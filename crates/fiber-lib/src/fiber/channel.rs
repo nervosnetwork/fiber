@@ -422,11 +422,9 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                    state
-                        .handle_reestablish_channel_message(myself, reestablish_channel)
-                        .await?;
+                    state.handle_reestablish_channel_message(myself, reestablish_channel)?;
                     if !state.reestablishing {
-                        self.trigger_all_retryable_tasks(myself, state).await;
+                        self.trigger_all_retryable_tasks(myself, state);
                     }
                 }
                 _ => {
@@ -466,7 +464,7 @@ where
                     node_signature,
                     partial_signature,
                 );
-                state.maybe_public_channel_is_ready(myself).await;
+                state.maybe_public_channel_is_ready(myself);
                 Ok(())
             }
             FiberChannelMessage::AcceptChannel(accept_channel) => {
@@ -593,7 +591,7 @@ where
                 };
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                state.maybe_channel_is_ready(myself).await;
+                state.maybe_channel_is_ready(myself);
                 Ok(())
             }
             FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
@@ -636,9 +634,7 @@ where
                 Ok(())
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                state
-                    .handle_reestablish_channel_message(myself, reestablish_channel)
-                    .await?;
+                state.handle_reestablish_channel_message(myself, reestablish_channel)?;
                 Ok(())
             }
             FiberChannelMessage::TxAbort(_) => {
@@ -810,7 +806,7 @@ where
         }
     }
 
-    async fn process_add_tlc_error(
+    fn process_add_tlc_error(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -866,15 +862,14 @@ where
 
         for add_tlc in apply_tlcs {
             assert!(add_tlc.is_received());
-            if let Err(error) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
+            if let Err(error) = self.apply_add_tlc_operation(myself, state, &add_tlc) {
                 self.process_add_tlc_error(
                     myself,
                     state,
                     add_tlc.payment_hash,
                     add_tlc.tlc_id,
                     error,
-                )
-                .await;
+                );
             }
         }
 
@@ -897,18 +892,16 @@ where
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
 
-        let _ = self
-            .register_retryable_relay_tlc_remove(
-                myself,
-                state,
-                previous_tlc,
-                previous_channel_id,
-                remove_reason,
-            )
-            .await;
+        let _ = self.register_retryable_relay_tlc_remove(
+            myself,
+            state,
+            previous_tlc,
+            previous_channel_id,
+            remove_reason,
+        );
     }
 
-    async fn try_to_settle_down_tlc(
+    fn try_to_settle_down_tlc(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -973,7 +966,7 @@ where
         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason);
     }
 
-    async fn apply_add_tlc_operation(
+    fn apply_add_tlc_operation(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -995,7 +988,6 @@ where
                     .map_err(ProcessingChannelError::without_shared_secret)?;
                 let shared_secret = peeled.shared_secret;
                 self.apply_add_tlc_operation_with_peeled_onion_packet(state, add_tlc, peeled)
-                    .await
                     .map_err(move |err| err.with_shared_secret(shared_secret))?;
             }
             None => {
@@ -1025,14 +1017,13 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
-            .await;
+        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id);
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
     }
 
-    async fn apply_add_tlc_operation_with_peeled_onion_packet(
+    fn apply_add_tlc_operation_with_peeled_onion_packet(
         &self,
         state: &mut ChannelActorState,
         add_tlc: &TlcInfo,
@@ -1179,8 +1170,7 @@ where
                 add_tlc.tlc_id,
                 peeled_onion_packet,
                 forward_fee,
-            )
-            .await;
+            );
         }
         Ok(())
     }
@@ -1724,7 +1714,7 @@ where
         }
 
         if updated {
-            state.on_owned_channel_updated(myself, true).await;
+            state.on_owned_channel_updated(myself, true);
         }
 
         Ok(())
@@ -1766,7 +1756,7 @@ where
         }
     }
 
-    pub async fn register_and_apply_forward_tlc(
+    pub fn register_and_apply_forward_tlc(
         &self,
         state: &mut ChannelActorState,
         payment_hash: Hash256,
@@ -1801,7 +1791,7 @@ where
         }
     }
 
-    pub async fn register_retryable_relay_tlc_remove(
+    pub fn register_retryable_relay_tlc_remove(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -1855,25 +1845,24 @@ where
         Ok(())
     }
 
-    async fn trigger_all_retryable_tasks(
+    fn trigger_all_retryable_tasks(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
         state.schedule_next_retry_task(myself);
-        self.check_and_retry_relay_remove_tasks(myself, state).await;
+        self.check_and_retry_relay_remove_tasks(myself, state);
     }
 
-    async fn check_and_retry_relay_remove_tasks(
+    fn check_and_retry_relay_remove_tasks(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
         let tasks: Vec<_> = state.waiting_relay_remove_tasks.drain().collect();
         for (_, RelayRemoveTlc(channel_id, tlc_id, reason)) in tasks {
-            let _ = self
-                .register_retryable_relay_tlc_remove(myself, state, tlc_id, channel_id, reason)
-                .await;
+            let _ =
+                self.register_retryable_relay_tlc_remove(myself, state, tlc_id, channel_id, reason);
         }
     }
 
@@ -1921,7 +1910,7 @@ where
         }
     }
 
-    async fn handle_forward_tlc_result(
+    fn handle_forward_tlc_result(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -1935,7 +1924,8 @@ where
         if let Some((channel_err, tlc_err)) = result.error_info {
             match channel_err {
                 ProcessingChannelError::WaitingTlcAck => {
-                    // peer already buffered the tlc, we just ignore the error here
+                    // peer already buffered the tlc, we already removed the forward tlc record
+                    // and just ignore the error here
                 }
                 _ => {
                     let error = ProcessingChannelError::TlcForwardingError(tlc_err)
@@ -1946,16 +1936,14 @@ where
                         result.payment_hash,
                         TLCId::Received(result.tlc_id),
                         error,
-                    )
-                    .await;
+                    );
                 }
             }
         }
     }
 
-    async fn handle_relay_remove_result(
+    fn handle_relay_remove_result(
         &self,
-        _myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         key: (Hash256, TLCId),
         result: ProcessingChannelResult,
@@ -1967,6 +1955,7 @@ where
                 state.waiting_relay_remove_tasks.remove(&key);
             }
             _ => {
+                // relay remove failed with other errors, this is not a expected case in normal
                 error!("relay remove failed with error: {:?}", result.err());
             }
         }
@@ -2167,7 +2156,7 @@ where
                 }
             }
             ChannelCommand::BroadcastChannelUpdate() => {
-                state.broadcast_channel_update(myself).await;
+                state.broadcast_channel_update(myself);
                 Ok(())
             }
             ChannelCommand::NotifyEvent(event) => self.handle_event(myself, state, event).await,
@@ -2182,7 +2171,7 @@ where
                 state.private_key = private_key.clone();
                 let ReloadParams { notify_changes } = reload_params;
                 if notify_changes {
-                    state.on_owned_channel_updated(myself, false).await;
+                    state.on_owned_channel_updated(myself, false);
                 }
                 Ok(())
             }
@@ -2223,18 +2212,17 @@ where
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                state.maybe_channel_is_ready(myself).await;
+                state.maybe_channel_is_ready(myself);
             }
             ChannelEvent::RunRetryTask => {
                 self.apply_retryable_tlc_operations(myself, state, true)
                     .await;
             }
             ChannelEvent::RelayRemoveResult(key, res) => {
-                self.handle_relay_remove_result(myself, state, key, res)
-                    .await;
+                self.handle_relay_remove_result(state, key, res);
             }
             ChannelEvent::ForwardTlcResult(result) => {
-                self.handle_forward_tlc_result(myself, state, result).await;
+                self.handle_forward_tlc_result(myself, state, result);
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
@@ -4211,15 +4199,13 @@ impl ChannelActorState {
         }
     }
 
-    pub async fn try_create_channel_messages(
-        &mut self,
-    ) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
-        let channel_announcement = self.try_create_channel_announcement_message().await?;
+    pub fn try_create_channel_messages(&mut self) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
+        let channel_announcement = self.try_create_channel_announcement_message()?;
         let channel_update = self.try_create_channel_update_message()?;
         Some((channel_announcement, channel_update))
     }
 
-    pub async fn try_create_channel_announcement_message(&mut self) -> Option<ChannelAnnouncement> {
+    pub fn try_create_channel_announcement_message(&mut self) -> Option<ChannelAnnouncement> {
         if !self.is_public() {
             debug!("Ignoring non-public channel announcement");
             return None;
@@ -4353,7 +4339,7 @@ impl ChannelActorState {
     // (e.g. channel ready and channel reestablishment) and some require us to send a
     // OwnedChannelUpdateEvent::Updated (e.g. user channel parameters update) to the network actor.
     // update_only is used to distinguish between the two cases.
-    async fn on_owned_channel_updated(
+    fn on_owned_channel_updated(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         update_only: bool,
@@ -4367,11 +4353,11 @@ impl ChannelActorState {
         if let Some(handle) = self.scheduled_channel_update_handle.take() {
             handle.abort();
         }
-        self.broadcast_channel_update(myself).await;
+        self.broadcast_channel_update(myself);
         self.send_update_tlc_info_message();
     }
 
-    async fn broadcast_channel_update(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+    fn broadcast_channel_update(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         if self.is_public() {
             let channel_update = self.generate_channel_update();
             self.network()
@@ -6534,16 +6520,14 @@ impl ChannelActorState {
         Ok(())
     }
 
-    async fn maybe_public_channel_is_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+    fn maybe_public_channel_is_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         debug!("Trying to create channel announcement message for public channel");
-        if let Some((channel_announcement, channel_update)) =
-            self.try_create_channel_messages().await
-        {
+        if let Some((channel_announcement, channel_update)) = self.try_create_channel_messages() {
             debug!(
                 "Channel announcement/update message for {:?} created, public channel is ready",
                 self.get_id(),
             );
-            self.on_new_channel_ready(myself).await;
+            self.on_new_channel_ready(myself);
 
             debug!(
                 "Broadcasting channel announcement {:?} and channel update {:?}",
@@ -6565,14 +6549,14 @@ impl ChannelActorState {
         }
     }
 
-    async fn maybe_channel_is_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+    fn maybe_channel_is_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         match self.state {
             ChannelState::AwaitingChannelReady(flags) => {
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
                     if !self.is_public() {
-                        self.on_new_channel_ready(myself).await;
+                        self.on_new_channel_ready(myself);
                     } else {
-                        self.maybe_public_channel_is_ready(myself).await;
+                        self.maybe_public_channel_is_ready(myself);
                     }
                 }
             }
@@ -6585,12 +6569,12 @@ impl ChannelActorState {
         }
     }
 
-    async fn on_new_channel_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+    fn on_new_channel_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         let peer_id = self.get_remote_peer_id();
-        self.on_owned_channel_updated(myself, false).await;
+        self.on_owned_channel_updated(myself, false);
         self.network()
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(
@@ -6602,7 +6586,7 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    async fn on_reestablished_channel_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+    fn on_reestablished_channel_ready(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         let Some(outpoint) = self.get_funding_transaction_outpoint() else {
             return;
         };
@@ -6619,10 +6603,10 @@ impl ChannelActorState {
                     channel_id, peer_id, outpoint,
                 ))
             });
-        self.on_owned_channel_updated(myself, false).await;
+        self.on_owned_channel_updated(myself, false);
     }
 
-    async fn resume_funding(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+    fn resume_funding(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         match self.state {
             ChannelState::AwaitingTxSignatures(mut flags) => {
                 let channel_id = self.get_id();
@@ -6697,7 +6681,7 @@ impl ChannelActorState {
             ChannelState::AwaitingChannelReady(flags) => {
                 // It's turn to send the funding tx to chain and waiting for confirmations
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    self.maybe_channel_is_ready(myself).await;
+                    self.maybe_channel_is_ready(myself);
                 } else {
                     if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) {
                         // If we are ready, resend the ChannelReady message
@@ -6905,7 +6889,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    async fn handle_reestablish_channel_message(
+    fn handle_reestablish_channel_message(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         reestablish_channel: &ReestablishChannel,
@@ -6916,15 +6900,15 @@ impl ChannelActorState {
             reestablish_channel, self.commitment_numbers, self.state
         );
         let network = self.network();
-        self.notify_funding_tx(&network).await;
+        self.notify_funding_tx(&network);
         match self.state {
             ChannelState::NegotiatingFunding(_flags) => {
                 // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
                 // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
             }
             ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_) => {
-                self.on_reestablished_channel_ready(myself).await;
-                self.resume_funding(myself).await;
+                self.on_reestablished_channel_ready(myself);
+                self.resume_funding(myself);
             }
             ChannelState::ChannelReady => {
                 self.clear_waiting_peer_response();
@@ -6981,7 +6965,7 @@ impl ChannelActorState {
                     // ignore, waiting for remote peer to resend revoke_and_ack
                 }
 
-                self.on_reestablished_channel_ready(myself).await;
+                self.on_reestablished_channel_ready(myself);
                 debug_event!(network, "Reestablished channel in ChannelReady");
             }
             _ => {
@@ -7976,7 +7960,7 @@ impl ChannelActorState {
         since.value().to_le_bytes()
     }
 
-    async fn notify_funding_tx(&self, network: &ActorRef<NetworkActorMessage>) {
+    fn notify_funding_tx(&self, network: &ActorRef<NetworkActorMessage>) {
         let tx = if let Some(ref tx) = self.funding_tx {
             tx
         } else {

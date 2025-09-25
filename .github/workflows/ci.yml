@@ -155,7 +155,7 @@ jobs:
 
           cd ./tests/perf/
           cargo run --bin run-test --release integration
-          cargo run --bin run-test --release benchmark 50 30 base
+          cargo run --bin run-test --release benchmark 90 30 base
           cd -
           git stash
 
@@ -172,7 +172,7 @@ jobs:
 
           cd ./tests/perf/
           cargo run --bin run-test --release integration
-          cargo run --bin run-test --release benchmark 50 30 compare
+          cargo run --bin run-test --release benchmark 90 30 compare
           cd -
 
       - name: Upload benchmark results
