@@ -41,14 +41,36 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Check for code changes
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'fiber-js/**'
+              - 'tests/**'
+              - 'Cargo.*'
+
+      - name: Skip tests if no code changes
+        if: steps.changes.outputs.code != 'true'
+        run: |
+          echo "🚀 No code changes detected in crates/, fiber-js/, or tests/"
+          echo "Skipping unit tests to save CI resources."
+          exit 0
+
       - uses: dsherret/rust-toolchain-file@v1
+        if: steps.changes.outputs.code == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.changes.outputs.code == 'true'
         with:
           key: test-${{ runner.os }}
       - uses: taiki-e/install-action@v2
+        if: steps.changes.outputs.code == 'true'
         with:
           tool: nextest
       - name: Run tests
+        if: steps.changes.outputs.code == 'true'
         run: |
           RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast
         env:
@@ -101,17 +123,41 @@ jobs:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check for code changes
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'fiber-js/**'
+              - 'tests/**'
+              - 'Cargo.*'
+
+      - name: Skip coverage if no code changes
+        if: steps.changes.outputs.code != 'true'
+        run: |
+          echo "🚀 No code changes detected in crates/, fiber-js/, or tests/"
+          echo "Skipping coverage test to save CI resources."
+          exit 0
+
       - uses: dsherret/rust-toolchain-file@v1
+        if: steps.changes.outputs.code == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.changes.outputs.code == 'true'
         with:
           key: coverage-${{ runner.os }}
       - name: Install Grcov
+        if: steps.changes.outputs.code == 'true'
         run: make coverage-install-tools
       - name: Generate Code Coverage Report of Unit Tests
+        if: steps.changes.outputs.code == 'true'
         run: |
           make coverage-run-unittests
           make coverage-collect-data
       - name: Upload Code Coverage Report of Unit Tests
+        if: steps.changes.outputs.code == 'true'
         uses: codecov/codecov-action@v4
         with:
           files: coverage-report.info
@@ -229,7 +275,7 @@ jobs:
           echo "Comparing against: origin/${{ github.base_ref }}"
           git checkout origin/${{ github.base_ref }}
 
-          sed -i 's/sleep 5/sleep 10/g' ./tests/nodes/wait.sh
+          sed -i 's/sleep 5/sleep 10/g' ./tests/nodes/wait.sh || true
           export ON_GITHUB_ACTION=y
           CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > baseline.log 2>&1 &
           ./tests/nodes/wait.sh
