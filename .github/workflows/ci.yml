@@ -2,14 +2,20 @@ on: [push, pull_request]
 
 name: Continuous integration
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-${{ runner.os }}
       - run: |
           make check
           make check-migrate
@@ -19,8 +25,11 @@ jobs:
     name: Cargo Shear
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shear-${{ runner.os }}
       - uses: cargo-bins/cargo-binstall@main
       - run: |
           cargo binstall --no-confirm cargo-shear --force --locked --version 1.1.9
@@ -29,32 +38,42 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ runner.os }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - run: |
+      - name: Run tests
+        run: |
           RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast
+        env:
+          RUST_TEST_THREADS: 2
 
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: fmt-${{ runner.os }}
       - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-${{ runner.os }}
       - run: |
           rustup target add wasm32-unknown-unknown
           make clippy
@@ -79,10 +98,13 @@ jobs:
     name: Code Coverage
     needs: [ test ]
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage-${{ runner.os }}
       - name: Install Grcov
         run: make coverage-install-tools
       - name: Generate Code Coverage Report of Unit Tests
@@ -90,7 +112,7 @@ jobs:
           make coverage-run-unittests
           make coverage-collect-data
       - name: Upload Code Coverage Report of Unit Tests
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           files: coverage-report.info
           env_vars: OS,RUST_TOOLCHAIN
@@ -108,21 +130,26 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         profile: [dev, release]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-${{ matrix.os }}-${{ matrix.profile }}
       - name: Install Dependencies (Windows)
         if: contains(matrix.os, 'windows')
         run: |
           vcpkg integrate install
           vcpkg install openssl:x64-windows-static-md
-      - run: cargo build --locked --verbose --profile ${{ matrix.profile }}
+      - name: Build with profile
+        run: cargo build --locked --verbose --profile ${{ matrix.profile }}
 
 
   benchmark:
     name: Benchmark
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v2
@@ -135,7 +162,7 @@ jobs:
         uses: actions/cache@v4
         id: cache-ckb
         with:
-          path: /usr/local/bin/ckb*
+          path: ~/.local/bin/ckb*
           key: ckb-v0.116.1-${{ runner.os }}
           restore-keys: |
             ckb-v0.116.1-
@@ -144,9 +171,31 @@ jobs:
         if: steps.cache-ckb.outputs.cache-hit != 'true'
         run: |
           version=0.116.1
-          wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
+          echo "🔐 Downloading and verifying CKB v${version}..."
+
+          # Download with retry and verification
+          for attempt in 1 2 3; do
+            if wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"; then
+              break
+            else
+              echo "Download attempt $attempt failed, retrying..."
+              sleep 2
+            fi
+          done
+
+          # Verify file exists and extract
+          if [ -f "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz" ]; then
+            tar -xzf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
+            # Use more secure installation method
+            mkdir -p ~/.local/bin
+            mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* ~/.local/bin/
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+            # Verify installation
+            ~/.local/bin/ckb --version
+          else
+            echo "❌ CKB download failed after 3 attempts"
+            exit 1
+          fi
 
       - name: Cache build artifacts
         uses: actions/cache@v4
@@ -236,5 +285,33 @@ jobs:
           else
             echo "⚠️ Comparison report not found at ./tests/perf/comparison_report.txt"
             echo "This might indicate a benchmark execution failure."
+            exit 1
+          fi
+
+  # Summary job that depends on all other jobs
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [check, cargo-shear, test, fmt, clippy, typos]
+    if: always()
+    steps:
+      - name: Check all job results
+        run: |
+          if [[ "${{ needs.check.result }}" == "success" && \
+                "${{ needs.cargo-shear.result }}" == "success" && \
+                "${{ needs.test.result }}" == "success" && \
+                "${{ needs.fmt.result }}" == "success" && \
+                "${{ needs.clippy.result }}" == "success" && \
+                "${{ needs.typos.result }}" == "success" ]]; then
+            echo "🎉 All CI checks passed!"
+            exit 0
+          else
+            echo "❌ Some CI checks failed:"
+            echo "  - Check: ${{ needs.check.result }}"
+            echo "  - Cargo Shear: ${{ needs.cargo-shear.result }}"
+            echo "  - Test: ${{ needs.test.result }}"
+            echo "  - Format: ${{ needs.fmt.result }}"
+            echo "  - Clippy: ${{ needs.clippy.result }}"
+            echo "  - Typos: ${{ needs.typos.result }}"
             exit 1
           fi
