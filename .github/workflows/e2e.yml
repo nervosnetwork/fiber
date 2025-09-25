@@ -54,20 +54,66 @@ jobs:
       - uses: actions/checkout@v2
       - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
+      - name: Cache CKB binaries
+        uses: actions/cache@v4
+        id: cache-ckb
+        with:
+          path: /usr/local/bin/ckb*
+          key: ckb-v${{ matrix.release }}-${{ runner.os }}
+          restore-keys: |
+            ckb-v${{ matrix.release }}-
+
+      - name: Cache Bitcoin and LND binaries
+        if: matrix.workflow == 'cross-chain-hub'
+        uses: actions/cache@v4
+        id: cache-bitcoin-lnd
+        with:
+          path: |
+            ./bitcoin-27.0
+            ./lnd-linux-amd64-v0.18.0-beta
+          key: bitcoin-lnd-v27.0-v0.18.0-${{ runner.os }}
+          restore-keys: |
+            bitcoin-lnd-v27.0-v0.18.0-
+
       - name: Install dependencies
         run: |
           version=${{ matrix.release }}
-          wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
+
+          # Install CKB if not cached
+          if [ "${{ steps.cache-ckb.outputs.cache-hit }}" != "true" ]; then
+            echo "📥 Downloading CKB v${version}..."
+            wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
+            tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
+            sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
+          else
+            echo "✅ Using cached CKB binaries"
+          fi
+
+          # Install Bitcoin and LND for cross-chain-hub workflow
           if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
-            wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
-            tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
+            if [ "${{ steps.cache-bitcoin-lnd.outputs.cache-hit }}" != "true" ]; then
+              echo "📥 Downloading Bitcoin Core v27.0..."
+              wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
+              tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
+              echo "📥 Downloading LND v0.18.0-beta..."
+              wget "https://github.com/lightningnetwork/lnd/releases/download/v0.18.0-beta/lnd-linux-amd64-v0.18.0-beta.tar.gz"
+              tar -xvaf "lnd-linux-amd64-v0.18.0-beta.tar.gz"
+            else
+              echo "✅ Using cached Bitcoin and LND binaries"
+            fi
             echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
-            wget "https://github.com/lightningnetwork/lnd/releases/download/v0.18.0-beta/lnd-linux-amd64-v0.18.0-beta.tar.gz"
-            tar -xvaf "lnd-linux-amd64-v0.18.0-beta.tar.gz"
             echo "$(pwd)/lnd-linux-amd64-v0.18.0-beta" >> $GITHUB_PATH
           fi
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/
+            tests/deploy/udt-init/target/
+          key: e2e-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            e2e-build-${{ runner.os }}-
 
       - name: Run e2e workflow
         id: e2eTests
