@@ -1,12 +1,14 @@
 use crate::{
+    create_n_nodes_network_with_params,
     fiber::{
         network::SendPaymentCommand,
         payment::{AttemptStatus, MppMode},
     },
-    gen_rand_sha256_hash,
+    gen_rand_sha256_hash, gen_rpc_config,
     invoice::{Currency, InvoiceBuilder},
+    rpc::invoice::NewInvoiceParams,
     test_utils::{create_n_nodes_network, init_tracing, MIN_RESERVED_CKB},
-    HUGE_CKB_AMOUNT,
+    ChannelParameters, HUGE_CKB_AMOUNT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -309,4 +311,64 @@ async fn test_send_mpp_split_in_retry() {
     run_test(MppMode::BasicMpp, AttemptStatus::Success).await;
     // Atomic mpp can not handle this scenario now
     run_test(MppMode::AtomicMpp, AttemptStatus::Failed).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_multiple_payment_with_same_invoice() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let invoice = node_1
+        .gen_invoice(NewInvoiceParams {
+            amount: 100000,
+            ..Default::default()
+        })
+        .await;
+
+    let invoice_str = invoice.invoice_address;
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_str.clone()),
+            ..Default::default()
+        })
+        .await;
+
+    node_0.wait_until_success(res.unwrap().payment_hash).await;
+
+    // send the second time
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_str.clone()),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err());
 }
