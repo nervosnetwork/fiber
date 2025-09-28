@@ -7,6 +7,9 @@ edition = "2021"
 name = "fnn"
 path = "src/main.rs"
 
+[features]
+metrics = ["fnn/metrics"]
+
 [dependencies]
 fnn = { path = "../fiber-lib" }
 ckb-chain-spec = "0.202.0"

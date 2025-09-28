@@ -183,7 +183,9 @@ pub async fn main() -> Result<(), ExitMessage> {
                 );
             }
 
-            let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
+            let watchtower_client = if let Some(url) =
+                fiber_config.standalone_watchtower_rpc_url.clone()
+            {
                 let mut client_builder = HttpClientBuilder::default();
 
                 if let Some(token) = fiber_config.standalone_watchtower_token.as_ref() {
@@ -232,6 +234,13 @@ pub async fn main() -> Result<(), ExitMessage> {
                 );
                 Some(watchtower_actor)
             };
+
+            #[cfg(feature = "metrics")]
+            if let Some(addr) = fiber_config.metrics_addr.as_ref() {
+                if let Err(e) = fnn::metrics::start_metrics(addr) {
+                    tracing::error!("Failed to start metrics server: {}", e);
+                }
+            }
 
             #[cfg(debug_assertions)]
             let rpc_dev_module_commitment_txs_clone = rpc_dev_module_commitment_txs.clone();

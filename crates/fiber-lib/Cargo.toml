@@ -91,6 +91,8 @@ tokio = { version = "1", features = [
   "process",
 ] }
 tower = { version = "0.5" }
+tokio-metrics = { version = "0.4.5", optional = true, features = ["metrics-rs-integration"] }
+metrics-exporter-prometheus = { version = "0.17.2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 biscuit-auth = { version = "6.0.0-beta.3", features = ["wasm"] }
@@ -119,6 +121,7 @@ bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
 portable = ["rocksdb/portable"]
 watchtower = []
+metrics = ["tokio-metrics", "metrics-exporter-prometheus"]
 
 [dev-dependencies]
 ciborium = "0.2.2"
