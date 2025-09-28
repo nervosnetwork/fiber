@@ -17,6 +17,7 @@ use musig2::BinaryEncoding;
 use musig2::SecNonceBuilder;
 use secp256k1::{Secp256k1, XOnlyPublicKey};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::iter;
 #[cfg(test)]
 use std::{
     backtrace::Backtrace,
@@ -3257,6 +3258,7 @@ impl TlcState {
             self.received_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
         }
     }
+
     pub fn add_offered_tlc(&mut self, tlc: TlcInfo) {
         self.offered_tlcs.add_tlc(tlc);
     }
@@ -5245,7 +5247,7 @@ impl ChannelActorState {
 
             debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
-            self.tlc_state.apply_remove_tlc(tlc_id);
+            self.apply_remove_tlc(tlc_id);
         }
         debug!(
             "Removed tlc payment_hash {:?} with reason {:?}",
@@ -5253,6 +5255,21 @@ impl ChannelActorState {
         );
 
         Ok((current.clone(), reason))
+    }
+
+    fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
+        self.tlc_state.apply_remove_tlc(tlc_id);
+
+        let points: HashSet<u64> = self
+            .tlc_state
+            .all_tlcs()
+            .flat_map(|x| [x.created_at.get_local(), x.created_at.get_remote()])
+            .chain(iter::once(self.get_local_commitment_number()))
+            .chain(iter::once(self.get_remote_commitment_number()))
+            .collect();
+
+        self.remote_commitment_points
+            .retain(|(number, _)| points.contains(number));
     }
 
     pub fn clean_up_failed_tlcs(&mut self) {
@@ -5337,7 +5354,13 @@ impl ChannelActorState {
                     None
                 }
             })
-            .expect("remote commitment point should exist")
+            .expect(
+                format!(
+                    "remote commitment point: {:?} should exist",
+                    commitment_number
+                )
+                .as_str(),
+            )
     }
 
     fn get_current_local_commitment_point(&self) -> Pubkey {
@@ -6645,19 +6668,12 @@ impl ChannelActorState {
         self.remote_commitment_points
             .push((self.get_local_commitment_number(), commitment_point));
 
-        // shrink the remote commitment points list
-        // TODO: use all_tlcs as filter instead of select the minimal commitment number
-        let len = self.remote_commitment_points.len();
-        if len > (self.local_constraints.max_tlc_number_in_flight + 1) as usize {
-            let min_remote_commitment = self
-                .tlc_state
-                .all_tlcs()
-                .map(|x| x.created_at.remote.min(x.created_at.local))
-                .min()
-                .unwrap_or_default();
-            self.remote_commitment_points
-                .retain(|(num, _)| *num >= min_remote_commitment);
-        }
+        debug_assert!(
+            self.remote_commitment_points.len()
+                <= self.local_constraints.max_tlc_number_in_flight as usize
+                    + self.remote_constraints.max_tlc_number_in_flight as usize
+                    + 2
+        );
     }
 
     fn handle_revoke_and_ack_peer_message(
