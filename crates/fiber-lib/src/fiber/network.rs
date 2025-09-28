@@ -76,7 +76,8 @@ use crate::ckb::{
 };
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
+    TxUpdateCommand,
 };
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
@@ -1655,9 +1656,6 @@ where
                         }
                     }
                 }
-
-                let used_ms = now_timestamp_as_millis_u64() - now;
-                tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -2517,11 +2515,7 @@ where
     ) -> Result<(), Error> {
         assert!(attempt.is_retrying());
 
-        if !attempt
-            .last_error
-            .as_ref()
-            .is_some_and(|err| err.contains("WaitingTlcAck"))
-        {
+        if attempt.last_error.as_ref().is_some_and(|e| !e.is_empty()) {
             // `session.remain_amount()` do not contains this part of amount,
             // so we need to add the receiver amount to it, so we may make fewer
             // attempts to send the payment.
@@ -2538,7 +2532,7 @@ where
                 })?;
 
             attempt.update_route(hops);
-        };
+        }
 
         self.send_attempt(myself, state, session, attempt).await?;
         Ok(())
@@ -2665,7 +2659,7 @@ where
                     attempt.hash, e
                 );
                 self.set_attempt_fail_with_error(session, attempt, &err, false);
-                return Err(Error::SendPaymentFirstHopError(err, false));
+                return Err(Error::FirstHopError(err, false));
             }
         };
 
@@ -2694,7 +2688,7 @@ where
                     error_detail.error_code_as_str()
                 );
                 self.set_attempt_fail_with_error(session, attempt, &err, need_to_retry);
-                return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
+                return Err(Error::FirstHopError(err, need_to_retry));
             }
             Ok(_) => {
                 self.store.insert_attempt(attempt.clone());
@@ -2722,12 +2716,14 @@ where
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                         channel_id,
-                        command: ChannelCommand::ForwardTlcResult(ForwardTlcResult {
-                            payment_hash,
-                            channel_id,
-                            tlc_id,
-                            error_info: error_info.clone(),
-                        }),
+                        command: ChannelCommand::NotifyEvent(ChannelEvent::ForwardTlcResult(
+                            ForwardTlcResult {
+                                payment_hash,
+                                channel_id,
+                                tlc_id,
+                                error_info: error_info.clone(),
+                            },
+                        )),
                     }),
                 ))
                 .expect("network actor alive");
@@ -2750,24 +2746,22 @@ where
                     .track_attempt_router(&attempt);
                 self.store.insert_attempt(attempt);
             }
-            Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
+            Some((ProcessingChannelError::WaitingTlcAck, _)) => {
                 // do nothing
             }
             Some((error, tlc_err)) => {
                 self.update_graph_with_tlc_fail(&myself, &tlc_err).await;
-                let (error, need_to_retry) =
-                    if matches!(error, ProcessingChannelError::WaitingTlcAck) {
-                        ("WaitingTlcAck".to_string(), true)
-                    } else {
-                        let need_to_retry = self.network_graph.write().await.record_attempt_fail(
-                            &attempt,
-                            tlc_err.clone(),
-                            true,
-                        );
-                        (error.to_string(), need_to_retry)
-                    };
-
-                self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    tlc_err.clone(),
+                    true,
+                );
+                self.set_attempt_fail_with_error(
+                    &mut session,
+                    &mut attempt,
+                    &error.to_string(),
+                    need_to_retry,
+                );
                 // retry the current attempt if it is retryable
                 if attempt.is_retrying() {
                     self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
@@ -2811,11 +2805,9 @@ where
             .send_payment_onion_packet(state, session, attempt)
             .await
         {
-            let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
+            let need_retry = matches!(err, Error::FirstHopError(_, true));
             if need_retry {
-                // If this is the first hop error, such as the WaitingTlcAck error,
-                // we will just retry later, return Ok here for letting endpoint user
-                // know payment session is created successfully
+                debug!("Retrying payment attempt due to first hop error: {:?}", err);
                 self.register_payment_retry(
                     myself,
                     state,
@@ -2952,7 +2944,7 @@ where
         // retrying payment in ractor framework, we will increase the delay time to avoid
         // flooding the network actor with too many retrying payments.
         state.retry_send_payment_count += 1;
-        let delay = (state.retry_send_payment_count as u64) * 50_u64;
+        let delay = (state.retry_send_payment_count as u64) * 20_u64;
         myself.send_after(Duration::from_millis(delay), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
                 payment_hash,
@@ -3528,7 +3520,7 @@ where
         Ok((channel, temp_channel_id, new_id))
     }
 
-    fn check_feature_compatibility(&self, peer_id: &PeerId) -> Result<(), ProcessingChannelError> {
+    fn check_feature_compatibility(&self, peer_id: &PeerId) -> ProcessingChannelResult {
         if let Some(ConnectedPeer {
             features: Some(peer_features),
             ..
@@ -3625,10 +3617,7 @@ where
         .await;
     }
 
-    pub async fn abandon_channel(
-        &mut self,
-        channel_id: Hash256,
-    ) -> Result<(), ProcessingChannelError> {
+    pub async fn abandon_channel(&mut self, channel_id: Hash256) -> ProcessingChannelResult {
         if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
             match channel_actor_state.state {
                 ChannelState::ChannelReady
@@ -3821,6 +3810,23 @@ where
                     Ok(())
                 }
                 None => {
+                    // if it's relay remove tlc, insert it into ChannelActorState's retryable queue
+                    if let ChannelCommand::RemoveTlc(remove_tlc, _) = &command {
+                        if let Some(mut state) = self.store.get_channel_actor_state(&channel_id) {
+                            if matches!(
+                                state.state,
+                                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+                            ) {
+                                let operation = RetryableTlcOperation::RemoveTlc(
+                                    TLCId::Received(remove_tlc.id),
+                                    remove_tlc.reason.clone(),
+                                );
+                                state.retryable_tlc_operations.push_back(operation);
+                                self.store.insert_channel_actor_state(state);
+                            }
+                        }
+                    }
+
                     let error = Error::ChannelNotFound(channel_id);
                     if let Some(rpc_reply) = command.rpc_reply_port() {
                         let _ = rpc_reply.send(Err(error.to_string()));
@@ -4148,7 +4154,7 @@ where
         _myself: ActorRef<NetworkActorMessage>,
         peer_id: PeerId,
         init_msg: Init,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         if !self.is_connected(&peer_id) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Peer {:?} is not connected",
