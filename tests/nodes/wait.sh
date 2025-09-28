@@ -42,6 +42,6 @@ while [ $count -lt $try_number ]; do
           echo "Reached maximum number of tries ($try_number), exiting with status 1"
             exit 1
         fi
-        sleep 5
+        sleep 10
     fi
 done

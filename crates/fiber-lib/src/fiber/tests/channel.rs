@@ -2071,6 +2071,8 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
 
 #[tokio::test]
 async fn do_test_channel_remote_commitment_error() {
+    crate::init_tracing();
+
     // https://github.com/nervosnetwork/fiber/issues/447
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;

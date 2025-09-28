@@ -246,8 +246,9 @@ pub async fn main() -> Result<(), ExitMessage> {
                                     break;
                                 }
                                 Some(event) => {
-                                    // we may forward more events to the rpc dev module in the future for integration testing
-                                    // for now, we only forward RemoteCommitmentSigned events, which are used for submitting outdated commitment transactions
+                                    // we may forward more events to the rpc dev module in the future for
+                                    // integration testing for now, we only forward RemoteCommitmentSigned events,
+                                    // which are used for submitting outdated commitment transactions
                                     #[cfg(debug_assertions)]
                                     if let Some(rpc_dev_module_commitment_txs) = rpc_dev_module_commitment_txs_clone.as_ref() {
                                         if let NetworkServiceEvent::RemoteCommitmentSigned(_, channel_id, commitment_tx, _) = event.clone() {
@@ -545,7 +546,8 @@ impl ExitMessage {
 #[cfg(target_family = "unix")]
 async fn signal_listener() {
     use tokio::signal::unix::{signal, SignalKind};
-    // SIGTERM is commonly sent for graceful shutdown of applications, followed by 30 seconds of grace time, then a SIGKILL.
+    // SIGTERM is commonly sent for graceful shutdown of applications,
+    // followed by 30 seconds of grace time, then a SIGKILL.
     let mut sigterm = signal(SignalKind::terminate()).expect("listen for SIGTERM");
     // SIGINT is usually sent due to ctrl-c in the terminal.
     let mut sigint = signal(SignalKind::interrupt()).expect("listen for SIGINT");
