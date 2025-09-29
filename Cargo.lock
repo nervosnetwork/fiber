@@ -2249,6 +2249,7 @@ dependencies = [
  "jsonrpsee",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
+ "metrics",
  "metrics-exporter-prometheus",
  "molecule",
  "musig2",
