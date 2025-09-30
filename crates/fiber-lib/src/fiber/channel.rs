@@ -23,6 +23,7 @@ use std::{
     backtrace::Backtrace,
     sync::{LazyLock, Mutex},
 };
+use strum::AsRefStr;
 use tracing::{debug, error, info, trace, warn};
 
 use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
@@ -132,6 +133,16 @@ pub enum ChannelActorMessage {
     Event(ChannelEvent),
     /// PeerMessage are the messages sent from the peer.
     PeerMessage(FiberChannelMessage),
+}
+
+impl Display for ChannelActorMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Command(command) => write!(f, "Command.{command}"),
+            Self::Event(event) => write!(f, "Event.{}", event.as_ref()),
+            Self::PeerMessage(msg) => write!(f, "PeerMessage.{msg}"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2628,6 +2639,11 @@ where
             message,
         );
 
+        #[cfg(feature = "metrics")]
+        let start = now_timestamp_as_millis_u64();
+        #[cfg(feature = "metrics")]
+        let name = format!("fiber.channel_actor.{}", message);
+
         match message {
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self
@@ -2694,6 +2710,13 @@ where
                     NetworkActorCommand::SettleMPPTlcSet(payment_hash),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+
+        #[cfg(feature = "metrics")]
+        {
+            let end = now_timestamp_as_millis_u64();
+            let elapsed = end - start;
+            metrics::histogram!(name).record(elapsed as u32);
         }
 
         Ok(())
@@ -3743,7 +3766,7 @@ pub enum StopReason {
     PeerDisConnected,
 }
 
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum ChannelEvent {
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
