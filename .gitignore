@@ -3,6 +3,7 @@
 # direnv related temp files/directories
 .direnv
 /result*
+.DS_Store
 
 /tests/nodes/*/fiber/store
 /tests/nodes/*/config.yml
@@ -27,3 +28,7 @@ tests/nodes/.ports
 /crates/fiber-wasm/dist
 /crates/fiber-wasm-db-worker/dist
 package-lock.json
+target
+baseline.json
+current.json
+comparison_report.txt

@@ -1,11 +1,14 @@
 [package]
 name = "fiber-bin"
-version = "0.6.0-rc4"
+version = "0.6.0-rc5"
 edition = "2021"
 
 [[bin]]
 name = "fnn"
 path = "src/main.rs"
+
+[features]
+metrics = ["fnn/metrics"]
 
 [dependencies]
 fnn = { path = "../fiber-lib" }

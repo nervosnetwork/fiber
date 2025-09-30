@@ -183,7 +183,9 @@ pub async fn main() -> Result<(), ExitMessage> {
                 );
             }
 
-            let watchtower_client = if let Some(url) = fiber_config.standalone_watchtower_rpc_url {
+            let watchtower_client = if let Some(url) =
+                fiber_config.standalone_watchtower_rpc_url.clone()
+            {
                 let mut client_builder = HttpClientBuilder::default();
 
                 if let Some(token) = fiber_config.standalone_watchtower_token.as_ref() {
@@ -233,6 +235,13 @@ pub async fn main() -> Result<(), ExitMessage> {
                 Some(watchtower_actor)
             };
 
+            #[cfg(feature = "metrics")]
+            if let Some(addr) = fiber_config.metrics_addr.as_ref() {
+                if let Err(e) = fnn::metrics::start_metrics(addr) {
+                    tracing::error!("Failed to start metrics server: {}", e);
+                }
+            }
+
             #[cfg(debug_assertions)]
             let rpc_dev_module_commitment_txs_clone = rpc_dev_module_commitment_txs.clone();
             new_tokio_task_tracker().spawn(async move {
@@ -246,8 +255,9 @@ pub async fn main() -> Result<(), ExitMessage> {
                                     break;
                                 }
                                 Some(event) => {
-                                    // we may forward more events to the rpc dev module in the future for integration testing
-                                    // for now, we only forward RemoteCommitmentSigned events, which are used for submitting outdated commitment transactions
+                                    // we may forward more events to the rpc dev module in the future for
+                                    // integration testing for now, we only forward RemoteCommitmentSigned events,
+                                    // which are used for submitting outdated commitment transactions
                                     #[cfg(debug_assertions)]
                                     if let Some(rpc_dev_module_commitment_txs) = rpc_dev_module_commitment_txs_clone.as_ref() {
                                         if let NetworkServiceEvent::RemoteCommitmentSigned(_, channel_id, commitment_tx, _) = event.clone() {
@@ -545,7 +555,8 @@ impl ExitMessage {
 #[cfg(target_family = "unix")]
 async fn signal_listener() {
     use tokio::signal::unix::{signal, SignalKind};
-    // SIGTERM is commonly sent for graceful shutdown of applications, followed by 30 seconds of grace time, then a SIGKILL.
+    // SIGTERM is commonly sent for graceful shutdown of applications,
+    // followed by 30 seconds of grace time, then a SIGKILL.
     let mut sigterm = signal(SignalKind::terminate()).expect("listen for SIGTERM");
     // SIGINT is usually sent due to ctrl-c in the terminal.
     let mut sigint = signal(SignalKind::interrupt()).expect("listen for SIGINT");

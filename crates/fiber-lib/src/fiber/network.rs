@@ -11,6 +11,7 @@ use ractor::concurrency::Duration;
 use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
+use rand::seq::SliceRandom;
 use rand::Rng;
 use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
@@ -75,15 +76,15 @@ use crate::ckb::{
 };
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
-    DEFAULT_COMMITMENT_DELAY_EPOCHS,
+    ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
+    TxUpdateCommand,
 };
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{
-    DEFAULT_MAX_PARTS, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-    MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
@@ -175,6 +176,16 @@ pub(crate) fn check_chain_hash(chain_hash: &Hash256) -> Result<(), Error> {
 }
 
 #[derive(Debug)]
+pub enum PeerDisconnectReason {
+    /// User request disconnection.
+    Requested,
+    /// Init message timeout.
+    InitMessageTimeout,
+    /// Chain hash mismatch.
+    ChainHashMismatch,
+}
+
+#[derive(Debug)]
 pub struct OpenChannelResponse {
     pub channel_id: Hash256,
 }
@@ -249,7 +260,7 @@ pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr),
-    DisconnectPeer(PeerId),
+    DisconnectPeer(PeerId, PeerDisconnectReason),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
     SavePeerAddress(Multiaddr),
@@ -262,7 +273,7 @@ pub enum NetworkActorCommand {
     // Settle MPP tlc set
     SettleMPPTlcSet(Hash256),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
-    CheckPeerInit(PeerId),
+    CheckPeerInit(PeerId, SessionId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -565,14 +576,11 @@ impl SendPaymentData {
         };
 
         // check htlc expiry delta and limit are both valid if it is set
-        let final_tlc_expiry_delta = command
-            .final_tlc_expiry_delta
-            .or_else(|| {
-                invoice
-                    .as_ref()
-                    .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
-            })
-            .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        let final_tlc_expiry_delta = invoice
+            .as_ref()
+            .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
+            .or(command.final_tlc_expiry_delta)
+            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
         if !(MIN_TLC_EXPIRY_DELTA..=MAX_PAYMENT_TLC_EXPIRY_LIMIT).contains(&final_tlc_expiry_delta)
         {
             return Err(format!(
@@ -586,7 +594,10 @@ impl SendPaymentData {
             .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
 
         if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
-            return Err("tlc_expiry_limit is too small".to_string());
+            return Err(format!(
+                "tlc_expiry_limit is too small, final_tlc_expiry_delta: {}, tlc_expiry_limit: {}",
+                final_tlc_expiry_delta, tlc_expiry_limit
+            ));
         }
         if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
             return Err(format!(
@@ -1318,8 +1329,12 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-            NetworkActorCommand::DisconnectPeer(peer_id) => {
+            NetworkActorCommand::DisconnectPeer(peer_id, reason) => {
                 if let Some(session) = state.get_peer_session(&peer_id) {
+                    debug!(
+                        "Disconnecting peer {:?} session w {:?}ith reason {:?}",
+                        &peer_id, &session, &reason
+                    );
                     state.control.disconnect(session).await?;
                 }
             }
@@ -1405,6 +1420,8 @@ where
                         .into_iter()
                         .chain(graph_nodes_to_connect.into_iter())
                 };
+
+                let mut rng = rand::thread_rng();
                 for (peer_id, addresses) in peers_to_connect {
                     debug!("Peer to connect: {:?}, {:?}", peer_id, addresses);
                     if let Some(session) = state.get_peer_session(&peer_id) {
@@ -1414,7 +1431,9 @@ where
                                 );
                         continue;
                     }
-                    for addr in addresses {
+
+                    // Randomly pick one address to connect
+                    if let Some(addr) = addresses.choose(&mut rng) {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
@@ -1424,14 +1443,19 @@ where
                     }
                 }
             }
-            NetworkActorCommand::CheckPeerInit(peer_id) => {
+            NetworkActorCommand::CheckPeerInit(peer_id, session_id) => {
                 // Check if the peer has sent Init message.
                 if let Some(session) = state.peer_session_map.get(&peer_id) {
-                    if session.features.is_none() {
+                    // If Peer reconnect, the session_id will changed, and a new CheckPeerInit command will be issued.
+                    // In that case we just skip check here.
+                    if session.session_id == session_id && session.features.is_none() {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                                NetworkActorCommand::DisconnectPeer(
+                                    peer_id.clone(),
+                                    PeerDisconnectReason::InitMessageTimeout,
+                                ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1632,9 +1656,6 @@ where
                         }
                     }
                 }
-
-                let used_ms = now_timestamp_as_millis_u64() - now;
-                tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -2494,11 +2515,7 @@ where
     ) -> Result<(), Error> {
         assert!(attempt.is_retrying());
 
-        if !attempt
-            .last_error
-            .as_ref()
-            .is_some_and(|err| err.contains("WaitingTlcAck"))
-        {
+        if attempt.last_error.as_ref().is_some_and(|e| !e.is_empty()) {
             // `session.remain_amount()` do not contains this part of amount,
             // so we need to add the receiver amount to it, so we may make fewer
             // attempts to send the payment.
@@ -2515,7 +2532,7 @@ where
                 })?;
 
             attempt.update_route(hops);
-        };
+        }
 
         self.send_attempt(myself, state, session, attempt).await?;
         Ok(())
@@ -2642,7 +2659,7 @@ where
                     attempt.hash, e
                 );
                 self.set_attempt_fail_with_error(session, attempt, &err, false);
-                return Err(Error::SendPaymentFirstHopError(err, false));
+                return Err(Error::FirstHopError(err, false));
             }
         };
 
@@ -2671,7 +2688,7 @@ where
                     error_detail.error_code_as_str()
                 );
                 self.set_attempt_fail_with_error(session, attempt, &err, need_to_retry);
-                return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
+                return Err(Error::FirstHopError(err, need_to_retry));
             }
             Ok(_) => {
                 self.store.insert_attempt(attempt.clone());
@@ -2699,12 +2716,14 @@ where
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                         channel_id,
-                        command: ChannelCommand::ForwardTlcResult(ForwardTlcResult {
-                            payment_hash,
-                            channel_id,
-                            tlc_id,
-                            error_info: error_info.clone(),
-                        }),
+                        command: ChannelCommand::NotifyEvent(ChannelEvent::ForwardTlcResult(
+                            ForwardTlcResult {
+                                payment_hash,
+                                channel_id,
+                                tlc_id,
+                                error_info: error_info.clone(),
+                            },
+                        )),
                     }),
                 ))
                 .expect("network actor alive");
@@ -2727,24 +2746,22 @@ where
                     .track_attempt_router(&attempt);
                 self.store.insert_attempt(attempt);
             }
-            Some((ProcessingChannelError::RepeatedProcessing(_), _)) => {
+            Some((ProcessingChannelError::WaitingTlcAck, _)) => {
                 // do nothing
             }
             Some((error, tlc_err)) => {
                 self.update_graph_with_tlc_fail(&myself, &tlc_err).await;
-                let (error, need_to_retry) =
-                    if matches!(error, ProcessingChannelError::WaitingTlcAck) {
-                        ("WaitingTlcAck".to_string(), true)
-                    } else {
-                        let need_to_retry = self.network_graph.write().await.record_attempt_fail(
-                            &attempt,
-                            tlc_err.clone(),
-                            true,
-                        );
-                        (error.to_string(), need_to_retry)
-                    };
-
-                self.set_attempt_fail_with_error(&mut session, &mut attempt, &error, need_to_retry);
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    tlc_err.clone(),
+                    true,
+                );
+                self.set_attempt_fail_with_error(
+                    &mut session,
+                    &mut attempt,
+                    &error.to_string(),
+                    need_to_retry,
+                );
                 // retry the current attempt if it is retryable
                 if attempt.is_retrying() {
                     self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
@@ -2788,11 +2805,9 @@ where
             .send_payment_onion_packet(state, session, attempt)
             .await
         {
-            let need_retry = matches!(err, Error::SendPaymentFirstHopError(_, true));
+            let need_retry = matches!(err, Error::FirstHopError(_, true));
             if need_retry {
-                // If this is the first hop error, such as the WaitingTlcAck error,
-                // we will just retry later, return Ok here for letting endpoint user
-                // know payment session is created successfully
+                debug!("Retrying payment attempt due to first hop error: {:?}", err);
                 self.register_payment_retry(
                     myself,
                     state,
@@ -2929,7 +2944,7 @@ where
         // retrying payment in ractor framework, we will increase the delay time to avoid
         // flooding the network actor with too many retrying payments.
         state.retry_send_payment_count += 1;
-        let delay = (state.retry_send_payment_count as u64) * 50_u64;
+        let delay = (state.retry_send_payment_count as u64) * 20_u64;
         myself.send_after(Duration::from_millis(delay), move || {
             NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
                 payment_hash,
@@ -3352,8 +3367,9 @@ where
 
         if tlc_expiry_delta.is_some_and(|d| d < MIN_TLC_EXPIRY_DELTA) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "TLC expiry delta is too small, expect larger than {}",
-                MIN_TLC_EXPIRY_DELTA
+                "TLC expiry delta is too small, expect larger than {}, got {}",
+                MIN_TLC_EXPIRY_DELTA,
+                tlc_expiry_delta.unwrap()
             )));
         }
 
@@ -3504,7 +3520,7 @@ where
         Ok((channel, temp_channel_id, new_id))
     }
 
-    fn check_feature_compatibility(&self, peer_id: &PeerId) -> Result<(), ProcessingChannelError> {
+    fn check_feature_compatibility(&self, peer_id: &PeerId) -> ProcessingChannelResult {
         if let Some(ConnectedPeer {
             features: Some(peer_features),
             ..
@@ -3601,10 +3617,7 @@ where
         .await;
     }
 
-    pub async fn abandon_channel(
-        &mut self,
-        channel_id: Hash256,
-    ) -> Result<(), ProcessingChannelError> {
+    pub async fn abandon_channel(&mut self, channel_id: Hash256) -> ProcessingChannelResult {
         if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
             match channel_actor_state.state {
                 ChannelState::ChannelReady
@@ -3796,7 +3809,30 @@ where
                     actor.send_message(ChannelActorMessage::Command(command))?;
                     Ok(())
                 }
-                None => Err(Error::ChannelNotFound(channel_id)),
+                None => {
+                    // if it's relay remove tlc, insert it into ChannelActorState's retryable queue
+                    if let ChannelCommand::RemoveTlc(remove_tlc, _) = &command {
+                        if let Some(mut state) = self.store.get_channel_actor_state(&channel_id) {
+                            if matches!(
+                                state.state,
+                                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+                            ) {
+                                let operation = RetryableTlcOperation::RemoveTlc(
+                                    TLCId::Received(remove_tlc.id),
+                                    remove_tlc.reason.clone(),
+                                );
+                                state.retryable_tlc_operations.push_back(operation);
+                                self.store.insert_channel_actor_state(state);
+                            }
+                        }
+                    }
+
+                    let error = Error::ChannelNotFound(channel_id);
+                    if let Some(rpc_reply) = command.rpc_reply_port() {
+                        let _ = rpc_reply.send(Err(error.to_string()));
+                    }
+                    Err(error)
+                }
             },
         }
     }
@@ -3864,6 +3900,19 @@ where
         remote_pubkey: Pubkey,
         session: &SessionContext,
     ) {
+        debug!("Peer {remote_peer_id:?} connected");
+        #[cfg(feature = "metrics")]
+        {
+            metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).increment(1);
+            match session.ty {
+                SessionType::Inbound => {
+                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).increment(1);
+                }
+                SessionType::Outbound => {
+                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).increment(1);
+                }
+            }
+        }
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             ConnectedPeer {
@@ -3911,14 +3960,39 @@ where
         .expect("send Init message to peer must succeed");
 
         let remote_peer_id = remote_peer_id.clone();
+        let session_id = session.id;
         self.network.send_after(CHECK_PEER_INIT_INTERVAL, move || {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(remote_peer_id))
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(
+                remote_peer_id,
+                session_id,
+            ))
         });
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
+        debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
-            if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
+            let active_channels = self.session_channels_map.remove(&peer.session_id);
+            #[cfg(feature = "metrics")]
+            {
+                metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).decrement(1);
+                match peer.session_type {
+                    SessionType::Inbound => {
+                        metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).decrement(1);
+                    }
+                    SessionType::Outbound => {
+                        metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).decrement(1);
+                    }
+                }
+
+                if active_channels
+                    .as_ref()
+                    .is_some_and(|channels| !channels.is_empty())
+                {
+                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT).increment(1);
+                }
+            }
+            if let Some(channel_ids) = active_channels {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
@@ -4112,7 +4186,7 @@ where
         _myself: ActorRef<NetworkActorMessage>,
         peer_id: PeerId,
         init_msg: Init,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         if !self.is_connected(&peer_id) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Peer {:?} is not connected",
@@ -4123,7 +4197,10 @@ where
         check_chain_hash(&init_msg.chain_hash).map_err(|e| {
             self.network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::DisconnectPeer(peer_id.clone()),
+                    NetworkActorCommand::DisconnectPeer(
+                        peer_id.clone(),
+                        PeerDisconnectReason::ChainHashMismatch,
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
@@ -4137,8 +4214,15 @@ where
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);
             debug_event!(_myself, "PeerInit");
+            let active_channels = self.store.get_active_channel_ids_by_peer(&peer_id);
+            #[cfg(feature = "metrics")]
+            {
+                if !active_channels.is_empty() {
+                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT).decrement(1);
+                }
+            }
 
-            for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
+            for channel_id in active_channels {
                 if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
                     error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
                 }
@@ -4695,8 +4779,8 @@ where
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisionEvent::ActorTerminated(who, _, _) => {
-                debug!("Actor {:?} terminated", who);
+            SupervisionEvent::ActorTerminated(who, _state, reason) => {
+                debug!("Actor {:?} terminated with reason {:?}", who, reason);
             }
             SupervisionEvent::ActorFailed(who, err) => {
                 panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
@@ -4818,7 +4902,7 @@ impl ServiceHandle for NetworkServiceHandle {
     }
 
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        trace!("Service event: {:?}", event);
+        debug!("Service event: {:?}", event);
     }
 }
 

@@ -11,7 +11,9 @@ use super::types::{
 };
 use super::types::{Cursor, Pubkey, TlcErr};
 use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::config::{
+    DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+};
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::path::NodeHeapElement;
@@ -479,6 +481,8 @@ pub enum PathFindError {
     Overflow(String),
     #[error("Feature not enabled: {0}")]
     FeatureNotEnabled(String),
+    #[error("Node not found in graph: {0}")]
+    UnknownNode(String),
     #[error("Insufficient balance: {0}")]
     InsufficientBalance(String),
     #[error("Path find failed for min_tlc_value error: {0}")]
@@ -755,10 +759,12 @@ where
         // but a malicious node may send a channel update with a too large expiry delta
         // which makes the network graph contains a channel update with a too large expiry delta.
         // We need to check it again here to avoid any malicious channel update
-        if channel_update.tlc_expiry_delta > DEFAULT_TLC_EXPIRY_DELTA {
+        // Note: we don't check the tlc_expiry_delta is too small here, because it does not effect
+        // the path finding, and a too small tlc_expiry_delta only makes the hop itself more risky.
+        if channel_update.tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
             error!(
                 "Channel update has too large expiry delta: {} > {}, channel update: {:?}",
-                channel_update.tlc_expiry_delta, DEFAULT_TLC_EXPIRY_DELTA, &channel_update
+                channel_update.tlc_expiry_delta, MAX_PAYMENT_TLC_EXPIRY_LIMIT, &channel_update
             );
             return None;
         }
@@ -1337,7 +1343,8 @@ where
     fn is_node_support_mpp(&self, node: &Pubkey) -> bool {
         self.nodes
             .get(node)
-            .is_some_and(|node_info| node_info.features.supports_basic_mpp())
+            .map(|node_info| node_info.features.supports_basic_mpp())
+            .unwrap_or(true)
     }
 
     fn rand_tlc_expiry_delta(&self, route: &[RouterHop]) -> u64 {
@@ -1955,7 +1962,7 @@ where
             ));
         }
 
-        let mut agg_tlc_expiry = final_tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        let mut agg_tlc_expiry = final_tlc_expiry_delta.unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
         for (idx, cur_hop) in router_hops.iter().enumerate() {
             let prev_hop_pubkey = router_hops.get(idx + 1).map(|h| h.pubkey).unwrap_or(source);
 

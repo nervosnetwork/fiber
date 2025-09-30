@@ -3,8 +3,9 @@ use crate::ckb::contracts::{
     check_udt_script, get_cell_deps_count, get_script_by_contract, Contract,
 };
 use crate::fiber::channel::{
-    occupied_capacity, ProcessingChannelError, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
-    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    occupied_capacity, ProcessingChannelError, ProcessingChannelResult,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
+    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{
     MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
@@ -144,7 +145,7 @@ pub(crate) fn check_open_channel_parameters(
     commitment_fee_rate: u64,
     commitment_delay_epoch: u64,
     max_tlc_number_in_flight: u64,
-) -> Result<(), ProcessingChannelError> {
+) -> ProcessingChannelResult {
     if let Some(udt_type_script) = udt_type_script {
         if !check_udt_script(udt_type_script) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -226,17 +227,17 @@ pub(crate) fn check_open_channel_parameters(
 pub(crate) fn check_tlc_delta_with_epochs(
     tlc_expiry_delta: u64,
     commitment_delay_epoch: u64,
-) -> Result<(), ProcessingChannelError> {
+) -> ProcessingChannelResult {
     if tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA {
         return Err(ProcessingChannelError::InvalidParameter(format!(
-            "TLC expiry delta is too small, expect larger than {}",
-            MIN_TLC_EXPIRY_DELTA
+            "TLC expiry delta is too small, expect larger than {}, got {}",
+            MIN_TLC_EXPIRY_DELTA, tlc_expiry_delta
         )));
     }
     if tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
         return Err(ProcessingChannelError::InvalidParameter(format!(
-            "TLC expiry delta is too large, expected to be smaller than {}",
-            MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            "TLC expiry delta is too large, expected to be smaller than {}, got {}",
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT, tlc_expiry_delta
         )));
     }
 

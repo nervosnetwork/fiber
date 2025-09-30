@@ -44,7 +44,7 @@ pub enum Error {
     #[error("Send payment error: {0}")]
     SendPaymentError(String),
     #[error("Send payment first hop error: {0}")]
-    SendPaymentFirstHopError(String, bool),
+    FirstHopError(String, bool),
     #[error("InvalidParameter: {0}")]
     InvalidParameter(String),
     #[error("Network Graph error: {0}")]
