@@ -76,7 +76,8 @@ use crate::ckb::{
 };
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
+    TxUpdateCommand,
 };
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
@@ -1655,9 +1656,6 @@ where
                         }
                     }
                 }
-
-                let used_ms = now_timestamp_as_millis_u64() - now;
-                tracing::debug!("CheckChannels complete after {used_ms}ms");
             }
             NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
                 // load hold tlcs
@@ -3812,6 +3810,23 @@ where
                     Ok(())
                 }
                 None => {
+                    // if it's relay remove tlc, insert it into ChannelActorState's retryable queue
+                    if let ChannelCommand::RemoveTlc(remove_tlc, _) = &command {
+                        if let Some(mut state) = self.store.get_channel_actor_state(&channel_id) {
+                            if matches!(
+                                state.state,
+                                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+                            ) {
+                                let operation = RetryableTlcOperation::RemoveTlc(
+                                    TLCId::Received(remove_tlc.id),
+                                    remove_tlc.reason.clone(),
+                                );
+                                state.retryable_tlc_operations.push_back(operation);
+                                self.store.insert_channel_actor_state(state);
+                            }
+                        }
+                    }
+
                     let error = Error::ChannelNotFound(channel_id);
                     if let Some(rpc_reply) = command.rpc_reply_port() {
                         let _ = rpc_reply.send(Err(error.to_string()));
@@ -3886,6 +3901,18 @@ where
         session: &SessionContext,
     ) {
         debug!("Peer {remote_peer_id:?} connected");
+        #[cfg(feature = "metrics")]
+        {
+            metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).increment(1);
+            match session.ty {
+                SessionType::Inbound => {
+                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).increment(1);
+                }
+                SessionType::Outbound => {
+                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).increment(1);
+                }
+            }
+        }
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             ConnectedPeer {
@@ -3945,7 +3972,27 @@ where
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
-            if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
+            let active_channels = self.session_channels_map.remove(&peer.session_id);
+            #[cfg(feature = "metrics")]
+            {
+                metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).decrement(1);
+                match peer.session_type {
+                    SessionType::Inbound => {
+                        metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).decrement(1);
+                    }
+                    SessionType::Outbound => {
+                        metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).decrement(1);
+                    }
+                }
+
+                if active_channels
+                    .as_ref()
+                    .is_some_and(|channels| !channels.is_empty())
+                {
+                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT).increment(1);
+                }
+            }
+            if let Some(channel_ids) = active_channels {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
@@ -4167,8 +4214,15 @@ where
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);
             debug_event!(_myself, "PeerInit");
+            let active_channels = self.store.get_active_channel_ids_by_peer(&peer_id);
+            #[cfg(feature = "metrics")]
+            {
+                if !active_channels.is_empty() {
+                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT).decrement(1);
+                }
+            }
 
-            for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
+            for channel_id in active_channels {
                 if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
                     error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
                 }

@@ -378,6 +378,16 @@ pub struct FiberConfig {
     )]
     #[default(true)]
     pub reuse_port_for_websocket: bool,
+
+    /// Metrics address
+    #[cfg(feature = "metrics")]
+    #[arg(
+        name = "FIBER_METRICS_ADDR",
+        long = "fiber-metrics-addr",
+        env,
+        help = "Address for metrics endpoint (e.g., 127.0.0.1:9090). Requires binary to be compiled with RUSTFLAGS=\"--cfg tokio_unstable\" and metrics feature enabled"
+    )]
+    pub metrics_addr: Option<String>,
 }
 
 /// Must be a valid utf-8 string of length maximal length 32 bytes.

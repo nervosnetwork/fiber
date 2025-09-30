@@ -242,7 +242,6 @@ jobs:
           echo "Comparing against: origin/${{ github.base_ref }}"
           git checkout origin/${{ github.base_ref }}
 
-          sed -i 's/sleep 5/sleep 10/g' ./tests/nodes/wait.sh || true
           export ON_GITHUB_ACTION=y
           CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > baseline.log 2>&1 &
           ./tests/nodes/wait.sh
@@ -299,33 +298,5 @@ jobs:
           else
             echo "⚠️ Comparison report not found at ./tests/perf/comparison_report.txt"
             echo "This might indicate a benchmark execution failure."
-            exit 1
-          fi
-
-  # Summary job that depends on all other jobs
-  ci-success:
-    name: CI Success
-    runs-on: ubuntu-latest
-    needs: [check, cargo-shear, test, fmt, clippy, typos]
-    if: always()
-    steps:
-      - name: Check all job results
-        run: |
-          if [[ "${{ needs.check.result }}" == "success" && \
-                "${{ needs.cargo-shear.result }}" == "success" && \
-                "${{ needs.test.result }}" == "success" && \
-                "${{ needs.fmt.result }}" == "success" && \
-                "${{ needs.clippy.result }}" == "success" && \
-                "${{ needs.typos.result }}" == "success" ]]; then
-            echo "🎉 All CI checks passed!"
-            exit 0
-          else
-            echo "❌ Some CI checks failed:"
-            echo "  - Check: ${{ needs.check.result }}"
-            echo "  - Cargo Shear: ${{ needs.cargo-shear.result }}"
-            echo "  - Test: ${{ needs.test.result }}"
-            echo "  - Format: ${{ needs.fmt.result }}"
-            echo "  - Clippy: ${{ needs.clippy.result }}"
-            echo "  - Typos: ${{ needs.typos.result }}"
             exit 1
           fi
