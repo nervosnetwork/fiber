@@ -1723,12 +1723,10 @@ where
                     })
                     .collect();
 
-                let mut hash_algorithm = HashAlgorithm::default();
-                let mut tlc_preimage_map = HashMap::new();
-
                 // we generally set all validation error as IncorrectOrUnknownPaymentDetails, this failure
                 // is expected to be the scenarios malicious sender have sent a inconsistent data with MPP,
                 // and we don't want to keep them in the database.
+                let mut tlc_preimage_map = HashMap::new();
                 let tlc_fail = 'validation: {
                     macro_rules! validation_fail {
                         ($msg:expr) => {{
@@ -1756,15 +1754,19 @@ where
                         )
                     };
 
-                    let Some(mpp_mode) = invoice.mpp_mode() else {
-                        validation_fail!("try to settle down mpp payment_hash: {:?} while the invoice does no support MPP");
-                    };
-
                     if !is_invoice_fulfilled(&invoice, &tlcs) {
                         return Ok(());
                     }
 
-                    hash_algorithm = invoice.hash_algorithm().cloned().unwrap_or(hash_algorithm);
+                    let Some(mpp_mode) = invoice.mpp_mode() else {
+                        validation_fail!("try to settle down mpp payment_hash: {:?} while the invoice does no support MPP");
+                    };
+
+                    let hash_algorithm = invoice
+                        .hash_algorithm()
+                        .cloned()
+                        .unwrap_or(HashAlgorithm::default());
+
                     // Generate preimages based on MPP mode
                     match mpp_mode {
                         MppMode::BasicMpp => {
@@ -1828,7 +1830,6 @@ where
                                     .get(&(tlc.channel_id, tlc.id()))
                                     .expect("must got preimage");
                                 let hash: Hash256 = hash_algorithm.hash(preimage.as_ref()).into();
-
                                 if hash != payment_hash {
                                     validation_fail!(
                                         "verify AMP preimage for payment hash {:?} is not valid"
@@ -1838,7 +1839,7 @@ where
                         }
                     }
                     None
-                }; // end of 'validation block
+                };
 
                 // remove tlcs
                 for tlc in tlcs {
