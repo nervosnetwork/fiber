@@ -1,4 +1,6 @@
 mod config;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 pub use config::Config;
 
 #[cfg(any(test, feature = "bench"))]
