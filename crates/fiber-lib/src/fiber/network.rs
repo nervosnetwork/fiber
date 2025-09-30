@@ -1481,11 +1481,17 @@ where
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
-                for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                // peer has active channels but down
+                let mut with_channel_down_peers = HashSet::new();
+                for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             if actor_state.reestablishing {
                                 continue;
+                            }
+
+                            if !state.peer_session_map.contains_key(&peer_id) {
+                                with_channel_down_peers.insert(peer_id);
                             }
 
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
@@ -1631,6 +1637,16 @@ where
                             }
                         }
                     }
+                }
+
+                #[cfg(feature = "metrics")]
+                metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
+                    .set(with_channel_down_peers.len() as u32);
+                if !with_channel_down_peers.is_empty() {
+                    debug!(
+                        "Check channels: found {} peers down with channels",
+                        with_channel_down_peers.len()
+                    );
                 }
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
@@ -3972,7 +3988,6 @@ where
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
-            let active_channels = self.session_channels_map.remove(&peer.session_id);
             #[cfg(feature = "metrics")]
             {
                 metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).decrement(1);
@@ -3984,15 +3999,8 @@ where
                         metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).decrement(1);
                     }
                 }
-
-                if active_channels
-                    .as_ref()
-                    .is_some_and(|channels| !channels.is_empty())
-                {
-                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT).increment(1);
-                }
             }
-            if let Some(channel_ids) = active_channels {
+            if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
@@ -4214,15 +4222,8 @@ where
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);
             debug_event!(_myself, "PeerInit");
-            let active_channels = self.store.get_active_channel_ids_by_peer(&peer_id);
-            #[cfg(feature = "metrics")]
-            {
-                if !active_channels.is_empty() {
-                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT).decrement(1);
-                }
-            }
 
-            for channel_id in active_channels {
+            for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
                 if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
                     error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
                 }
