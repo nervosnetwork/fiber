@@ -145,9 +145,8 @@ jobs:
 
       - name: Get baseline benchmark
         run: |
-          echo "PR target branch: ${{ github.base_ref }}"
           echo "Comparing against: origin/${{ github.base_ref }}"
-          git checkout ${{ github.sha }}
+          git checkout origin/${{ github.base_ref }}
 
           export ON_GITHUB_ACTION=y
           CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > baseline.log 2>&1 &
@@ -155,7 +154,7 @@ jobs:
 
           cd ./tests/perf/
           cargo run --bin run-test --release integration
-          cargo run --bin run-test --release benchmark 50 30 base
+          cargo run --bin run-test --release benchmark 90 30 base
           cd -
           git stash
 
@@ -172,7 +171,7 @@ jobs:
 
           cd ./tests/perf/
           cargo run --bin run-test --release integration
-          cargo run --bin run-test --release benchmark 50 30 compare
+          cargo run --bin run-test --release benchmark 90 30 compare
           cd -
 
       - name: Upload benchmark results

@@ -3748,7 +3748,7 @@ async fn test_send_payment_tlc_expiry_soon_first_hop() {
     attempt.last_error = None;
     attempt.route_hops = hops_infos;
     attempt.tried_times = 0;
-    attempt.last_error = Some("WaitingTlcAck".to_string());
+    attempt.last_error = Some("".to_string());
     node_0.update_payment_session(payment_session);
     node_0.update_payment_attempt(attempt.clone());
 
@@ -3848,7 +3848,7 @@ async fn test_send_payment_tlc_expiry_soon() {
     attempt.last_error = None;
     attempt.route_hops = hops_infos;
     attempt.tried_times = 0;
-    attempt.last_error = Some("WaitingTlcAck".to_string());
+    attempt.last_error = Some("".to_string());
     node_0.update_payment_session(payment_session);
     node_0.update_payment_attempt(attempt.clone());
 

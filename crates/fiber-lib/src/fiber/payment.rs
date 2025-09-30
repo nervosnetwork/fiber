@@ -491,9 +491,7 @@ impl Attempt {
             self.status = AttemptStatus::Failed;
         } else {
             self.status = AttemptStatus::Retrying;
-            if !error.contains("WaitingTlcAck") {
-                self.tried_times += 1;
-            }
+            self.tried_times += 1;
         }
     }
 

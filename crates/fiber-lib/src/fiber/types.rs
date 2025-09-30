@@ -1271,7 +1271,7 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct RemoveTlcFulfill {
     pub payment_preimage: Hash256,
 }
@@ -1483,7 +1483,7 @@ impl From<molecule_fiber::TlcErr> for TlcErr {
 // sender should decode it and then decide what to do with the error.
 // Note: this supposed to be only accessible by the sender, and it's not reliable since it
 //       is not placed on-chain due to the possibility of hop failure.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TlcErrPacket {
     // TODO: replace this with the real onion packet
     pub onion_packet: Vec<u8>,
@@ -1648,7 +1648,7 @@ impl TlcErrorCode {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(TlcErrPacket),
