@@ -3,6 +3,7 @@ use ckb_types::{
     packed::OutPoint,
 };
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
+use strum::AsRefStr;
 use tentacle::secio::PeerId;
 
 use crate::{
@@ -53,7 +54,7 @@ pub enum InternalMessage {
     ReportTracingResult(CkbTxTracingResult),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, AsRefStr)]
 pub enum InFlightCkbTxActorMessage {
     /// Send the transaction. The actor may start with only tx tracer first.
     SendTx(TransactionView),
@@ -95,7 +96,11 @@ impl Actor for InFlightCkbTxActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
+        #[cfg(feature = "metrics")]
+        let start = crate::now_timestamp_as_millis_u64();
+        #[cfg(feature = "metrics")]
+        let name = format!("fiber.in_flight_ckb_tx_actor.{}", message.as_ref());
+        let res = match message {
             InFlightCkbTxActorMessage::Internal(InternalMessage::Start) => {
                 self.start(myself, state).await
             }
@@ -120,7 +125,16 @@ impl Actor for InFlightCkbTxActor {
                 }
                 Ok(())
             }
+        };
+
+        #[cfg(feature = "metrics")]
+        {
+            let end = crate::now_timestamp_as_millis_u64();
+            let elapsed = end - start;
+            metrics::histogram!(name).record(elapsed as u32);
         }
+
+        res
     }
 }
 
