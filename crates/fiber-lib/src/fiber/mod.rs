@@ -8,6 +8,8 @@ pub mod hash_algorithm;
 pub mod history;
 pub mod network;
 pub mod payment;
+#[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
+pub mod profiling;
 pub mod serde_utils;
 pub mod types;
 
