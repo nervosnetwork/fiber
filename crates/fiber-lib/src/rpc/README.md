@@ -50,6 +50,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
         * [Method `list_peers`](#peer-list_peers)
+    * [Module Prof](#module-prof)
+        * [Method `pprof`](#prof-pprof)
     * [Module Watchtower](#module-watchtower)
         * [Method `create_watch_channel`](#watchtower-create_watch_channel)
         * [Method `remove_watch_channel`](#watchtower-remove_watch_channel)
@@ -851,6 +853,29 @@ List connected peers
 ##### Returns
 
 * `peers` - <em>Vec<[PeerInfo](#type-peerinfo)></em>, A list of connected peers.
+
+---
+
+
+
+<a id="prof"></a>
+### Module `Prof`
+RPC module for profiling
+ This module require build with pprof feature and debug symbol.
+
+
+<a id="prof-pprof"></a>
+#### Method `pprof`
+
+Collects a temporary CPU profile and writes a flamegraph SVG to disk.
+
+##### Params
+
+* `duration_secs` - <em>`Option<u64>`</em>, Duration to profile in seconds. Defaults 10s.
+
+##### Returns
+
+* `path` - <em>`String`</em>, Path of the generated flamegraph SVG.
 
 ---
 
