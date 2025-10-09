@@ -138,7 +138,7 @@ pub enum ChannelActorMessage {
 impl Display for ChannelActorMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Command(command) => write!(f, "Command.{command}"),
+            Self::Command(command) => write!(f, "Command.{}", command.as_ref()),
             Self::Event(event) => write!(f, "Event.{}", event.as_ref()),
             Self::PeerMessage(msg) => write!(f, "PeerMessage.{msg}"),
         }
@@ -165,7 +165,7 @@ pub struct TlcNotification {
     pub script: Script,
 }
 
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
     FundingTxSigned(Transaction),
