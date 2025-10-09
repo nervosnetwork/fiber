@@ -14,6 +14,8 @@ pub mod invoice;
 mod middleware;
 pub mod payment;
 pub mod peer;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod prof;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,6 +37,8 @@ pub mod server {
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::rpc::prof::{ProfRpcServer, ProfRpcServerImpl};
     use crate::{
         cch::CchMessage,
         fiber::{
@@ -307,6 +311,11 @@ pub mod server {
                         .into_rpc(),
                     )
                     .unwrap();
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if config.is_module_enabled("prof") {
+                modules.merge(ProfRpcServerImpl::new().into_rpc()).unwrap();
             }
         }
         if let Some(cch_actor) = cch_actor {
