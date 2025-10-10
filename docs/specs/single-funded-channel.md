@@ -106,6 +106,10 @@ After $T$, anyone may claim the cell by submitting a transaction with a relative
 - Includes an input locked by a script hashing to $L_2$, or
 - Outputs the same cell parameters but with the initiator shutdown script as the lock
 
-## 5. Collaborative Shutdown
+## Funding Negotiation
+
+The non-initiator SHOULD NOT reply `TxUpdate` nor `TxSignatures` to the initiator. Instead the initiator MUST skip to the next step after sending `TxUpdate` and `TxSignatures`.
+
+## Collaborative Shutdown
 
 In a cooperative shutdown, both parties use the shutdown script specified in the shutdown message. The output structure mirrors the settlement transaction above.
