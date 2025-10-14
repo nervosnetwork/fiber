@@ -134,7 +134,7 @@ impl AmpChild {
 
     /// ReconstructChildren derives the set of children hashes and preimages from the
     /// provided descriptors.
-    pub fn construct_amp_children(
+    pub fn reconstruct_amp_children(
         child_descs: &[AmpChildDesc],
         hash_algorithm: HashAlgorithm,
     ) -> Vec<AmpChild> {

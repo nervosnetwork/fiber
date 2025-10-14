@@ -739,6 +739,7 @@ fn test_amp_custom_records() {
         parent_payment_hash,
         3,
         AmpChildDesc::new(0, AmpSecret::random()),
+        1000,
     );
     amp_record.write(&mut payment_custom_records);
 
@@ -797,7 +798,7 @@ fn test_reconstruct_children() {
     let desc2 = AmpChildDesc::new(1, share2);
 
     let children =
-        AmpChild::construct_amp_children(&[desc1.clone(), desc2.clone()], HashAlgorithm::Sha256);
+        AmpChild::reconstruct_amp_children(&[desc1.clone(), desc2.clone()], HashAlgorithm::Sha256);
 
     assert_eq!(children.len(), 2);
 
@@ -815,7 +816,7 @@ fn test_reconstruct_single_child() {
     let share = root;
     let desc = AmpChildDesc::new(0, share);
 
-    let children = AmpChild::construct_amp_children(&[desc.clone()], HashAlgorithm::Sha256);
+    let children = AmpChild::reconstruct_amp_children(&[desc.clone()], HashAlgorithm::Sha256);
 
     assert_eq!(children.len(), 1);
 
@@ -835,7 +836,7 @@ fn test_reconstruct_n_children() {
         .collect();
 
     // last hop will reconstruct children and derive them
-    let children = AmpChild::construct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
+    let children = AmpChild::reconstruct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
 
     assert_eq!(children.len(), descs.len());
 
@@ -847,7 +848,7 @@ fn test_reconstruct_n_children() {
 
     // if we only reconstruct the first 10 children, they should not be the same
     let first_10_children = &descs[0..10];
-    let children = AmpChild::construct_amp_children(first_10_children, HashAlgorithm::Sha256);
+    let children = AmpChild::reconstruct_amp_children(first_10_children, HashAlgorithm::Sha256);
 
     // the derived child is not equal to expected child
     for (i, desc) in first_10_children.iter().enumerate() {
@@ -858,7 +859,7 @@ fn test_reconstruct_n_children() {
 
 #[test]
 fn test_reconstruct_empty_children() {
-    let children = AmpChild::construct_amp_children(&[], HashAlgorithm::Sha256);
+    let children = AmpChild::reconstruct_amp_children(&[], HashAlgorithm::Sha256);
     assert!(children.is_empty());
 }
 
@@ -872,7 +873,7 @@ fn test_part_of_attempt_retry() {
         .map(|(i, &share)| AmpChildDesc::new(i as u16, share))
         .collect();
 
-    let children = AmpChild::construct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
+    let children = AmpChild::reconstruct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
 
     assert_eq!(children.len(), descs.len());
 

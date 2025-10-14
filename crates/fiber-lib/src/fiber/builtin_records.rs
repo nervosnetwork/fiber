@@ -60,16 +60,23 @@ pub struct AmpPaymentData {
     pub total_amp_count: u16,
     pub payment_hash: Hash256,
     pub child_desc: AmpChildDesc,
+    pub total_amount: u128,
 }
 
 impl AmpPaymentData {
     pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
 
-    pub fn new(payment_hash: Hash256, total_amp_count: u16, child_desc: AmpChildDesc) -> Self {
+    pub fn new(
+        payment_hash: Hash256,
+        total_amp_count: u16,
+        child_desc: AmpChildDesc,
+        total_amount: u128,
+    ) -> Self {
         Self {
             payment_hash,
             total_amp_count,
             child_desc,
+            total_amount,
         }
     }
 
@@ -79,6 +86,7 @@ impl AmpPaymentData {
         vec.extend_from_slice(&self.total_amp_count.to_le_bytes());
         vec.extend_from_slice(&self.child_desc.index.to_le_bytes());
         vec.extend_from_slice(self.child_desc.secret.as_bytes());
+        vec.extend_from_slice(&self.total_amount.to_le_bytes());
         vec
     }
 
@@ -97,17 +105,19 @@ impl AmpPaymentData {
             .data
             .get(&Self::CUSTOM_RECORD_KEY)
             .and_then(|data| {
-                if data.len() != 32 + 4 + 32 {
+                if data.len() != 32 + 4 + 32 + 16 {
                     return None;
                 }
                 let parent_hash: [u8; 32] = data[..32].try_into().unwrap();
                 let total_amp_count = u16::from_le_bytes(data[32..34].try_into().unwrap());
                 let index = u16::from_le_bytes(data[34..36].try_into().unwrap());
                 let secret = AmpSecret::new(data[36..68].try_into().unwrap());
+                let total_amount = u128::from_le_bytes(data[68..].try_into().unwrap());
                 Some(Self::new(
                     Hash256::from(parent_hash),
                     total_amp_count,
                     AmpChildDesc::new(index, secret),
+                    total_amount,
                 ))
             })
     }

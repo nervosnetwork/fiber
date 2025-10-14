@@ -370,6 +370,10 @@ impl CkbInvoice {
         self.has_feature(|feature| feature.supports_atomic_mpp())
     }
 
+    pub fn is_reuse(&self) -> bool {
+        self.reuse().cloned().unwrap_or(false)
+    }
+
     pub fn mpp_mode(&self) -> Option<MppMode> {
         if self.basic_mpp() {
             Some(MppMode::BasicMpp)

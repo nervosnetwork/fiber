@@ -11,7 +11,6 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::network::PaymentCustomRecords;
-use crate::fiber::payment::MppMode;
 use crate::fiber::types::TxSignatures;
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 #[cfg(test)]
@@ -908,16 +907,22 @@ where
         tlc_id: TLCId,
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
-
         let parent_payment_hash = tlc_info
             .parent_payment_hash
             .unwrap_or(tlc_info.payment_hash);
-        let invoice = self.store.get_invoice(&parent_payment_hash);
-        let mpp_mode = invoice.as_ref().and_then(|inv| inv.mpp_mode());
-        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
-        if preimage.is_none() && !mpp_mode.is_some_and(|m| m == MppMode::AtomicMpp) {
+        // MPP or AMP
+        if tlc_info.total_amount.is_some() {
+            // add to pending settlement tlc set
+            // the tlc set will be settled by network actor
+            state
+                .pending_notify_mpp_tlcs
+                .push((parent_payment_hash, tlc_info.id()));
             return;
         }
+
+        let invoice = self.store.get_invoice(&parent_payment_hash);
+        let preimage = self.store.get_preimage(&tlc_info.payment_hash);
+
         let mut remove_reason = preimage.map(|preimage| {
             RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                 payment_preimage: preimage,
@@ -944,16 +949,6 @@ where
                     // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
                     // this maybe happened when process is killed and restart
                     error!("invoice already paid, ignore");
-                    return;
-                }
-                _ if mpp_mode.is_some() => {
-                    // add to pending settlement tlc set
-                    // the tlc set will be settled by network actor
-                    state
-                        .pending_notify_mpp_tlcs
-                        .push((parent_payment_hash, tlc_info.id()));
-
-                    // just return, the tlc set will be settled by network actor
                     return;
                 }
                 _ => {
@@ -1103,8 +1098,8 @@ where
                     tlc.payment_secret = Some(record.payment_secret);
                     tlc.total_amount = Some(record.total_amount);
                 }
-                (Some(invoice), None, Some(record)) if invoice.atomic_mpp() => {
-                    tlc.total_amount = Some(invoice.amount.unwrap_or_default());
+                (_, None, Some(record)) => {
+                    tlc.total_amount = Some(record.total_amount);
                     tlc.parent_payment_hash = Some(parent_payment_hash);
                     // now save amp_record with parent payment_hash as key
                     self.store.insert_atomic_mpp_payment_data(
@@ -1134,7 +1129,7 @@ where
                         return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
                     }
                 }
-                (None, Some(_), _) | (None, _, Some(_)) => {
+                (None, Some(_), _) => {
                     error!("invoice not found for MPP payment: {:?}", payment_hash);
                     return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
                         "invoice not found".to_string(),

@@ -105,7 +105,7 @@ use crate::fiber::types::{
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
 use crate::utils::payment::is_invoice_fulfilled;
-use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
+use crate::{gen_rand_sha256_hash, now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -615,14 +615,19 @@ impl SendPaymentData {
 
         let keysend = command.keysend.unwrap_or(false);
         let (payment_hash, preimage) = if !keysend {
-            (
-                validate_field(
-                    command.payment_hash,
-                    invoice.as_ref().map(|i| *i.payment_hash()),
-                    "payment_hash",
-                )?,
-                None,
-            )
+            let reuse = invoice.as_ref().is_some_and(|i| i.is_reuse());
+            if reuse {
+                (gen_rand_sha256_hash(), None)
+            } else {
+                (
+                    validate_field(
+                        command.payment_hash,
+                        invoice.as_ref().map(|i| *i.payment_hash()),
+                        "payment_hash",
+                    )?,
+                    None,
+                )
+            }
         } else {
             if invoice.is_some() {
                 return Err("keysend payment should not have invoice".to_string());
@@ -1842,7 +1847,7 @@ where
                                 .map(|(_, data)| data.child_desc.clone())
                                 .collect();
                             let children =
-                                AmpChild::construct_amp_children(&child_descs, hash_algorithm);
+                                AmpChild::reconstruct_amp_children(&child_descs, hash_algorithm);
                             debug_assert_eq!(child_descs.len(), children.len());
 
                             for (((channel_id, tlc_id), _), child) in
@@ -2815,7 +2820,11 @@ where
 
         // generate custom records for amp_mpp
         if amp_mpp {
-            self.set_amp_custom_records(&mut result, session.payment_hash());
+            self.set_amp_custom_records(
+                &mut result,
+                session.payment_hash(),
+                session.remain_amount(),
+            );
         }
 
         for attempt in &result {
@@ -2825,7 +2834,12 @@ where
         return Ok(result);
     }
 
-    fn set_amp_custom_records(&self, attempts: &mut [Attempt], payment_hash: Hash256) {
+    fn set_amp_custom_records(
+        &self,
+        attempts: &mut [Attempt],
+        payment_hash: Hash256,
+        total_amount: u128,
+    ) {
         debug_assert!(!attempts.is_empty());
 
         let root = AmpSecret::random();
@@ -2839,11 +2853,15 @@ where
             .map(|(i, &share)| AmpChildDesc::new(i as u16, share))
             .collect();
 
-        let children = AmpChild::construct_amp_children(&child_descs, hash_algorithm);
+        let children = AmpChild::reconstruct_amp_children(&child_descs, hash_algorithm);
         for (index, (attempt, child)) in attempts.iter_mut().zip(&children).enumerate() {
             let last_hop = attempt.route_hops.last_mut().expect("last hop");
-            let amp_data =
-                AmpPaymentData::new(payment_hash, total_count, child_descs[index].clone());
+            let amp_data = AmpPaymentData::new(
+                payment_hash,
+                total_count,
+                child_descs[index].clone(),
+                total_amount,
+            );
             let mut custom_records = last_hop.custom_records.clone().unwrap_or_default();
             amp_data.write(&mut custom_records);
             last_hop.custom_records = Some(custom_records);

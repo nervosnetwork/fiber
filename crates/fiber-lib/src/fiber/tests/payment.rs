@@ -5505,7 +5505,7 @@ async fn test_payment_with_payment_data_record() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_basic_mpp(false)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
