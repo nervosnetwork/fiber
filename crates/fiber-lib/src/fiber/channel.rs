@@ -25,6 +25,7 @@ use std::{
     backtrace::Backtrace,
     sync::{LazyLock, Mutex},
 };
+use strum::AsRefStr;
 use tracing::{debug, error, info, trace, warn};
 
 use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
@@ -136,6 +137,16 @@ pub enum ChannelActorMessage {
     PeerMessage(FiberChannelMessage),
 }
 
+impl Display for ChannelActorMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Command(command) => write!(f, "Command.{}", command.as_ref()),
+            Self::Event(event) => write!(f, "Event.{}", event.as_ref()),
+            Self::PeerMessage(msg) => write!(f, "PeerMessage.{msg}"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddTlcResponse {
     pub tlc_id: u64,
@@ -156,7 +167,7 @@ pub struct TlcNotification {
     pub script: Script,
 }
 
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
     FundingTxSigned(Transaction),
@@ -2665,6 +2676,11 @@ where
             message,
         );
 
+        #[cfg(feature = "metrics")]
+        let start = now_timestamp_as_millis_u64();
+        #[cfg(feature = "metrics")]
+        let name = format!("fiber.channel_actor.{}", message);
+
         match message {
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self
@@ -2733,6 +2749,13 @@ where
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
 
+        #[cfg(feature = "metrics")]
+        {
+            let end = now_timestamp_as_millis_u64();
+            let elapsed = end - start;
+            metrics::histogram!(name).record(elapsed as u32);
+        }
+
         Ok(())
     }
 
@@ -2777,6 +2800,9 @@ where
             }
         }
 
+        #[cfg(feature = "metrics")]
+        metrics::gauge!(crate::metrics::TOTAL_CHANNEL_COUNT).increment(1);
+
         Ok(())
     }
 
@@ -2809,6 +2835,9 @@ where
         let _ = self.network.send_message(NetworkActorMessage::new_event(
             NetworkActorEvent::ChannelActorStopped(state.get_id(), stop_reason),
         ));
+
+        #[cfg(feature = "metrics")]
+        metrics::gauge!(crate::metrics::TOTAL_CHANNEL_COUNT).decrement(1);
         Ok(())
     }
 }
@@ -3776,7 +3805,7 @@ pub enum StopReason {
     PeerDisConnected,
 }
 
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum ChannelEvent {
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),

@@ -19,9 +19,11 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr, TransportType};
@@ -259,7 +261,7 @@ pub struct PeerInfo {
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
 /// need to hide it from the API. So in case a reply is needed, we need to put
 /// an optional RpcReplyPort in the of the definition of this message.
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
@@ -816,7 +818,7 @@ macro_rules! debug_event {
     };
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, AsRefStr)]
 pub enum NetworkServiceEvent {
     NetworkStarted(PeerId, Vec<MultiAddr>, Vec<Multiaddr>),
     NetworkStopped(PeerId),
@@ -858,7 +860,7 @@ pub enum NetworkServiceEvent {
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
 /// all events are processed by the network actor.
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum NetworkActorEvent {
     /// Network events to be processed by this actor.
     PeerConnected(PeerId, Pubkey, SessionContext),
@@ -933,6 +935,16 @@ pub enum NetworkActorMessage {
     Command(NetworkActorCommand),
     Event(NetworkActorEvent),
     Notification(NetworkServiceEvent),
+}
+
+impl Display for NetworkActorMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Command(command) => write!(f, "Command.{}", command.as_ref()),
+            Self::Event(event) => write!(f, "Event.{}", event.as_ref()),
+            Self::Notification(event) => write!(f, "Notification.{}", event.as_ref()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1535,11 +1547,17 @@ where
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
-                for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                // peer has active channels but down
+                let mut with_channel_down_peers = HashSet::new();
+                for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             if actor_state.reestablishing {
                                 continue;
+                            }
+
+                            if !state.peer_session_map.contains_key(&peer_id) {
+                                with_channel_down_peers.insert(peer_id);
                             }
 
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
@@ -1685,6 +1703,16 @@ where
                             }
                         }
                     }
+                }
+
+                #[cfg(feature = "metrics")]
+                metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
+                    .set(with_channel_down_peers.len() as u32);
+                if !with_channel_down_peers.is_empty() {
+                    debug!(
+                        "Check channels: found {} peers down with channels",
+                        with_channel_down_peers.len()
+                    );
                 }
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
@@ -4094,6 +4122,18 @@ where
         session: &SessionContext,
     ) {
         debug!("Peer {remote_peer_id:?} connected");
+        #[cfg(feature = "metrics")]
+        {
+            metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).increment(1);
+            match session.ty {
+                SessionType::Inbound => {
+                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).increment(1);
+                }
+                SessionType::Outbound => {
+                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).increment(1);
+                }
+            }
+        }
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             ConnectedPeer {
@@ -4153,6 +4193,18 @@ where
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
+            #[cfg(feature = "metrics")]
+            {
+                metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).decrement(1);
+                match peer.session_type {
+                    SessionType::Inbound => {
+                        metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).decrement(1);
+                    }
+                    SessionType::Outbound => {
+                        metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).decrement(1);
+                    }
+                }
+            }
             if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
@@ -4881,6 +4933,10 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(feature = "metrics")]
+        let start = now_timestamp_as_millis_u64();
+        #[cfg(feature = "metrics")]
+        let name = format!("fiber.network_actor.{}", message);
         match message {
             NetworkActorMessage::Event(event) => {
                 if let Err(err) = self.handle_event(myself, state, event).await {
@@ -4898,6 +4954,14 @@ where
                 }
             }
         }
+
+        #[cfg(feature = "metrics")]
+        {
+            let end = now_timestamp_as_millis_u64();
+            let elapsed = end - start;
+            metrics::histogram!(name).record(elapsed as u32);
+        }
+
         Ok(())
     }
 

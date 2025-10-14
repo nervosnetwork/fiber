@@ -17,6 +17,7 @@ use ckb_types::{
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+use strum::AsRefStr;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -54,6 +55,7 @@ impl<S: WatchtowerStore> WatchtowerActor<S> {
     }
 }
 
+#[derive(AsRefStr)]
 pub enum WatchtowerMessage {
     CreateChannel(Hash256, Script, SettlementData),
     RemoveChannel(Hash256),
@@ -93,6 +95,10 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(feature = "metrics")]
+        let start = crate::now_timestamp_as_millis_u64();
+        #[cfg(feature = "metrics")]
+        let name = format!("fiber.watchtower_actor.{}", message.as_ref());
         match message {
             WatchtowerMessage::CreateChannel(
                 channel_id,
@@ -135,6 +141,12 @@ where
                 .store
                 .remove_watch_preimage(NodeId::local(), payment_hash),
             WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
+        }
+        #[cfg(feature = "metrics")]
+        {
+            let end = crate::now_timestamp_as_millis_u64();
+            let elapsed = end - start;
+            metrics::histogram!(name).record(elapsed as u32);
         }
         Ok(())
     }

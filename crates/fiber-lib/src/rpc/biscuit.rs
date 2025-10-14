@@ -94,6 +94,8 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "submit_commitment_transaction",
         r#"allow if write("chain");"#,
     );
+    // prof
+    b.rule("pprof", r#"allow if write("pprof");"#);
     // graph
     b.rule("graph_nodes", r#"allow if read("graph");"#);
     b.rule("graph_channels", r#"allow if read("graph");"#);

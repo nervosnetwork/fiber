@@ -7,6 +7,7 @@ use ckb_types::{
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use strum::AsRefStr;
 use tracing::debug;
 
 use crate::{
@@ -122,7 +123,7 @@ impl From<Option<ckb_jsonrpc_types::TransactionWithStatusResponse>> for GetShutd
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum CkbChainMessage {
     Fund(
         FundingTx,
@@ -206,6 +207,10 @@ impl Actor for CkbChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(feature = "metrics")]
+        let start = crate::now_timestamp_as_millis_u64();
+        #[cfg(feature = "metrics")]
+        let name = format!("fiber.ckb_chain_actor.{}", message.as_ref());
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
                 let context = state.build_funding_context(request.script.clone());
@@ -331,6 +336,13 @@ impl Actor for CkbChainActor {
             CkbChainMessage::Stop => {
                 myself.stop(Some("stop received".to_string()));
             }
+        }
+
+        #[cfg(feature = "metrics")]
+        {
+            let end = crate::now_timestamp_as_millis_u64();
+            let elapsed = end - start;
+            metrics::histogram!(name).record(elapsed as u32);
         }
 
         Ok(())
