@@ -93,7 +93,6 @@ use crate::fiber::config::{
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::GraphChannelStat;
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::payment::MppMode;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use crate::fiber::payment::SessionRoute;
@@ -104,7 +103,7 @@ use crate::fiber::types::{
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
-use crate::utils::payment::is_invoice_fulfilled;
+use crate::utils::payment::{is_atomic_mpp_fulfilled, is_invoice_fulfilled};
 use crate::{gen_rand_sha256_hash, now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1755,6 +1754,9 @@ where
                         state.get_received_tlc(tlc_id).cloned()
                     })
                     .collect();
+                if tlcs.is_empty() {
+                    return Ok(());
+                }
 
                 // we generally set all validation error as IncorrectOrUnknownPaymentDetails, this failure
                 // is expected to be the scenarios malicious sender have sent a inconsistent data with MPP,
@@ -1772,33 +1774,39 @@ where
 
                     // check if all tlcs have the same total amount
                     if tlcs.len() > 1
-                        && !tlcs
-                            .windows(2)
-                            .all(|w| w[0].total_amount == w[1].total_amount)
+                        && !tlcs.windows(2).all(|w| {
+                            w[0].total_amount == w[1].total_amount
+                                && w[0].hash_algorithm == w[1].hash_algorithm
+                        })
                     {
-                        validation_fail!("TLCs have inconsistent total_amount: {:?}");
+                        validation_fail!("TLCs have inconsistent information: {:?}");
                     }
 
                     // check if tlc set are fulfilled
                     let invoice = self.store.get_invoice(&payment_hash);
-                    let Some(invoice) = invoice else {
-                        validation_fail!(
-                            "Try to settle mpp tlc set, but invoice not found for payment hash {:?}"
-                        )
+                    let hash_algorithm = tlcs[0].hash_algorithm;
+                    let mpp_mode = match invoice {
+                        Some(invoice) => {
+                            if !is_invoice_fulfilled(&invoice, &tlcs) {
+                                return Ok(());
+                            }
+                            let Some(mpp_mode) = invoice.mpp_mode() else {
+                                validation_fail!("Try to settle down mpp payment_hash: {:?} while the invoice does no support MPP");
+                            };
+                            if invoice.hash_algorithm().cloned().unwrap_or_default()
+                                != hash_algorithm
+                            {
+                                validation_fail!("TLCs hash_algorithm does not match invoice for mpp payment_hash: {:?}");
+                            }
+                            mpp_mode
+                        }
+                        None => {
+                            if !is_atomic_mpp_fulfilled(&tlcs) {
+                                return Ok(());
+                            }
+                            MppMode::AtomicMpp
+                        }
                     };
-
-                    if !is_invoice_fulfilled(&invoice, &tlcs) {
-                        return Ok(());
-                    }
-
-                    let Some(mpp_mode) = invoice.mpp_mode() else {
-                        validation_fail!("try to settle down mpp payment_hash: {:?} while the invoice does no support MPP");
-                    };
-
-                    let hash_algorithm = invoice
-                        .hash_algorithm()
-                        .cloned()
-                        .unwrap_or(HashAlgorithm::default());
 
                     // Generate preimages based on MPP mode
                     match mpp_mode {

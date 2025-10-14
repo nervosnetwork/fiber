@@ -110,7 +110,7 @@ async fn test_send_amp_without_invoice() {
     let res = node_0.send_payment(command).await;
     let payment_hash = res.unwrap().payment_hash;
 
-    node_0.wait_until_failed(payment_hash).await;
+    node_0.wait_until_success(payment_hash).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -347,6 +347,8 @@ async fn test_mpp_multiple_payment_with_same_invoice() {
     let invoice = node_1
         .gen_invoice(NewInvoiceParams {
             amount: 100000,
+            reuse: Some(true),
+            allow_atomic_mpp: Some(true),
             ..Default::default()
         })
         .await;
@@ -362,13 +364,16 @@ async fn test_mpp_multiple_payment_with_same_invoice() {
 
     node_0.wait_until_success(res.unwrap().payment_hash).await;
 
-    // send the second time
-    let res = node_0
-        .send_payment(SendPaymentCommand {
-            invoice: Some(invoice_str.clone()),
-            ..Default::default()
-        })
-        .await;
+    // send the same invoice multiple times
 
-    assert!(res.is_err());
+    for _i in 0..3 {
+        let res = node_0
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice_str.clone()),
+                ..Default::default()
+            })
+            .await;
+
+        node_0.wait_until_success(res.unwrap().payment_hash).await;
+    }
 }

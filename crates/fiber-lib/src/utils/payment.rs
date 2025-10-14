@@ -1,4 +1,7 @@
-use crate::{fiber::channel::TlcInfo, invoice::CkbInvoice};
+use crate::{
+    fiber::{channel::TlcInfo, payment::MppMode},
+    invoice::CkbInvoice,
+};
 use tracing::debug;
 
 /// Check if the invoice is fulfilled by the tlc set
@@ -17,6 +20,10 @@ pub fn is_invoice_fulfilled(invoice: &CkbInvoice, tlc_set: &[TlcInfo]) -> bool {
         return false;
     };
 
+    if invoice.mpp_mode() == Some(MppMode::AtomicMpp) {
+        return is_atomic_mpp_fulfilled(tlc_set);
+    }
+
     // check if total_amount is enough
     let total_amount = first_tlc.total_amount.unwrap_or(first_tlc.amount);
 
@@ -28,6 +35,20 @@ pub fn is_invoice_fulfilled(invoice: &CkbInvoice, tlc_set: &[TlcInfo]) -> bool {
     let total_tlc_amount = tlc_set.iter().map(|tlc| tlc.amount).sum::<u128>();
     debug!(
         "checking total_tlc_amount: {}, total_amount: {}",
+        total_tlc_amount, total_amount
+    );
+    total_tlc_amount >= total_amount
+}
+
+pub fn is_atomic_mpp_fulfilled(tlc_set: &[TlcInfo]) -> bool {
+    if tlc_set.is_empty() {
+        return false;
+    }
+    let first_tlc = &tlc_set[0];
+    let total_amount = first_tlc.total_amount.unwrap_or(first_tlc.amount);
+    let total_tlc_amount = tlc_set.iter().map(|tlc| tlc.amount).sum::<u128>();
+    debug!(
+        "checking atomic mpp total_tlc_amount: {}, total_amount: {}",
         total_tlc_amount, total_amount
     );
     total_tlc_amount >= total_amount
