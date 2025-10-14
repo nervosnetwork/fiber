@@ -136,6 +136,8 @@ pub enum Attribute {
     Feature(FeatureVector),
     /// The payment secret of the invoice
     PaymentSecret(Hash256),
+    /// Reuse
+    Reuse(bool),
 }
 
 /// The metadata of the invoice
@@ -348,6 +350,7 @@ impl CkbInvoice {
     attr_getter!(fallback_address, FallbackAddr, String);
     attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
     attr_getter!(payment_secret, PaymentSecret, Hash256);
+    attr_getter!(reuse, Reuse, bool);
 
     fn has_feature<F>(&self, feature_check: F) -> bool
     where
@@ -568,6 +571,11 @@ impl From<Attribute> for InvoiceAttr {
                     .value(payment_secret.into())
                     .build(),
             ),
+            Attribute::Reuse(value) => InvoiceAttrUnion::Reuse(
+                gen_invoice::Reuse::new_builder()
+                    .value(if value { 1u8 } else { 0u8 }.into())
+                    .build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -615,6 +623,7 @@ impl From<InvoiceAttr> for Attribute {
                 Attribute::HashAlgorithm(hash_algorithm)
             }
             InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
+            InvoiceAttrUnion::Reuse(x) => Attribute::Reuse(u8::from(x.value()) != 0),
         }
     }
 }
@@ -688,6 +697,7 @@ impl InvoiceBuilder {
     attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);
     attr_setter!(payment_secret, PaymentSecret, Hash256);
     attr_setter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
+    attr_setter!(reuse, Reuse, bool);
 
     fn update_feature_vector<F>(self, updater: F) -> Self
     where

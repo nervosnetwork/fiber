@@ -551,6 +551,7 @@ Generates a new invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
 * `allow_atomic_mpp` - <em>`Option<bool>`</em>, Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
+* `reuse` - <em>`Option<bool>`</em>, Whether allow the invoice to be reused, means it can be paid multiple times, default is false
 
 ##### Returns
 
@@ -1018,6 +1019,7 @@ The attributes of the invoice
 * `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
 * `Feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
 * `PaymentSecret` - <em>[Hash256](#type-hash256)</em>, The payment secret of the invoice
+* `Reuse` - <em>`bool`</em>, Reuse
 ---
 
 <a id="#type-cchorderstatus"></a>

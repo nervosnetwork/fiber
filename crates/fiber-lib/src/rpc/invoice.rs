@@ -54,6 +54,8 @@ pub enum Attribute {
     Feature(Vec<String>),
     /// The payment secret of the invoice
     PaymentSecret(Hash256),
+    /// Reuse
+    Reuse(bool),
 }
 
 /// The metadata of the invoice
@@ -106,6 +108,7 @@ impl From<InternalAttribute> for Attribute {
                 Attribute::Feature(feature.enabled_features_names())
             }
             InternalAttribute::PaymentSecret(secret) => Attribute::PaymentSecret(secret),
+            InternalAttribute::Reuse(value) => Attribute::Reuse(value),
         }
     }
 }
@@ -163,6 +166,8 @@ pub struct NewInvoiceParams {
     pub allow_mpp: Option<bool>,
     /// Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
     pub allow_atomic_mpp: Option<bool>,
+    /// Whether allow the invoice to be reused, means it can be paid multiple times, default is false
+    pub reuse: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -348,7 +353,10 @@ where
 
         let basic_mpp = params.allow_mpp.unwrap_or_default();
         let atomic_mpp = params.allow_atomic_mpp.unwrap_or_default();
-        let need_gen_preimage = params.payment_hash.is_none() && !atomic_mpp;
+        let payment_hash = params
+            .payment_hash
+            .or_else(|| atomic_mpp.then(gen_rand_sha256_hash));
+        let need_gen_preimage = payment_hash.is_none();
 
         let preimage_opt = params
             .payment_preimage
@@ -357,7 +365,7 @@ where
         if let Some(preimage) = preimage_opt {
             invoice_builder = invoice_builder.payment_preimage(preimage);
         }
-        if let Some(hash) = params.payment_hash {
+        if let Some(hash) = payment_hash {
             invoice_builder = invoice_builder.payment_hash(hash);
         }
 
@@ -369,6 +377,12 @@ where
         };
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
+        };
+        if let Some(reuse) = params.reuse {
+            if reuse && !atomic_mpp {
+                return error("Only Atomic MPP invoice can be reused");
+            }
+            invoice_builder = invoice_builder.reuse(reuse);
         };
 
         if basic_mpp {
