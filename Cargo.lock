@@ -5893,9 +5893,9 @@ dependencies = [
 
 [[package]]
 name = "tentacle"
-version = "0.7.2"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f506abf5f90f9a082c8368b34bc62026bfc9138c6e6e706c3ea3e9906dc34564"
+checksum = "6bc03a774edf73d8b3480383d694a5a0c86b3fe22dddd75e9119a8e41dd11677"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6218,14 +6218,15 @@ dependencies = [
 
 [[package]]
 name = "tokio-yamux"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ceca7847b5aea2d1974df016012fddcef3e9fbdda3ae2474fb2618e2b3ddda7"
+checksum = "63c31635b5c26807b3b15619bf22a76e2761c36bff915f3e3d54e79655410b74"
 dependencies = [
  "bytes",
  "futures",
  "futures-timer",
  "log",
+ "metrics",
  "nohash-hasher",
  "tokio",
  "tokio-util",
