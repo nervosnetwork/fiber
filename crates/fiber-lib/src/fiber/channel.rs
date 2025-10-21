@@ -1743,6 +1743,13 @@ where
         state: &mut ChannelActorState,
         operation: RetryableTlcOperation,
     ) {
+        if state
+            .retryable_tlc_operations
+            .iter()
+            .any(|op| *op == operation)
+        {
+            return;
+        }
         state.retryable_tlc_operations.push_back(operation);
         if state.retryable_tlc_operations.len() == 1 {
             // if there are already some retryable tasks in queue, we don't need to trigger again
@@ -5835,8 +5842,8 @@ impl ChannelActorState {
 
     fn is_waiting_tlc_ack(&self) -> bool {
         self.tlc_state.waiting_ack
-            || (self.remote_revocation_nonce_for_send.is_none()
-                || self.remote_revocation_nonce_for_verify.is_none())
+            || self.remote_revocation_nonce_for_send.is_none()
+            || self.remote_revocation_nonce_for_verify.is_none()
     }
 
     fn check_tlc_limits(&self, add_amount: u128, is_sent: bool) -> ProcessingChannelResult {
