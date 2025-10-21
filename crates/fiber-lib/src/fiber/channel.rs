@@ -2206,7 +2206,7 @@ where
                 myself.stop(Some("ChannelClosed".to_string()));
             }
             ChannelEvent::CheckActiveChannel => {
-                if state.should_disconnect_peer_awaiting_response() && !state.is_closed() {
+                if state.peer_does_not_reply_ack_in_time() && !state.is_closed() {
                     error!(
                         "Channel {} from peer {:?} is inactive for a time, shutting down it forcefully",
                         state.get_id(),
@@ -4138,7 +4138,7 @@ impl ChannelActorState {
         self.waiting_peer_response = None;
     }
 
-    pub fn should_disconnect_peer_awaiting_response(&self) -> bool {
+    pub fn peer_does_not_reply_ack_in_time(&self) -> bool {
         // this check only needed when other peer already shutdown force and we don't know it
         // if we are already got in ShuttingDown, means we already in normal shutdown process
         if matches!(self.state, ChannelState::ShuttingDown(_)) {

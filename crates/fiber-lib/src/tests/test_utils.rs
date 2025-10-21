@@ -41,6 +41,7 @@ use jsonrpsee::{
     rpc_params, server::ServerHandle,
 };
 
+use ractor::RpcReplyPort;
 use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
@@ -63,6 +64,7 @@ use std::{
 };
 use tempfile::TempDir as OldTempDir;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use tokio::sync::oneshot;
 use tokio::sync::RwLock as TokioRwLock;
 use tokio::{
     select,
@@ -1224,6 +1226,23 @@ impl NetworkNode {
                             .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate)),
                     }),
                 )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    pub async fn send_shutdown_command_to_channel(
+        &self,
+        channel_id: Hash256,
+        command: ShutdownCommand,
+    ) {
+        let (send, _recv) = oneshot::channel();
+        let rpc_reply = RpcReplyPort::from(send);
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Shutdown(command, rpc_reply),
+                }),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }

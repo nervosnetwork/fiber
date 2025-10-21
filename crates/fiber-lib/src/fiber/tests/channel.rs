@@ -6062,3 +6062,50 @@ async fn test_funding_timeout() {
         .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(_)))
         .await;
 }
+
+#[tokio::test]
+async fn test_channel_one_peer_check_active_fail() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    node_0
+        .send_shutdown_command_to_channel(
+            channels[0],
+            ShutdownCommand {
+                force: true,
+                close_script: None,
+                fee_rate: None,
+            },
+        )
+        .await;
+
+    let mut wait_time = 0;
+    for _ in 0..50 {
+        if matches!(
+            node_0.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+        ) {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        wait_time += 1;
+    }
+    if wait_time >= 50 {
+        panic!("node_0 channel did not reach Closed state in time");
+    }
+
+    wait_time = 0;
+    for _ in 0..50 {
+        let node_1_state = node_1.get_channel_actor_state(channels[0]);
+        if matches!(node_1_state.state, ChannelState::ChannelReady) {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        wait_time += 1;
+    }
+    if wait_time >= 50 {
+        panic!("node_1 channel did not reach ChannelReady state in time");
+    }
+}
