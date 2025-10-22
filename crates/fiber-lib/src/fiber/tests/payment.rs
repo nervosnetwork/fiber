@@ -4952,6 +4952,7 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
                 max_fee_amount: None,
                 max_parts: None,
                 keysend: None,
+                atomic_mpp: None,
                 udt_type_script: None,
                 dry_run: false,
                 hop_hints: None,

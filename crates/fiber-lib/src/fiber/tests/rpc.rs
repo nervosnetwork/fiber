@@ -8,7 +8,6 @@ use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
 use crate::rpc::config::RpcConfig;
 use crate::rpc::graph::{GraphChannelsParams, GraphChannelsResult};
 use crate::rpc::info::NodeInfoResult;
-use crate::rpc::invoice::Attribute;
 use crate::tests::*;
 use crate::{
     fiber::types::Hash256,
@@ -107,7 +106,6 @@ async fn test_rpc_basic() {
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
         allow_atomic_mpp: None,
-        reuse: None,
     };
 
     // node0 generate a invoice
@@ -231,48 +229,6 @@ async fn test_invoice_rpc_invalid_mpp_option() {
 
     let err = invoice_res.unwrap_err();
     assert!(err.contains("Can not set both basic MPP and atomic MPP"));
-}
-
-#[tokio::test]
-async fn test_invoice_rpc_reusable_invoice() {
-    let (nodes, _channels) = gen_mock_network().await;
-
-    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
-
-    let payment_hash = gen_rand_sha256_hash();
-    let mut new_invoice_params = NewInvoiceParams {
-        amount: 1000,
-        description: Some("test".to_string()),
-        currency: Currency::Fibd,
-        expiry: Some(322),
-        final_expiry_delta: Some(900000 + 1234),
-        udt_type_script: Some(Script::default().into()),
-        payment_hash: Some(payment_hash),
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
-        allow_atomic_mpp: Some(true),
-        reuse: Some(true),
-        ..Default::default()
-    };
-
-    // node0 generate a invoice
-    let invoice_res: Result<InvoiceResult, String> = node_0
-        .send_rpc_request("new_invoice", new_invoice_params.clone())
-        .await;
-
-    assert!(invoice_res.is_ok());
-    let invoice = invoice_res.unwrap().invoice;
-    assert!(invoice
-        .data
-        .attrs
-        .iter()
-        .any(|attr| matches!(attr, Attribute::Reuse(true))));
-
-    new_invoice_params.allow_atomic_mpp = Some(false);
-    let invoice_res: Result<InvoiceResult, String> = node_0
-        .send_rpc_request("new_invoice", new_invoice_params.clone())
-        .await;
-    let err = invoice_res.unwrap_err();
-    assert!(err.contains("Only Atomic MPP invoice can be reused"));
 }
 
 #[tokio::test]

@@ -48,10 +48,6 @@ struct PaymentSecret {
     value: Byte32,
 }
 
-table Reuse {
-    value: byte,
-}
-
 union InvoiceAttr {
     ExpiryTime,
     Description,
@@ -63,7 +59,6 @@ union InvoiceAttr {
     PayeePublicKey,
     HashAlgorithm,
     PaymentSecret,
-    Reuse,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;

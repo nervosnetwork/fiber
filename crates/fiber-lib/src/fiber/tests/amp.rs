@@ -105,6 +105,7 @@ async fn test_send_amp_without_invoice() {
     let command = SendPaymentCommand {
         max_parts: Some(2),
         invoice: Some(ckb_invoice.to_string()),
+        atomic_mpp: Some(true),
         ..Default::default()
     };
     let res = node_0.send_payment(command).await;
@@ -186,6 +187,7 @@ async fn test_send_mpp_3_nodes_pay_self() {
         )
         .await;
         let [node_0, _node_1, _node_2, _node_3] = nodes.try_into().expect("4 nodes");
+
         let res = node_0
             .send_mpp_payment_with_command(
                 &node_0,
@@ -347,7 +349,6 @@ async fn test_mpp_multiple_payment_with_same_invoice() {
     let invoice = node_1
         .gen_invoice(NewInvoiceParams {
             amount: 100000,
-            reuse: Some(true),
             allow_atomic_mpp: Some(true),
             ..Default::default()
         })
@@ -358,6 +359,7 @@ async fn test_mpp_multiple_payment_with_same_invoice() {
     let res = node_0
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice_str.clone()),
+            atomic_mpp: Some(true),
             ..Default::default()
         })
         .await;
@@ -370,10 +372,116 @@ async fn test_mpp_multiple_payment_with_same_invoice() {
         let res = node_0
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice_str.clone()),
+                atomic_mpp: Some(true),
                 ..Default::default()
             })
             .await;
 
         node_0.wait_until_success(res.unwrap().payment_hash).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_amp_without_invoice_multiple_times() {
+    init_tracing();
+
+    let (nodes, _channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_1.get_public_key()),
+            amount: Some(100000),
+            atomic_mpp: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    node_0.wait_until_success(res.unwrap().payment_hash).await;
+
+    // send the same invoice multiple times
+
+    for _i in 0..3 {
+        let res = node_0
+            .send_payment(SendPaymentCommand {
+                target_pubkey: Some(node_1.get_public_key()),
+                amount: Some(100000),
+                atomic_mpp: Some(true),
+                ..Default::default()
+            })
+            .await;
+
+        node_0.wait_until_success(res.unwrap().payment_hash).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_amp_flags_checking() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+        ],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let invoice = node_1
+        .gen_invoice(NewInvoiceParams {
+            amount: 100000,
+            allow_atomic_mpp: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.invoice_address),
+            atomic_mpp: Some(false),
+            ..Default::default()
+        })
+        .await;
+
+    let err = res.expect_err("expect failed");
+    assert!(err.contains("It is a AMP invoice, need to set amp flag in SendPayment"));
+
+    let invoice = node_1
+        .gen_invoice(NewInvoiceParams {
+            amount: 100000,
+            allow_atomic_mpp: Some(false),
+            ..Default::default()
+        })
+        .await;
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.invoice_address),
+            atomic_mpp: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    let err = res.expect_err("expect failed");
+    assert!(err.contains("AMP flag can not set for a non-AMP invoice"));
 }

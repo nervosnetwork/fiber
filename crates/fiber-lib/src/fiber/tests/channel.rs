@@ -3056,6 +3056,7 @@ async fn do_test_add_tlc_value_limit() {
         .expect("node_b alive");
         // sleep for a while to make sure the AddTlc processed by both party
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        eprintln!("add_tlc_result: {:?}", add_tlc_result);
         assert!(add_tlc_result.is_ok());
     }
 }

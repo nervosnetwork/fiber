@@ -747,6 +747,7 @@ impl NetworkNode {
             SendPaymentCommand {
                 max_parts,
                 dry_run: false,
+                atomic_mpp: Some(true),
                 ..Default::default()
             },
             MppMode::AtomicMpp,
@@ -809,6 +810,11 @@ impl NetworkNode {
         target_node.insert_invoice(ckb_invoice.clone(), preimage);
         let mut command = command.clone();
         command.invoice = Some(ckb_invoice.to_string());
+        let atomic_mpp = match mode {
+            MppMode::BasicMpp => None,
+            MppMode::AtomicMpp => Some(true),
+        };
+        command.atomic_mpp = atomic_mpp;
 
         self.send_payment(command).await
     }

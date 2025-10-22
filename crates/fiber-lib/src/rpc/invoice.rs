@@ -108,7 +108,6 @@ impl From<InternalAttribute> for Attribute {
                 Attribute::Feature(feature.enabled_features_names())
             }
             InternalAttribute::PaymentSecret(secret) => Attribute::PaymentSecret(secret),
-            InternalAttribute::Reuse(value) => Attribute::Reuse(value),
         }
     }
 }
@@ -166,8 +165,6 @@ pub struct NewInvoiceParams {
     pub allow_mpp: Option<bool>,
     /// Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
     pub allow_atomic_mpp: Option<bool>,
-    /// Whether allow the invoice to be reused, means it can be paid multiple times, default is false
-    pub reuse: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -377,12 +374,6 @@ where
         };
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
-        };
-        if let Some(reuse) = params.reuse {
-            if reuse && !atomic_mpp {
-                return error("Only Atomic MPP invoice can be reused");
-            }
-            invoice_builder = invoice_builder.reuse(reuse);
         };
 
         if basic_mpp {

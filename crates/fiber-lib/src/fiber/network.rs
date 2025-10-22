@@ -390,6 +390,8 @@ pub struct SendPaymentCommand {
     pub max_parts: Option<u64>,
     // keysend payment, default is false
     pub keysend: Option<bool>,
+    // allow atomic mpp, default is false,
+    pub atomic_mpp: Option<bool>,
     // udt type script
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
@@ -613,21 +615,20 @@ impl SendPaymentData {
         }
 
         let keysend = command.keysend.unwrap_or(false);
-        let (payment_hash, preimage) = if !keysend {
-            let reuse = invoice.as_ref().is_some_and(|i| i.is_reuse());
-            if reuse {
-                (gen_rand_sha256_hash(), None)
-            } else {
-                (
-                    validate_field(
-                        command.payment_hash,
-                        invoice.as_ref().map(|i| *i.payment_hash()),
-                        "payment_hash",
-                    )?,
-                    None,
-                )
-            }
-        } else {
+        let atomic_mpp = command.atomic_mpp.unwrap_or(false);
+        let invoice_atomic_mpp = invoice.as_ref().map_or(atomic_mpp, |inv| inv.atomic_mpp());
+
+        if keysend && atomic_mpp {
+            return Err("keysend and AMP cannot be both true".to_string());
+        }
+        if invoice_atomic_mpp && !atomic_mpp {
+            return Err("It is a AMP invoice, need to set amp flag in SendPayment".to_string());
+        }
+        if atomic_mpp && !invoice_atomic_mpp {
+            return Err("AMP flag can not set for a non-AMP invoice".to_string());
+        }
+
+        let (payment_hash, preimage) = if keysend {
             if invoice.is_some() {
                 return Err("keysend payment should not have invoice".to_string());
             }
@@ -642,6 +643,17 @@ impl SendPaymentData {
             // use the default payment hash algorithm here for keysend payment
             let payment_hash: Hash256 = blake2b_256(preimage).into();
             (payment_hash, Some(preimage))
+        } else if atomic_mpp {
+            (gen_rand_sha256_hash(), None)
+        } else {
+            (
+                validate_field(
+                    command.payment_hash,
+                    invoice.as_ref().map(|i| *i.payment_hash()),
+                    "payment_hash",
+                )?,
+                None,
+            )
         };
 
         if udt_type_script.is_none() && amount >= u64::MAX as u128 {
@@ -666,7 +678,6 @@ impl SendPaymentData {
 
         let hop_hints = command.hop_hints.unwrap_or_default();
         let basic_mpp = invoice.as_ref().is_some_and(|inv| inv.basic_mpp());
-        let atomic_mpp = invoice.as_ref().is_some_and(|inv| inv.atomic_mpp());
         let is_mpp_payment = basic_mpp || atomic_mpp;
 
         if basic_mpp && atomic_mpp {
