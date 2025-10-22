@@ -3815,344 +3815,6 @@ impl From<CustomRecords> for CustomRecordsOpt {
     }
 }
 #[derive(Clone)]
-pub struct CommitmentNonce(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for CommitmentNonce {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for CommitmentNonce {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for CommitmentNonce {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "funding", self.funding())?;
-        write!(f, ", {}: {}", "commitment", self.commitment())?;
-        write!(f, " }}")
-    }
-}
-impl ::core::default::Default for CommitmentNonce {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        CommitmentNonce::new_unchecked(v)
-    }
-}
-impl CommitmentNonce {
-    const DEFAULT_VALUE: [u8; 132] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const TOTAL_SIZE: usize = 132;
-    pub const FIELD_SIZES: [usize; 2] = [66, 66];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn funding(&self) -> PubNonce {
-        PubNonce::new_unchecked(self.0.slice(0..66))
-    }
-    pub fn commitment(&self) -> PubNonce {
-        PubNonce::new_unchecked(self.0.slice(66..132))
-    }
-    pub fn as_reader<'r>(&'r self) -> CommitmentNonceReader<'r> {
-        CommitmentNonceReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for CommitmentNonce {
-    type Builder = CommitmentNonceBuilder;
-    const NAME: &'static str = "CommitmentNonce";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        CommitmentNonce(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        CommitmentNonceReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        CommitmentNonceReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .funding(self.funding())
-            .commitment(self.commitment())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct CommitmentNonceReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for CommitmentNonceReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for CommitmentNonceReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for CommitmentNonceReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "funding", self.funding())?;
-        write!(f, ", {}: {}", "commitment", self.commitment())?;
-        write!(f, " }}")
-    }
-}
-impl<'r> CommitmentNonceReader<'r> {
-    pub const TOTAL_SIZE: usize = 132;
-    pub const FIELD_SIZES: [usize; 2] = [66, 66];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn funding(&self) -> PubNonceReader<'r> {
-        PubNonceReader::new_unchecked(&self.as_slice()[0..66])
-    }
-    pub fn commitment(&self) -> PubNonceReader<'r> {
-        PubNonceReader::new_unchecked(&self.as_slice()[66..132])
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for CommitmentNonceReader<'r> {
-    type Entity = CommitmentNonce;
-    const NAME: &'static str = "CommitmentNonceReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        CommitmentNonceReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len != Self::TOTAL_SIZE {
-            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct CommitmentNonceBuilder {
-    pub(crate) funding: PubNonce,
-    pub(crate) commitment: PubNonce,
-}
-impl CommitmentNonceBuilder {
-    pub const TOTAL_SIZE: usize = 132;
-    pub const FIELD_SIZES: [usize; 2] = [66, 66];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn funding(mut self, v: PubNonce) -> Self {
-        self.funding = v;
-        self
-    }
-    pub fn commitment(mut self, v: PubNonce) -> Self {
-        self.commitment = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for CommitmentNonceBuilder {
-    type Entity = CommitmentNonce;
-    const NAME: &'static str = "CommitmentNonceBuilder";
-    fn expected_length(&self) -> usize {
-        Self::TOTAL_SIZE
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(self.funding.as_slice())?;
-        writer.write_all(self.commitment.as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        CommitmentNonce::new_unchecked(inner.into())
-    }
-}
-#[derive(Clone)]
-pub struct RevocationNonce(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for RevocationNonce {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for RevocationNonce {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for RevocationNonce {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "revoke", self.revoke())?;
-        write!(f, ", {}: {}", "ack", self.ack())?;
-        write!(f, " }}")
-    }
-}
-impl ::core::default::Default for RevocationNonce {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        RevocationNonce::new_unchecked(v)
-    }
-}
-impl RevocationNonce {
-    const DEFAULT_VALUE: [u8; 132] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const TOTAL_SIZE: usize = 132;
-    pub const FIELD_SIZES: [usize; 2] = [66, 66];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn revoke(&self) -> PubNonce {
-        PubNonce::new_unchecked(self.0.slice(0..66))
-    }
-    pub fn ack(&self) -> PubNonce {
-        PubNonce::new_unchecked(self.0.slice(66..132))
-    }
-    pub fn as_reader<'r>(&'r self) -> RevocationNonceReader<'r> {
-        RevocationNonceReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for RevocationNonce {
-    type Builder = RevocationNonceBuilder;
-    const NAME: &'static str = "RevocationNonce";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        RevocationNonce(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        RevocationNonceReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        RevocationNonceReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder().revoke(self.revoke()).ack(self.ack())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct RevocationNonceReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for RevocationNonceReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for RevocationNonceReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for RevocationNonceReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "revoke", self.revoke())?;
-        write!(f, ", {}: {}", "ack", self.ack())?;
-        write!(f, " }}")
-    }
-}
-impl<'r> RevocationNonceReader<'r> {
-    pub const TOTAL_SIZE: usize = 132;
-    pub const FIELD_SIZES: [usize; 2] = [66, 66];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn revoke(&self) -> PubNonceReader<'r> {
-        PubNonceReader::new_unchecked(&self.as_slice()[0..66])
-    }
-    pub fn ack(&self) -> PubNonceReader<'r> {
-        PubNonceReader::new_unchecked(&self.as_slice()[66..132])
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for RevocationNonceReader<'r> {
-    type Entity = RevocationNonce;
-    const NAME: &'static str = "RevocationNonceReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        RevocationNonceReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len != Self::TOTAL_SIZE {
-            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct RevocationNonceBuilder {
-    pub(crate) revoke: PubNonce,
-    pub(crate) ack: PubNonce,
-}
-impl RevocationNonceBuilder {
-    pub const TOTAL_SIZE: usize = 132;
-    pub const FIELD_SIZES: [usize; 2] = [66, 66];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn revoke(mut self, v: PubNonce) -> Self {
-        self.revoke = v;
-        self
-    }
-    pub fn ack(mut self, v: PubNonce) -> Self {
-        self.ack = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for RevocationNonceBuilder {
-    type Entity = RevocationNonce;
-    const NAME: &'static str = "RevocationNonceBuilder";
-    fn expected_length(&self) -> usize {
-        Self::TOTAL_SIZE
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(self.revoke.as_slice())?;
-        writer.write_all(self.ack.as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        RevocationNonce::new_unchecked(inner.into())
-    }
-}
-#[derive(Clone)]
 pub struct CustomRecordDataPair(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for CustomRecordDataPair {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -5367,10 +5029,10 @@ impl ::core::default::Default for OpenChannel {
     }
 }
 impl OpenChannel {
-    const DEFAULT_VALUE: [u8; 666] = [
-        154, 2, 0, 0, 80, 0, 0, 0, 112, 0, 0, 0, 144, 0, 0, 0, 144, 0, 0, 0, 160, 0, 0, 0, 213, 0,
+    const DEFAULT_VALUE: [u8; 534] = [
+        22, 2, 0, 0, 80, 0, 0, 0, 112, 0, 0, 0, 144, 0, 0, 0, 144, 0, 0, 0, 160, 0, 0, 0, 213, 0,
         0, 0, 221, 0, 0, 0, 229, 0, 0, 0, 237, 0, 0, 0, 253, 0, 0, 0, 5, 1, 0, 0, 13, 1, 0, 0, 46,
-        1, 0, 0, 79, 1, 0, 0, 112, 1, 0, 0, 145, 1, 0, 0, 145, 1, 0, 0, 21, 2, 0, 0, 153, 2, 0, 0,
+        1, 0, 0, 79, 1, 0, 0, 112, 1, 0, 0, 145, 1, 0, 0, 145, 1, 0, 0, 211, 1, 0, 0, 21, 2, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48,
@@ -5386,11 +5048,7 @@ impl OpenChannel {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 19;
     pub fn total_size(&self) -> usize {
@@ -5505,17 +5163,17 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[68..]) as usize;
         PubNonceOpt::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_commitment_nonce(&self) -> CommitmentNonce {
+    pub fn next_commitment_nonce(&self) -> PubNonce {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[68..]) as usize;
         let end = molecule::unpack_number(&slice[72..]) as usize;
-        CommitmentNonce::new_unchecked(self.0.slice(start..end))
+        PubNonce::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_revocation_nonce(&self) -> RevocationNonce {
+    pub fn next_revocation_nonce(&self) -> PubNonce {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[72..]) as usize;
         let end = molecule::unpack_number(&slice[76..]) as usize;
-        RevocationNonce::new_unchecked(self.0.slice(start..end))
+        PubNonce::new_unchecked(self.0.slice(start..end))
     }
     pub fn channel_flags(&self) -> Byte {
         let slice = self.as_slice();
@@ -5789,17 +5447,17 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[68..]) as usize;
         PubNonceOptReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_commitment_nonce(&self) -> CommitmentNonceReader<'r> {
+    pub fn next_commitment_nonce(&self) -> PubNonceReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[68..]) as usize;
         let end = molecule::unpack_number(&slice[72..]) as usize;
-        CommitmentNonceReader::new_unchecked(&self.as_slice()[start..end])
+        PubNonceReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_revocation_nonce(&self) -> RevocationNonceReader<'r> {
+    pub fn next_revocation_nonce(&self) -> PubNonceReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[72..]) as usize;
         let end = molecule::unpack_number(&slice[76..]) as usize;
-        RevocationNonceReader::new_unchecked(&self.as_slice()[start..end])
+        PubNonceReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn channel_flags(&self) -> ByteReader<'r> {
         let slice = self.as_slice();
@@ -5874,8 +5532,8 @@ impl<'r> molecule::prelude::Reader<'r> for OpenChannelReader<'r> {
         PubkeyReader::verify(&slice[offsets[13]..offsets[14]], compatible)?;
         PubkeyReader::verify(&slice[offsets[14]..offsets[15]], compatible)?;
         PubNonceOptReader::verify(&slice[offsets[15]..offsets[16]], compatible)?;
-        CommitmentNonceReader::verify(&slice[offsets[16]..offsets[17]], compatible)?;
-        RevocationNonceReader::verify(&slice[offsets[17]..offsets[18]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[16]..offsets[17]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[17]..offsets[18]], compatible)?;
         ByteReader::verify(&slice[offsets[18]..offsets[19]], compatible)?;
         Ok(())
     }
@@ -5898,8 +5556,8 @@ pub struct OpenChannelBuilder {
     pub(crate) first_per_commitment_point: Pubkey,
     pub(crate) second_per_commitment_point: Pubkey,
     pub(crate) channel_announcement_nonce: PubNonceOpt,
-    pub(crate) next_commitment_nonce: CommitmentNonce,
-    pub(crate) next_revocation_nonce: RevocationNonce,
+    pub(crate) next_commitment_nonce: PubNonce,
+    pub(crate) next_revocation_nonce: PubNonce,
     pub(crate) channel_flags: Byte,
 }
 impl OpenChannelBuilder {
@@ -5968,11 +5626,11 @@ impl OpenChannelBuilder {
         self.channel_announcement_nonce = v;
         self
     }
-    pub fn next_commitment_nonce(mut self, v: CommitmentNonce) -> Self {
+    pub fn next_commitment_nonce(mut self, v: PubNonce) -> Self {
         self.next_commitment_nonce = v;
         self
     }
-    pub fn next_revocation_nonce(mut self, v: RevocationNonce) -> Self {
+    pub fn next_revocation_nonce(mut self, v: PubNonce) -> Self {
         self.next_revocation_nonce = v;
         self
     }
@@ -6165,14 +5823,12 @@ impl ::core::default::Default for AcceptChannel {
     }
 }
 impl AcceptChannel {
-    const DEFAULT_VALUE: [u8; 585] = [
-        73, 2, 0, 0, 56, 0, 0, 0, 88, 0, 0, 0, 104, 0, 0, 0, 157, 0, 0, 0, 165, 0, 0, 0, 181, 0, 0,
-        0, 189, 0, 0, 0, 222, 0, 0, 0, 255, 0, 0, 0, 32, 1, 0, 0, 65, 1, 0, 0, 65, 1, 0, 0, 197, 1,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48,
-        0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 453] = [
+        197, 1, 0, 0, 56, 0, 0, 0, 88, 0, 0, 0, 104, 0, 0, 0, 157, 0, 0, 0, 165, 0, 0, 0, 181, 0,
+        0, 0, 189, 0, 0, 0, 222, 0, 0, 0, 255, 0, 0, 0, 32, 1, 0, 0, 65, 1, 0, 0, 65, 1, 0, 0, 131,
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0,
+        48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -6183,9 +5839,7 @@ impl AcceptChannel {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 13;
     pub fn total_size(&self) -> usize {
@@ -6270,20 +5924,20 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[48..]) as usize;
         PubNonceOpt::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_commitment_nonce(&self) -> CommitmentNonce {
+    pub fn next_commitment_nonce(&self) -> PubNonce {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
-        CommitmentNonce::new_unchecked(self.0.slice(start..end))
+        PubNonce::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_revocation_nonce(&self) -> RevocationNonce {
+    pub fn next_revocation_nonce(&self) -> PubNonce {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[56..]) as usize;
-            RevocationNonce::new_unchecked(self.0.slice(start..end))
+            PubNonce::new_unchecked(self.0.slice(start..end))
         } else {
-            RevocationNonce::new_unchecked(self.0.slice(start..))
+            PubNonce::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> AcceptChannelReader<'r> {
@@ -6491,20 +6145,20 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[48..]) as usize;
         PubNonceOptReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_commitment_nonce(&self) -> CommitmentNonceReader<'r> {
+    pub fn next_commitment_nonce(&self) -> PubNonceReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
-        CommitmentNonceReader::new_unchecked(&self.as_slice()[start..end])
+        PubNonceReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_revocation_nonce(&self) -> RevocationNonceReader<'r> {
+    pub fn next_revocation_nonce(&self) -> PubNonceReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[56..]) as usize;
-            RevocationNonceReader::new_unchecked(&self.as_slice()[start..end])
+            PubNonceReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            RevocationNonceReader::new_unchecked(&self.as_slice()[start..])
+            PubNonceReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -6565,8 +6219,8 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
         PubkeyReader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
         PubkeyReader::verify(&slice[offsets[9]..offsets[10]], compatible)?;
         PubNonceOptReader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
-        CommitmentNonceReader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
-        RevocationNonceReader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
         Ok(())
     }
 }
@@ -6583,8 +6237,8 @@ pub struct AcceptChannelBuilder {
     pub(crate) first_per_commitment_point: Pubkey,
     pub(crate) second_per_commitment_point: Pubkey,
     pub(crate) channel_announcement_nonce: PubNonceOpt,
-    pub(crate) next_commitment_nonce: CommitmentNonce,
-    pub(crate) next_revocation_nonce: RevocationNonce,
+    pub(crate) next_commitment_nonce: PubNonce,
+    pub(crate) next_revocation_nonce: PubNonce,
 }
 impl AcceptChannelBuilder {
     pub const FIELD_COUNT: usize = 13;
@@ -6632,11 +6286,11 @@ impl AcceptChannelBuilder {
         self.channel_announcement_nonce = v;
         self
     }
-    pub fn next_commitment_nonce(mut self, v: CommitmentNonce) -> Self {
+    pub fn next_commitment_nonce(mut self, v: PubNonce) -> Self {
         self.next_commitment_nonce = v;
         self
     }
-    pub fn next_revocation_nonce(mut self, v: RevocationNonce) -> Self {
+    pub fn next_revocation_nonce(mut self, v: PubNonce) -> Self {
         self.next_revocation_nonce = v;
         self
     }
@@ -6757,17 +6411,15 @@ impl ::core::default::Default for CommitmentSigned {
     }
 }
 impl CommitmentSigned {
-    const DEFAULT_VALUE: [u8; 196] = [
+    const DEFAULT_VALUE: [u8; 130] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 196;
-    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
+    pub const TOTAL_SIZE: usize = 130;
+    pub const FIELD_SIZES: [usize; 3] = [32, 32, 66];
     pub const FIELD_COUNT: usize = 3;
     pub fn channel_id(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(0..32))
@@ -6775,8 +6427,8 @@ impl CommitmentSigned {
     pub fn funding_tx_partial_signature(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(32..64))
     }
-    pub fn next_commitment_nonce(&self) -> CommitmentNonce {
-        CommitmentNonce::new_unchecked(self.0.slice(64..196))
+    pub fn next_commitment_nonce(&self) -> PubNonce {
+        PubNonce::new_unchecked(self.0.slice(64..130))
     }
     pub fn as_reader<'r>(&'r self) -> CommitmentSignedReader<'r> {
         CommitmentSignedReader::new_unchecked(self.as_slice())
@@ -6846,8 +6498,8 @@ impl<'r> ::core::fmt::Display for CommitmentSignedReader<'r> {
     }
 }
 impl<'r> CommitmentSignedReader<'r> {
-    pub const TOTAL_SIZE: usize = 196;
-    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
+    pub const TOTAL_SIZE: usize = 130;
+    pub const FIELD_SIZES: [usize; 3] = [32, 32, 66];
     pub const FIELD_COUNT: usize = 3;
     pub fn channel_id(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[0..32])
@@ -6855,8 +6507,8 @@ impl<'r> CommitmentSignedReader<'r> {
     pub fn funding_tx_partial_signature(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[32..64])
     }
-    pub fn next_commitment_nonce(&self) -> CommitmentNonceReader<'r> {
-        CommitmentNonceReader::new_unchecked(&self.as_slice()[64..196])
+    pub fn next_commitment_nonce(&self) -> PubNonceReader<'r> {
+        PubNonceReader::new_unchecked(&self.as_slice()[64..130])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for CommitmentSignedReader<'r> {
@@ -6884,11 +6536,11 @@ impl<'r> molecule::prelude::Reader<'r> for CommitmentSignedReader<'r> {
 pub struct CommitmentSignedBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) funding_tx_partial_signature: Byte32,
-    pub(crate) next_commitment_nonce: CommitmentNonce,
+    pub(crate) next_commitment_nonce: PubNonce,
 }
 impl CommitmentSignedBuilder {
-    pub const TOTAL_SIZE: usize = 196;
-    pub const FIELD_SIZES: [usize; 3] = [32, 32, 132];
+    pub const TOTAL_SIZE: usize = 130;
+    pub const FIELD_SIZES: [usize; 3] = [32, 32, 66];
     pub const FIELD_COUNT: usize = 3;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
@@ -6898,7 +6550,7 @@ impl CommitmentSignedBuilder {
         self.funding_tx_partial_signature = v;
         self
     }
-    pub fn next_commitment_nonce(mut self, v: CommitmentNonce) -> Self {
+    pub fn next_commitment_nonce(mut self, v: PubNonce) -> Self {
         self.next_commitment_nonce = v;
         self
     }
@@ -7637,22 +7289,20 @@ impl ::core::default::Default for TxComplete {
     }
 }
 impl TxComplete {
-    const DEFAULT_VALUE: [u8; 164] = [
+    const DEFAULT_VALUE: [u8; 98] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 164;
-    pub const FIELD_SIZES: [usize; 2] = [32, 132];
+    pub const TOTAL_SIZE: usize = 98;
+    pub const FIELD_SIZES: [usize; 2] = [32, 66];
     pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(0..32))
     }
-    pub fn next_commitment_nonce(&self) -> CommitmentNonce {
-        CommitmentNonce::new_unchecked(self.0.slice(32..164))
+    pub fn next_commitment_nonce(&self) -> PubNonce {
+        PubNonce::new_unchecked(self.0.slice(32..98))
     }
     pub fn as_reader<'r>(&'r self) -> TxCompleteReader<'r> {
         TxCompleteReader::new_unchecked(self.as_slice())
@@ -7715,14 +7365,14 @@ impl<'r> ::core::fmt::Display for TxCompleteReader<'r> {
     }
 }
 impl<'r> TxCompleteReader<'r> {
-    pub const TOTAL_SIZE: usize = 164;
-    pub const FIELD_SIZES: [usize; 2] = [32, 132];
+    pub const TOTAL_SIZE: usize = 98;
+    pub const FIELD_SIZES: [usize; 2] = [32, 66];
     pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[0..32])
     }
-    pub fn next_commitment_nonce(&self) -> CommitmentNonceReader<'r> {
-        CommitmentNonceReader::new_unchecked(&self.as_slice()[32..164])
+    pub fn next_commitment_nonce(&self) -> PubNonceReader<'r> {
+        PubNonceReader::new_unchecked(&self.as_slice()[32..98])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for TxCompleteReader<'r> {
@@ -7749,17 +7399,17 @@ impl<'r> molecule::prelude::Reader<'r> for TxCompleteReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct TxCompleteBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) next_commitment_nonce: CommitmentNonce,
+    pub(crate) next_commitment_nonce: PubNonce,
 }
 impl TxCompleteBuilder {
-    pub const TOTAL_SIZE: usize = 164;
-    pub const FIELD_SIZES: [usize; 2] = [32, 132];
+    pub const TOTAL_SIZE: usize = 98;
+    pub const FIELD_SIZES: [usize; 2] = [32, 66];
     pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
     }
-    pub fn next_commitment_nonce(mut self, v: CommitmentNonce) -> Self {
+    pub fn next_commitment_nonce(mut self, v: PubNonce) -> Self {
         self.next_commitment_nonce = v;
         self
     }
@@ -9679,18 +9329,16 @@ impl ::core::default::Default for RevokeAndAck {
     }
 }
 impl RevokeAndAck {
-    const DEFAULT_VALUE: [u8; 229] = [
+    const DEFAULT_VALUE: [u8; 163] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 229;
-    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 132];
+    pub const TOTAL_SIZE: usize = 163;
+    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 66];
     pub const FIELD_COUNT: usize = 4;
     pub fn channel_id(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(0..32))
@@ -9701,8 +9349,8 @@ impl RevokeAndAck {
     pub fn next_per_commitment_point(&self) -> Pubkey {
         Pubkey::new_unchecked(self.0.slice(64..97))
     }
-    pub fn next_revocation_nonce(&self) -> RevocationNonce {
-        RevocationNonce::new_unchecked(self.0.slice(97..229))
+    pub fn next_revocation_nonce(&self) -> PubNonce {
+        PubNonce::new_unchecked(self.0.slice(97..163))
     }
     pub fn as_reader<'r>(&'r self) -> RevokeAndAckReader<'r> {
         RevokeAndAckReader::new_unchecked(self.as_slice())
@@ -9779,8 +9427,8 @@ impl<'r> ::core::fmt::Display for RevokeAndAckReader<'r> {
     }
 }
 impl<'r> RevokeAndAckReader<'r> {
-    pub const TOTAL_SIZE: usize = 229;
-    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 132];
+    pub const TOTAL_SIZE: usize = 163;
+    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 66];
     pub const FIELD_COUNT: usize = 4;
     pub fn channel_id(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[0..32])
@@ -9791,8 +9439,8 @@ impl<'r> RevokeAndAckReader<'r> {
     pub fn next_per_commitment_point(&self) -> PubkeyReader<'r> {
         PubkeyReader::new_unchecked(&self.as_slice()[64..97])
     }
-    pub fn next_revocation_nonce(&self) -> RevocationNonceReader<'r> {
-        RevocationNonceReader::new_unchecked(&self.as_slice()[97..229])
+    pub fn next_revocation_nonce(&self) -> PubNonceReader<'r> {
+        PubNonceReader::new_unchecked(&self.as_slice()[97..163])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for RevokeAndAckReader<'r> {
@@ -9821,11 +9469,11 @@ pub struct RevokeAndAckBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) revocation_partial_signature: Byte32,
     pub(crate) next_per_commitment_point: Pubkey,
-    pub(crate) next_revocation_nonce: RevocationNonce,
+    pub(crate) next_revocation_nonce: PubNonce,
 }
 impl RevokeAndAckBuilder {
-    pub const TOTAL_SIZE: usize = 229;
-    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 132];
+    pub const TOTAL_SIZE: usize = 163;
+    pub const FIELD_SIZES: [usize; 4] = [32, 32, 33, 66];
     pub const FIELD_COUNT: usize = 4;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
@@ -9839,7 +9487,7 @@ impl RevokeAndAckBuilder {
         self.next_per_commitment_point = v;
         self
     }
-    pub fn next_revocation_nonce(mut self, v: RevocationNonce) -> Self {
+    pub fn next_revocation_nonce(mut self, v: PubNonce) -> Self {
         self.next_revocation_nonce = v;
         self
     }

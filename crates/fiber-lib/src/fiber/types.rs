@@ -560,66 +560,6 @@ impl TryFrom<molecule_gossip::SchnorrSignature> for SchnorrSignature {
     }
 }
 
-/// A wrapper for musig2 public nonce list, which will be updated in each round of commitment tx generation.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitmentNonce {
-    /// The funding nonce is used to sign the tx which unlocks the funding tx output.
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub funding: PubNonce,
-    /// The commitment nonce is used to sign the tx which unlocks the commitment tx output.
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub commitment: PubNonce,
-}
-
-/// A wrapper for musig2 public nonce list, which will be updated in each round of commitment tx revocation.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RevocationNonce {
-    /// The revocation nonce is used to sign the tx which revokes the previous commitment tx.
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub revoke: PubNonce,
-    /// The ack nonce is used to sign the tx which acknowledges the previous commitment tx.
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub ack: PubNonce,
-}
-
-impl From<molecule_fiber::CommitmentNonce> for CommitmentNonce {
-    fn from(nonce: molecule_fiber::CommitmentNonce) -> Self {
-        Self {
-            funding: nonce.funding().into(),
-            commitment: nonce.commitment().into(),
-        }
-    }
-}
-
-impl From<CommitmentNonce> for molecule_fiber::CommitmentNonce {
-    fn from(nonce: CommitmentNonce) -> Self {
-        Self::new_builder()
-            .funding(nonce.funding.into())
-            .commitment(nonce.commitment.into())
-            .build()
-    }
-}
-
-impl From<molecule_fiber::RevocationNonce> for RevocationNonce {
-    fn from(nonce: molecule_fiber::RevocationNonce) -> Self {
-        Self {
-            revoke: nonce.revoke().into(),
-            ack: nonce.ack().into(),
-        }
-    }
-}
-
-impl From<RevocationNonce> for molecule_fiber::RevocationNonce {
-    fn from(nonce: RevocationNonce) -> Self {
-        Self::new_builder()
-            .revoke(nonce.revoke.into())
-            .ack(nonce.ack.into())
-            .build()
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Init {
     pub features: FeatureVector,
@@ -663,8 +603,8 @@ pub struct OpenChannel {
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
     pub channel_announcement_nonce: Option<PubNonce>,
-    pub next_commitment_nonce: CommitmentNonce,
-    pub next_revocation_nonce: RevocationNonce,
+    pub next_commitment_nonce: PubNonce,
+    pub next_revocation_nonce: PubNonce,
     pub channel_flags: ChannelFlags,
 }
 
@@ -771,8 +711,8 @@ pub struct AcceptChannel {
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
     pub channel_announcement_nonce: Option<PubNonce>,
-    pub next_commitment_nonce: CommitmentNonce,
-    pub next_revocation_nonce: RevocationNonce,
+    pub next_commitment_nonce: PubNonce,
+    pub next_revocation_nonce: PubNonce,
 }
 
 impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
@@ -830,7 +770,7 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
 pub struct CommitmentSigned {
     pub channel_id: Hash256,
     pub funding_tx_partial_signature: PartialSignature,
-    pub next_commitment_nonce: CommitmentNonce,
+    pub next_commitment_nonce: PubNonce,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
@@ -962,7 +902,7 @@ impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxComplete {
     pub channel_id: Hash256,
-    pub next_commitment_nonce: CommitmentNonce,
+    pub next_commitment_nonce: PubNonce,
 }
 
 impl From<TxComplete> for molecule_fiber::TxComplete {
@@ -1240,12 +1180,14 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAndAck {
     pub channel_id: Hash256,
     pub revocation_partial_signature: PartialSignature,
     pub next_per_commitment_point: Pubkey,
-    pub next_revocation_nonce: RevocationNonce,
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub next_revocation_nonce: PubNonce,
 }
 
 impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {

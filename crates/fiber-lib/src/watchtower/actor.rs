@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use ckb_hash::{blake2b_256, new_blake2b};
+use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::{Either, Status};
 use ckb_sdk::{
     rpc::ckb_indexer::{Cell, CellType, Order, ScriptType, SearchKey, SearchMode, Tx},
@@ -27,10 +27,7 @@ use crate::{
         CkbConfig,
     },
     fiber::{
-        channel::{
-            create_witness_for_commitment_cell_with_pending_tlcs, RevocationData, SettlementData,
-            SettlementTlc, XUDT_COMPATIBLE_WITNESS,
-        },
+        channel::{RevocationData, SettlementData, XUDT_COMPATIBLE_WITNESS},
         hash_algorithm::HashAlgorithm,
         types::{Hash256, NodeId, Privkey, Pubkey},
     },
@@ -823,17 +820,100 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         == channel_data.local_settlement_pubkey_hash()
                     {
                         two_parties_all_settled = sw.settlement_remote_pubkey_hash == [0u8; 20];
-                        (
-                            Unlock {
-                                unlock_type: if for_remote { 0xFF } else { 0xFE },
-                                with_preimage: false,
-                                signature: [0u8; 65],
-                                preimage: None,
-                            },
-                            settlement_data.local_amount,
-                            channel_data.local_settlement_key.clone(),
-                            sw.to_witness(),
-                        )
+                        if two_parties_all_settled {
+                            (
+                                Unlock {
+                                    unlock_type: 0xFF,
+                                    with_preimage: false,
+                                    signature: [0u8; 65],
+                                    preimage: None,
+                                },
+                                settlement_data.local_amount,
+                                channel_data.local_settlement_key.clone(),
+                                sw.to_witness(),
+                            )
+                        } else {
+                            let mut unlock_option = None;
+                            for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
+                                if tlc.is_offered() {
+                                    let delay = mul(delay_epoch, 2, 3);
+                                    if cell_header_epoch.to_rational() + delay.to_rational()
+                                        <= current_epoch.to_rational()
+                                    {
+                                        if let Some(private_key) =
+                                            settlement_data.tlcs.iter().find_map(|settlement_tlc| {
+                                                settlement_tlc
+                                                    .payment_hash
+                                                    .as_ref()
+                                                    .starts_with(&tlc.payment_hash)
+                                                    .then_some(&settlement_tlc.local_key)
+                                            })
+                                        {
+                                            if current_time > tlc.htlc_expiry {
+                                                unlock_option = Some((
+                                                    Unlock {
+                                                        unlock_type: i as u8,
+                                                        with_preimage: false,
+                                                        signature: [0u8; 65],
+                                                        preimage: None,
+                                                    },
+                                                    tlc.payment_amount,
+                                                    private_key.clone(),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let delay = mul(delay_epoch, 1, 3);
+                                    if cell_header_epoch.to_rational() + delay.to_rational()
+                                        <= current_epoch.to_rational()
+                                    {
+                                        if let Some(private_key) =
+                                            settlement_data.tlcs.iter().find_map(|settlement_tlc| {
+                                                settlement_tlc
+                                                    .payment_hash
+                                                    .as_ref()
+                                                    .starts_with(&tlc.payment_hash)
+                                                    .then_some(&settlement_tlc.local_key)
+                                            })
+                                        {
+                                            if let Some(preimage) =
+                                                store.search_preimage(&tlc.payment_hash)
+                                            {
+                                                unlock_option = Some((
+                                                    Unlock {
+                                                        unlock_type: i as u8,
+                                                        with_preimage: true,
+                                                        signature: [0u8; 65],
+                                                        preimage: Some(preimage),
+                                                    },
+                                                    tlc.payment_amount,
+                                                    private_key.clone(),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some((unlock, unlock_amount, private_key)) = unlock_option {
+                                debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
+                                (
+                                    unlock,
+                                    unlock_amount,
+                                    private_key,
+                                    settlement_data.to_witness(
+                                        for_remote,
+                                        channel_data.local_settlement_key.clone(),
+                                        channel_data.remote_settlement_key,
+                                    ),
+                                )
+                            } else {
+                                return Ok(None);
+                            }
+                        }
                     } else {
                         return Ok(None);
                     }
@@ -842,17 +922,100 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         == channel_data.local_settlement_pubkey_hash()
                     {
                         two_parties_all_settled = sw.settlement_local_pubkey_hash == [0u8; 20];
-                        (
-                            Unlock {
-                                unlock_type: if for_remote { 0xFF } else { 0xFE },
-                                with_preimage: false,
-                                signature: [0u8; 65],
-                                preimage: None,
-                            },
-                            settlement_data.local_amount,
-                            channel_data.local_settlement_key.clone(),
-                            sw.to_witness(),
-                        )
+                        if two_parties_all_settled {
+                            (
+                                Unlock {
+                                    unlock_type: 0xFE,
+                                    with_preimage: false,
+                                    signature: [0u8; 65],
+                                    preimage: None,
+                                },
+                                settlement_data.local_amount,
+                                channel_data.local_settlement_key.clone(),
+                                sw.to_witness(),
+                            )
+                        } else {
+                            let mut unlock_option = None;
+                            for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
+                                if !tlc.is_offered() {
+                                    let delay = mul(delay_epoch, 2, 3);
+                                    if cell_header_epoch.to_rational() + delay.to_rational()
+                                        <= current_epoch.to_rational()
+                                    {
+                                        if let Some(private_key) =
+                                            settlement_data.tlcs.iter().find_map(|settlement_tlc| {
+                                                settlement_tlc
+                                                    .payment_hash
+                                                    .as_ref()
+                                                    .starts_with(&tlc.payment_hash)
+                                                    .then_some(&settlement_tlc.local_key)
+                                            })
+                                        {
+                                            if current_time > tlc.htlc_expiry {
+                                                unlock_option = Some((
+                                                    Unlock {
+                                                        unlock_type: i as u8,
+                                                        with_preimage: false,
+                                                        signature: [0u8; 65],
+                                                        preimage: None,
+                                                    },
+                                                    tlc.payment_amount,
+                                                    private_key.clone(),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let delay = mul(delay_epoch, 1, 3);
+                                    if cell_header_epoch.to_rational() + delay.to_rational()
+                                        <= current_epoch.to_rational()
+                                    {
+                                        if let Some(private_key) =
+                                            settlement_data.tlcs.iter().find_map(|settlement_tlc| {
+                                                settlement_tlc
+                                                    .payment_hash
+                                                    .as_ref()
+                                                    .starts_with(&tlc.payment_hash)
+                                                    .then_some(&settlement_tlc.local_key)
+                                            })
+                                        {
+                                            if let Some(preimage) =
+                                                store.search_preimage(&tlc.payment_hash)
+                                            {
+                                                unlock_option = Some((
+                                                    Unlock {
+                                                        unlock_type: i as u8,
+                                                        with_preimage: true,
+                                                        signature: [0u8; 65],
+                                                        preimage: Some(preimage),
+                                                    },
+                                                    tlc.payment_amount,
+                                                    private_key.clone(),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some((unlock, unlock_amount, private_key)) = unlock_option {
+                                debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
+                                (
+                                    unlock,
+                                    unlock_amount,
+                                    private_key,
+                                    settlement_data.to_witness(
+                                        for_remote,
+                                        channel_data.local_settlement_key.clone(),
+                                        channel_data.remote_settlement_key,
+                                    ),
+                                )
+                            } else {
+                                return Ok(None);
+                            }
+                        }
                     } else {
                         return Ok(None);
                     }
@@ -868,8 +1031,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
             let mut should_settle_local = true;
             let mut unlock_option = None;
             for (i, tlc) in settlement_data.tlcs.iter().enumerate() {
-                if tlc.tlc_id.is_offered() {
-                    if for_remote {
+                match (tlc.tlc_id.is_offered(), for_remote) {
+                    (true, true) | (false, false) => {
                         let delay = mul(delay_epoch, 2, 3);
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
@@ -886,32 +1049,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     tlc.payment_amount,
                                     tlc.local_key.clone(),
                                 ));
-                                break;
-                            }
-                        }
-                    } else {
-                        let delay = mul(delay_epoch, 1, 3);
-                        if cell_header_epoch.to_rational() + delay.to_rational()
-                            <= current_epoch.to_rational()
-                        {
-                            if let Some(preimage) = store.get_watch_preimage(&tlc.payment_hash) {
-                                unlock_option = Some((
-                                    Unlock {
-                                        unlock_type: i as u8,
-                                        with_preimage: true,
-                                        signature: [0u8; 65],
-                                        preimage: Some(preimage),
-                                    },
-                                    tlc.payment_amount,
-                                    tlc.local_key.clone(),
-                                ));
-                                should_settle_local = false;
                                 break;
                             }
                         }
                     }
-                } else {
-                    if for_remote {
+                    _ => {
                         let delay = mul(delay_epoch, 1, 3);
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
@@ -928,27 +1070,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     tlc.local_key.clone(),
                                 ));
                                 should_settle_local = false;
-                                break;
-                            }
-                        }
-                    } else {
-                        let delay = mul(delay_epoch, 2, 3);
-                        if cell_header_epoch.to_rational() + delay.to_rational()
-                            <= current_epoch.to_rational()
-                        {
-                            should_settle_local = false;
-
-                            if current_time > tlc.expiry {
-                                unlock_option = Some((
-                                    Unlock {
-                                        unlock_type: i as u8,
-                                        with_preimage: false,
-                                        signature: [0u8; 65],
-                                        preimage: None,
-                                    },
-                                    tlc.payment_amount,
-                                    tlc.local_key.clone(),
-                                ));
                                 break;
                             }
                         }
@@ -1274,6 +1395,10 @@ impl Htlc {
         } else {
             HashAlgorithm::Sha256
         }
+    }
+
+    pub fn is_offered(&self) -> bool {
+        self.htlc_type & 0b0000001 == 0
     }
 }
 
@@ -1825,31 +1950,6 @@ impl SettlementWitness {
 //         Ok(Some(tx))
 //     }
 // }
-
-#[derive(Debug)]
-struct Tlc<'a>(&'a [u8]);
-
-impl<'a> Tlc<'a> {
-    pub fn hash_algorithm(&self) -> HashAlgorithm {
-        if (self.0[0] >> 1) & 0b0000001 == 0 {
-            HashAlgorithm::CkbHash
-        } else {
-            HashAlgorithm::Sha256
-        }
-    }
-
-    pub fn payment_hash(&self) -> &'a [u8] {
-        &self.0[17..37]
-    }
-
-    pub fn remote_pubkey_hash(&self) -> &'a [u8] {
-        &self.0[37..57]
-    }
-
-    pub fn local_pubkey_hash(&self) -> &'a [u8] {
-        &self.0[57..77]
-    }
-}
 
 // Calculate the product of delay_epoch and a fraction
 fn mul(
