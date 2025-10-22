@@ -229,7 +229,7 @@ pub enum TxCollaborationCommand {
     TxComplete(),
 }
 
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct AddTlcCommand {
     pub amount: u128,
     pub payment_hash: Hash256,
@@ -1853,6 +1853,17 @@ where
                 return;
             };
 
+            #[cfg(debug_assertions)]
+            {
+                let hashset: HashSet<RetryableTlcOperation> =
+                    state.retryable_tlc_operations.iter().cloned().collect();
+                assert_eq!(
+                    hashset.len(),
+                    state.retryable_tlc_operations.len(),
+                    "retryable_tlc_operations contains duplicated operations"
+                );
+            }
+
             let success = match operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, reason) => self
                     .handle_remove_tlc_command(
@@ -2986,7 +2997,7 @@ pub struct TlcInfo {
 
 // When we are forwarding a TLC, we need to know the previous TLC information.
 // This struct keeps the information of the previous TLC.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct PrevTlcInfo {
     pub(crate) prev_channel_id: Hash256,
     // The TLC is always a received TLC because we are forwarding it.
@@ -3093,7 +3104,7 @@ impl From<TlcInfo> for TlcNotifyInfo {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug, Hash)]
 pub enum RetryableTlcOperation {
     RemoveTlc(TLCId, RemoveTlcReason),
     AddTlc(AddTlcCommand),
