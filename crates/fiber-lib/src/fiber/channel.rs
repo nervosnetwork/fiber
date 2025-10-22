@@ -5126,18 +5126,16 @@ impl ChannelActorState {
 
     pub fn get_next_commitment_nonce(&self) -> PubNonce {
         let commitment_number = self.get_next_commitment_number(true);
-        let [commitment] = self
-            .signer
-            .derive_musig2_nonce(commitment_number, [Musig2Context::Commitment]);
-        commitment.public_nonce()
+        self.signer
+            .derive_musig2_nonce(commitment_number, Musig2Context::Commitment)
+            .public_nonce()
     }
 
     pub fn get_next_revocation_nonce(&self) -> PubNonce {
         let commitment_number = self.get_next_commitment_number(false);
-        let [revoke] = self
-            .signer
-            .derive_musig2_nonce(commitment_number, [Musig2Context::Revoke]);
-        revoke.public_nonce()
+        self.signer
+            .derive_musig2_nonce(commitment_number, Musig2Context::Revoke)
+            .public_nonce()
     }
 
     fn get_last_committed_remote_nonce(&self) -> PubNonce {
@@ -5458,16 +5456,18 @@ impl ChannelActorState {
     }
 
     fn get_init_revocation_nonce(&self) -> PubNonce {
-        let [revoke] = self.signer.derive_musig2_nonce(2, [Musig2Context::Revoke]);
-        revoke.public_nonce()
+        self.signer
+            .derive_musig2_nonce(2, Musig2Context::Revoke)
+            .public_nonce()
     }
 
     fn get_commitment_nonce(&self) -> PubNonce {
-        let [commitment] = self.signer.derive_musig2_nonce(
-            self.get_local_commitment_number(),
-            [Musig2Context::Commitment],
-        );
-        commitment.public_nonce()
+        self.signer
+            .derive_musig2_nonce(
+                self.get_local_commitment_number(),
+                Musig2Context::Commitment,
+            )
+            .public_nonce()
     }
 
     fn get_revocation_nonce(&self, for_remote: bool) -> PubNonce {
@@ -5476,10 +5476,9 @@ impl ChannelActorState {
         } else {
             self.get_remote_commitment_number()
         };
-        let [revoke] = self
-            .signer
-            .derive_musig2_nonce(commitment_number, [Musig2Context::Revoke]);
-        revoke.public_nonce()
+        self.signer
+            .derive_musig2_nonce(commitment_number, Musig2Context::Revoke)
+            .public_nonce()
     }
 
     pub fn get_deterministic_musig2_agg_pubnonce(
@@ -7093,9 +7092,9 @@ impl ChannelActorState {
     fn get_funding_sign_context(&self) -> Musig2SignContext {
         let common_ctx = self.get_funding_common_context();
         let seckey = self.signer.funding_key.clone();
-        let [secnonce] = self.signer.derive_musig2_nonce(
+        let secnonce = self.signer.derive_musig2_nonce(
             self.get_local_commitment_number(),
-            [Musig2Context::Commitment],
+            Musig2Context::Commitment,
         );
 
         Musig2SignContext {
@@ -7114,9 +7113,9 @@ impl ChannelActorState {
         } else {
             self.get_remote_commitment_number()
         };
-        let [secnonce] = self
+        let secnonce = self
             .signer
-            .derive_musig2_nonce(commitment_number, [Musig2Context::Revoke]);
+            .derive_musig2_nonce(commitment_number, Musig2Context::Revoke);
 
         Some(Musig2SignContext {
             common_ctx,
@@ -7951,18 +7950,12 @@ impl InMemorySigner {
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 
-    pub fn derive_musig2_nonce<const N: usize>(
-        &self,
-        commitment_number: u64,
-        contexts: [Musig2Context; N],
-    ) -> [SecNonce; N] {
+    pub fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce {
         let commitment_point = self.get_commitment_point(commitment_number);
         let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
 
-        contexts.map(|context| {
-            SecNonceBuilder::new(seckey.as_ref())
-                .with_extra_input(&context.to_string())
-                .build()
-        })
+        SecNonceBuilder::new(seckey.as_ref())
+            .with_extra_input(&context.to_string())
+            .build()
     }
 }
