@@ -272,8 +272,8 @@ pub enum NetworkActorCommand {
     CheckChannels,
     // Timeout a hold tlc
     TimeoutHoldTlc(Hash256, Hash256, u64),
-    // Settle MPP tlc set
-    SettleMPPTlcSet(Hash256),
+    // Settle tlc set, including MPP and normal tlc set
+    SettleTlcSet(Hash256, Option<(Hash256, u64)>),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(PeerId, SessionId),
     // For internal use and debugging only. Most of the messages requires some
@@ -1685,19 +1685,26 @@ where
                     }
                 }
             }
-            NetworkActorCommand::SettleMPPTlcSet(payment_hash) => {
-                // load hold tlcs
-                let tlcs: Vec<_> = self
-                    .store
-                    .get_payment_hold_tlcs(payment_hash)
+            NetworkActorCommand::SettleTlcSet(payment_hash, tlc_info) => {
+                let tlc_ids = if let Some((channel_id, tlc_id)) = tlc_info {
+                    vec![(channel_id, tlc_id)]
+                } else {
+                    self.store
+                        .get_payment_hold_tlcs(payment_hash)
+                        .iter()
+                        .map(|hold_tlc| (hold_tlc.channel_id, hold_tlc.tlc_id))
+                        .collect()
+                };
+                let tlcs: Vec<_> = tlc_ids
                     .iter()
-                    .filter_map(|hold_tlc| {
-                        let state = self.store.get_channel_actor_state(&hold_tlc.channel_id)?;
-                        let tlc_id = TLCId::Received(hold_tlc.tlc_id);
+                    .filter_map(|(channel_id, tlc_id)| {
+                        let state = self.store.get_channel_actor_state(channel_id)?;
+                        let tlc_id = TLCId::Received(*tlc_id);
                         state.get_received_tlc(tlc_id).cloned()
                     })
                     .collect();
 
+                let is_not_mpp = tlc_info.is_some();
                 let mut tlc_fail = None;
 
                 // check if all tlcs have the same total amount
@@ -1720,6 +1727,13 @@ where
                     // just return if invoice is not fulfilled
                     if !is_invoice_fulfilled(&invoice, &tlcs) {
                         return Ok(());
+                    }
+                    if is_not_mpp
+                        && self.store.get_invoice_status(&payment_hash)
+                            == Some(CkbInvoiceStatus::Paid)
+                    {
+                        tlc_fail =
+                            Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
                     }
                 }
 
@@ -1759,6 +1773,10 @@ where
                                 &tlc.channel_id,
                                 tlc.id(),
                             );
+                            if is_not_mpp {
+                                self.store
+                                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)?;
+                            }
                         }
                         Err(err) => {
                             error!(
@@ -4725,7 +4743,7 @@ where
             if !already_timeout {
                 myself
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SettleMPPTlcSet(payment_hash),
+                        NetworkActorCommand::SettleTlcSet(payment_hash, None),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
