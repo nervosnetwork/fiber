@@ -179,7 +179,6 @@ where
     S: WatchtowerStore,
 {
     fn periodic_check(&self, state: &WatchtowerState) {
-        // TODO @quake
         let secret_key = state.secret_key;
         let rpc_url = state.config.rpc_url.clone();
         tokio::task::block_in_place(move || {
@@ -412,13 +411,7 @@ fn build_revocation_tx(
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
     query.data_len_range = Some(ValueRangeOption::new_exact(0));
     query.min_total_capacity = min_total_capacity;
-    let (cells, total_capacity) = cell_collector.collect_live_cells(&query, false)?;
-    debug!(
-        "cells len: {}, total_capacity: {}",
-        cells.len(),
-        total_capacity
-    );
-
+    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
     let mut inputs_capacity = 0u64;
     for cell in cells {
         let input_capacity: u64 = cell.output.capacity().unpack();
@@ -430,10 +423,6 @@ fn build_revocation_tx(
         );
         let fee =
             fee_calculator.fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-        debug!(
-            "inputs_capacity: {}, change_output_occupied_capacity: {}, fee: {}",
-            inputs_capacity, change_output_occupied_capacity, fee
-        );
         if inputs_capacity >= change_output_occupied_capacity + fee {
             let new_change_output = change_output
                 .as_builder()
@@ -676,10 +665,6 @@ fn find_preimages<S: WatchtowerStore>(
                                                             &witness[16..],
                                                         )
                                                     {
-                                                        debug!(
-                                                            "settlement_witness: {:?}",
-                                                            settlement_witness
-                                                        );
                                                         for unlock in settlement_witness.unlocks {
                                                             if unlock.with_preimage
                                                                 && unlock.unlock_type < 0xFE
@@ -700,7 +685,6 @@ fn find_preimages<S: WatchtowerStore>(
                                                                     if payment_hash.starts_with(
                                                                         &tlc.payment_hash,
                                                                     ) {
-                                                                        info!("Found a preimage for payment hash: {:?}", payment_hash);
                                                                         store
                                                                             .insert_watch_preimage(
                                                                                 self_node_id
@@ -783,7 +767,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         ))));
     }
 
-    let delay_epoch = delay_epoch.unwrap();
+    let mut delay_epoch = delay_epoch.unwrap();
     let settlement_data = if for_remote {
         channel_data.remote_settlement_data.clone()
     } else {
@@ -803,15 +787,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let mut two_parties_all_settled = false;
     let (unlock, unlock_amount, unlock_key, new_settlement_witness) = match settlement_witness {
         Some(mut sw) => {
-            if cell_header_epoch.to_rational() + delay_epoch.to_rational()
-                > current_epoch.to_rational()
-            {
-                debug!(
-                    "Commitment cell: {:?} is not ready to settle local",
-                    commitment_cell
-                );
-                return Ok(None);
-            }
             if sw.update() {
                 debug!("channel_data local_settlement_key pubkey hash: {:?}，sw settlement_remote_pubkey_hash: {:?}, sw settlement_local_pubkey_hash: {:?}, for_remote: {}",
                     channel_data.local_settlement_pubkey_hash(), sw.settlement_remote_pubkey_hash, sw.settlement_local_pubkey_hash, for_remote);
@@ -821,20 +796,35 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     {
                         two_parties_all_settled = sw.settlement_remote_pubkey_hash == [0u8; 20];
                         if two_parties_all_settled {
-                            (
-                                Unlock {
-                                    unlock_type: 0xFF,
-                                    with_preimage: false,
-                                    signature: [0u8; 65],
-                                    preimage: None,
-                                },
-                                settlement_data.local_amount,
-                                channel_data.local_settlement_key.clone(),
-                                sw.to_witness(),
-                            )
+                            if cell_header_epoch.to_rational() + delay_epoch.to_rational()
+                                > current_epoch.to_rational()
+                            {
+                                debug!(
+                                    "Commitment cell: {:?} is not ready to settle local",
+                                    commitment_cell.out_point.tx_hash
+                                );
+                                return Ok(None);
+                            } else {
+                                (
+                                    Unlock {
+                                        unlock_type: 0xFF,
+                                        with_preimage: false,
+                                        signature: [0u8; 65],
+                                        preimage: None,
+                                    },
+                                    sw.settlement_local_amount,
+                                    channel_data.local_settlement_key.clone(),
+                                    sw.to_witness(),
+                                )
+                            }
                         } else {
+                            let mut should_settle_local = true;
                             let mut unlock_option = None;
                             for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
+                                let expiry = match tlc.absolute_expiry() {
+                                    Some(expiry) => expiry,
+                                    None => continue,
+                                };
                                 if tlc.is_offered() {
                                     let delay = mul(delay_epoch, 2, 3);
                                     if cell_header_epoch.to_rational() + delay.to_rational()
@@ -849,7 +839,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     .then_some(&settlement_tlc.local_key)
                                             })
                                         {
-                                            if current_time > tlc.htlc_expiry {
+                                            should_settle_local = false;
+                                            if current_time > expiry {
                                                 unlock_option = Some((
                                                     Unlock {
                                                         unlock_type: i as u8,
@@ -860,8 +851,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     tlc.payment_amount,
                                                     private_key.clone(),
                                                 ));
+                                                delay_epoch = delay;
                                                 break;
                                             }
+                                        } else {
+                                            warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
                                         }
                                     }
                                 } else {
@@ -878,6 +872,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     .then_some(&settlement_tlc.local_key)
                                             })
                                         {
+                                            should_settle_local = false;
                                             if let Some(preimage) =
                                                 store.search_preimage(&tlc.payment_hash)
                                             {
@@ -891,25 +886,48 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     tlc.payment_amount,
                                                     private_key.clone(),
                                                 ));
+                                                delay_epoch = delay;
                                                 break;
+                                            } else {
+                                                if cell_header_epoch.to_rational()
+                                                    + delay_epoch.to_rational()
+                                                    <= current_epoch.to_rational()
+                                                {
+                                                    should_settle_local = true
+                                                }
                                             }
+                                        } else {
+                                            warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
                                         }
                                     }
                                 }
                             }
 
+                            if should_settle_local {
+                                if cell_header_epoch.to_rational() + delay_epoch.to_rational()
+                                    > current_epoch.to_rational()
+                                {
+                                    debug!(
+                                        "Commitment cell: {:?} is not ready to settle local",
+                                        commitment_cell.out_point.tx_hash
+                                    );
+                                    return Ok(None);
+                                }
+                                unlock_option = Some((
+                                    Unlock {
+                                        unlock_type: 0xFF,
+                                        with_preimage: false,
+                                        signature: [0u8; 65],
+                                        preimage: None,
+                                    },
+                                    sw.settlement_local_amount,
+                                    channel_data.local_settlement_key.clone(),
+                                ));
+                            }
+
                             if let Some((unlock, unlock_amount, private_key)) = unlock_option {
                                 debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
-                                (
-                                    unlock,
-                                    unlock_amount,
-                                    private_key,
-                                    settlement_data.to_witness(
-                                        for_remote,
-                                        channel_data.local_settlement_key.clone(),
-                                        channel_data.remote_settlement_key,
-                                    ),
-                                )
+                                (unlock, unlock_amount, private_key, sw.to_witness())
                             } else {
                                 return Ok(None);
                             }
@@ -923,21 +941,36 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     {
                         two_parties_all_settled = sw.settlement_local_pubkey_hash == [0u8; 20];
                         if two_parties_all_settled {
-                            (
-                                Unlock {
-                                    unlock_type: 0xFE,
-                                    with_preimage: false,
-                                    signature: [0u8; 65],
-                                    preimage: None,
-                                },
-                                settlement_data.local_amount,
-                                channel_data.local_settlement_key.clone(),
-                                sw.to_witness(),
-                            )
+                            if cell_header_epoch.to_rational() + delay_epoch.to_rational()
+                                > current_epoch.to_rational()
+                            {
+                                debug!(
+                                    "Commitment cell: {:?} is not ready to settle local",
+                                    commitment_cell.out_point.tx_hash
+                                );
+                                return Ok(None);
+                            } else {
+                                (
+                                    Unlock {
+                                        unlock_type: 0xFE,
+                                        with_preimage: false,
+                                        signature: [0u8; 65],
+                                        preimage: None,
+                                    },
+                                    sw.settlement_remote_amount,
+                                    channel_data.local_settlement_key.clone(),
+                                    sw.to_witness(),
+                                )
+                            }
                         } else {
+                            let mut should_settle_local = true;
                             let mut unlock_option = None;
                             for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
                                 if !tlc.is_offered() {
+                                    let expiry = match tlc.absolute_expiry() {
+                                        Some(expiry) => expiry,
+                                        None => continue,
+                                    };
                                     let delay = mul(delay_epoch, 2, 3);
                                     if cell_header_epoch.to_rational() + delay.to_rational()
                                         <= current_epoch.to_rational()
@@ -951,7 +984,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     .then_some(&settlement_tlc.local_key)
                                             })
                                         {
-                                            if current_time > tlc.htlc_expiry {
+                                            should_settle_local = false;
+                                            if current_time > expiry {
                                                 unlock_option = Some((
                                                     Unlock {
                                                         unlock_type: i as u8,
@@ -962,8 +996,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     tlc.payment_amount,
                                                     private_key.clone(),
                                                 ));
+                                                delay_epoch = delay;
                                                 break;
                                             }
+                                        } else {
+                                            warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
                                         }
                                     }
                                 } else {
@@ -980,6 +1017,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     .then_some(&settlement_tlc.local_key)
                                             })
                                         {
+                                            should_settle_local = false;
                                             if let Some(preimage) =
                                                 store.search_preimage(&tlc.payment_hash)
                                             {
@@ -993,25 +1031,48 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     tlc.payment_amount,
                                                     private_key.clone(),
                                                 ));
+                                                delay_epoch = delay;
                                                 break;
+                                            } else {
+                                                if cell_header_epoch.to_rational()
+                                                    + delay_epoch.to_rational()
+                                                    <= current_epoch.to_rational()
+                                                {
+                                                    should_settle_local = true
+                                                }
                                             }
+                                        } else {
+                                            warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
                                         }
                                     }
                                 }
                             }
 
+                            if should_settle_local {
+                                if cell_header_epoch.to_rational() + delay_epoch.to_rational()
+                                    > current_epoch.to_rational()
+                                {
+                                    debug!(
+                                        "Commitment cell: {:?} is not ready to settle local",
+                                        commitment_cell.out_point.tx_hash
+                                    );
+                                    return Ok(None);
+                                }
+                                unlock_option = Some((
+                                    Unlock {
+                                        unlock_type: 0xFE,
+                                        with_preimage: false,
+                                        signature: [0u8; 65],
+                                        preimage: None,
+                                    },
+                                    sw.settlement_remote_amount,
+                                    channel_data.local_settlement_key.clone(),
+                                ));
+                            }
+
                             if let Some((unlock, unlock_amount, private_key)) = unlock_option {
                                 debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
-                                (
-                                    unlock,
-                                    unlock_amount,
-                                    private_key,
-                                    settlement_data.to_witness(
-                                        for_remote,
-                                        channel_data.local_settlement_key.clone(),
-                                        channel_data.remote_settlement_key,
-                                    ),
-                                )
+                                (unlock, unlock_amount, private_key, sw.to_witness())
                             } else {
                                 return Ok(None);
                             }
@@ -1049,6 +1110,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     tlc.payment_amount,
                                     tlc.local_key.clone(),
                                 ));
+                                delay_epoch = delay;
                                 break;
                             }
                         }
@@ -1058,6 +1120,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                         {
+                            should_settle_local = false;
                             if let Some(preimage) = store.get_watch_preimage(&tlc.payment_hash) {
                                 unlock_option = Some((
                                     Unlock {
@@ -1069,8 +1132,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     tlc.payment_amount,
                                     tlc.local_key.clone(),
                                 ));
-                                should_settle_local = false;
+                                delay_epoch = delay;
                                 break;
+                            } else {
+                                if cell_header_epoch.to_rational() + delay_epoch.to_rational()
+                                    <= current_epoch.to_rational()
+                                {
+                                    should_settle_local = true
+                                }
                             }
                         }
                     }
@@ -1083,7 +1152,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 {
                     debug!(
                         "Commitment cell: {:?} is not ready to settle local",
-                        commitment_cell
+                        commitment_cell.out_point.tx_hash
                     );
                     return Ok(None);
                 }
@@ -1134,123 +1203,266 @@ fn build_settlement_tx<S: WatchtowerStore>(
         .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
         .build();
 
-    // TODO @quake
-    // if cell_output.type_().is_none() {
-    let capacity: u64 = cell_output.capacity().unpack();
-    let new_capacity = (capacity as u128).saturating_sub(unlock_amount) as u64;
-    let new_commitment_output = cell_output
-        .clone()
-        .as_builder()
-        .lock(
-            cell_output
-                .lock()
-                .as_builder()
-                .args(new_commitment_lock_script_args.pack())
-                .build(),
-        )
-        .capacity(new_capacity.pack())
-        .build();
-    let settlement_output = CellOutput::new_builder()
-        .lock(fee_provider_lock_script.clone())
-        .capacity((unlock_amount as u64).pack())
-        .build();
+    if cell_output.type_().is_none() {
+        let capacity: u64 = cell_output.capacity().unpack();
+        let new_capacity = (capacity as u128).saturating_sub(unlock_amount) as u64;
+        let new_commitment_output = cell_output
+            .clone()
+            .as_builder()
+            .lock(
+                cell_output
+                    .lock()
+                    .as_builder()
+                    .args(new_commitment_lock_script_args.pack())
+                    .build(),
+            )
+            .capacity(new_capacity.pack())
+            .build();
+        let settlement_output = CellOutput::new_builder()
+            .lock(fee_provider_lock_script.clone())
+            .capacity((unlock_amount as u64).pack())
+            .build();
 
-    let witness_for_commitment_cell: Vec<u8> = [
-        XUDT_COMPATIBLE_WITNESS.as_slice(),
-        &[0x01],
-        new_settlement_witness.as_slice(),
-        unlock.to_witness().as_slice(),
-    ]
-    .concat();
+        let witness_for_commitment_cell: Vec<u8> = [
+            XUDT_COMPATIBLE_WITNESS.as_slice(),
+            &[0x01],
+            new_settlement_witness.as_slice(),
+            unlock.to_witness().as_slice(),
+        ]
+        .concat();
 
-    let input = CellInput::new_builder()
-        .previous_output(commitment_cell.out_point.clone().into())
-        .build();
-
-    let mut tx_builder = Transaction::default()
-        .as_advanced_builder()
-        .cell_deps(get_cell_deps_sync(
-            vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-            &None,
-        )?)
-        .input(input);
-    if !two_parties_all_settled {
-        tx_builder = tx_builder
-            .output(new_commitment_output.clone())
-            .output_data(Bytes::default());
-    }
-    tx_builder = tx_builder
-        .output(settlement_output.clone())
-        .output_data(Bytes::default())
-        .witness(witness_for_commitment_cell.pack())
-        .witness(placeholder_witness_for_change.as_bytes().pack());
-
-    // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
-    let fee_calculator = FeeCalculator::new(1000);
-    // use two inputs as the maximum fee provider cell inputs
-    let fee = fee_calculator.fee(
-        tx_builder.clone().build().data().serialized_size_in_block() as u64
-            + CellInput::TOTAL_SIZE as u64 * 2,
-    );
-    let settlement_output_occupied_capacity = settlement_output
-        .occupied_capacity(Capacity::shannons(0))
-        .expect("capacity does not overflow")
-        .as_u64();
-    let min_total_capacity =
-        capacity.saturating_sub(new_capacity + settlement_output_occupied_capacity + fee);
-    let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
-    query.script_search_mode = Some(SearchMode::Exact);
-    query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
-    query.data_len_range = Some(ValueRangeOption::new_exact(0));
-    if min_total_capacity > 0 {
-        query.min_total_capacity = min_total_capacity;
-    }
-    let (cells, total_capacity) = cell_collector.collect_live_cells(&query, false)?;
-    debug!(
-        "cells len: {}, total_capacity: {}",
-        cells.len(),
-        total_capacity
-    );
-
-    let mut inputs_capacity = capacity;
-    for cell in cells {
-        let input_capacity: u64 = cell.output.capacity().unpack();
-        inputs_capacity += input_capacity;
-        let since = Since::new(
-            SinceType::EpochNumberWithFraction,
-            delay_epoch.full_value(),
-            true,
-        )
-        .value();
-        tx_builder = tx_builder.input(
+        let input = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
+            let since = Since::new(SinceType::Timestamp, current_time / 1000, false).value();
             CellInput::new_builder()
-                .previous_output(cell.out_point)
+                .previous_output(commitment_cell.out_point.clone().into())
                 .since(since.pack())
-                .build(),
-        );
-        let fee =
-            fee_calculator.fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-        debug!(
-                    "inputs_capacity: {}, capacity: {}, new_capacity:  {}, unlock_amount: {}, settlement_output_occupied_capacity: {}, fee: {}",
-                    inputs_capacity, capacity, new_capacity, unlock_amount, settlement_output_occupied_capacity, fee
-                );
-        if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
-            let adjusted_settlement_output = change_output
-                .as_builder()
-                .capacity((inputs_capacity - new_capacity - fee).pack())
-                .build();
-            let outputs = if two_parties_all_settled {
-                vec![adjusted_settlement_output]
-            } else {
-                vec![new_commitment_output, adjusted_settlement_output]
-            };
-            let tx = tx_builder.set_outputs(outputs).build();
-            let tx = sign_tx_with_settlement(tx, secret_key, unlock_key.0, unlock.with_preimage)?;
-            return Ok(Some(tx));
-        }
-    }
+                .build()
+        } else {
+            CellInput::new_builder()
+                .previous_output(commitment_cell.out_point.clone().into())
+                .build()
+        };
 
-    Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
+        let mut tx_builder = Transaction::default()
+            .as_advanced_builder()
+            .cell_deps(get_cell_deps_sync(
+                vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                &None,
+            )?)
+            .input(input);
+        if !two_parties_all_settled {
+            tx_builder = tx_builder
+                .output(new_commitment_output.clone())
+                .output_data(Bytes::default());
+        }
+        tx_builder = tx_builder
+            .output(settlement_output.clone())
+            .output_data(Bytes::default())
+            .witness(witness_for_commitment_cell.pack())
+            .witness(placeholder_witness_for_change.as_bytes().pack());
+
+        // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
+        let fee_calculator = FeeCalculator::new(1000);
+        // use two inputs as the maximum fee provider cell inputs
+        let fee = fee_calculator.fee(
+            tx_builder.clone().build().data().serialized_size_in_block() as u64
+                + CellInput::TOTAL_SIZE as u64 * 2,
+        );
+        let settlement_output_occupied_capacity = settlement_output
+            .occupied_capacity(Capacity::shannons(0))
+            .expect("capacity does not overflow")
+            .as_u64();
+        let min_total_capacity =
+            capacity.saturating_sub(new_capacity + settlement_output_occupied_capacity + fee);
+        let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
+        query.script_search_mode = Some(SearchMode::Exact);
+        query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
+        query.data_len_range = Some(ValueRangeOption::new_exact(0));
+        if min_total_capacity > 0 {
+            query.min_total_capacity = min_total_capacity;
+        }
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let mut inputs_capacity = capacity;
+        for cell in cells {
+            let input_capacity: u64 = cell.output.capacity().unpack();
+            inputs_capacity += input_capacity;
+            let since = Since::new(
+                SinceType::EpochNumberWithFraction,
+                delay_epoch.full_value(),
+                true,
+            )
+            .value();
+            tx_builder = tx_builder.input(
+                CellInput::new_builder()
+                    .previous_output(cell.out_point)
+                    .since(since.pack())
+                    .build(),
+            );
+            let fee = fee_calculator
+                .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
+            if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
+                let adjusted_settlement_output = change_output
+                    .as_builder()
+                    .capacity((inputs_capacity - new_capacity - fee).pack())
+                    .build();
+                let outputs = if two_parties_all_settled {
+                    vec![adjusted_settlement_output]
+                } else {
+                    vec![new_commitment_output, adjusted_settlement_output]
+                };
+                let tx = tx_builder.set_outputs(outputs).build();
+                let tx =
+                    sign_tx_with_settlement(tx, secret_key, unlock_key.0, unlock.with_preimage)?;
+                return Ok(Some(tx));
+            }
+        }
+
+        Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
+    } else {
+        let output_data = commitment_cell.output_data.as_ref().unwrap();
+        if output_data.len() < 16 {
+            return Err(Box::new(RpcError::Other(anyhow!("Invalid output data"))));
+        }
+        let amount = u128::from_le_bytes(output_data.as_bytes()[0..16].try_into().unwrap());
+        let new_amount = amount.saturating_sub(unlock_amount);
+        let new_commitment_output = cell_output
+            .clone()
+            .as_builder()
+            .lock(
+                cell_output
+                    .lock()
+                    .as_builder()
+                    .args(new_commitment_lock_script_args.pack())
+                    .build(),
+            )
+            .build();
+        let new_commitment_output_data = new_amount.to_le_bytes().to_vec().pack();
+
+        let settlement_output = CellOutput::new_builder()
+            .lock(fee_provider_lock_script.clone())
+            .type_(cell_output.type_().clone())
+            .build();
+        let settlement_output_data = unlock_amount.to_le_bytes().to_vec().pack();
+        let settlement_output_occupied_capacity = settlement_output
+            .occupied_capacity(Capacity::bytes(settlement_output_data.raw_data().len()).unwrap())
+            .expect("capacity does not overflow")
+            .as_u64();
+        let settlement_output = settlement_output
+            .as_builder()
+            .capacity(settlement_output_occupied_capacity.pack())
+            .build();
+
+        let witness_for_commitment_cell: Vec<u8> = [
+            XUDT_COMPATIBLE_WITNESS.as_slice(),
+            &[0x01],
+            new_settlement_witness.as_slice(),
+            unlock.to_witness().as_slice(),
+        ]
+        .concat();
+
+        let input = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
+            let since = Since::new(SinceType::Timestamp, current_time / 1000, false).value();
+            CellInput::new_builder()
+                .previous_output(commitment_cell.out_point.clone().into())
+                .since(since.pack())
+                .build()
+        } else {
+            CellInput::new_builder()
+                .previous_output(commitment_cell.out_point.clone().into())
+                .build()
+        };
+
+        let mut tx_builder = Transaction::default()
+            .as_advanced_builder()
+            .cell_deps(get_cell_deps_sync(
+                vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
+                &commitment_cell.output.type_.map(|script| script.into()),
+            )?)
+            .input(input);
+        if !two_parties_all_settled {
+            tx_builder = tx_builder
+                .output(new_commitment_output.clone())
+                .output_data(new_commitment_output_data.clone());
+        }
+        tx_builder = tx_builder
+            .output(settlement_output.clone())
+            .output_data(settlement_output_data.clone())
+            .output(change_output.clone())
+            .output_data(Bytes::default())
+            .witness(witness_for_commitment_cell.pack())
+            .witness(placeholder_witness_for_change.as_bytes().pack());
+
+        // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
+        let fee_calculator = FeeCalculator::new(1000);
+        // use two inputs as the maximum fee provider cell inputs
+        let fee = fee_calculator.fee(
+            tx_builder.clone().build().data().serialized_size_in_block() as u64
+                + CellInput::TOTAL_SIZE as u64 * 2,
+        );
+
+        let change_output_occupied_capacity = change_output
+            .occupied_capacity(Capacity::shannons(0))
+            .expect("capacity does not overflow")
+            .as_u64();
+        let min_total_capacity =
+            change_output_occupied_capacity + settlement_output_occupied_capacity + fee;
+        let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
+        query.script_search_mode = Some(SearchMode::Exact);
+        query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
+        query.data_len_range = Some(ValueRangeOption::new_exact(0));
+        query.min_total_capacity = min_total_capacity;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let mut inputs_capacity = 0u64;
+        for cell in cells {
+            let input_capacity: u64 = cell.output.capacity().unpack();
+            inputs_capacity += input_capacity;
+            let since = Since::new(
+                SinceType::EpochNumberWithFraction,
+                delay_epoch.full_value(),
+                true,
+            )
+            .value();
+            tx_builder = tx_builder.input(
+                CellInput::new_builder()
+                    .previous_output(cell.out_point)
+                    .since(since.pack())
+                    .build(),
+            );
+            let fee = fee_calculator
+                .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
+            if inputs_capacity
+                >= change_output_occupied_capacity + settlement_output_occupied_capacity + fee
+            {
+                let new_change_output = change_output
+                    .as_builder()
+                    .capacity((inputs_capacity - settlement_output_occupied_capacity - fee).pack())
+                    .build();
+                let outputs = if two_parties_all_settled {
+                    vec![settlement_output, new_change_output]
+                } else {
+                    vec![new_commitment_output, settlement_output, new_change_output]
+                };
+                let outputs_data = if two_parties_all_settled {
+                    vec![settlement_output_data, Bytes::default()]
+                } else {
+                    vec![
+                        new_commitment_output_data,
+                        settlement_output_data,
+                        Bytes::default(),
+                    ]
+                };
+                let tx = tx_builder
+                    .set_outputs(outputs)
+                    .set_outputs_data(outputs_data)
+                    .build();
+                let tx =
+                    sign_tx_with_settlement(tx, secret_key, unlock_key.0, unlock.with_preimage)?;
+                return Ok(Some(tx));
+            }
+        }
+
+        Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
+    }
 }
 
 fn sign_tx(
@@ -1400,6 +1612,18 @@ impl Htlc {
     pub fn is_offered(&self) -> bool {
         self.htlc_type & 0b0000001 == 0
     }
+
+    pub fn absolute_expiry(&self) -> Option<u64> {
+        let since = Since::from_raw_value(self.htlc_expiry);
+        if since.is_absolute() {
+            match since.extract_metric() {
+                Some((SinceType::Timestamp, expiry)) => Some(expiry),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1450,11 +1674,6 @@ impl SettlementWitness {
         let pending_htlc_witness_len = 85 * pending_htlc_count;
         // 1 byte for unlock_count, 1 byte for pending_htlc_count, 72 bytes for settlement script
         if witness.len() < 1 + 1 + pending_htlc_witness_len + 72 {
-            warn!(
-                "Invalid witness length: {}, pending_htlc_witness_len: {}",
-                witness.len(),
-                pending_htlc_witness_len
-            );
             return None;
         }
         let pending_htlcs = (2..2 + pending_htlc_witness_len)
@@ -1500,11 +1719,6 @@ impl SettlementWitness {
                 }
             }
         }
-
-        debug!(
-            "settlement witness: {} htlcs, {} unlocks, settlement_remote_pubkey_hash: {:?}, settlement_remote_amount: {}, settlement_local_pubkey_hash: {:?}, settlement_local_amount: {}",
-            pending_htlc_count, unlocks.len(), settlement_remote_pubkey_hash, settlement_remote_amount, settlement_local_pubkey_hash, settlement_local_amount
-        );
 
         Some(Self {
             pending_htlc_count,
@@ -1561,395 +1775,6 @@ impl SettlementWitness {
         vec
     }
 }
-
-// #[allow(clippy::too_many_arguments)]
-// fn build_settlement_tx_for_pending_tlcs<S: WatchtowerStore>(
-//     commitment_tx_cell: Cell,
-//     cell_header: HeaderView,
-//     delay_epoch: EpochNumberWithFraction,
-//     settlement_data: SettlementData,
-//     for_remote: bool,
-//     pending_tlcs: Option<Vec<u8>>,
-//     secret_key: SecretKey,
-//     cell_collector: &mut DefaultCellCollector,
-//     current_time: u64,
-//     current_epoch: EpochNumberWithFraction,
-//     store: &S,
-// ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
-//     // TODO @quake
-//     let settlement_tlc: Option<(usize, SettlementTlc, Option<Hash256>)> = match pending_tlcs.clone()
-//     {
-//         Some(pending_tlcs) => pending_tlcs
-//             .chunks(85)
-//             .enumerate()
-//             .find_map(|(index, tlc)| {
-//                 let tlc = Tlc(tlc);
-//                 settlement_data.tlcs.iter().find_map(|settlement_tlc| {
-//                     let pubkey_hash = blake2b_256(settlement_tlc.local_key.pubkey().serialize());
-//                     if settlement_tlc.tlc_id.is_offered() {
-//                         if pubkey_hash.starts_with(tlc.local_pubkey_hash())
-//                             && settlement_tlc.expiry < current_time
-//                         {
-//                             Some((index, settlement_tlc.clone(), None))
-//                         } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash()) {
-//                             store
-//                                 .search_preimage(tlc.payment_hash())
-//                                 .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
-//                         } else {
-//                             None
-//                         }
-//                     } else if pubkey_hash.starts_with(tlc.remote_pubkey_hash())
-//                         && settlement_tlc.expiry < current_time
-//                     {
-//                         Some((index, settlement_tlc.clone(), None))
-//                     } else if pubkey_hash.starts_with(tlc.local_pubkey_hash()) {
-//                         store
-//                             .search_preimage(tlc.payment_hash())
-//                             .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
-//                     } else {
-//                         None
-//                     }
-//                 })
-//             }),
-//         None => settlement_data
-//             .tlcs
-//             .iter()
-//             .enumerate()
-//             .find_map(|(index, settlement_tlc)| {
-//                 store
-//                     .get_watch_preimage(&settlement_tlc.payment_hash)
-//                     .map(|preimage| (index, settlement_tlc.clone(), Some(preimage)))
-//                     .or_else(|| {
-//                         if settlement_tlc.expiry < current_time {
-//                             Some((index, settlement_tlc.clone(), None))
-//                         } else {
-//                             None
-//                         }
-//                     })
-//             }),
-//     };
-//     if let Some((index, tlc, preimage)) = settlement_tlc {
-//         let delay = if preimage.is_some() {
-//             // unlock with preimage should delay 1/3 of the epoch
-//             mul(delay_epoch, 1, 3)
-//         } else {
-//             // unlock with expiry should delay 2/3 of the epoch
-//             mul(delay_epoch, 2, 3)
-//         };
-//         if cell_header.epoch().to_rational() + delay.to_rational() > current_epoch.to_rational() {
-//             return Ok(None);
-//         }
-//         info!(
-//             "Try to build settlement tx for pending tlc, index: {}, pending_tlcs is some: {}, settlement_data tlcs len: {}, for_remote: {}, preimage is some: {}",
-//             index,
-//             pending_tlcs.is_some(),
-//             settlement_data.tlcs.len(),
-//             for_remote,
-//             preimage.is_some()
-//         );
-//         let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
-//         let args = blake160(pubkey.serialize().as_ref());
-//         let fee_provider_lock_script =
-//             get_script_by_contract(Contract::Secp256k1Lock, args.as_bytes());
-
-//         let change_output = CellOutput::new_builder()
-//             .lock(fee_provider_lock_script.clone())
-//             .build();
-//         let placeholder_witness_for_change = WitnessArgs::new_builder()
-//             .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
-//             .build();
-
-//         let old_pending_tlcs = pending_tlcs.unwrap_or_else(|| {
-//             settlement_data
-//                 .tlcs
-//                 .iter()
-//                 .flat_map(|tlc| tlc.to_witness(for_remote))
-//                 .collect()
-//         });
-//         let old_pending_tlcs_size = old_pending_tlcs.len() / 85;
-//         let new_pending_tlcs = if old_pending_tlcs_size > 1 {
-//             [
-//                 &[old_pending_tlcs_size as u8 - 1],
-//                 &old_pending_tlcs[..85 * index],
-//                 &old_pending_tlcs[85 * (index + 1)..],
-//             ]
-//             .concat()
-//         } else {
-//             vec![]
-//         };
-//         let mut witness_for_commitment_cell = create_witness_for_commitment_cell_with_pending_tlcs(
-//             index as u8,
-//             old_pending_tlcs.as_slice(),
-//         );
-//         if let Some(preiamge) = preimage {
-//             witness_for_commitment_cell.extend_from_slice(preiamge.as_ref());
-//         }
-//         let cell_output: CellOutput = commitment_tx_cell.output.clone().into();
-//         let mut new_commitment_lock_script_args =
-//             cell_output.lock().args().raw_data()[0..36].to_vec();
-//         if !new_pending_tlcs.is_empty() {
-//             new_commitment_lock_script_args
-//                 .extend_from_slice(&blake2b_256(&new_pending_tlcs)[0..20]);
-//         }
-//         if cell_output.type_().is_none() {
-//             let capacity: u64 = cell_output.capacity().unpack();
-//             let new_capacity = (capacity as u128 - tlc.payment_amount) as u64;
-//             let new_commitment_output = cell_output
-//                 .clone()
-//                 .as_builder()
-//                 .lock(
-//                     cell_output
-//                         .lock()
-//                         .as_builder()
-//                         .args(new_commitment_lock_script_args.pack())
-//                         .build(),
-//                 )
-//                 .capacity(new_capacity.pack())
-//                 .build();
-//             let settlement_output = CellOutput::new_builder()
-//                 .lock(fee_provider_lock_script.clone())
-//                 .capacity((tlc.payment_amount as u64).pack())
-//                 .build();
-
-//             let input = {
-//                 if preimage.is_none() {
-//                     // TODO: ckb is using seconds as timestamp, we may need to change the expiry unit to seconds in the future
-//                     let since = Since::new(SinceType::Timestamp, tlc.expiry / 1000, false).value();
-//                     CellInput::new_builder()
-//                         .previous_output(commitment_tx_cell.out_point.clone().into())
-//                         .since(since.pack())
-//                         .build()
-//                 } else {
-//                     CellInput::new_builder()
-//                         .previous_output(commitment_tx_cell.out_point.clone().into())
-//                         .build()
-//                 }
-//             };
-//             let mut tx_builder = Transaction::default()
-//                 .as_advanced_builder()
-//                 .cell_deps(get_cell_deps_sync(
-//                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-//                     &None,
-//                 )?)
-//                 .input(input)
-//                 .output(new_commitment_output.clone())
-//                 .output_data(Bytes::default())
-//                 .output(settlement_output.clone())
-//                 .output_data(Bytes::default())
-//                 .witness(witness_for_commitment_cell.pack())
-//                 .witness(placeholder_witness_for_change.as_bytes().pack());
-
-//             // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
-//             let fee_calculator = FeeCalculator::new(1000);
-//             // use two inputs as the maximum fee provider cell inputs
-//             let fee = fee_calculator.fee(
-//                 tx_builder.clone().build().data().serialized_size_in_block() as u64
-//                     + CellInput::TOTAL_SIZE as u64 * 2,
-//             );
-//             let settlement_output_occupied_capacity = settlement_output
-//                 .occupied_capacity(Capacity::shannons(0))
-//                 .expect("capacity does not overflow")
-//                 .as_u64();
-//             let min_total_capacity =
-//                 capacity.saturating_sub(new_capacity + settlement_output_occupied_capacity + fee);
-//             let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
-//             query.script_search_mode = Some(SearchMode::Exact);
-//             query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
-//             query.data_len_range = Some(ValueRangeOption::new_exact(0));
-//             if min_total_capacity > 0 {
-//                 query.min_total_capacity = min_total_capacity;
-//             }
-//             let (cells, total_capacity) = cell_collector.collect_live_cells(&query, false)?;
-//             debug!(
-//                 "cells len: {}, total_capacity: {}",
-//                 cells.len(),
-//                 total_capacity
-//             );
-
-//             let mut inputs_capacity = capacity;
-//             for cell in cells {
-//                 let input_capacity: u64 = cell.output.capacity().unpack();
-//                 inputs_capacity += input_capacity;
-//                 let since =
-//                     Since::new(SinceType::EpochNumberWithFraction, delay.full_value(), true)
-//                         .value();
-//                 tx_builder = tx_builder.input(
-//                     CellInput::new_builder()
-//                         .previous_output(cell.out_point)
-//                         .since(since.pack())
-//                         .build(),
-//                 );
-//                 let fee = fee_calculator
-//                     .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-//                 debug!(
-//                     "inputs_capacity: {}, new_capacity:  {}, settlement_output_occupied_capacity: {}, fee: {}",
-//                     inputs_capacity, new_capacity, settlement_output_occupied_capacity, fee
-//                 );
-//                 if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
-//                     let adjusted_settlement_output = change_output
-//                         .as_builder()
-//                         .capacity((inputs_capacity - new_capacity - fee).pack())
-//                         .build();
-//                     let outputs = vec![new_commitment_output, adjusted_settlement_output];
-//                     let tx = tx_builder.set_outputs(outputs).build();
-//                     let tx = sign_tx_with_settlement(tx, secret_key, tlc.local_key.0)?;
-//                     return Ok(Some(tx));
-//                 }
-//             }
-
-//             Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
-//         } else {
-//             let amount = u128::from_le_bytes(
-//                 commitment_tx_cell.output_data.unwrap().as_bytes()[0..16]
-//                     .try_into()
-//                     .unwrap(),
-//             );
-//             let new_amount = amount - tlc.payment_amount;
-//             let new_commitment_output = cell_output
-//                 .clone()
-//                 .as_builder()
-//                 .lock(
-//                     cell_output
-//                         .lock()
-//                         .as_builder()
-//                         .args(new_commitment_lock_script_args.pack())
-//                         .build(),
-//                 )
-//                 .build();
-//             let new_commitment_output_data = new_amount.to_le_bytes().to_vec().pack();
-//             let settlement_output = CellOutput::new_builder()
-//                 .lock(fee_provider_lock_script.clone())
-//                 .type_(cell_output.type_().clone())
-//                 .build();
-//             let settlement_output_data = tlc.payment_amount.to_le_bytes().to_vec().pack();
-//             let settlement_output_occupied_capacity = settlement_output
-//                 .occupied_capacity(
-//                     Capacity::bytes(settlement_output_data.raw_data().len()).unwrap(),
-//                 )
-//                 .expect("capacity does not overflow")
-//                 .as_u64();
-//             let settlement_output = settlement_output
-//                 .as_builder()
-//                 .capacity(settlement_output_occupied_capacity.pack())
-//                 .build();
-
-//             let input = {
-//                 if preimage.is_none() {
-//                     // TODO: ckb is using seconds as timestamp, we may need to change the expiry unit to seconds in the future
-//                     let since = Since::new(SinceType::Timestamp, tlc.expiry / 1000, false).value();
-//                     CellInput::new_builder()
-//                         .previous_output(commitment_tx_cell.out_point.clone().into())
-//                         .since(since.pack())
-//                         .build()
-//                 } else {
-//                     CellInput::new_builder()
-//                         .previous_output(commitment_tx_cell.out_point.clone().into())
-//                         .build()
-//                 }
-//             };
-//             let mut tx_builder = Transaction::default()
-//                 .as_advanced_builder()
-//                 .cell_deps(get_cell_deps_sync(
-//                     vec![Contract::CommitmentLock, Contract::Secp256k1Lock],
-//                     &commitment_tx_cell.output.type_.map(|script| script.into()),
-//                 )?)
-//                 .input(input)
-//                 .output(new_commitment_output.clone())
-//                 .output_data(new_commitment_output_data)
-//                 .output(settlement_output.clone())
-//                 .output_data(settlement_output_data.clone())
-//                 .output(change_output.clone())
-//                 .output_data(Bytes::default())
-//                 .witness(witness_for_commitment_cell.pack())
-//                 .witness(placeholder_witness_for_change.as_bytes().pack());
-
-//             // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
-//             let fee_calculator = FeeCalculator::new(1000);
-//             // use two inputs as the maximum fee provider cell inputs
-//             let fee = fee_calculator.fee(
-//                 tx_builder.clone().build().data().serialized_size_in_block() as u64
-//                     + CellInput::TOTAL_SIZE as u64 * 2,
-//             );
-//             let change_output_occupied_capacity = change_output
-//                 .occupied_capacity(Capacity::shannons(0))
-//                 .expect("capacity does not overflow")
-//                 .as_u64();
-//             let min_total_capacity =
-//                 change_output_occupied_capacity + settlement_output_occupied_capacity + fee;
-//             let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
-//             query.script_search_mode = Some(SearchMode::Exact);
-//             query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
-//             query.data_len_range = Some(ValueRangeOption::new_exact(0));
-//             query.min_total_capacity = min_total_capacity;
-//             let (cells, total_capacity) = cell_collector.collect_live_cells(&query, false)?;
-//             debug!(
-//                 "cells len: {}, total_capacity: {}",
-//                 cells.len(),
-//                 total_capacity
-//             );
-//             let mut inputs_capacity = 0u64;
-//             for cell in cells {
-//                 let input_capacity: u64 = cell.output.capacity().unpack();
-//                 inputs_capacity += input_capacity;
-//                 let since =
-//                     Since::new(SinceType::EpochNumberWithFraction, delay.full_value(), true)
-//                         .value();
-//                 tx_builder = tx_builder.input(
-//                     CellInput::new_builder()
-//                         .previous_output(cell.out_point)
-//                         .since(since.pack())
-//                         .build(),
-//                 );
-//                 let fee = fee_calculator
-//                     .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-//                 debug!("inputs_capacity: {}, change_output_occupied_capacity: {}, settlement_output_occupied_capacity: {}, fee: {}", inputs_capacity, change_output_occupied_capacity, settlement_output_occupied_capacity, fee);
-//                 if inputs_capacity
-//                     >= change_output_occupied_capacity + settlement_output_occupied_capacity + fee
-//                 {
-//                     let new_change_output = change_output
-//                         .as_builder()
-//                         .capacity(
-//                             (inputs_capacity - settlement_output_occupied_capacity - fee).pack(),
-//                         )
-//                         .build();
-//                     let outputs = vec![new_commitment_output, settlement_output, new_change_output];
-//                     let tx = tx_builder.set_outputs(outputs).build();
-//                     let tx = sign_tx_with_settlement(tx, secret_key, tlc.local_key.0)?;
-//                     return Ok(Some(tx));
-//                 }
-//             }
-
-//             Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
-//         }
-//     } else if cell_header.epoch().to_rational() + delay_epoch.to_rational()
-//         > current_epoch.to_rational()
-//     {
-//         debug!(
-//             "Commitment tx: {:#x} is not ready to settle",
-//             commitment_tx_cell.out_point.tx_hash
-//         );
-//         Ok(None)
-//     } else {
-//         info!(
-//             "Try to settle the commitment tx: {:#x} discarding pending tlcs",
-//             commitment_tx_cell.out_point.tx_hash
-//         );
-//         let cell_output: CellOutput = commitment_tx_cell.output.into();
-//         let since = u64::from_le_bytes(
-//             cell_output.lock().args().raw_data()[20..28]
-//                 .try_into()
-//                 .expect("u64 from slice"),
-//         );
-//         let tx = build_settlement_tx(
-//             commitment_tx_cell.out_point.clone().into(),
-//             since,
-//             settlement_data,
-//             secret_key,
-//             cell_collector,
-//         )?;
-//         Ok(Some(tx))
-//     }
-// }
 
 // Calculate the product of delay_epoch and a fraction
 fn mul(

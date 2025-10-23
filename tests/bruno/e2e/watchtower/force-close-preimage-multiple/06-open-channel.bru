@@ -1,0 +1,41 @@
+meta {
+  name: Node1 open a channel to Node2 with amount 99 ckb and 3.5 delay_epoch
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "open_channel",
+    "params": [
+      {
+        "peer_id": "{{NODE2_PEERID}}",
+        "funding_amount": "0x24e160300",
+        "commitment_delay_epoch": "0x20001000003"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.temporary_channel_id: isDefined
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 2000));
+    bru.setVar("N1N2_TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
+}

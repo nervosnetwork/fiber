@@ -1,7 +1,7 @@
 meta {
-  name: check balance, the difference should be the open channel amount (0x826299e00) + fee (it may vary, max 5000)
+  name: check balance, the difference should be the tlc2 (6000000) - fee (it may vary, max 5000)
   type: http
-  seq: 22
+  seq: 23
 }
 
 post {
@@ -36,5 +36,5 @@ script:pre-request {
 }
 
 assert {
-  Number(BigInt(bru.getVar("NODE2_BALANCE")) - BigInt(res.body.result.capacity)): lt 35000005000
+  Number(BigInt(res.body.result.capacity) - BigInt(bru.getVar("NODE2_BALANCE"))): gt 5995000
 }

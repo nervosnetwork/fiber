@@ -1,5 +1,5 @@
 meta {
-  name: check balance, the difference should be the tlc2 (6000000) - fee (it may vary, max 5000)
+  name: check balance, the difference should be the tlc2 (6000000) + fee (it may vary, max 5000)
   type: http
   seq: 22
 }
@@ -29,12 +29,12 @@ body:json {
 }
 
 script:pre-request {
-  let script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  let script = bru.getVar("NODE1_FUNDING_SCRIPT");
   let body = req.getBody();
   body.params[0].script = script;
   req.setBody(body);
 }
 
 assert {
-  Number(BigInt(res.body.result.capacity) - BigInt(bru.getVar("NODE2_BALANCE"))): gt 5995000
+  Number(BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(res.body.result.capacity)): lt 6005000
 }

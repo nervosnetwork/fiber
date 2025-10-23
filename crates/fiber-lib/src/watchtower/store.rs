@@ -90,7 +90,7 @@ pub struct ChannelData {
     // but the local node hasn't received the revocation message from the remote node yet, then the remote node
     // may force close the channel with the latest commitment transaction, in this case, the watchtower
     // should have pending_remote_settlement_data to settle the remote commitment transaction.
-    // pub pending_remote_settlement_data: SettlementData,
+    pub pending_remote_settlement_data: SettlementData,
     pub local_settlement_data: Option<SettlementData>,
     pub revocation_data: Option<RevocationData>,
 }

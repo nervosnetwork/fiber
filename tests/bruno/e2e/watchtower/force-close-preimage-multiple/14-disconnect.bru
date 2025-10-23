@@ -1,11 +1,11 @@
 meta {
-  name: node2 accept channel
+  name: disconnect NODE2 from NODE1
   type: http
-  seq: 7
+  seq: 14
 }
 
 post {
-  url: {{NODE2_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,23 +19,19 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "accept_channel",
+    "method": "disconnect_peer",
     "params": [
-      {
-        "temporary_channel_id": "{{N1N2_TEMP_CHANNEL_ID}}",
-        "funding_amount": "0x826299e00"
-      }
+      {"peer_id": "{{NODE2_PEERID}}"}
     ]
   }
 }
 
 assert {
   res.body.error: isUndefined
+  res.body.result: isDefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 1000));
-  console.log("accept channel result: ", res.body);
-  bru.setVar("CHANNEL_ID", res.body.result.channel_id);
 }

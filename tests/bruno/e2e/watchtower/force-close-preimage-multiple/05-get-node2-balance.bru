@@ -1,7 +1,7 @@
 meta {
-  name: check balance, the difference should be the open channel amount (0x826299e00) + fee (it may vary, max 5000)
+  name: get node2 balance
   type: http
-  seq: 22
+  seq: 5
 }
 
 post {
@@ -35,6 +35,6 @@ script:pre-request {
   req.setBody(body);
 }
 
-assert {
-  Number(BigInt(bru.getVar("NODE2_BALANCE")) - BigInt(res.body.result.capacity)): lt 35000005000
+script:post-response {
+  bru.setVar("NODE2_BALANCE", res.body.result.capacity);
 }

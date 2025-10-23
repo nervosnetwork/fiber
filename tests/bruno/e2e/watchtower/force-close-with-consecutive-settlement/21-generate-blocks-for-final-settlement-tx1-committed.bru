@@ -1,7 +1,7 @@
 meta {
-  name: generate a few blocks for final settlement tx to be committed
+  name: generate a few blocks for final settlement tx1 to be committed
   type: http
-  seq: 19
+  seq: 21
 }
 
 post {
@@ -20,10 +20,15 @@ body:json {
     "id": 42,
     "jsonrpc": "2.0",
     "method": "generate_epochs",
-    "params": ["0x1"]
+    "params": ["0x5"]
   }
 }
 
 assert {
   res.status: eq 200
+}
+
+script:post-response {
+  // Wait for the final settlement tx2 to be generated
+  await new Promise(r => setTimeout(r, 5000));
 }

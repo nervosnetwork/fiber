@@ -1,7 +1,7 @@
 meta {
-  name: check balance, the difference should be the fee (it may vary, max 5000)
+  name: check balance, the difference should be the tlc1 + tlc2 (9000000) - fee (it may vary, max 5000)
   type: http
-  seq: 19
+  seq: 25
 }
 
 post {
@@ -36,5 +36,5 @@ script:pre-request {
 }
 
 assert {
-  Number(BigInt(bru.getVar("NODE2_BALANCE")) - BigInt(res.body.result.capacity)): lt 5000
+  Number(BigInt(res.body.result.capacity) - BigInt(bru.getVar("NODE2_BALANCE"))): gt 8995000
 }
