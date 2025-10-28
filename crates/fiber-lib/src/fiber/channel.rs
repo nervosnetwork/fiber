@@ -5803,7 +5803,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn is_waiting_tlc_ack(&self) -> bool {
+    pub fn is_waiting_tlc_ack(&self) -> bool {
         self.tlc_state.waiting_ack
             || (self.remote_revocation_nonce_for_send.is_none()
                 || self.remote_revocation_nonce_for_verify.is_none())

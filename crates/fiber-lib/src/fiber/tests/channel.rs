@@ -2363,7 +2363,13 @@ async fn test_network_add_two_tlcs_remove_one() {
     assert!(add_tlc_result.is_err());
 
     // now wait for a while, then add a tlc again, it will success
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    loop {
+        let node_a_state = node_a.get_channel_actor_state(channel_id);
+        if !node_a_state.is_waiting_tlc_ack() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
     let add_tlc_result_b = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
