@@ -3135,31 +3135,6 @@ impl PendingTlcs {
     pub fn add_tlc(&mut self, tlc: TlcInfo) {
         self.tlcs.push(tlc);
     }
-
-    pub fn get_oldest_failed_tlcs(&self) -> Vec<TLCId> {
-        let mut failed_tlcs = self
-            .tlcs
-            .iter()
-            .filter_map(|tlc| {
-                if tlc.is_fail_remove_confirmed() {
-                    Some((tlc.tlc_id, tlc.removed_confirmed_at.unwrap_or(u64::MAX)))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        if failed_tlcs.len() > 1 {
-            failed_tlcs.sort_by_key(|a| a.1);
-            failed_tlcs
-                .iter()
-                .take(failed_tlcs.len() - 1)
-                .map(|(tlc_id, _)| *tlc_id)
-                .collect()
-        } else {
-            return Vec::new();
-        }
-    }
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
@@ -5296,19 +5271,24 @@ impl ChannelActorState {
         // Remove the oldest failed tlcs from the channel state turns out to be very tricky
         // Because the different parties may have different views on the failed tlcs,
         // so we need to be very careful here.
-
         // The basic idea is to remove the oldest failed tlcs that are confirmed by both parties.
-        // And we need to calculate the oldest failed tlcs independently from two directions,
-        // Because we may have tlc operations from both directions at the same time, order matters.
         // see #475 for more details.
-        let failed_offered_tlcs = self.tlc_state.offered_tlcs.get_oldest_failed_tlcs();
-        let failed_received_tlcs = self.tlc_state.received_tlcs.get_oldest_failed_tlcs();
+        let to_be_removed_ids = self
+            .tlc_state
+            .all_tlcs()
+            .filter_map(|tlc| {
+                if tlc.removed_confirmed_at.is_some()
+                    && tlc.applied_flags.contains(AppliedFlags::APPLIED_REMOVE)
+                {
+                    Some(tlc.tlc_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<TLCId>>();
 
-        for tlc_id in failed_offered_tlcs
-            .iter()
-            .chain(failed_received_tlcs.iter())
-        {
-            self.tlc_state.apply_remove_tlc(*tlc_id);
+        for tlc_id in to_be_removed_ids {
+            self.tlc_state.apply_remove_tlc(tlc_id);
         }
     }
 
