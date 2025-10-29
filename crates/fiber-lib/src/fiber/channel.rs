@@ -1050,10 +1050,7 @@ where
             let invoice = self.store.get_invoice(&payment_hash);
             if let Some(ref invoice) = invoice {
                 let invoice_status = self.get_invoice_status(invoice);
-                if !matches!(
-                    invoice_status,
-                    CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
-                ) {
+                if !matches!(invoice_status, CkbInvoiceStatus::Open) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
                 }
             }
@@ -1133,13 +1130,6 @@ where
                         payment_hash
                     );
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                }
-
-                // update invoice status to received only all the error checking passed
-                if invoice.is_some() {
-                    self.store
-                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                        .expect("update invoice status failed");
                 }
 
                 if let Some(custom_records) = peeled_onion_packet.current.custom_records {

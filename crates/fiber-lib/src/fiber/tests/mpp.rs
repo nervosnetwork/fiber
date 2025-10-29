@@ -19,7 +19,7 @@ use crate::{
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
     gen_rand_secp256k1_public_key, gen_rand_sha256_hash, gen_rpc_config,
-    invoice::{Currency, InvoiceBuilder},
+    invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     now_timestamp_as_millis_u64,
     rpc::invoice::NewInvoiceParams,
     test_utils::{
@@ -47,6 +47,9 @@ async fn test_send_mpp_basic_two_channels_one_time() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
+    let invoice = node_1.get_invoice_status(&payment_hash).unwrap();
+    assert_eq!(invoice, CkbInvoiceStatus::Open);
+
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
     node_0.wait_until_success(payment_hash).await;
 
@@ -64,6 +67,10 @@ async fn test_send_mpp_basic_two_channels_one_time() {
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
+
+    let invoice = node_1.get_invoice_status(&payment_hash).unwrap();
+    eprintln!("invoice status: {:?}", invoice);
+    assert_eq!(invoice, CkbInvoiceStatus::Paid);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

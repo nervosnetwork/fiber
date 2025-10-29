@@ -1704,7 +1704,7 @@ where
                     })
                     .collect();
 
-                let is_not_mpp = tlc_info.is_some();
+                let not_mpp = tlc_info.is_some();
                 let mut tlc_fail = None;
 
                 // check if all tlcs have the same total amount
@@ -1715,26 +1715,25 @@ where
                 {
                     error!("TLCs have inconsistent total_amount: {:?}", tlcs);
                     tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
-                } else {
-                    // check if tlc set are fulfilled
-                    let Some(invoice) = self.store.get_invoice(&payment_hash) else {
-                        error!(
-                            "Try to settle mpp tlc set, but invoice not found for payment hash {:?}",
-                            payment_hash
-                        );
-                        return Ok(());
-                    };
-                    // just return if invoice is not fulfilled
-                    if !is_invoice_fulfilled(&invoice, &tlcs) {
-                        return Ok(());
-                    }
-                    if is_not_mpp
-                        && self.store.get_invoice_status(&payment_hash)
-                            == Some(CkbInvoiceStatus::Paid)
+                }
+                let Some(invoice) = self.store.get_invoice(&payment_hash) else {
+                    error!(
+                        "Try to settle mpp tlc set, but invoice not found for payment hash {:?}",
+                        payment_hash
+                    );
+                    return Ok(());
+                };
+
+                let fulfilled = is_invoice_fulfilled(&invoice, &tlcs);
+                if not_mpp {
+                    if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open)
+                        || !fulfilled
                     {
                         tlc_fail =
                             Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
                     }
+                } else if !fulfilled {
+                    return Ok(());
                 }
 
                 let Some(preimage) = self.store.get_preimage(&payment_hash) else {
@@ -1754,6 +1753,11 @@ where
                             payment_preimage: preimage,
                         }),
                     };
+
+                    self.store
+                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                        .expect("update invoice status failed");
+
                     match state
                         .send_command_to_channel(
                             tlc.channel_id,
@@ -1773,10 +1777,6 @@ where
                                 &tlc.channel_id,
                                 tlc.id(),
                             );
-                            if is_not_mpp {
-                                self.store
-                                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)?;
-                            }
                         }
                         Err(err) => {
                             error!(
