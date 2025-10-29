@@ -796,7 +796,7 @@ where
                         TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
                             | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
                     )
-                    && !tlc.applied_flags.contains(AppliedFlags::APPLIED_REMOVE)
+                    && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
             })
             .map(|tlc| tlc.tlc_id)
             .collect();
@@ -1033,7 +1033,7 @@ where
             .tlc_state
             .get_mut(&add_tlc.tlc_id)
             .expect("expect tlc");
-        tlc.applied_flags = AppliedFlags::APPLIED_ADD;
+        tlc.applied_flags = AppliedFlags::ADD;
 
         if peeled_onion_packet.is_last() {
             if forward_amount != add_tlc.amount {
@@ -1329,7 +1329,7 @@ where
     ) -> ProcessingChannelResult {
         let channel_id = state.get_id();
         let tlc = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");
-        tlc.applied_flags |= AppliedFlags::APPLIED_REMOVE;
+        tlc.applied_flags |= AppliedFlags::REMOVE;
 
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
 
@@ -2949,8 +2949,8 @@ bitflags! {
     #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
     #[serde(transparent)]
     pub struct AppliedFlags: u8 {
-        const APPLIED_ADD = 1;
-        const APPLIED_REMOVE = 1 << 1;
+        const ADD = 1;
+        const REMOVE = 1 << 1;
     }
 }
 
@@ -5278,7 +5278,7 @@ impl ChannelActorState {
             .all_tlcs()
             .filter_map(|tlc| {
                 if tlc.removed_confirmed_at.is_some()
-                    && tlc.applied_flags.contains(AppliedFlags::APPLIED_REMOVE)
+                    && tlc.applied_flags.contains(AppliedFlags::REMOVE)
                 {
                     Some(tlc.tlc_id)
                 } else {
