@@ -7,7 +7,7 @@ GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|w
 
 .PHONY: build-metrics-prof
 build-metrics-prof:
-	RUSTFLAGS="${RUSTFLAGS} --cfg tokio_unstable" cargo build --profile prof --features "metrics pprof"
+	RUSTFLAGS="${RUSTFLAGS} --cfg tokio_unstable -Cforce-frame-pointers=yes" cargo +nightly build --profile prof --features "metrics pprof"
 
 .PHONY: test
 test:
