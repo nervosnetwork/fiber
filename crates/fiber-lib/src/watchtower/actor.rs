@@ -1636,6 +1636,9 @@ struct Unlock {
 
 impl Unlock {
     pub fn build_from_witness(witness: &[u8]) -> Option<Self> {
+        if witness.len() < 67 {
+            return None;
+        }
         let unlock_type = witness[0];
         let with_preimage = witness[1] == 1;
         if with_preimage && witness.len() < 99 {
@@ -1714,7 +1717,6 @@ impl SettlementWitness {
                     }
                 }
                 None => {
-                    warn!("failed to build unlock from witness, is it a valid witness?");
                     return None;
                 }
             }
