@@ -1407,7 +1407,7 @@ fn mul(
     let new_integer = full_numerator / new_denominator;
     let new_numerator = full_numerator % new_denominator;
 
-    // nomalize the fraction (max epoch length is 1800)
+    // normalize the fraction (max epoch length is 1800)
     let scale_factor = if new_denominator > 1800 {
         new_denominator / 1800 + 1
     } else {
