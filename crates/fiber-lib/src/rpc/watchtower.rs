@@ -139,8 +139,8 @@ pub struct CreateWatchChannelParams {
     pub local_funding_pubkey: Pubkey,
     /// The remote party's funding public key
     pub remote_funding_pubkey: Pubkey,
-    /// Remote settlement data
-    pub remote_settlement_data: SettlementData,
+    /// Settlement data
+    pub settlement_data: SettlementData,
 }
 
 #[serde_as]
@@ -226,7 +226,7 @@ where
             params.remote_settlement_key,
             params.local_funding_pubkey,
             params.remote_funding_pubkey,
-            params.remote_settlement_data,
+            params.settlement_data,
         );
         Ok(())
     }

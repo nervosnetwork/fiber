@@ -277,7 +277,7 @@ fn test_store_watchtower() {
             local_funding_pubkey,
             remote_funding_pubkey,
             revocation_data: None,
-            local_settlement_data: None,
+            local_settlement_data: settlement_data.clone(),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
         }]
@@ -305,7 +305,7 @@ fn test_store_watchtower() {
             remote_settlement_key,
             local_funding_pubkey,
             remote_funding_pubkey,
-            local_settlement_data: None,
+            local_settlement_data: settlement_data.clone(),
             revocation_data: Some(revocation_data),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
@@ -419,7 +419,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         local_funding_pubkey,
         remote_funding_pubkey,
         revocation_data: None,
-        local_settlement_data: None,
+        local_settlement_data: settlement_data.clone(),
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
     }];

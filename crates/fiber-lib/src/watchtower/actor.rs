@@ -113,7 +113,7 @@ where
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
-                remote_settlement_data,
+                settlement_data,
             ) => self.store.insert_watch_channel(
                 NodeId::local(),
                 channel_id,
@@ -122,7 +122,7 @@ where
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
-                remote_settlement_data,
+                settlement_data,
             ),
             WatchtowerMessage::RemoveChannel(channel_id) => {
                 self.store.remove_watch_channel(NodeId::local(), channel_id)
@@ -771,10 +771,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let settlement_data = if for_remote {
         channel_data.remote_settlement_data.clone()
     } else {
-        channel_data
-            .local_settlement_data
-            .clone()
-            .expect("local settlement data")
+        channel_data.local_settlement_data.clone()
     };
 
     let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);

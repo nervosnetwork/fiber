@@ -756,7 +756,7 @@ impl WatchtowerStore for Store {
         remote_settlement_key: Pubkey,
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
-        remote_settlement_data: SettlementData,
+        settlement_data: SettlementData,
     ) {
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
@@ -772,9 +772,9 @@ impl WatchtowerStore for Store {
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
-                pending_remote_settlement_data: remote_settlement_data.clone(),
-                remote_settlement_data,
-                local_settlement_data: None,
+                pending_remote_settlement_data: settlement_data.clone(),
+                remote_settlement_data: settlement_data.clone(),
+                local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
             },
             "ChannelData",
@@ -866,7 +866,7 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
-            channel_data.local_settlement_data = Some(local_settlement_data);
+            channel_data.local_settlement_data = local_settlement_data;
             let mut batch = self.batch();
             batch.put_kv(KeyValue::WatchtowerChannel(
                 node_id,

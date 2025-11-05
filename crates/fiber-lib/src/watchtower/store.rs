@@ -27,7 +27,7 @@ pub trait WatchtowerStore {
         remote_settlement_key: Pubkey,
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
-        remote_settlement_data: SettlementData,
+        settlement_data: SettlementData,
     );
     /// Remove a channel from the store, the watchtower will stop monitoring the channel
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256);
@@ -91,7 +91,7 @@ pub struct ChannelData {
     // may force close the channel with the latest commitment transaction, in this case, the watchtower
     // should have pending_remote_settlement_data to settle the remote commitment transaction.
     pub pending_remote_settlement_data: SettlementData,
-    pub local_settlement_data: Option<SettlementData>,
+    pub local_settlement_data: SettlementData,
     pub revocation_data: Option<RevocationData>,
 }
 

@@ -506,7 +506,7 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
             remote_settlement_key,
             local_funding_pubkey,
             remote_funding_pubkey,
-            remote_settlement_data,
+            settlement_data,
         ) => {
             watchtower_client
                 .create_watch_channel(CreateWatchChannelParams {
@@ -516,7 +516,7 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     remote_settlement_key,
                     local_funding_pubkey,
                     remote_funding_pubkey,
-                    remote_settlement_data,
+                    settlement_data,
                 })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);

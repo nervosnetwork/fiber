@@ -6196,11 +6196,8 @@ impl ChannelActorState {
                 self.check_tx_complete_preconditions()?;
 
                 let (local_settlement_key, remote_settlement_key) = self.get_settlement_keys();
-                let settlement_data = SettlementData {
-                    local_amount: self.get_local_balance(),
-                    remote_amount: self.get_remote_balance(),
-                    tlcs: vec![],
-                };
+                let settlement_data = self.build_settlement_data(false);
+
                 network
                     .send_message(NetworkActorMessage::new_notification(
                         NetworkServiceEvent::RemoteTxComplete(
@@ -7435,26 +7432,6 @@ impl ChannelActorState {
         };
         let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
         key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly()
-    }
-
-    pub fn build_and_verify_commitment_tx(
-        &self,
-        funding_tx_partial_signature: PartialSignature,
-    ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let (commitment_tx, settlement_data) = self.build_commitment_tx_and_settlement_data(false);
-
-        let funding_verify_ctx = self.get_funding_verify_context();
-        funding_verify_ctx.verify(
-            funding_tx_partial_signature,
-            &compute_tx_message(&commitment_tx),
-        )?;
-
-        Ok(PartiallySignedCommitmentTransaction {
-            version: self.get_remote_commitment_number(),
-            commitment_tx,
-            settlement_data,
-            funding_tx_partial_signature,
-        })
     }
 
     fn build_and_sign_commitment_tx(
