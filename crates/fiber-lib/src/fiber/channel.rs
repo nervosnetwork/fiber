@@ -1140,6 +1140,20 @@ where
                 }
 
                 self.store_preimage(payment_hash, preimage);
+            } else if let Some(invoice) = invoice {
+                let expiry_time_millis = invoice
+                    .expiry_time()
+                    .map(|duration| duration.as_millis() as u64)
+                    .unwrap_or(DEFAULT_HOLD_TLC_TIMEOUT);
+                // Save TLC for the Hold Invoice
+                self.store.insert_payment_hold_tlc(
+                    payment_hash,
+                    HoldTlc {
+                        channel_id: add_tlc.channel_id,
+                        tlc_id: add_tlc.tlc_id.into(),
+                        hold_expire_at: now_timestamp_as_millis_u64() + expiry_time_millis,
+                    },
+                );
             } else {
                 error!("preimage is not found for payment hash: {:?}", payment_hash);
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
