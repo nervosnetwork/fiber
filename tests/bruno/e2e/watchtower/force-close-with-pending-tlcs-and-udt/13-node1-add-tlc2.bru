@@ -1,7 +1,7 @@
 meta {
-  name: node1 add tlc1, 3000000 shannons
+  name: node1 add tlc2, 6000000 shannons
   type: http
-  seq: 9
+  seq: 13
 }
 
 post {
@@ -23,8 +23,8 @@ body:json {
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "amount": "0x2dc6c0",
-        "payment_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "amount": "0x5b8d80",
+        "payment_hash": "{{payment_hash}}",
         "expiry": "{{expiry}}"
       }
     ]
@@ -37,8 +37,8 @@ assert {
 }
 
 script:pre-request {
-  // 10 seconds expiry
-  let expiry = "0x" + (Date.now() + 1000 * 10).toString(16);
+  // 17 seconds expiry
+  let expiry = "0x" + (Date.now() + 1000 * 17).toString(16);
   bru.setVar("expiry", expiry);
 }
 

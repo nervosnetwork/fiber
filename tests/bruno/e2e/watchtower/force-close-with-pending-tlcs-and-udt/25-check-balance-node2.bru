@@ -1,7 +1,7 @@
 meta {
   name: check balance, the difference should be the tlc2 (6000000)
   type: http
-  seq: 22
+  seq: 25
 }
 
 post {
@@ -38,7 +38,7 @@ body:json {
 }
 
 script:pre-request {
-  let script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  let script = bru.getVar("NODE2_FUNDING_SCRIPT");
   let body = req.getBody();
   body.params[0].script = script;
   req.setBody(body);
@@ -46,13 +46,13 @@ script:pre-request {
 
 script:post-response {
   let capacity = res.body.result.objects.reduce((acc, cell) => {
-    console.log("NODE1_NEW_BALANCE: ", cell.output_data);
+    console.log("NODE2_NEW_BALANCE: ", cell.output_data);
     const hexBytes = cell.output_data.slice(2).match(/../g).reverse().join('');
     return acc + BigInt(`0x${hexBytes}`);
   }, BigInt(0));
-  bru.setVar("NODE1_NEW_BALANCE", capacity);
+  bru.setVar("NODE2_NEW_BALANCE", capacity);
 }
 
 assert {
-  Number(BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(bru.getVar("NODE1_NEW_BALANCE"))): eq 6000000
+  Number(BigInt(bru.getVar("NODE2_NEW_BALANCE")) - BigInt(bru.getVar("NODE2_BALANCE"))): eq 6000000
 }

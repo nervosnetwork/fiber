@@ -1,7 +1,7 @@
 meta {
-  name: generate a few blocks for final settlement tx2 to be committed
+  name: generate a few blocks for commitment tx
   type: http
-  seq: 20
+  seq: 17
 }
 
 post {
@@ -26,4 +26,9 @@ body:json {
 
 assert {
   res.status: eq 200
+}
+
+script:post-response {
+  // Wait for the commitment tx to be included in a block
+  await new Promise(r => setTimeout(r, 1000));
 }

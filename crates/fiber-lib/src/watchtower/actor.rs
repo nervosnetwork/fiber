@@ -1322,7 +1322,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         }
         let amount = u128::from_le_bytes(output_data.as_bytes()[0..16].try_into().unwrap());
         let new_amount = amount.saturating_sub(unlock_amount);
-        let new_commitment_output = cell_output
+        let mut new_commitment_output = cell_output
             .clone()
             .as_builder()
             .lock(
@@ -1344,7 +1344,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             .occupied_capacity(Capacity::bytes(settlement_output_data.raw_data().len()).unwrap())
             .expect("capacity does not overflow")
             .as_u64();
-        let settlement_output = settlement_output
+        let mut settlement_output = settlement_output
             .as_builder()
             .capacity(settlement_output_occupied_capacity.pack())
             .build();
@@ -1376,11 +1376,45 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 &commitment_cell.output.type_.map(|script| script.into()),
             )?)
             .input(input);
+
+        let outputs_capacity: u64 = if unlock.unlock_type >= 0xFE {
+            if two_parties_all_settled {
+                settlement_output = settlement_output
+                    .as_builder()
+                    .capacity(new_commitment_output.capacity())
+                    .build();
+                settlement_output.capacity().unpack()
+            } else {
+                let new_commitment_output_capacity = new_commitment_output
+                    .occupied_capacity(Capacity::bytes(16).unwrap())
+                    .expect("capacity does not overflow")
+                    .as_u64();
+                new_commitment_output = new_commitment_output
+                    .as_builder()
+                    .capacity(new_commitment_output_capacity.pack())
+                    .build();
+
+                let settlement_output_capacity: u64 = settlement_output.capacity().unpack();
+                let new_settlement_output_capacity = settlement_output_capacity
+                    + commitment_cell.output.capacity.value()
+                    - new_commitment_output_capacity;
+                settlement_output = settlement_output
+                    .as_builder()
+                    .capacity(new_settlement_output_capacity.pack())
+                    .build();
+
+                new_settlement_output_capacity + new_commitment_output_capacity
+            }
+        } else {
+            settlement_output_occupied_capacity + commitment_cell.output.capacity.value()
+        };
+
         if !two_parties_all_settled {
             tx_builder = tx_builder
                 .output(new_commitment_output.clone())
                 .output_data(new_commitment_output_data.clone());
         }
+
         tx_builder = tx_builder
             .output(settlement_output.clone())
             .output_data(settlement_output_data.clone())
@@ -1401,15 +1435,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
             .occupied_capacity(Capacity::shannons(0))
             .expect("capacity does not overflow")
             .as_u64();
-        let min_total_capacity =
-            change_output_occupied_capacity + settlement_output_occupied_capacity + fee;
+        let min_total_capacity = change_output_occupied_capacity + outputs_capacity + fee;
         let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
         query.script_search_mode = Some(SearchMode::Exact);
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
         query.data_len_range = Some(ValueRangeOption::new_exact(0));
         query.min_total_capacity = min_total_capacity;
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
-        let mut inputs_capacity = 0u64;
+        let mut inputs_capacity = commitment_cell.output.capacity.value();
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
             inputs_capacity += input_capacity;
@@ -1427,12 +1460,10 @@ fn build_settlement_tx<S: WatchtowerStore>(
             );
             let fee = fee_calculator
                 .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-            if inputs_capacity
-                >= change_output_occupied_capacity + settlement_output_occupied_capacity + fee
-            {
+            if inputs_capacity >= change_output_occupied_capacity + outputs_capacity + fee {
                 let new_change_output = change_output
                     .as_builder()
-                    .capacity((inputs_capacity - settlement_output_occupied_capacity - fee).pack())
+                    .capacity((inputs_capacity - outputs_capacity - fee).pack())
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![settlement_output, new_change_output]
