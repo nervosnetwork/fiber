@@ -1333,14 +1333,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .build(),
             )
             .build();
-        let new_commitment_output_data = if two_parties_all_settled {
-            amount
-        } else {
-            new_amount
-        }
-        .to_le_bytes()
-        .to_vec()
-        .pack();
+        let new_commitment_output_data = new_amount.to_le_bytes().to_vec().pack();
 
         let settlement_output = CellOutput::new_builder()
             .lock(fee_provider_lock_script.clone())
