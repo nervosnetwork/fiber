@@ -1339,7 +1339,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
             .lock(fee_provider_lock_script.clone())
             .type_(cell_output.type_().clone())
             .build();
-        let settlement_output_data = unlock_amount.to_le_bytes().to_vec().pack();
+        let settlement_output_data = if two_parties_all_settled {
+            amount
+        } else {
+            unlock_amount
+        }
+        .to_le_bytes()
+        .to_vec()
+        .pack();
         let settlement_output_occupied_capacity = settlement_output
             .occupied_capacity(Capacity::bytes(settlement_output_data.raw_data().len()).unwrap())
             .expect("capacity does not overflow")
