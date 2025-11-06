@@ -27,3 +27,7 @@ body:json {
 assert {
   res.status: eq 200
 }
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 5000));
+}

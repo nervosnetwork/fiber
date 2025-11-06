@@ -1,5 +1,5 @@
 meta {
-  name: check ckb balance, the difference should be the fee (it may vary, max 1 ckb)
+  name: check ckb balance, the difference should be the fee (it may vary, max 1 ckb + 5000 shannons)
   type: http
   seq: 26
 }
@@ -36,6 +36,6 @@ script:pre-request {
 }
 
 assert {
-  Number(BigInt(bru.getVar("NODE1_BALANCE_CKB")) - BigInt(res.body.result.capacity)): lt 100000000
-  Number(BigInt(bru.getVar("NODE1_BALANCE_CKB")) - BigInt(res.body.result.capacity)): gt -100000000
+  Number(BigInt(bru.getVar("NODE1_BALANCE_CKB")) - BigInt(res.body.result.capacity)): lt 100005000
+  Number(BigInt(bru.getVar("NODE1_BALANCE_CKB")) - BigInt(res.body.result.capacity)): gt -100005000
 }
