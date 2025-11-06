@@ -1495,9 +1495,12 @@ where
 
                 // peer has active channels but down
                 let mut with_channel_down_peers = HashSet::new();
+                let mut ready_channels_count = 0;
+                let mut shuttingdown_channels_count = 0;
                 for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            ready_channels_count += 1;
                             if actor_state.reestablishing {
                                 continue;
                             }
@@ -1648,18 +1651,41 @@ where
                                 }
                             }
                         }
+                    } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
+                        shuttingdown_channels_count += 1;
                     }
                 }
 
+                // update metrics
                 #[cfg(feature = "metrics")]
-                metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
-                    .set(with_channel_down_peers.len() as u32);
-                if !with_channel_down_peers.is_empty() {
-                    debug!(
-                        "Check channels: found {} peers down with channels",
-                        with_channel_down_peers.len()
-                    );
+                {
+                    // channels
+                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
+                        .set(with_channel_down_peers.len() as u32);
+                    metrics::gauge!(crate::metrics::TOTAL_CHANNEL_COUNT)
+                        .set((ready_channels_count + shuttingdown_channels_count) as u32);
+                    metrics::gauge!(crate::metrics::READY_CHANNEL_COUNT)
+                        .set(ready_channels_count as u32);
+                    metrics::gauge!(crate::metrics::SHUTTING_DOWN_CHANNEL_COUNT)
+                        .set(shuttingdown_channels_count as u32);
+
+                    // peers
+                    let total_peers = state.peer_session_map.len();
+                    let outbound_peers = state
+                        .peer_session_map
+                        .iter()
+                        .filter(|(_id, peer)| peer.session_type.is_outbound())
+                        .count();
+                    let inbound_peers = total_peers - outbound_peers;
+                    metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).set(total_peers as u32);
+                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).set(inbound_peers as u32);
+                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).set(outbound_peers as u32);
                 }
+                debug!(
+                    "Check channels: {} ready channels {} shutting down channels, found {} peers down with channels",
+                    ready_channels_count, shuttingdown_channels_count,
+                    with_channel_down_peers.len()
+                );
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
@@ -3929,18 +3955,6 @@ where
         session: &SessionContext,
     ) {
         debug!("Peer {remote_peer_id:?} connected");
-        #[cfg(feature = "metrics")]
-        {
-            metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).increment(1);
-            match session.ty {
-                SessionType::Inbound => {
-                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).increment(1);
-                }
-                SessionType::Outbound => {
-                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).increment(1);
-                }
-            }
-        }
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             ConnectedPeer {
@@ -4000,18 +4014,6 @@ where
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
-            #[cfg(feature = "metrics")]
-            {
-                metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).decrement(1);
-                match peer.session_type {
-                    SessionType::Inbound => {
-                        metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).decrement(1);
-                    }
-                    SessionType::Outbound => {
-                        metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).decrement(1);
-                    }
-                }
-            }
             if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
