@@ -782,7 +782,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         .build();
 
     let mut two_parties_all_settled = false;
-    let (unlock, unlock_amount, unlock_key, new_settlement_witness) = match settlement_witness {
+    let (unlock, mut unlock_amount, unlock_key, new_settlement_witness) = match settlement_witness {
         Some(mut sw) => {
             if sw.update() {
                 debug!("channel_data local_settlement_key pubkey hash: {:?}，sw settlement_remote_pubkey_hash: {:?}, sw settlement_local_pubkey_hash: {:?}, for_remote: {}",
@@ -1202,6 +1202,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
     if cell_output.type_().is_none() {
         let capacity: u64 = cell_output.capacity().unpack();
+        if two_parties_all_settled {
+            unlock_amount = capacity as u128;
+        }
         let new_capacity = (capacity as u128).saturating_sub(unlock_amount) as u64;
         let new_commitment_output = cell_output
             .clone()
