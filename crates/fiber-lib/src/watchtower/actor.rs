@@ -815,7 +815,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 )
                             }
                         } else {
-                            let mut should_settle_local = true;
+                            let mut should_settle_local = sw.pending_htlcs.is_empty();
                             let mut unlock_option = None;
                             for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
                                 let expiry = match tlc.absolute_expiry() {
@@ -960,7 +960,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 )
                             }
                         } else {
-                            let mut should_settle_local = true;
+                            let mut should_settle_local = sw.pending_htlcs.is_empty();
                             let mut unlock_option = None;
                             for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
                                 if !tlc.is_offered() {
@@ -1086,7 +1086,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             }
         }
         None => {
-            let mut should_settle_local = true;
+            let mut should_settle_local = settlement_data.tlcs.is_empty();
             let mut unlock_option = None;
             for (i, tlc) in settlement_data.tlcs.iter().enumerate() {
                 match (tlc.tlc_id.is_offered(), for_remote) {
@@ -1827,7 +1827,7 @@ fn mul(
     let new_integer = full_numerator / new_denominator;
     let new_numerator = full_numerator % new_denominator;
 
-    // normalize the fraction (max epoch length is 1800)
+    // nomalize the fraction (max epoch length is 1800)
     let scale_factor = if new_denominator > 1800 {
         new_denominator / 1800 + 1
     } else {
