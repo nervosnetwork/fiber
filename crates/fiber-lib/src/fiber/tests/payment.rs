@@ -659,6 +659,59 @@ async fn test_send_payment_with_normal_invoice_workflow() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
+async fn test_send_payment_with_hold_invoice_workflow() {
+    init_tracing();
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::CkbHash
+        .hash(payment_preimage.as_ref())
+        .into();
+    let invoice = node_1
+        .gen_invoice(NewInvoiceParams {
+            amount: 1000,
+            description: Some("test invoice".to_string()),
+            payment_hash: Some(payment_hash),
+            ..Default::default()
+        })
+        .await;
+
+    // node_0 -> node_1 will be ok for hold invoice
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.invoice_address),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    println!("res: {:?}", res);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    node_1
+        .settle_invoice(&payment_hash, payment_preimage)
+        .await
+        .expect("settle invoice");
+
+    node_0.wait_until_success(payment_hash).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
 async fn test_send_payment_with_more_capacity_for_payself() {
     init_tracing();
 
