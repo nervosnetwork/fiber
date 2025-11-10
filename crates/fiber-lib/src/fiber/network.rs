@@ -2259,7 +2259,7 @@ where
             }
 
             NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
-                let _ = reply.send(self.settle_invoice(&myself, &hash, &preimage));
+                let _ = reply.send(self.settle_invoice(&myself, hash, preimage));
             }
             NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
                 let _ = reply.send(self.add_invoice(invoice, preimage));
@@ -2376,12 +2376,12 @@ where
     pub fn settle_invoice(
         &self,
         myself: &ActorRef<NetworkActorMessage>,
-        payment_hash: &Hash256,
-        payment_preimage: &Hash256,
+        payment_hash: Hash256,
+        payment_preimage: Hash256,
     ) -> Result<(), SettleInvoiceError> {
         let invoice = self
             .store
-            .get_invoice(payment_hash)
+            .get_invoice(&payment_hash)
             .ok_or(SettleInvoiceError::InvoiceNotFound)?;
 
         let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
@@ -2390,11 +2390,15 @@ where
             return Err(SettleInvoiceError::HashMismatch);
         }
 
-        self.store.insert_preimage(*payment_hash, *payment_preimage);
+        self.store.insert_preimage(payment_hash, payment_preimage);
+
+        let _ = myself.send_message(NetworkActorMessage::new_notification(
+            NetworkServiceEvent::PreimageCreated(payment_hash, payment_preimage),
+        ));
 
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SettleMPPTlcSet(*payment_hash),
+            NetworkActorCommand::SettleMPPTlcSet(payment_hash),
         ));
 
         Ok(())
