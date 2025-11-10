@@ -815,13 +815,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 )
                             }
                         } else {
-                            let mut should_settle_local = sw.pending_htlcs.is_empty();
+                            let mut pending_tlcs_count = sw.pending_htlcs.len();
                             let mut unlock_option = None;
                             for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
                                 let expiry = match tlc.absolute_expiry() {
                                     Some(expiry) => expiry,
                                     None => continue,
                                 };
+
                                 if tlc.is_offered() {
                                     let delay = mul(delay_epoch, 2, 3);
                                     if cell_header_epoch.to_rational() + delay.to_rational()
@@ -836,7 +837,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     .then_some(&settlement_tlc.local_key)
                                             })
                                         {
-                                            should_settle_local = false;
                                             if current_time > expiry {
                                                 unlock_option = Some((
                                                     Unlock {
@@ -869,7 +869,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     .then_some(&settlement_tlc.local_key)
                                             })
                                         {
-                                            should_settle_local = false;
                                             if let Some(preimage) =
                                                 store.search_preimage(&tlc.payment_hash)
                                             {
@@ -889,8 +888,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                 if cell_header_epoch.to_rational()
                                                     + delay_epoch.to_rational()
                                                     <= current_epoch.to_rational()
+                                                    && current_time > expiry
                                                 {
-                                                    should_settle_local = true
+                                                    pending_tlcs_count -= 1;
                                                 }
                                             }
                                         } else {
@@ -900,7 +900,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 }
                             }
 
-                            if should_settle_local {
+                            if pending_tlcs_count == 0 {
                                 if cell_header_epoch.to_rational() + delay_epoch.to_rational()
                                     > current_epoch.to_rational()
                                 {
@@ -960,14 +960,15 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 )
                             }
                         } else {
-                            let mut should_settle_local = sw.pending_htlcs.is_empty();
+                            let mut pending_tlcs_count = sw.pending_htlcs.len();
                             let mut unlock_option = None;
                             for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
+                                let expiry = match tlc.absolute_expiry() {
+                                    Some(expiry) => expiry,
+                                    None => continue,
+                                };
+
                                 if !tlc.is_offered() {
-                                    let expiry = match tlc.absolute_expiry() {
-                                        Some(expiry) => expiry,
-                                        None => continue,
-                                    };
                                     let delay = mul(delay_epoch, 2, 3);
                                     if cell_header_epoch.to_rational() + delay.to_rational()
                                         <= current_epoch.to_rational()
@@ -981,7 +982,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     .then_some(&settlement_tlc.local_key)
                                             })
                                         {
-                                            should_settle_local = false;
                                             if current_time > expiry {
                                                 unlock_option = Some((
                                                     Unlock {
@@ -1014,7 +1014,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                     .then_some(&settlement_tlc.local_key)
                                             })
                                         {
-                                            should_settle_local = false;
                                             if let Some(preimage) =
                                                 store.search_preimage(&tlc.payment_hash)
                                             {
@@ -1034,8 +1033,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                 if cell_header_epoch.to_rational()
                                                     + delay_epoch.to_rational()
                                                     <= current_epoch.to_rational()
+                                                    && current_time > expiry
                                                 {
-                                                    should_settle_local = true
+                                                    pending_tlcs_count -= 1;
                                                 }
                                             }
                                         } else {
@@ -1045,7 +1045,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 }
                             }
 
-                            if should_settle_local {
+                            if pending_tlcs_count == 0 {
                                 if cell_header_epoch.to_rational() + delay_epoch.to_rational()
                                     > current_epoch.to_rational()
                                 {
@@ -1086,7 +1086,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             }
         }
         None => {
-            let mut should_settle_local = settlement_data.tlcs.is_empty();
+            let mut pending_tlcs_count = settlement_data.tlcs.len();
             let mut unlock_option = None;
             for (i, tlc) in settlement_data.tlcs.iter().enumerate() {
                 match (tlc.tlc_id.is_offered(), for_remote) {
@@ -1095,7 +1095,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                         {
-                            should_settle_local = false;
                             if current_time > tlc.expiry {
                                 unlock_option = Some((
                                     Unlock {
@@ -1117,7 +1116,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                         {
-                            should_settle_local = false;
                             if let Some(preimage) = store.get_watch_preimage(&tlc.payment_hash) {
                                 unlock_option = Some((
                                     Unlock {
@@ -1134,8 +1132,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             } else {
                                 if cell_header_epoch.to_rational() + delay_epoch.to_rational()
                                     <= current_epoch.to_rational()
+                                    && current_time > tlc.expiry
                                 {
-                                    should_settle_local = true
+                                    pending_tlcs_count -= 1;
                                 }
                             }
                         }
@@ -1143,7 +1142,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 }
             }
 
-            if should_settle_local {
+            if pending_tlcs_count == 0 {
                 if cell_header_epoch.to_rational() + delay_epoch.to_rational()
                     > current_epoch.to_rational()
                 {
