@@ -40,8 +40,8 @@ pub enum CchError {
     ReceiveBTCOrderAlreadyPaid,
     #[error("ReceiveBTC received payment amount is too small")]
     ReceiveBTCReceivedAmountTooSmall,
-    #[error("ReceiveBTC expected preimage but missing")]
-    ReceiveBTCMissingPreimage,
+    #[error("Expect preimage in settled payment but missing")]
+    SettledPaymentMissingPreimage,
     #[error("System time error: {0}")]
     SystemTimeError(#[from] SystemTimeError),
     #[error("JSON serialization error: {0}")]
