@@ -1654,7 +1654,7 @@ impl Htlc {
         let since = Since::from_raw_value(self.htlc_expiry);
         if since.is_absolute() {
             match since.extract_metric() {
-                Some((SinceType::Timestamp, expiry)) => Some(expiry),
+                Some((SinceType::Timestamp, expiry)) => Some(expiry * 1000),
                 _ => None,
             }
         } else {
