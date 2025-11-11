@@ -1,7 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Batch, DbDirection, IteratorMode, Store};
+pub use native::{Batch, DbDirection, IteratorMode, Store, StoreChangeWatcher};
 
 #[cfg(all(target_arch = "wasm32", not(test)))]
 mod browser;
@@ -43,7 +43,7 @@ use ckb_types::packed::OutPoint;
 use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tentacle::secio::PeerId;
 use tracing::info;
@@ -236,6 +236,33 @@ pub enum KeyValue {
     NetworkActorState(PeerId, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
     HoldTlc((Hash256, Hash256, u64), u64),
+}
+
+/// Recorded store changes.
+///
+/// This is a subset of all `put_kv(KeyValue)` and `delete(&[u8])` changes. Only interested changes
+/// are recorded and sent to watchers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum StoreChange {
+    PutCkbInvoice {
+        payment_hash: Hash256,
+        invoice: CkbInvoice,
+    },
+    PutPreimage {
+        payment_hash: Hash256,
+        payment_preimage: Hash256,
+    },
+    DeletePreimage {
+        payment_hash: Hash256,
+    },
+    PutCkbInvoiceStatus {
+        payment_hash: Hash256,
+        payment_status: CkbInvoiceStatus,
+    },
+    PutPaymentSession {
+        payment_hash: Hash256,
+        payment_session: PaymentSession,
+    },
 }
 
 pub trait StoreKeyValue {

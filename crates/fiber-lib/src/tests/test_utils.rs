@@ -704,6 +704,24 @@ impl NetworkNode {
         self.store.get_preimage(payment_hash)
     }
 
+    pub async fn settle_invoice(
+        &self,
+        payment_hash: &Hash256,
+        preimage: Hash256,
+    ) -> Result<(), String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                *payment_hash,
+                preimage,
+                rpc_reply,
+            ))
+        };
+
+        call!(self.network_actor, message)
+            .expect("source_node alive")
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn send_payment(
         &self,
         command: SendPaymentCommand,

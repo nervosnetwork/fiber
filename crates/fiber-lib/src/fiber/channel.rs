@@ -1138,6 +1138,27 @@ where
                 }
 
                 self.store_preimage(payment_hash, preimage);
+            } else if let Some(invoice) = invoice {
+                // The TLC should be held until the invoice is expired or the TLC itself is
+                // expired.
+                let hold_expire_at = match invoice.expiry_time() {
+                    Some(invoice_expiry) => u64::try_from(
+                        invoice_expiry
+                            .as_millis()
+                            .saturating_add(invoice.data.timestamp),
+                    )
+                    .unwrap_or(u64::MAX),
+                    None => add_tlc.expiry,
+                };
+                // Save TLC for the Hold Invoice
+                self.store.insert_payment_hold_tlc(
+                    payment_hash,
+                    HoldTlc {
+                        channel_id: add_tlc.channel_id,
+                        tlc_id: add_tlc.tlc_id.into(),
+                        hold_expire_at,
+                    },
+                );
             } else {
                 error!("preimage is not found for payment hash: {:?}", payment_hash);
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);

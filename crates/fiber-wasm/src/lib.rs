@@ -281,7 +281,11 @@ pub async fn fiber(
             channel: ChannelRpcServerImpl::new(network_actor.clone(), store.clone()),
             graph: GraphRpcServerImpl::new(network_graph.clone(), store.clone()),
             info: InfoRpcServerImpl::new(network_actor.clone(), config.ckb.unwrap_or_default()),
-            invoice: InvoiceRpcServerImpl::new(store.clone(), config.fiber),
+            invoice: InvoiceRpcServerImpl::new(
+                store.clone(),
+                Some(network_actor.clone()),
+                config.fiber,
+            ),
             payment: PaymentRpcServerImpl::new(network_actor.clone(), store.clone()),
             peer: PeerRpcServerImpl::new(network_actor.clone()),
         })

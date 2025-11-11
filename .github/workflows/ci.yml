@@ -65,7 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check for typos
-        uses: crate-ci/typos@v1.30.0
+        uses: crate-ci/typos@v1.39.0
       - name: Typos info
         if: failure()
         run: |
@@ -77,7 +77,7 @@ jobs:
 
   coverage:
     name: Code Coverage
-    needs: [ test ]
+    needs: [test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -118,7 +118,6 @@ jobs:
           vcpkg integrate install
           vcpkg install openssl:x64-windows-static-md
       - run: cargo build --locked --verbose --profile ${{ matrix.profile }}
-
 
   benchmark:
     name: Benchmark

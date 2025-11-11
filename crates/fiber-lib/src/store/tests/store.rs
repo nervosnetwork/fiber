@@ -949,3 +949,50 @@ fn test_store_save_channel_update_and_get_timestamp() {
         )]
     );
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+struct StoreChangeSaver {
+    pub changes: std::sync::RwLock<Vec<crate::store::store_impl::StoreChange>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl crate::store::store_impl::StoreChangeWatcher for StoreChangeSaver {
+    fn on_store_change(&self, change: crate::store::store_impl::StoreChange) {
+        self.changes.write().unwrap().push(change);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_change_watcher() {
+    use crate::store::store_impl::StoreChange;
+    use std::sync::Arc;
+
+    let (mut store, _dir) = generate_store();
+    let watcher = Arc::new(StoreChangeSaver::default());
+    store.set_watcher(watcher.clone());
+
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_preimage(preimage)
+        .fallback_address("address".to_string())
+        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .build()
+        .unwrap();
+    let payment_hash = *invoice.payment_hash();
+
+    store
+        .insert_invoice(invoice.clone(), Some(preimage))
+        .unwrap();
+    store.remove_preimage(&payment_hash);
+
+    let changes = watcher.changes.read().unwrap();
+    assert!(changes.iter().any(
+        |e| matches!(e, StoreChange::PutCkbInvoice { payment_hash: h, .. } if h == &payment_hash)
+    ));
+    assert!(changes.iter().any(
+        |e| matches!(e, StoreChange::DeletePreimage { payment_hash: h } if h == &payment_hash)
+    ));
+}

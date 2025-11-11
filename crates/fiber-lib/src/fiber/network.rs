@@ -99,7 +99,9 @@ use crate::fiber::types::{
     FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
+use crate::invoice::{
+    CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
+};
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
@@ -329,6 +331,18 @@ pub enum NetworkActorCommand {
     BuildPaymentRouter(
         BuildRouterCommand,
         RpcReplyPort<Result<PaymentRouter, String>>,
+    ),
+
+    AddInvoice(
+        CkbInvoice,
+        Option<Hash256>,
+        RpcReplyPort<Result<(), InvoiceError>>,
+    ),
+
+    SettleInvoice(
+        Hash256,
+        Hash256,
+        RpcReplyPort<Result<(), SettleInvoiceError>>,
     ),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
@@ -2224,6 +2238,13 @@ where
                 let _ = rpc.send(Ok(peers));
             }
 
+            NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
+                let _ = reply.send(self.settle_invoice(&myself, &hash, &preimage));
+            }
+            NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
+                let _ = reply.send(self.add_invoice(invoice, preimage));
+            }
+
             #[cfg(any(debug_assertions, feature = "bench"))]
             NetworkActorCommand::UpdateFeatures(features) => {
                 state.features = features;
@@ -2318,6 +2339,45 @@ where
                 }
             }
         }
+    }
+
+    pub fn add_invoice(
+        &self,
+        invoice: CkbInvoice,
+        preimage: Option<Hash256>,
+    ) -> Result<(), InvoiceError> {
+        let payment_hash = invoice.payment_hash();
+        if self.store.get_invoice(payment_hash).is_some() {
+            return Err(InvoiceError::InvoiceAlreadyExists);
+        }
+        self.store.insert_invoice(invoice, preimage)
+    }
+
+    pub fn settle_invoice(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        payment_hash: &Hash256,
+        payment_preimage: &Hash256,
+    ) -> Result<(), SettleInvoiceError> {
+        let invoice = self
+            .store
+            .get_invoice(payment_hash)
+            .ok_or(SettleInvoiceError::InvoiceNotFound)?;
+
+        let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+        let hash = hash_algorithm.hash(payment_preimage);
+        if hash.as_slice() != payment_hash.as_ref() {
+            return Err(SettleInvoiceError::HashMismatch);
+        }
+
+        self.store.insert_preimage(*payment_hash, *payment_preimage);
+
+        // We will send network actor a message to settle the invoice immediately if possible.
+        let _ = myself.send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SettleMPPTlcSet(*payment_hash),
+        ));
+
+        Ok(())
     }
 
     async fn handle_send_onion_packet_command(
