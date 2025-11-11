@@ -1,11 +1,11 @@
 meta {
-  name: 11-get-receive-btc-order-tlc-id
+  name: 13-get-invoice-status
   type: http
-  seq: 11
+  seq: 13
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,7 +19,7 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "get_receive_btc_order",
+    "method": "get_invoice",
     "params": [
       {
         "payment_hash": "{{PAYMENT_HASH}}"
@@ -30,8 +30,9 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.status: eq 200
+  res.body.result.status: isDefined
 }
+
 
 script:pre-request {
   if(bru.getVar("iteration") === undefined){
@@ -39,25 +40,27 @@ script:pre-request {
   }
 }
 
+vars:post-response {
+  max_iterations: 20
+}
+
 script:post-response {
   const i = bru.getVar("iteration");
   const n = bru.getVar("max_iterations");
   if (i < n) {
     console.log(`Try ${i+1}/${n}`);
+    console.log(res.body)
   }
 
-  if (res.body.result.tlc_id !== null) {
-    bru.setVar("N3N1_TLC_ID1", res.body.result.tlc_id);
-    console.log(`Node 3 has sent a pending tlc: ${res.body.result.tlc_id}`);
+  if (res.body.result.status == "Paid") {
+    console.log("Invoicee is paid");
     bru.setVar("iteration", 0);
-    // wait for confirmation
-    await new Promise(r => setTimeout(r, 500));
   } else if (i+1 < n) {
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => setTimeout(r, 100));
     bru.setVar("iteration", i + 1);
-    bru.setNextRequest("11-get-receive-btc-order-tlc-id");
+    bru.setNextRequest("13-get-invoice-status");
   } else {
     bru.setVar("iteration", 0);
-    throw new Error("Node 3 has not sent a pending tlc");
+    throw new Error("Alice has not received the payment");
   }
 }

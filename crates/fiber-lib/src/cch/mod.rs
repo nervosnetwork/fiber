@@ -1,5 +1,5 @@
 mod actor;
-pub use actor::{start_cch, CchActor, CchMessage, ReceiveBTC, SendBTC};
+pub use actor::{start_cch, CchActor, CchArgs, CchMessage, ReceiveBTC, SendBTC};
 
 mod error;
 pub use error::{CchError, CchResult};
@@ -11,7 +11,7 @@ pub use config::{
 };
 
 mod order;
-pub use order::{CchOrderStatus, ReceiveBTCOrder, SendBTCOrder};
+pub use order::{CchInvoice, CchOrder, CchOrderStatus};
 
 mod orders_db;
 pub use orders_db::CchOrdersDb;

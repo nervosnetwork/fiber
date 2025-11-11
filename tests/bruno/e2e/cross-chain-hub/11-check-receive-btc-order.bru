@@ -1,7 +1,7 @@
 meta {
-  name: 14-node3-list-channel
+  name: 11-check-receive-btc-order
   type: http
-  seq: 14
+  seq: 11
 }
 
 post {
@@ -19,10 +19,10 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "list_channels",
+    "method": "get_cch_order",
     "params": [
       {
-        "peer_id": "{{NODE1_PEERID}}"
+        "payment_hash": "{{PAYMENT_HASH}}"
       }
     ]
   }
@@ -30,6 +30,5 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.channels: isDefined
-  res.body.result.channels.map(channel => channel.channel_id): notContains {{N1N3_CHANNEL_ID}}
+  res.status: eq 200
 }
