@@ -2374,7 +2374,7 @@ where
 
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SettleMPPTlcSet(*payment_hash),
+            NetworkActorCommand::SettleTlcSet(*payment_hash, None),
         ));
 
         Ok(())
