@@ -1083,7 +1083,7 @@ The status of a cross-chain hub order, will update as the order progresses.
 
 #### Enum with values of
 
-* `Pending` - Order is created and has not send out payments yet.
+* `Pending` - Order is created and has not received the incoming payment
 * `IncomingAccepted` - HTLC in the incoming payment is accepted.
 * `OutgoingInFlight` - There's an outgoing payment in flight.
 * `OutgoingSettled` - The outgoing payment is settled.

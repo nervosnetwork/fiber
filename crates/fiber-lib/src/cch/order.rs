@@ -1,5 +1,4 @@
 use lightning_invoice::Bolt11Invoice;
-use lnd_grpc_tonic_client::lnrpc;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
@@ -15,7 +14,7 @@ use crate::{
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CchOrderStatus {
-    /// Order is created and has not send out payments yet.
+    /// Order is created and has not received the incoming payment
     Pending = 0,
     /// HTLC in the incoming payment is accepted.
     IncomingAccepted = 1,
@@ -27,31 +26,6 @@ pub enum CchOrderStatus {
     Succeeded = 4,
     /// Order is failed.
     Failed = 5,
-}
-
-/// Lnd payment is the outgoing part of a CCHOrder to send BTC from Fiber to Lightning
-impl From<lnrpc::payment::PaymentStatus> for CchOrderStatus {
-    fn from(status: lnrpc::payment::PaymentStatus) -> Self {
-        use lnrpc::payment::PaymentStatus;
-        match status {
-            PaymentStatus::Succeeded => CchOrderStatus::OutgoingSettled,
-            PaymentStatus::Failed => CchOrderStatus::Failed,
-            _ => CchOrderStatus::OutgoingInFlight,
-        }
-    }
-}
-
-/// Lnd invoice is the incoming part of a CCHOrder to receive BTC from Lightning to Fiber
-impl From<lnrpc::invoice::InvoiceState> for CchOrderStatus {
-    fn from(state: lnrpc::invoice::InvoiceState) -> Self {
-        use lnrpc::invoice::InvoiceState;
-        match state {
-            InvoiceState::Accepted => CchOrderStatus::IncomingAccepted,
-            InvoiceState::Canceled => CchOrderStatus::Failed,
-            InvoiceState::Settled => CchOrderStatus::Succeeded,
-            _ => CchOrderStatus::Pending,
-        }
-    }
 }
 
 /// The generated proxy invoice for the incoming payment.
