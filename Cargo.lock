@@ -4726,7 +4726,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 [[package]]
 name = "ractor"
 version = "0.15.6"
-source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#e3acf671e661b6bb73d714deffcddbdd638084d3"
+source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#547ee6aea5efb9fc20a2f281225bcd510919c373"
 dependencies = [
  "async-trait",
  "bon",
@@ -4745,7 +4745,7 @@ dependencies = [
 [[package]]
 name = "ractor_async_trait_decl"
 version = "0.15.6"
-source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#e3acf671e661b6bb73d714deffcddbdd638084d3"
+source = "git+https://github.com/officeyutong/ractor?branch=use-non-send-future-in-wasm#547ee6aea5efb9fc20a2f281225bcd510919c373"
 dependencies = [
  "proc-macro2",
  "quote",
