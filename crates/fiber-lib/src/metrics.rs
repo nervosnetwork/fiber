@@ -10,6 +10,10 @@ pub const INBOUND_PEER_COUNT: &str = "fiber.inbound_peer_count";
 pub const OUTBOUND_PEER_COUNT: &str = "fiber.outbound_peer_count";
 pub const DOWN_WITH_CHANNEL_PEER_COUNT: &str = "fiber.down_with_channel_peer_count";
 
+pub const CCH_LND_TRACKER_INVOICE_QUEUE_LEN: &str = "fiber.cch.lnd_tracker.invoice_queue_len";
+pub const CCH_LND_TRACKER_ACTIVE_INVOICE_TRACKERS: &str =
+    "fiber.cch.lnd_tracker.active_invoice_trackers";
+
 pub fn start_metrics(metrics_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let socket_addr = metrics_addr
         .to_socket_addrs()
