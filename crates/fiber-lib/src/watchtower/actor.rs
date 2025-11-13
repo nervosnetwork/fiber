@@ -1230,15 +1230,16 @@ fn build_settlement_tx<S: WatchtowerStore>(
         ]
         .concat();
 
-        let input = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
-            let since = Since::new(SinceType::Timestamp, current_time / 1000, false).value();
+        let input = {
+            let since = Since::new(
+                SinceType::EpochNumberWithFraction,
+                delay_epoch.full_value(),
+                true,
+            )
+            .value();
             CellInput::new_builder()
                 .previous_output(commitment_cell.out_point.clone().into())
                 .since(since.pack())
-                .build()
-        } else {
-            CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
                 .build()
         };
 
@@ -1282,15 +1283,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
         }
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
         let mut inputs_capacity = capacity;
+        let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
+            Since::new(SinceType::Timestamp, current_time / 1000, false).value()
+        } else {
+            0
+        };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
             inputs_capacity += input_capacity;
-            let since = Since::new(
-                SinceType::EpochNumberWithFraction,
-                delay_epoch.full_value(),
-                true,
-            )
-            .value();
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
@@ -1366,15 +1366,16 @@ fn build_settlement_tx<S: WatchtowerStore>(
         ]
         .concat();
 
-        let input = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
-            let since = Since::new(SinceType::Timestamp, current_time / 1000, false).value();
+        let input = {
+            let since = Since::new(
+                SinceType::EpochNumberWithFraction,
+                delay_epoch.full_value(),
+                true,
+            )
+            .value();
             CellInput::new_builder()
                 .previous_output(commitment_cell.out_point.clone().into())
                 .since(since.pack())
-                .build()
-        } else {
-            CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
                 .build()
         };
 
@@ -1452,15 +1453,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
         query.min_total_capacity = min_total_capacity;
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
         let mut inputs_capacity = commitment_cell.output.capacity.value();
+        let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
+            Since::new(SinceType::Timestamp, current_time / 1000, false).value()
+        } else {
+            0
+        };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
             inputs_capacity += input_capacity;
-            let since = Since::new(
-                SinceType::EpochNumberWithFraction,
-                delay_epoch.full_value(),
-                true,
-            )
-            .value();
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
