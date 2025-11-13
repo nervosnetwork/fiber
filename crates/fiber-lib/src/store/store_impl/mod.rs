@@ -604,6 +604,7 @@ impl PreimageStore for Store {
         batch.commit();
     }
 
+    #[cfg(feature = "watchtower")]
     fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
         let key = [&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
         self.get(key)
@@ -615,6 +616,13 @@ impl PreimageStore for Store {
                 iter.next()
                     .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
             })
+    }
+
+    #[cfg(not(feature = "watchtower"))]
+    fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        let key = [&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "Preimage"))
     }
 }
 
