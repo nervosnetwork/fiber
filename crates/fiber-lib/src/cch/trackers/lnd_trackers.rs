@@ -240,7 +240,7 @@ impl Actor for LndTrackerActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
+        let res = match message {
             LndTrackerMessage::TrackInvoice(payment_hash) => {
                 state.invoice_queue.push_back(payment_hash);
                 state.process_invoice_queue(myself).await?;
@@ -278,7 +278,18 @@ impl Actor for LndTrackerActor {
                 let _ = reply_port.send(snapshot);
                 Ok(())
             }
+        };
+
+        // update metrics
+        #[cfg(feature = "metrics")]
+        {
+            metrics::gauge!(crate::metrics::CCH_LND_TRACKER_INVOICE_QUEUE_LEN)
+                .set(state.invoice_queue.len() as f64);
+            metrics::gauge!(crate::metrics::CCH_LND_TRACKER_ACTIVE_INVOICE_TRACKERS)
+                .set(state.active_invoice_trackers as f64);
         }
+
+        res
     }
 }
 
