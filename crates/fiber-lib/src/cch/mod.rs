@@ -7,7 +7,9 @@ pub use error::{CchError, CchResult};
 mod events;
 pub use events::{CchIncomingEvent, CchIncomingPaymentStatus, CchOutgoingPaymentStatus};
 mod trackers;
-pub use trackers::{LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage};
+pub use trackers::{
+    CchFiberStoreWatcher, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
+};
 
 mod config;
 pub use config::{

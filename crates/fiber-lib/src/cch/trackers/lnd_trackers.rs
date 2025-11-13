@@ -522,11 +522,6 @@ impl InvoiceTracker {
     // Return true to quit the tracker
     async fn on_invoice(&self, invoice: lnrpc::Invoice) -> Result<bool> {
         tracing::debug!("[InvoiceTracker] invoice: {:?}", invoice);
-        let payment_preimage = if !invoice.r_preimage.is_empty() {
-            Some(Hash256::try_from(invoice.r_preimage.as_slice())?)
-        } else {
-            None
-        };
         use lnrpc::invoice::InvoiceState;
         let status: CchIncomingPaymentStatus = InvoiceState::try_from(invoice.state)
             .unwrap_or(InvoiceState::Open)
@@ -534,7 +529,6 @@ impl InvoiceTracker {
 
         let event = CchIncomingEvent::InvoiceChanged {
             payment_hash: Hash256::try_from(invoice.r_hash.as_slice())?,
-            payment_preimage,
             status,
         };
         self.port.send(event);

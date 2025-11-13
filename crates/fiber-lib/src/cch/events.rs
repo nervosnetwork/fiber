@@ -73,8 +73,6 @@ pub enum CchIncomingEvent {
     InvoiceChanged {
         /// The payment hash of the invoice.
         payment_hash: Hash256,
-        /// The preimage of the invoice.
-        payment_preimage: Option<Hash256>,
         status: CchIncomingPaymentStatus,
     },
 

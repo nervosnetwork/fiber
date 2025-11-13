@@ -1,4 +1,4 @@
-use crate::{invoice::SettleInvoiceError, time::SystemTimeError};
+use crate::time::SystemTimeError;
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
@@ -26,20 +26,10 @@ pub enum CchError {
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
     #[error("CKB invoice missing amount")]
     CKBInvoiceMissingAmount,
-    #[error("Fail to settle CKB invoice: {0}")]
-    CKBSettleInvoiceError(#[from] SettleInvoiceError),
-    #[error("SendBTC order already paid")]
-    SendBTCOrderAlreadyPaid,
-    #[error("SendBTC received payment amount is too small")]
-    SendBTCReceivedAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too small")]
     ReceiveBTCOrderAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too large")]
     ReceiveBTCOrderAmountTooLarge,
-    #[error("ReceiveBTC order already paid")]
-    ReceiveBTCOrderAlreadyPaid,
-    #[error("ReceiveBTC received payment amount is too small")]
-    ReceiveBTCReceivedAmountTooSmall,
     #[error("Expect preimage in settled payment but missing")]
     SettledPaymentMissingPreimage,
     #[error("System time error: {0}")]

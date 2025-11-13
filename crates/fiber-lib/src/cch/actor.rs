@@ -2,8 +2,10 @@ use anyhow::{anyhow, Context, Result};
 use futures::StreamExt as _;
 use lightning_invoice::Bolt11Invoice;
 use lnd_grpc_tonic_client::{invoicesrpc, lnrpc, routerrpc, Uri};
-use ractor::{call, port::OutputPortSubscriberTrait as _, OutputPort, RpcReplyPort};
-use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
+use ractor::{
+    call, port::OutputPortSubscriberTrait as _, Actor, ActorCell, ActorProcessingErr, ActorRef,
+    OutputPort, RpcReplyPort,
+};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use std::str::FromStr;
@@ -13,7 +15,6 @@ use tokio::select;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::channel::TlcNotification;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::payment::PaymentStatus;
@@ -56,9 +57,6 @@ pub enum CchMessage {
     GetCchOrder(Hash256, RpcReplyPort<Result<CchOrder, CchError>>),
 
     Event(CchIncomingEvent),
-
-    PendingReceivedTlcNotification(TlcNotification),
-    SettledTlcNotification(TlcNotification),
 }
 
 impl From<CchIncomingEvent> for CchMessage {
@@ -128,10 +126,11 @@ impl Actor for CchActor {
             private_key.into(),
         );
 
-        let port = Arc::new(OutputPort::default());
+        // Create LND tracker port and subscribe
+        let lnd_port = Arc::new(OutputPort::default());
         let lnd_tracker = LndTrackerActor::start(
             LndTrackerArgs {
-                port: port.clone(),
+                port: lnd_port.clone(),
                 lnd_connection: lnd_connection.clone(),
                 tracker: args.tracker,
                 token: args.token.clone(),
@@ -139,7 +138,7 @@ impl Actor for CchActor {
             myself.get_cell(),
         )
         .await?;
-        myself.subscribe_to_port(&port);
+        myself.subscribe_to_port(&lnd_port);
 
         let state = CchState {
             config: args.config,
@@ -193,24 +192,6 @@ impl Actor for CchActor {
                 tracing::debug!("event {:?}", event);
                 if let Err(err) = state.handle_event(event).await {
                     tracing::error!("handle_event failed: {}", err);
-                }
-                Ok(())
-            }
-            CchMessage::PendingReceivedTlcNotification(tlc_notification) => {
-                if let Err(err) = state
-                    .handle_pending_received_tlc_notification(tlc_notification)
-                    .await
-                {
-                    tracing::error!("handle_pending_received_tlc_notification failed: {}", err);
-                }
-                Ok(())
-            }
-            CchMessage::SettledTlcNotification(tlc_notification) => {
-                if let Err(err) = state
-                    .handle_settled_tlc_notification(tlc_notification)
-                    .await
-                {
-                    tracing::error!("handle_settled_tlc_notification failed: {}", err);
                 }
                 Ok(())
             }
@@ -299,105 +280,78 @@ impl CchState {
         Ok(order)
     }
 
-    // On receiving new TLC, check whether it matches the SendBTC order
-    async fn handle_pending_received_tlc_notification(
+    async fn handle_fiber_invoice_changed_event(
         &mut self,
-        tlc_notification: TlcNotification,
+        mut order: CchOrder,
+        status: CchIncomingPaymentStatus,
     ) -> Result<()> {
-        let payment_hash = tlc_notification.tlc.payment_hash;
-        tracing::debug!("[inbounding tlc] payment hash: {}", payment_hash);
-
-        let mut order = match self.orders_db.get_cch_order(&payment_hash).await {
-            Err(CchDbError::NotFound(_)) => return Ok(()),
-            Err(err) => return Err(err.into()),
-            Ok(order) if order.is_from_fiber_to_lightning() => order,
-            // Ignore if the order is not from fiber to lightning
-            Ok(_) => return Ok(()),
-        };
-
-        if order.status != CchOrderStatus::Pending {
-            return Err(CchError::SendBTCOrderAlreadyPaid.into());
+        if !(order.is_awaiting_fiber_invoice_event()) {
+            return Ok(());
         }
 
-        if tlc_notification.tlc.amount < order.amount_sats {
-            // TODO: split the payment into multiple parts
-            return Err(CchError::SendBTCReceivedAmountTooSmall.into());
-        }
+        order.status = status.into();
+        if status == CchIncomingPaymentStatus::Accepted {
+            let req = routerrpc::SendPaymentRequest {
+                payment_request: order.outgoing_pay_req.clone(),
+                timeout_seconds: BTC_PAYMENT_TIMEOUT_SECONDS,
+                ..Default::default()
+            };
+            tracing::debug!("[inbounding tlc] SendPaymentRequest: {:?}", req);
 
-        order.status = CchOrderStatus::IncomingAccepted;
-        self.orders_db.update_cch_order(order.clone()).await?;
-
-        let req = routerrpc::SendPaymentRequest {
-            payment_request: order.outgoing_pay_req.clone(),
-            timeout_seconds: BTC_PAYMENT_TIMEOUT_SECONDS,
-            ..Default::default()
-        };
-        tracing::debug!("[inbounding tlc] SendPaymentRequest: {:?}", req);
-
-        let mut client = self.lnd_connection.create_router_client().await?;
-        // TODO: set a fee
-        let mut stream = client.send_payment_v2(req).await?.into_inner();
-        // Wait for the first message then quit
-        select! {
-            payment_result_opt = stream.next() => {
-                tracing::debug!("[inbounding tlc] payment result: {:?}", payment_result_opt);
-                if let Some(Ok(payment)) = payment_result_opt {
-                    let status: CchOutgoingPaymentStatus = lnrpc::payment::PaymentStatus::try_from(payment.status)?.into();
-                    order.status = status.into();
-                    self.orders_db
-                        .update_cch_order(order)
-                        .await?;
+            let mut client = self.lnd_connection.create_router_client().await?;
+            // TODO: set a fee
+            let mut stream = client.send_payment_v2(req).await?.into_inner();
+            // Wait for the first message then quit
+            select! {
+                payment_result_opt = stream.next() => {
+                    tracing::debug!("[inbounding tlc] payment result: {:?}", payment_result_opt);
+                    if let Some(Ok(payment)) = payment_result_opt {
+                        let status: CchOutgoingPaymentStatus = lnrpc::payment::PaymentStatus::try_from(payment.status)?.into();
+                        order.status = status.into();
+                    }
+                }
+                _ = self.token.cancelled() => {
+                    tracing::debug!("Cancellation received, shutting down cch service");
                 }
             }
-            _ = self.token.cancelled() => {
-                tracing::debug!("Cancellation received, shutting down cch service");
-                return Ok(());
-            }
         }
 
+        self.orders_db.update_cch_order(order).await?;
         Ok(())
     }
 
-    async fn handle_settled_tlc_notification(
+    async fn handle_fiber_payment_changed_event(
         &mut self,
-        tlc_notification: TlcNotification,
+        mut order: CchOrder,
+        payment_preimage: Option<Hash256>,
+        status: CchOutgoingPaymentStatus,
     ) -> Result<()> {
-        let payment_hash = tlc_notification.tlc.payment_hash;
-        tracing::debug!("[settled tlc] payment hash: {}", payment_hash);
+        if !(order.is_awaiting_fiber_payment_event()) {
+            return Ok(());
+        }
 
-        let mut order = match self.orders_db.get_cch_order(&payment_hash).await {
-            Err(CchDbError::NotFound(_)) => return Ok(()),
-            Err(err) => return Err(err.into()),
-            // Ignore if the order is from fiber to lightning
-            Ok(order) if order.is_from_fiber_to_lightning() => return Ok(()),
-            Ok(order) => order,
-        };
+        order.status = status.into();
+        if status == CchOutgoingPaymentStatus::Settled {
+            let payment_preimage =
+                payment_preimage.ok_or(CchError::SettledPaymentMissingPreimage)?;
+            order.payment_preimage = Some(payment_preimage);
+            self.orders_db.update_cch_order(order.clone()).await?;
 
-        let preimage = tlc_notification
-            .tlc
-            .payment_preimage
-            .ok_or(CchError::SettledPaymentMissingPreimage)?;
+            // settle the lnd invoice
+            let req = invoicesrpc::SettleInvoiceMsg {
+                preimage: payment_preimage.into(),
+            };
+            tracing::debug!("[settled tlc] SettleInvoiceMsg: {:?}", req);
 
-        tracing::debug!("[settled tlc] preimage: {:#x}", preimage);
+            let mut client = self.lnd_connection.create_invoices_client().await?;
+            // TODO: set a fee
+            let resp = client.settle_invoice(req).await?.into_inner();
+            tracing::debug!("[settled tlc] SettleInvoiceResp: {:?}", resp);
 
-        order.status = CchOrderStatus::OutgoingSettled;
-        order.payment_preimage = Some(preimage);
-        self.orders_db.update_cch_order(order.clone()).await?;
+            order.status = CchOrderStatus::Succeeded;
+        }
 
-        // settle the lnd invoice
-        let req = invoicesrpc::SettleInvoiceMsg {
-            preimage: preimage.into(),
-        };
-        tracing::debug!("[settled tlc] SettleInvoiceMsg: {:?}", req);
-
-        let mut client = self.lnd_connection.create_invoices_client().await?;
-        // TODO: set a fee
-        let resp = client.settle_invoice(req).await?.into_inner();
-        tracing::debug!("[settled tlc] SettleInvoiceResp: {:?}", resp);
-
-        order.status = CchOrderStatus::Succeeded;
-        self.orders_db.update_cch_order(order.clone()).await?;
-
+        self.orders_db.update_cch_order(order).await?;
         Ok(())
     }
 
@@ -410,33 +364,55 @@ impl CchState {
 
         match event {
             CchIncomingEvent::InvoiceChanged { status, .. } => {
-                self.handle_invoice_changed_event(order, status).await
+                if !order.is_awaiting_invoice_event() {
+                    tracing::info!(
+                        "ignore invoice event {:?} while order status is {:?}",
+                        status,
+                        order.status,
+                    );
+                    return Ok(());
+                }
+                if order.is_incoming_invoice_fiber() {
+                    self.handle_fiber_invoice_changed_event(order, status).await
+                } else {
+                    self.handle_lnd_invoice_changed_event(order, status).await
+                }
             }
             CchIncomingEvent::PaymentChanged {
                 payment_preimage,
                 status,
                 ..
             } => {
-                self.handle_payment_changed_event(order, payment_preimage, status)
-                    .await
+                if !order.is_awaiting_payment_event() {
+                    tracing::info!(
+                        "ignore payment event {:?} while order status is {:?}",
+                        status,
+                        order.status,
+                    );
+                    return Ok(());
+                }
+                if order.is_outgoing_payment_fiber() {
+                    self.handle_fiber_payment_changed_event(order, payment_preimage, status)
+                        .await
+                } else {
+                    self.handle_lnd_payment_changed_event(order, payment_preimage, status)
+                        .await
+                }
             }
         }
     }
 
-    async fn handle_payment_changed_event(
+    async fn handle_lnd_payment_changed_event(
         &mut self,
         mut order: CchOrder,
         payment_preimage: Option<Hash256>,
         status: CchOutgoingPaymentStatus,
     ) -> Result<()> {
-        // When the order is not from fiber to lightning, the payment is sent to fiber. Since Fiber
-        // events are handled in `handle_pending_received_tlc_notification` and
-        // `handle_settled_tlc_notification`, skip the event here.
-        if !order.is_from_fiber_to_lightning() {
+        if !(order.is_awaiting_lnd_payment_event()) {
             return Ok(());
         }
-        order.status = status.into();
 
+        order.status = status.into();
         if status == CchOutgoingPaymentStatus::Settled {
             let payment_preimage =
                 payment_preimage.ok_or(CchError::SettledPaymentMissingPreimage)?;
@@ -455,19 +431,15 @@ impl CchState {
         }
 
         self.orders_db.update_cch_order(order).await?;
-
         Ok(())
     }
 
-    async fn handle_invoice_changed_event(
+    async fn handle_lnd_invoice_changed_event(
         &mut self,
         mut order: CchOrder,
         status: CchIncomingPaymentStatus,
     ) -> Result<()> {
-        // When the order is from fiber to lightning, the invoice is created in fiber. Since Fiber
-        // events are handled in `handle_pending_received_tlc_notification` and
-        // `handle_settled_tlc_notification`, skip the event here.
-        if order.is_from_fiber_to_lightning() {
+        if !(order.is_awaiting_lnd_invoice_event()) {
             return Ok(());
         }
 
@@ -495,7 +467,7 @@ impl CchState {
             }
         }
 
-        self.orders_db.update_cch_order(order.clone()).await?;
+        self.orders_db.update_cch_order(order).await?;
         Ok(())
     }
 

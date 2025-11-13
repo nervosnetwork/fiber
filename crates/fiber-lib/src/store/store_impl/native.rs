@@ -1,6 +1,3 @@
-use crate::fiber::types::Hash256;
-use crate::store::schema::PREIMAGE_PREFIX;
-
 use super::check_migrate;
 use super::{KeyValue, StoreChange, StoreKeyValue};
 
@@ -135,10 +132,6 @@ impl BatchWatcher {
 
     pub fn record_put(&mut self, key_value: KeyValue) {
         let change = match key_value {
-            KeyValue::CkbInvoice(payment_hash, invoice) => StoreChange::PutCkbInvoice {
-                payment_hash,
-                invoice,
-            },
             KeyValue::Preimage(payment_hash, payment_preimage) => StoreChange::PutPreimage {
                 payment_hash,
                 payment_preimage,
@@ -146,28 +139,13 @@ impl BatchWatcher {
             KeyValue::CkbInvoiceStatus(payment_hash, payment_status) => {
                 StoreChange::PutCkbInvoiceStatus {
                     payment_hash,
-                    payment_status,
+                    invoice_status: payment_status,
                 }
             }
             KeyValue::PaymentSession(payment_hash, payment_session) => {
                 StoreChange::PutPaymentSession {
                     payment_hash,
                     payment_session,
-                }
-            }
-            _ => return,
-        };
-
-        self.pending_changes.push(change);
-    }
-
-    pub fn record_delete(&mut self, key: &[u8]) {
-        let change = match key.first().copied().unwrap_or_default() {
-            PREIMAGE_PREFIX => {
-                let mut buf = [0u8; 32];
-                buf.copy_from_slice(&key[1..]);
-                StoreChange::DeletePreimage {
-                    payment_hash: Hash256::from(buf),
                 }
             }
             _ => return,
@@ -204,9 +182,6 @@ impl Batch {
 
     pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
         self.wb.delete(key.as_ref()).expect("delete should be OK");
-        if let Some(watcher) = &mut self.watcher {
-            watcher.record_delete(key.as_ref());
-        }
     }
 
     pub fn commit(self) {

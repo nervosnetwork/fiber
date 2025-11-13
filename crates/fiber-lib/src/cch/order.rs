@@ -74,7 +74,47 @@ pub struct CchOrder {
 }
 
 impl CchOrder {
-    pub fn is_from_fiber_to_lightning(&self) -> bool {
+    pub fn is_incoming_invoice_fiber(&self) -> bool {
         matches!(self.incoming_invoice, CchInvoice::Fiber(_))
+    }
+    pub fn is_incoming_invoice_lnd(&self) -> bool {
+        matches!(self.incoming_invoice, CchInvoice::Lightning(_))
+    }
+    pub fn is_outgoing_payment_fiber(&self) -> bool {
+        self.is_incoming_invoice_lnd()
+    }
+    pub fn is_outgoing_payment_lnd(&self) -> bool {
+        self.is_incoming_invoice_fiber()
+    }
+
+    pub fn is_awaiting_invoice_event(&self) -> bool {
+        self.status.is_awaiting_invoice_event()
+    }
+    pub fn is_awaiting_fiber_invoice_event(&self) -> bool {
+        self.is_awaiting_invoice_event() && self.is_incoming_invoice_fiber()
+    }
+    pub fn is_awaiting_lnd_invoice_event(&self) -> bool {
+        self.is_awaiting_invoice_event() && self.is_incoming_invoice_lnd()
+    }
+    pub fn is_awaiting_payment_event(&self) -> bool {
+        self.status.is_awaiting_payment_event()
+    }
+    pub fn is_awaiting_fiber_payment_event(&self) -> bool {
+        self.is_awaiting_payment_event() && self.is_outgoing_payment_fiber()
+    }
+    pub fn is_awaiting_lnd_payment_event(&self) -> bool {
+        self.is_awaiting_payment_event() && self.is_outgoing_payment_lnd()
+    }
+}
+
+impl CchOrderStatus {
+    pub fn is_awaiting_invoice_event(&self) -> bool {
+        matches!(self, CchOrderStatus::Pending)
+    }
+    pub fn is_awaiting_payment_event(&self) -> bool {
+        matches!(
+            self,
+            CchOrderStatus::IncomingAccepted | CchOrderStatus::OutgoingInFlight
+        )
     }
 }

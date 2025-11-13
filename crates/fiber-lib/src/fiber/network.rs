@@ -51,9 +51,9 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelState, ChannelSubscribers, ChannelTlcInfo,
-    OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
-    PublicChannelInfo, RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
+    ChannelInitializationParameter, ChannelState, ChannelTlcInfo, OpenChannelParameter,
+    PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
+    RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::config::AnnouncedNodeName;
@@ -3354,7 +3354,6 @@ pub struct NetworkActorState<S> {
     tlc_fee_proportional_millionths: u128,
     // The gossip messages actor to process and send gossip messages.
     gossip_actor: ActorRef<GossipActorMessage>,
-    channel_subscribers: ChannelSubscribers,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
     // The features of the node, used to indicate the capabilities of the node.
@@ -3589,13 +3588,7 @@ where
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.channel_subscribers.clone(),
-            ),
+            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
                     funding_amount,
@@ -3681,13 +3674,7 @@ where
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.channel_subscribers.clone(),
-            ),
+            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
                     funding_amount,
@@ -4100,7 +4087,6 @@ where
                 remote_pubkey,
                 self.network.clone(),
                 self.store.clone(),
-                self.channel_subscribers.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::ReestablishChannel(channel_id),
@@ -4587,7 +4573,6 @@ where
 pub struct NetworkActorStartArguments {
     pub config: FiberConfig,
     pub tracker: TaskTracker,
-    pub channel_subscribers: ChannelSubscribers,
     pub default_shutdown_script: Script,
 }
 
@@ -4619,7 +4604,6 @@ where
             config,
             #[cfg(not(target_arch = "wasm32"))]
             tracker,
-            channel_subscribers,
             default_shutdown_script,
             ..
         } = args;
@@ -4821,7 +4805,6 @@ where
             tlc_min_value: config.tlc_min_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             gossip_actor,
-            channel_subscribers,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
             features,
@@ -5112,7 +5095,6 @@ pub async fn start_network<
     tracker: TaskTracker,
     root_actor: ActorCell,
     store: S,
-    channel_subscribers: ChannelSubscribers,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> ActorRef<NetworkActorMessage> {
@@ -5125,7 +5107,6 @@ pub async fn start_network<
         NetworkActorStartArguments {
             config,
             tracker,
-            channel_subscribers,
             default_shutdown_script,
         },
         root_actor,
