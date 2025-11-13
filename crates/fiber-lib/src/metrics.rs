@@ -1,7 +1,10 @@
 use std::net::ToSocketAddrs;
 use tracing::error;
 
+/// READY_CHANNEL_COUNT + SHUTTING_DOWN_CHANNEL_COUNT
 pub const TOTAL_CHANNEL_COUNT: &str = "fiber.total_channel_count";
+pub const READY_CHANNEL_COUNT: &str = "fiber.ready_channel_count";
+pub const SHUTTING_DOWN_CHANNEL_COUNT: &str = "fiber.shutting_down_channel_count";
 pub const TOTAL_PEER_COUNT: &str = "fiber.total_peer_count";
 pub const INBOUND_PEER_COUNT: &str = "fiber.inbound_peer_count";
 pub const OUTBOUND_PEER_COUNT: &str = "fiber.outbound_peer_count";
