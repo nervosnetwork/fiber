@@ -18,6 +18,7 @@ pub trait WatchtowerStore {
     fn get_watch_channels(&self) -> Vec<ChannelData>;
     /// Insert a channel's funding tx lock script into the store, it will be used to monitor the channel,
     /// please note that the lock script should be globally unique, so that the watchtower can identify the channel.
+    #[allow(clippy::too_many_arguments)]
     fn insert_watch_channel(
         &self,
         node_id: NodeId,
