@@ -5654,8 +5654,11 @@ impl ChannelActorState {
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
         let delay_epoch = EpochNumberWithFraction::from_full_value(self.commitment_delay_epoch);
-        let epoch_delay_milliseconds =
-            (delay_epoch.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
+        let epoch_delay_milliseconds = ((delay_epoch.number() as f64
+            + delay_epoch.index() as f64 / delay_epoch.length() as f64)
+            * MILLI_SECONDS_PER_EPOCH as f64
+            * 2.0
+            / 3.0) as u64;
         let pending_tlc_count = self
             .tlc_state
             .all_tlcs()

@@ -2653,7 +2653,7 @@ async fn test_remove_expired_tlc_in_background() {
         (DEFAULT_COMMITMENT_DELAY_EPOCHS as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0)
             as u64;
 
-    let a_valid_but_small_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds + 100;
+    let a_valid_but_small_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds + 5000;
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,

@@ -86,7 +86,8 @@ use crate::fiber::channel::{
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS,
-    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
+    PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
@@ -1594,15 +1595,33 @@ where
                                 }
                             }
 
+                            let delay_epoch = EpochNumberWithFraction::from_full_value(
+                                actor_state.commitment_delay_epoch,
+                            );
+                            let epoch_delay_milliseconds = ((delay_epoch.number() as f64
+                                + delay_epoch.index() as f64 / delay_epoch.length() as f64)
+                                * MILLI_SECONDS_PER_EPOCH as f64
+                                * 2.0
+                                / 3.0)
+                                as u64;
+                            let pending_tlc_count = actor_state
+                                .tlc_state
+                                .all_tlcs()
+                                .filter(|tlc| tlc.removed_confirmed_at.is_none())
+                                .count() as u64;
+
                             // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
                             // to previous hop, even if later hop send backup RemoveTlc message to us later,
                             // it will be ignored.
+                            let expect_expiry = now
+                                + epoch_delay_milliseconds * (pending_tlc_count + 1)
+                                + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
                             let expired_tlcs = actor_state
                                 .tlc_state
                                 .received_tlcs
                                 .get_committed_tlcs()
                                 .into_iter()
-                                .filter(|tlc| tlc.expiry < now)
+                                .filter(|tlc| tlc.expiry < expect_expiry)
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
                                 info!(
@@ -1641,14 +1660,13 @@ where
 
                             // check whether the next hop have already sent us the RemoveTlc message
                             // for the offered expired tlc, if not we will force close the channel
+                            let expect_expiry = now + epoch_delay_milliseconds * pending_tlc_count;
                             if actor_state
                                 .tlc_state
                                 .offered_tlcs
                                 .get_committed_tlcs()
                                 .iter()
-                                .any(|tlc| {
-                                    tlc.expiry + (CHECK_CHANNELS_INTERVAL.as_millis() as u64) < now
-                                })
+                                .any(|tlc| tlc.expiry < expect_expiry)
                             {
                                 info!(
                                     "Force closing channel {:?} due to expired offered tlc",
