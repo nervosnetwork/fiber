@@ -1621,7 +1621,11 @@ where
                                 .received_tlcs
                                 .get_committed_tlcs()
                                 .into_iter()
-                                .filter(|tlc| tlc.expiry < expect_expiry)
+                                .filter(|tlc| {
+                                    tlc.is_last
+                                        && tlc.expiry < expect_expiry
+                                        && tlc.removed_confirmed_at.is_none()
+                                })
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
                                 info!(
@@ -1666,7 +1670,9 @@ where
                                 .offered_tlcs
                                 .get_committed_tlcs()
                                 .iter()
-                                .any(|tlc| tlc.expiry < expect_expiry)
+                                .any(|tlc| {
+                                    tlc.expiry < expect_expiry && tlc.removed_confirmed_at.is_none()
+                                })
                             {
                                 info!(
                                     "Force closing channel {:?} due to expired offered tlc",

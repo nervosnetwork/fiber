@@ -1055,6 +1055,7 @@ where
                     "TLC not found in state".to_string(),
                 ));
             };
+            tlc.is_last = true;
 
             // extract MPP total payment fields from onion packet
             match (&invoice, peeled_onion_packet.mpp_custom_records()) {
@@ -3012,6 +3013,8 @@ pub struct TlcInfo {
     ///
     pub previous_tlc: Option<(Hash256, TLCId)>,
     pub removed_confirmed_at: Option<u64>,
+    /// Whether this tlc is the last hop in a multi-path payment
+    pub is_last: bool,
 }
 
 // When we are forwarding a TLC, we need to know the previous TLC information.
@@ -5890,6 +5893,7 @@ impl ChannelActorState {
             removed_confirmed_at: None,
             total_amount: None,
             payment_secret: None,
+            is_last: false,
         }
     }
 
@@ -5903,6 +5907,8 @@ impl ChannelActorState {
             attempt_id: None,
             expiry: message.expiry,
             hash_algorithm: message.hash_algorithm,
+            // only in unit test will it be true
+            is_last: message.onion_packet.is_none(),
             // will be set when apply AddTlc operations after the signature is checked
             onion_packet: message.onion_packet,
             // No need to save shared secret for inbound TLC.
