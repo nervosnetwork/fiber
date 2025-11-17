@@ -345,7 +345,7 @@ async fn test_create_channel_with_too_large_amounts() {
     let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
     assert!(res.is_err(), "Create channel failed: {:?}", res);
     assert!(res.unwrap_err().to_string().contains(
-        "The total funding amount (18446744063909551614) should be less than 18446744054109551615"
+        "The total funding amount (18446744063809551614) should be less than 18446744053909551615"
     ));
 
     let params = ChannelParameters {
@@ -356,7 +356,7 @@ async fn test_create_channel_with_too_large_amounts() {
     let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
     assert!(res.is_err(), "Create channel failed: {:?}", res);
     assert!(res.unwrap_err().to_string().contains(
-        "The total funding amount (18446744063909551614) should be less than 18446744054109551615"
+        "The total funding amount (18446744063809551614) should be less than 18446744053909551615"
     ));
 
     let params = ChannelParameters {
@@ -2678,7 +2678,7 @@ async fn test_remove_expired_tlc_in_background() {
     let tlc_id = add_tlc_result.unwrap().tlc_id;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(
-        epoch_delay_milliseconds + 3000,
+        epoch_delay_milliseconds + 6000,
     ))
     .await;
 
@@ -4661,7 +4661,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
 #[tokio::test]
 async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 9800000000;
+    let node_b_funding_amount = 9900000000;
 
     let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -4673,7 +4673,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 57].pack()).build()),
+                        close_script: Some(Script::new_builder().args([0u8; 58].pack()).build()),
                         fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },

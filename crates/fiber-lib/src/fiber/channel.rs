@@ -4133,9 +4133,9 @@ pub(crate) fn occupied_capacity(
     shutdown_script: &Script,
     udt_type_script: &Option<Script>,
 ) -> Result<Capacity, CapacityError> {
-    // commitment lock args is 56 bytes, when shutdown script args len is less than 56, we need reserve more capacity
-    let min_lock_script = if shutdown_script.args().len() < 56 {
-        Script::new_builder().args([0u8; 56].pack()).build()
+    // commitment lock args is 57 bytes, when shutdown script args len is less than 57, we need reserve more capacity
+    let min_lock_script = if shutdown_script.args().len() < 57 {
+        Script::new_builder().args([0u8; 57].pack()).build()
     } else {
         shutdown_script.clone()
     };
@@ -5662,17 +5662,7 @@ impl ChannelActorState {
             * MILLI_SECONDS_PER_EPOCH as f64
             * 2.0
             / 3.0) as u64;
-        let pending_tlc_count = self
-            .tlc_state
-            .all_tlcs()
-            .filter(|tlc| tlc.removed_confirmed_at.is_none())
-            .count() as u64;
-        debug!(
-            "here debug pending_tlc_count: {} => delay: {}",
-            pending_tlc_count,
-            epoch_delay_milliseconds * (pending_tlc_count + 1)
-        );
-        let expect_expiry = current_time + epoch_delay_milliseconds * (pending_tlc_count + 1);
+        let expect_expiry = current_time + epoch_delay_milliseconds;
         if expiry < expect_expiry {
             error!(
                 "TLC expiry {} is too soon, current time + epoch delay: {}",
@@ -7310,6 +7300,7 @@ impl ChannelActorState {
             ))
             .as_ref(),
         );
+        commitment_lock_script_args.push(0x00);
 
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &commitment_lock_script_args);

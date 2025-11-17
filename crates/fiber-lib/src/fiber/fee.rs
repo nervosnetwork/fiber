@@ -21,7 +21,7 @@ use ckb_types::{
 use molecule::prelude::Entity;
 
 fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
-    let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 56]);
+    let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 57]);
     let cell_deps_count = get_cell_deps_count(vec![Contract::FundingLock], udt_type_script);
     let cell_deps = vec![CellDep::default(); cell_deps_count].pack();
 

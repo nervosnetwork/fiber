@@ -1604,17 +1604,11 @@ where
                                 * 2.0
                                 / 3.0)
                                 as u64;
-                            let pending_tlc_count = actor_state
-                                .tlc_state
-                                .all_tlcs()
-                                .filter(|tlc| tlc.removed_confirmed_at.is_none())
-                                .count() as u64;
-
                             // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
                             // to previous hop, even if later hop send backup RemoveTlc message to us later,
                             // it will be ignored.
                             let expect_expiry = now
-                                + epoch_delay_milliseconds * (pending_tlc_count + 1)
+                                + epoch_delay_milliseconds
                                 + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
                             let expired_tlcs = actor_state
                                 .tlc_state
@@ -1664,7 +1658,7 @@ where
 
                             // check whether the next hop have already sent us the RemoveTlc message
                             // for the offered expired tlc, if not we will force close the channel
-                            let expect_expiry = now + epoch_delay_milliseconds * pending_tlc_count;
+                            let expect_expiry = now + epoch_delay_milliseconds;
                             if actor_state
                                 .tlc_state
                                 .offered_tlcs
