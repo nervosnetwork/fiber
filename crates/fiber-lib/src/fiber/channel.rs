@@ -229,7 +229,7 @@ pub enum TxCollaborationCommand {
     TxComplete(),
 }
 
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct AddTlcCommand {
     pub amount: u128,
     pub payment_hash: Hash256,
@@ -1764,6 +1764,13 @@ where
         state: &mut ChannelActorState,
         operation: RetryableTlcOperation,
     ) {
+        if state
+            .retryable_tlc_operations
+            .iter()
+            .any(|op| *op == operation)
+        {
+            return;
+        }
         state.retryable_tlc_operations.push_back(operation);
         if state.retryable_tlc_operations.len() == 1 {
             // if there are already some retryable tasks in queue, we don't need to trigger again
@@ -1866,6 +1873,17 @@ where
             let Some(operation) = state.retryable_tlc_operations.pop_front() else {
                 return;
             };
+
+            #[cfg(debug_assertions)]
+            {
+                let hashset: HashSet<RetryableTlcOperation> =
+                    state.retryable_tlc_operations.iter().cloned().collect();
+                assert_eq!(
+                    hashset.len(),
+                    state.retryable_tlc_operations.len(),
+                    "retryable_tlc_operations contains duplicated operations"
+                );
+            }
 
             let success = match operation {
                 RetryableTlcOperation::RemoveTlc(tlc_id, reason) => self
@@ -2220,7 +2238,7 @@ where
                 myself.stop(Some("ChannelClosed".to_string()));
             }
             ChannelEvent::CheckActiveChannel => {
-                if state.should_disconnect_peer_awaiting_response() && !state.is_closed() {
+                if state.peer_does_not_reply_ack_in_time() && !state.is_closed() {
                     error!(
                         "Channel {} from peer {:?} is inactive for a time, shutting down it forcefully",
                         state.get_id(),
@@ -2995,7 +3013,7 @@ pub struct TlcInfo {
 
 // When we are forwarding a TLC, we need to know the previous TLC information.
 // This struct keeps the information of the previous TLC.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct PrevTlcInfo {
     pub(crate) prev_channel_id: Hash256,
     // The TLC is always a received TLC because we are forwarding it.
@@ -3102,7 +3120,7 @@ impl From<TlcInfo> for TlcNotifyInfo {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug, Hash)]
 pub enum RetryableTlcOperation {
     RemoveTlc(TLCId, RemoveTlcReason),
     AddTlc(AddTlcCommand),
@@ -4147,7 +4165,7 @@ impl ChannelActorState {
         self.waiting_peer_response = None;
     }
 
-    pub fn should_disconnect_peer_awaiting_response(&self) -> bool {
+    pub fn peer_does_not_reply_ack_in_time(&self) -> bool {
         // this check only needed when other peer already shutdown force and we don't know it
         // if we are already got in ShuttingDown, means we already in normal shutdown process
         if matches!(self.state, ChannelState::ShuttingDown(_)) {
@@ -5851,8 +5869,8 @@ impl ChannelActorState {
 
     fn is_waiting_tlc_ack(&self) -> bool {
         self.tlc_state.waiting_ack
-            || (self.remote_revocation_nonce_for_send.is_none()
-                || self.remote_revocation_nonce_for_verify.is_none())
+            || self.remote_revocation_nonce_for_send.is_none()
+            || self.remote_revocation_nonce_for_verify.is_none()
     }
 
     fn check_tlc_limits(&self, add_amount: u128, is_sent: bool) -> ProcessingChannelResult {
