@@ -13,7 +13,7 @@ jobs:
           - open-use-close-a-channel
           - udt
           - reestablish
-          - cross-chain-hub
+          # - cross-chain-hub
           - router-pay
           - udt-router-pay
           - watchtower

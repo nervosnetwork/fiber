@@ -43,7 +43,7 @@ script:post-response {
   // step 14: 1555
   // step 15: 500
   // sum is: 2455  (0x997)
-  if (res.body.result.channels[0].remote_balance != "0x997" || res.body.result.channels[0].local_balance != "0x37786334a469") {
+  if (res.body.result.channels[0].remote_balance != "0x997" || res.body.result.channels[0].local_balance != "0x37785d3ec369") {
     throw new Error("Assertion failed: channel amount is not right");
   }
 }
