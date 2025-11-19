@@ -11,7 +11,7 @@ use ractor::concurrency::Duration;
 use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
-use rand::seq::SliceRandom;
+use rand::seq::{IteratorRandom, SliceRandom};
 use rand::Rng;
 use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
@@ -133,7 +133,7 @@ const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
 const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 
 // The duration for which we will try to maintain the number of peers in connection.
-const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
+const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(1200);
 
 // The duration for which we will check all channels.
 #[cfg(debug_assertions)]
@@ -1374,6 +1374,28 @@ where
                 }
             },
             NetworkActorCommand::MaintainConnections => {
+                debug!("Trying to connect to peers with mutual channels");
+
+                for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    if state.is_connected(&peer_id) {
+                        continue;
+                    }
+                    let addresses = state.get_peer_addresses(&peer_id);
+
+                    debug!(
+                        "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
+                        &channel_id, &peer_id, &channel_state, &addresses
+                    );
+
+                    if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ConnectPeer(addr.to_owned()),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
+                }
+
                 let mut inbound_peer_sessions = state.inbound_peer_sessions();
                 let num_inbound_peers = inbound_peer_sessions.len();
                 let num_outbound_peers = state.num_of_outbound_peers();
@@ -1509,9 +1531,12 @@ where
 
                 // peer has active channels but down
                 let mut with_channel_down_peers = HashSet::new();
+                let mut ready_channels_count = 0;
+                let mut shuttingdown_channels_count = 0;
                 for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            ready_channels_count += 1;
                             if actor_state.reestablishing {
                                 continue;
                             }
@@ -1662,18 +1687,41 @@ where
                                 }
                             }
                         }
+                    } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
+                        shuttingdown_channels_count += 1;
                     }
                 }
 
+                // update metrics
                 #[cfg(feature = "metrics")]
-                metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
-                    .set(with_channel_down_peers.len() as u32);
-                if !with_channel_down_peers.is_empty() {
-                    debug!(
-                        "Check channels: found {} peers down with channels",
-                        with_channel_down_peers.len()
-                    );
+                {
+                    // channels
+                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
+                        .set(with_channel_down_peers.len() as u32);
+                    metrics::gauge!(crate::metrics::TOTAL_CHANNEL_COUNT)
+                        .set((ready_channels_count + shuttingdown_channels_count) as u32);
+                    metrics::gauge!(crate::metrics::READY_CHANNEL_COUNT)
+                        .set(ready_channels_count as u32);
+                    metrics::gauge!(crate::metrics::SHUTTING_DOWN_CHANNEL_COUNT)
+                        .set(shuttingdown_channels_count as u32);
+
+                    // peers
+                    let total_peers = state.peer_session_map.len();
+                    let outbound_peers = state
+                        .peer_session_map
+                        .iter()
+                        .filter(|(_id, peer)| peer.session_type.is_outbound())
+                        .count();
+                    let inbound_peers = total_peers - outbound_peers;
+                    metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).set(total_peers as u32);
+                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).set(inbound_peers as u32);
+                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).set(outbound_peers as u32);
                 }
+                debug!(
+                    "Check channels: {} ready channels {} shutting down channels, found {} peers down with channels",
+                    ready_channels_count, shuttingdown_channels_count,
+                    with_channel_down_peers.len()
+                );
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
@@ -4007,18 +4055,6 @@ where
         session: &SessionContext,
     ) {
         debug!("Peer {remote_peer_id:?} connected");
-        #[cfg(feature = "metrics")]
-        {
-            metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).increment(1);
-            match session.ty {
-                SessionType::Inbound => {
-                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).increment(1);
-                }
-                SessionType::Outbound => {
-                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).increment(1);
-                }
-            }
-        }
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             ConnectedPeer {
@@ -4078,18 +4114,6 @@ where
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
-            #[cfg(feature = "metrics")]
-            {
-                metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).decrement(1);
-                match peer.session_type {
-                    SessionType::Inbound => {
-                        metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).decrement(1);
-                    }
-                    SessionType::Outbound => {
-                        metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).decrement(1);
-                    }
-                }
-            }
             if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
@@ -4759,24 +4783,8 @@ where
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Trying to connect to peers with mutual channels");
-        for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
-            let addresses = state.get_peer_addresses(&peer_id);
-
-            debug!(
-                "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
-                &channel_id, &peer_id, &channel_state, &addresses
-            );
-            for addr in addresses {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ConnectPeer(addr),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            }
-        }
         // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
         myself
             .send_message(NetworkActorMessage::new_command(
