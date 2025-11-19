@@ -1798,6 +1798,12 @@ where
                     return Ok(());
                 }
 
+                // if we have enough tlcs to fulfill the invoice, update invoice status to Received
+                // for hold invoice we may don't have preimages yet, so just update status here
+                self.store
+                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                    .expect("update invoice status failed");
+
                 let Some(preimage) = self.store.get_preimage(&payment_hash) else {
                     return Ok(());
                 };
@@ -1815,10 +1821,6 @@ where
                             payment_preimage: preimage,
                         }),
                     };
-
-                    self.store
-                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                        .expect("update invoice status failed");
 
                     match state
                         .send_command_to_channel(
