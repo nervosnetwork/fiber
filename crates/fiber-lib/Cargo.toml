@@ -123,7 +123,7 @@ bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
 portable = ["rocksdb/portable"]
 watchtower = []
-metrics = ["dep:metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter-prometheus"]
+metrics = ["dep:metrics", "ractor/metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter-prometheus"]
 pprof = ["dep:pprof"]
 
 [dev-dependencies]
