@@ -94,7 +94,7 @@ tower = { version = "0.5" }
 tokio-metrics = { version = "0.4.5", optional = true, features = ["metrics-rs-integration"] }
 metrics = { version = "0.24.2", optional = true }
 metrics-exporter-prometheus = { version = "0.17.2", optional = true }
-pprof = { version = "0.15", features = ["flamegraph"], optional = true }
+pprof = { git = "https://github.com/tikv/pprof-rs.git", rev = "01cff82dbe6fe110a707bf2b38d8ebb1d14a18f8", features = ["flamegraph", "protobuf-codec", "frame-pointer"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 biscuit-auth = { version = "6.0.0-beta.3", features = ["wasm"] }
