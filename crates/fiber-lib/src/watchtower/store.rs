@@ -86,7 +86,6 @@ pub struct ChannelData {
     /// The remote party's funding public key
     pub remote_funding_pubkey: Pubkey,
     pub remote_settlement_data: SettlementData,
-    // TODO: @quake more test
     // There might be a corner case that the remote node has received the commitment message from the local node,
     // but the local node hasn't received the revocation message from the remote node yet, then the remote node
     // may force close the channel with the latest commitment transaction, in this case, the watchtower

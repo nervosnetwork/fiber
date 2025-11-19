@@ -508,17 +508,11 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                 }
                 after = Some(cells.last_cursor.clone());
                 for cell in cells.objects {
-                    let cell_output: CellOutput = cell.output.clone().into();
                     let commitment_tx_hash = cell.out_point.tx_hash.clone();
                     let commitment_tx_out_point =
                         OutPoint::new(commitment_tx_hash.pack(), cell.out_point.index.value());
                     // is it the first commitment tx which has unlocked funding output or not
                     let is_first = commitment_tx_out_point == first_commitment_tx_out_point;
-                    let lock_script_args = cell_output.lock().args().raw_data();
-                    let since = u64::from_le_bytes(
-                        lock_script_args[20..28].try_into().expect("u64 from slice"),
-                    );
-
                     let cell_header: HeaderView =
                         match ckb_client.get_header_by_number(cell.block_number) {
                             Ok(Some(header)) => header.into(),
@@ -590,7 +584,6 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                     };
                     match build_settlement_tx(
                         cell,
-                        since,
                         cell_header_epoch,
                         current_epoch,
                         current_time,
@@ -734,7 +727,6 @@ fn find_preimages<S: WatchtowerStore>(
 #[allow(clippy::too_many_arguments)]
 fn build_settlement_tx<S: WatchtowerStore>(
     commitment_cell: Cell,
-    since: u64,
     cell_header_epoch: EpochNumberWithFraction,
     current_epoch: EpochNumberWithFraction,
     current_time: u64,
@@ -745,6 +737,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
     cell_collector: &mut DefaultCellCollector,
     store: &S,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
+    let cell_output: CellOutput = commitment_cell.output.clone().into();
+    let lock_script_args = cell_output.lock().args().raw_data();
+    let since = u64::from_le_bytes(lock_script_args[20..28].try_into().expect("u64 from slice"));
+    let commitment_number =
+        u64::from_be_bytes(lock_script_args[28..36].try_into().expect("u64 from slice"));
+
     let delay_epoch = {
         let since = Since::from_raw_value(since);
         since
@@ -770,7 +768,17 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let mut delay_epoch = delay_epoch.unwrap();
     let is_first_settlement = settlement_witness.is_none();
     let settlement_data = if for_remote {
-        channel_data.remote_settlement_data.clone()
+        if channel_data
+            .revocation_data
+            .as_ref()
+            .map(|r| r.commitment_number)
+            .unwrap_or_default()
+            == commitment_number - 1
+        {
+            channel_data.remote_settlement_data.clone()
+        } else {
+            channel_data.pending_remote_settlement_data.clone()
+        }
     } else {
         channel_data.local_settlement_data.clone()
     };
@@ -1101,8 +1109,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         }
     };
 
-    let cell_output: CellOutput = commitment_cell.output.clone().into();
-    let mut new_commitment_lock_script_args = cell_output.lock().args().raw_data()[0..36].to_vec();
+    let mut new_commitment_lock_script_args = lock_script_args[0..36].to_vec();
     let new_script_hash = {
         let mut sw = SettlementWitness::build_from_witness(
             &[&[0x01], new_settlement_witness.as_slice()].concat(),
