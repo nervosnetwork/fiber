@@ -9,16 +9,6 @@ option Uint64Opt (Uint64);
 option Uint128Opt (Uint128);
 option CustomRecordsOpt (CustomRecords);
 
-struct CommitmentNonce {
-    funding:    PubNonce,
-    commitment: PubNonce,
-}
-
-struct RevocationNonce {
-    revoke:     PubNonce,
-    ack:        PubNonce,
-}
-
 table CustomRecordDataPair {
     key:    Uint32,
     value:  Bytes,
@@ -52,8 +42,8 @@ table OpenChannel {
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
     channel_announcement_nonce:  PubNonceOpt,
-    next_commitment_nonce:       CommitmentNonce,
-    next_revocation_nonce:       RevocationNonce,
+    next_commitment_nonce:       PubNonce,
+    next_revocation_nonce:       PubNonce,
     channel_flags:               byte,
 }
 
@@ -69,15 +59,14 @@ table AcceptChannel {
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
     channel_announcement_nonce:  PubNonceOpt,
-    next_commitment_nonce:       CommitmentNonce,
-    next_revocation_nonce:       RevocationNonce,
+    next_commitment_nonce:       PubNonce,
+    next_revocation_nonce:       PubNonce,
 }
 
 struct CommitmentSigned {
     channel_id:                       Byte32,
     funding_tx_partial_signature:     Byte32,
-    commitment_tx_partial_signature:  Byte32,
-    next_commitment_nonce:            CommitmentNonce,
+    next_commitment_nonce:            PubNonce,
 }
 
 table TxSignatures {
@@ -96,8 +85,7 @@ table TxUpdate {
 
 struct TxComplete {
     channel_id:                       Byte32,
-    commitment_tx_partial_signature:  Byte32,
-    next_commitment_nonce:            CommitmentNonce,
+    next_commitment_nonce:            PubNonce,
 }
 
 table TxAbort {
@@ -149,9 +137,8 @@ table AddTlc {
 struct RevokeAndAck {
     channel_id:                         Byte32,
     revocation_partial_signature:       Byte32,
-    commitment_tx_partial_signature:    Byte32,
     next_per_commitment_point:          Pubkey,
-    next_revocation_nonce:              RevocationNonce,
+    next_revocation_nonce:              PubNonce,
 }
 
 struct RemoveTlcFulfill {

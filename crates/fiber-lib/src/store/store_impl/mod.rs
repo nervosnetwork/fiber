@@ -1,5 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(feature = "watchtower")]
+use ckb_types::packed::Script;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Batch, DbDirection, IteratorMode, Store, StoreChangeWatcher};
 
@@ -20,6 +22,8 @@ use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
+#[cfg(feature = "watchtower")]
+use crate::fiber::types::{Privkey, Pubkey};
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
@@ -39,8 +43,6 @@ use crate::{
     watchtower::{ChannelData, WatchtowerStore},
 };
 use ckb_types::packed::OutPoint;
-#[cfg(feature = "watchtower")]
-use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 
 use serde::{Deserialize, Serialize};
@@ -602,6 +604,21 @@ impl PreimageStore for Store {
         batch.commit();
     }
 
+    #[cfg(feature = "watchtower")]
+    fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        let key = [&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "Preimage"))
+            // Try to get the preimage from watchtower store
+            .or_else(|| {
+                let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
+                let mut iter = self.prefix_iterator(prefix.as_slice());
+                iter.next()
+                    .map(|(_key, value)| deserialize_from(value.as_ref(), "Watchtower Preimage"))
+            })
+    }
+
+    #[cfg(not(feature = "watchtower"))]
     fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
         let key = [&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
         self.get(key)
@@ -742,8 +759,12 @@ impl WatchtowerStore for Store {
         &self,
         node_id: NodeId,
         channel_id: Hash256,
-        funding_tx_lock: Script,
-        remote_settlement_data: SettlementData,
+        funding_udt_type_script: Option<Script>,
+        local_settlement_key: Privkey,
+        remote_settlement_key: Pubkey,
+        local_funding_pubkey: Pubkey,
+        remote_funding_pubkey: Pubkey,
+        settlement_data: SettlementData,
     ) {
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
@@ -754,9 +775,14 @@ impl WatchtowerStore for Store {
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
-                funding_tx_lock,
-                remote_settlement_data,
-                local_settlement_data: None,
+                funding_udt_type_script,
+                local_settlement_key,
+                remote_settlement_key,
+                local_funding_pubkey,
+                remote_funding_pubkey,
+                pending_remote_settlement_data: settlement_data.clone(),
+                remote_settlement_data: settlement_data.clone(),
+                local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
             },
             "ChannelData",
@@ -805,6 +831,33 @@ impl WatchtowerStore for Store {
         }
     }
 
+    fn update_pending_remote_settlement(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        pending_remote_settlement_data: SettlementData,
+    ) {
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        if let Some(mut channel_data) = self
+            .get(key)
+            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+        {
+            channel_data.pending_remote_settlement_data = pending_remote_settlement_data;
+            let mut batch = self.batch();
+            batch.put_kv(KeyValue::WatchtowerChannel(
+                node_id,
+                channel_id,
+                channel_data,
+            ));
+            batch.commit();
+        }
+    }
+
     fn update_local_settlement(
         &self,
         node_id: NodeId,
@@ -821,7 +874,7 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
-            channel_data.local_settlement_data = Some(local_settlement_data);
+            channel_data.local_settlement_data = local_settlement_data;
             let mut batch = self.batch();
             batch.put_kv(KeyValue::WatchtowerChannel(
                 node_id,

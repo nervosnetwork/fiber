@@ -39,7 +39,7 @@ assert {
 script:post-response {
   await new Promise(r => setTimeout(r, 1000));
   console.log("step 13 list channels: ", res.body.result.channels[0]);
-  if (res.body.result.channels[0].remote_balance != "0x190" || res.body.result.channels[0].local_balance != "0x377939c85070") {
+  if (res.body.result.channels[0].remote_balance != "0x190" || res.body.result.channels[0].local_balance != "0x37785d3ecb70") {
     throw new Error("Assertion failed: channel amount is not right");
   }
 }

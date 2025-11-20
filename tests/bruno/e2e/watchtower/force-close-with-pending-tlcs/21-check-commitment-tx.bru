@@ -1,0 +1,39 @@
+meta {
+  name: check submitted commitment tx should be settled
+  type: http
+  seq: 21
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_live_cell",
+    "params": [
+      {
+        "index": "0x0",
+        "tx_hash": "{{TX_HASH}}"
+      },
+      false
+    ]
+  }
+}
+
+assert {
+  res.body.result.status: eq "unknown"
+}
+
+script:post-response {
+  console.log("generated result: ", res.body);
+}

@@ -1,0 +1,40 @@
+meta {
+  name: check balance, the difference should be the tlc1 + tlc2 (9000000) + fee (it may vary, max 5000)
+  type: http
+  seq: 24
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  let script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  let body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+assert {
+  Number(BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(res.body.result.capacity)): lt 9005000
+}

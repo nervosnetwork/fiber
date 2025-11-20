@@ -3,13 +3,11 @@ use crate::ckb::contracts::{
     check_udt_script, get_cell_deps_count, get_script_by_contract, Contract,
 };
 use crate::fiber::channel::{
-    occupied_capacity, ProcessingChannelError, ProcessingChannelResult,
+    occupied_capacity, tlc_expiry_delay, ProcessingChannelError, ProcessingChannelResult,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
     MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use crate::fiber::config::{
-    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
-};
+use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
 use ckb_types::core::{EpochNumberWithFraction, TransactionBuilder};
 use ckb_types::packed::{Bytes, CellDep, Script};
 use ckb_types::prelude::{Builder, PackVec};
@@ -21,9 +19,7 @@ use ckb_types::{
 use molecule::prelude::Entity;
 
 fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
-    // when there is pending tlcs, the commitment lock args will be 56 bytes, otherwise 46 bytes.
-    // to simplify the calculation, we use hardcoded 56 bytes here.
-    let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 56]);
+    let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 57]);
     let cell_deps_count = get_cell_deps_count(vec![Contract::FundingLock], udt_type_script);
     let cell_deps = vec![CellDep::default(); cell_deps_count].pack();
 
@@ -265,8 +261,7 @@ pub(crate) fn check_tlc_delta_with_epochs(
         )));
     }
 
-    let epoch_delay_milliseconds =
-        (epochs.number() as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0) as u64;
+    let epoch_delay_milliseconds = tlc_expiry_delay(&epochs);
     if tlc_expiry_delta < epoch_delay_milliseconds {
         return Err(ProcessingChannelError::InvalidParameter(format!(
             "TLC expiry delta {} is smaller than 2/3 commitment_delay_epoch delay {}",

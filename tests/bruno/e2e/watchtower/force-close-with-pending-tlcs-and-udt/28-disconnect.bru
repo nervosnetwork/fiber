@@ -1,0 +1,37 @@
+meta {
+  name: disconnect NODE2 from NODE1
+  type: http
+  seq: 28
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "disconnect_peer",
+    "params": [
+      {"peer_id": "{{NODE2_PEERID}}"}
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 1000));
+}
