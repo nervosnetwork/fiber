@@ -77,7 +77,7 @@ use crate::ckb::{
     GetShutdownTxResponse,
 };
 use crate::fiber::channel::{
-    AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
     TxUpdateCommand,
 };
@@ -86,8 +86,7 @@ use crate::fiber::channel::{
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS,
-    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
-    PAYMENT_MAX_PARTS_LIMIT,
+    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
@@ -1598,12 +1597,7 @@ where
                             let delay_epoch = EpochNumberWithFraction::from_full_value(
                                 actor_state.commitment_delay_epoch,
                             );
-                            let epoch_delay_milliseconds = ((delay_epoch.number() as f64
-                                + delay_epoch.index() as f64 / delay_epoch.length() as f64)
-                                * MILLI_SECONDS_PER_EPOCH as f64
-                                * 2.0
-                                / 3.0)
-                                as u64;
+                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
                             // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
                             // to previous hop, even if later hop send backup RemoveTlc message to us later,
                             // it will be ignored.
@@ -1615,11 +1609,7 @@ where
                                 .received_tlcs
                                 .get_committed_tlcs()
                                 .into_iter()
-                                .filter(|tlc| {
-                                    tlc.is_last
-                                        && tlc.expiry < expect_expiry
-                                        && tlc.removed_confirmed_at.is_none()
-                                })
+                                .filter(|tlc| tlc.is_last && tlc.expiry < expect_expiry)
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
                                 info!(
@@ -1664,9 +1654,7 @@ where
                                 .offered_tlcs
                                 .get_committed_tlcs()
                                 .iter()
-                                .any(|tlc| {
-                                    tlc.expiry < expect_expiry && tlc.removed_confirmed_at.is_none()
-                                })
+                                .any(|tlc| tlc.expiry < expect_expiry)
                             {
                                 info!(
                                     "Force closing channel {:?} due to expired offered tlc",

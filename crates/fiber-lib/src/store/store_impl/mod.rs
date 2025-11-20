@@ -614,7 +614,7 @@ impl PreimageStore for Store {
                 let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
                 let mut iter = self.prefix_iterator(prefix.as_slice());
                 iter.next()
-                    .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
+                    .map(|(_key, value)| deserialize_from(value.as_ref(), "Watchtower Preimage"))
             })
     }
 

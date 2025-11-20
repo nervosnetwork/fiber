@@ -4152,6 +4152,14 @@ pub(crate) fn occupied_capacity(
     }
 }
 
+/// Convert 2/3 delay epoch to the delay of tlc expiry in milliseconds
+pub(crate) fn tlc_expiry_delay(delay_epoch: &EpochNumberWithFraction) -> u64 {
+    ((delay_epoch.number() as f64 + delay_epoch.index() as f64 / delay_epoch.length() as f64)
+        * MILLI_SECONDS_PER_EPOCH as f64
+        * 2.0
+        / 3.0) as u64
+}
+
 // Constructors for the channel actor state.
 impl ChannelActorState {
     pub fn network(&self) -> ActorRef<NetworkActorMessage> {
@@ -5657,11 +5665,7 @@ impl ChannelActorState {
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
         let delay_epoch = EpochNumberWithFraction::from_full_value(self.commitment_delay_epoch);
-        let epoch_delay_milliseconds = ((delay_epoch.number() as f64
-            + delay_epoch.index() as f64 / delay_epoch.length() as f64)
-            * MILLI_SECONDS_PER_EPOCH as f64
-            * 2.0
-            / 3.0) as u64;
+        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
         let expect_expiry = current_time + epoch_delay_milliseconds;
         if expiry < expect_expiry {
             error!(
@@ -6284,14 +6288,6 @@ impl ChannelActorState {
 
         let (commitment_tx, settlement_data) =
             self.verify_and_complete_tx(commitment_signed.funding_tx_partial_signature)?;
-
-        let tlcs = self.get_active_tlcs_for_settlement(false);
-        info!(
-            "Before RemoteCommitmentSigned settlement data for commitment_number: {}, tlcs count: {}, tlc_state: {:?}",
-            self.get_remote_commitment_number(),
-            tlcs.len(),
-            self.tlc_state.all_tlcs().map(|tlc| tlc.status.clone()).collect::<Vec<_>>()
-        );
 
         // Notify outside observers.
         self.network()
@@ -7469,17 +7465,13 @@ impl ChannelActorState {
     ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
         let (commitment_tx, settlement_data) = self.build_commitment_tx_and_settlement_data(false);
 
-        self.get_funding_verify_context().verify(
-            funding_tx_partial_signature,
-            &compute_tx_message(&commitment_tx),
-        )?;
+        let message = compute_tx_message(&commitment_tx);
+        self.get_funding_verify_context()
+            .verify(funding_tx_partial_signature, &message)?;
 
         let completed_commitment_tx = {
             let sign_ctx = self.get_funding_sign_context();
-            let signature = sign_ctx.sign_and_aggregate(
-                &compute_tx_message(&commitment_tx),
-                funding_tx_partial_signature,
-            )?;
+            let signature = sign_ctx.sign_and_aggregate(&message, funding_tx_partial_signature)?;
             let witness =
                 create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature);
             commitment_tx
@@ -7905,15 +7897,10 @@ impl InMemorySigner {
         }
     }
 
-    /*************  ✨ Windsurf Command ⭐  *************/
     /// Returns the commitment point for the given commitment number.
     ///
     /// The commitment point is the public key derived from the commitment seed and the commitment number.
     /// The commitment point is used to derive the pubkeys used in the TLC (htlc and revocation outputs).
-    /// The commitment point is used to derive the pubkeys used in the TLC (htlc and revocation outputs).
-    /// The commitment point is used to derive the pubkeys used in the TLC (htlc and revocation outputs).
-    ///
-    /*******  e56105d2-1cc6-4a3d-96aa-3455731ac981  *******/
     pub fn get_commitment_point(&self, commitment_number: u64) -> Pubkey {
         get_commitment_point(&self.commitment_seed, commitment_number)
     }
