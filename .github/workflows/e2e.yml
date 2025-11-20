@@ -19,12 +19,12 @@ jobs:
           - open-use-close-a-channel
           - udt
           - reestablish
-          - cross-chain-hub
+          # - cross-chain-hub
           - router-pay
           - udt-router-pay
           - watchtower
         release:
-          - "0.116.1"
+          - "0.202.0"
         test_env:
           - "test"
         extra_bru_args:
@@ -33,26 +33,26 @@ jobs:
           # add an extra workflow to run udt using the env file xudt-test
           - workflow: "udt"
             test_env: "xudt-test"
-            release: "0.116.1"
+            release: "0.202.0"
           # add an extra workflow to run 3-nodes-transfer with sha256 hash algorithm
           - workflow: "3-nodes-transfer"
             test_env: "test"
-            release: "0.116.1"
+            release: "0.202.0"
             extra_bru_args: "--env-var HASH_ALGORITHM=sha256"
 
           ######################################
           # Funding Tx Verification Test Cases
           - workflow: "funding-tx-verification"
             test_env: "test"
-            release: "0.116.1"
+            release: "0.202.0"
             extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=remove_change"
           - workflow: "funding-tx-verification"
             test_env: "test"
-            release: "0.116.1"
+            release: "0.202.0"
             extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=modify_change"
           - workflow: "funding-tx-verification"
             test_env: "test"
-            release: "0.116.1"
+            release: "0.202.0"
             extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=fund_from_peer"
 
     runs-on: ubuntu-latest

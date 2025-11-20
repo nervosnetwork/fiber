@@ -16,3 +16,6 @@ inherits = "test"
 opt-level = 3
 debug = false
 
+[profile.prof]
+inherits = "release"
+debug = true

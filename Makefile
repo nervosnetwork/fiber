@@ -5,6 +5,10 @@ GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
+.PHONY: build-metrics-prof
+build-metrics-prof:
+	RUSTFLAGS="${RUSTFLAGS} --cfg tokio_unstable -Cforce-frame-pointers=yes" cargo +nightly build --profile prof --features "metrics pprof"
+
 .PHONY: test
 test:
 	RUST_LOG=off cargo nextest run --no-fail-fast -p fnn -p fiber-bin
@@ -80,7 +84,7 @@ gen-rpc-doc:
 check-dirty-rpc-doc: gen-rpc-doc
 	git diff --exit-code ./crates/fiber-lib/src/rpc/README.md
 
-MIGRATION_CHECK_VERSION := 0.2.6
+MIGRATION_CHECK_VERSION := 0.3.1
 install-migration-check:
 	@if ! command -v migration-check >/dev/null 2>&1 || [ "$$(migration-check --version | awk '{print $$2}')" != "$(MIGRATION_CHECK_VERSION)" ]; then \
 		echo "Installing migration-check $(MIGRATION_CHECK_VERSION)..."; \

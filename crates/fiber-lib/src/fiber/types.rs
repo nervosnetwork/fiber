@@ -13,14 +13,11 @@ use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
-use ckb_jsonrpc_types::CellOutput;
-use ckb_types::H256;
-use num_enum::IntoPrimitive;
-use num_enum::TryFromPrimitive;
-use std::convert::TryFrom;
-use std::fmt::Debug;
 
 use anyhow::anyhow;
+use bitcoin::hashes::Hash;
+use ckb_jsonrpc_types::CellOutput;
+use ckb_types::H256;
 use ckb_types::{
     core::FeeRate,
     packed::{Byte32 as MByte32, BytesVec, OutPoint, Script, Transaction},
@@ -31,6 +28,8 @@ use fiber_sphinx::{OnionErrorPacket, SphinxError};
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
+use num_enum::IntoPrimitive;
+use num_enum::TryFromPrimitive;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use secp256k1::{
@@ -41,6 +40,8 @@ use secp256k1::{Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::cmp::Ordering;
+use std::convert::TryFrom;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::str::FromStr;
 use strum::{AsRefStr, EnumString};
@@ -202,6 +203,31 @@ impl From<H256> for Hash256 {
     }
 }
 
+impl From<lightning_invoice::Sha256> for Hash256 {
+    fn from(value: lightning_invoice::Sha256) -> Self {
+        Hash256(value.0.to_byte_array())
+    }
+}
+
+impl From<bitcoin::hashes::sha256::Hash> for Hash256 {
+    fn from(value: bitcoin::hashes::sha256::Hash) -> Self {
+        Hash256(value.to_byte_array())
+    }
+}
+
+impl TryFrom<&[u8]> for Hash256 {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != 32 {
+            return Err(anyhow!("Invalid hash length"));
+        }
+        let mut data = [0u8; 32];
+        data.copy_from_slice(value);
+        Ok(Hash256(data))
+    }
+}
+
 fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
     MByte32::from_slice(value.as_slice()).expect("[u8; 32] to Byte32")
 }
@@ -240,6 +266,12 @@ impl FromStr for Hash256 {
         let mut data = [0u8; 32];
         data.copy_from_slice(&bytes);
         Ok(Hash256(data))
+    }
+}
+
+impl From<Hash256> for Vec<u8> {
+    fn from(val: Hash256) -> Self {
+        val.0.to_vec()
     }
 }
 
@@ -528,66 +560,6 @@ impl TryFrom<molecule_gossip::SchnorrSignature> for SchnorrSignature {
     }
 }
 
-/// A wrapper for musig2 public nonce list, which will be updated in each round of commitment tx generation.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitmentNonce {
-    /// The funding nonce is used to sign the tx which unlocks the funding tx output.
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub funding: PubNonce,
-    /// The commitment nonce is used to sign the tx which unlocks the commitment tx output.
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub commitment: PubNonce,
-}
-
-/// A wrapper for musig2 public nonce list, which will be updated in each round of commitment tx revocation.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RevocationNonce {
-    /// The revocation nonce is used to sign the tx which revokes the previous commitment tx.
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub revoke: PubNonce,
-    /// The ack nonce is used to sign the tx which acknowledges the previous commitment tx.
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub ack: PubNonce,
-}
-
-impl From<molecule_fiber::CommitmentNonce> for CommitmentNonce {
-    fn from(nonce: molecule_fiber::CommitmentNonce) -> Self {
-        Self {
-            funding: nonce.funding().into(),
-            commitment: nonce.commitment().into(),
-        }
-    }
-}
-
-impl From<CommitmentNonce> for molecule_fiber::CommitmentNonce {
-    fn from(nonce: CommitmentNonce) -> Self {
-        Self::new_builder()
-            .funding(nonce.funding.into())
-            .commitment(nonce.commitment.into())
-            .build()
-    }
-}
-
-impl From<molecule_fiber::RevocationNonce> for RevocationNonce {
-    fn from(nonce: molecule_fiber::RevocationNonce) -> Self {
-        Self {
-            revoke: nonce.revoke().into(),
-            ack: nonce.ack().into(),
-        }
-    }
-}
-
-impl From<RevocationNonce> for molecule_fiber::RevocationNonce {
-    fn from(nonce: RevocationNonce) -> Self {
-        Self::new_builder()
-            .revoke(nonce.revoke.into())
-            .ack(nonce.ack.into())
-            .build()
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Init {
     pub features: FeatureVector,
@@ -631,8 +603,8 @@ pub struct OpenChannel {
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
     pub channel_announcement_nonce: Option<PubNonce>,
-    pub next_commitment_nonce: CommitmentNonce,
-    pub next_revocation_nonce: RevocationNonce,
+    pub next_commitment_nonce: PubNonce,
+    pub next_revocation_nonce: PubNonce,
     pub channel_flags: ChannelFlags,
 }
 
@@ -739,8 +711,8 @@ pub struct AcceptChannel {
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
     pub channel_announcement_nonce: Option<PubNonce>,
-    pub next_commitment_nonce: CommitmentNonce,
-    pub next_revocation_nonce: RevocationNonce,
+    pub next_commitment_nonce: PubNonce,
+    pub next_revocation_nonce: PubNonce,
 }
 
 impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
@@ -798,8 +770,7 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
 pub struct CommitmentSigned {
     pub channel_id: Hash256,
     pub funding_tx_partial_signature: PartialSignature,
-    pub commitment_tx_partial_signature: PartialSignature,
-    pub next_commitment_nonce: CommitmentNonce,
+    pub next_commitment_nonce: PubNonce,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
@@ -812,9 +783,6 @@ impl From<CommitmentSigned> for molecule_fiber::CommitmentSigned {
             .channel_id(commitment_signed.channel_id.into())
             .funding_tx_partial_signature(partial_signature_to_molecule(
                 commitment_signed.funding_tx_partial_signature,
-            ))
-            .commitment_tx_partial_signature(partial_signature_to_molecule(
-                commitment_signed.commitment_tx_partial_signature,
             ))
             .next_commitment_nonce(commitment_signed.next_commitment_nonce.into())
             .build()
@@ -829,12 +797,6 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
             channel_id: commitment_signed.channel_id().into(),
             funding_tx_partial_signature: PartialSignature::from_slice(
                 commitment_signed.funding_tx_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
-            commitment_tx_partial_signature: PartialSignature::from_slice(
-                commitment_signed
-                    .commitment_tx_partial_signature()
-                    .as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
             next_commitment_nonce: commitment_signed.next_commitment_nonce().into(),
@@ -940,17 +902,13 @@ impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxComplete {
     pub channel_id: Hash256,
-    pub commitment_tx_partial_signature: PartialSignature,
-    pub next_commitment_nonce: CommitmentNonce,
+    pub next_commitment_nonce: PubNonce,
 }
 
 impl From<TxComplete> for molecule_fiber::TxComplete {
     fn from(tx_complete: TxComplete) -> Self {
         molecule_fiber::TxComplete::new_builder()
             .channel_id(tx_complete.channel_id.into())
-            .commitment_tx_partial_signature(partial_signature_to_molecule(
-                tx_complete.commitment_tx_partial_signature,
-            ))
             .next_commitment_nonce(tx_complete.next_commitment_nonce.into())
             .build()
     }
@@ -962,10 +920,6 @@ impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
     fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
         Ok(TxComplete {
             channel_id: tx_complete.channel_id().into(),
-            commitment_tx_partial_signature: PartialSignature::from_slice(
-                tx_complete.commitment_tx_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
             next_commitment_nonce: tx_complete.next_commitment_nonce().into(),
         })
     }
@@ -1226,13 +1180,14 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAndAck {
     pub channel_id: Hash256,
     pub revocation_partial_signature: PartialSignature,
-    pub commitment_tx_partial_signature: PartialSignature,
     pub next_per_commitment_point: Pubkey,
-    pub next_revocation_nonce: RevocationNonce,
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub next_revocation_nonce: PubNonce,
 }
 
 impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
@@ -1241,9 +1196,6 @@ impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
             .channel_id(revoke_and_ack.channel_id.into())
             .revocation_partial_signature(partial_signature_to_molecule(
                 revoke_and_ack.revocation_partial_signature,
-            ))
-            .commitment_tx_partial_signature(partial_signature_to_molecule(
-                revoke_and_ack.commitment_tx_partial_signature,
             ))
             .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
             .next_revocation_nonce(revoke_and_ack.next_revocation_nonce.into())
@@ -1259,10 +1211,6 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
             channel_id: revoke_and_ack.channel_id().into(),
             revocation_partial_signature: PartialSignature::from_slice(
                 revoke_and_ack.revocation_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
-            commitment_tx_partial_signature: PartialSignature::from_slice(
-                revoke_and_ack.commitment_tx_partial_signature().as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
             next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,

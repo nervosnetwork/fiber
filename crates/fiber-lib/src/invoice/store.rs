@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 use super::{CkbInvoiceStatus, InvoiceError};
 use crate::{fiber::types::Hash256, invoice::CkbInvoice};
 
@@ -25,4 +27,14 @@ pub trait PreimageStore {
 
     /// Get a preimage from the store.
     fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256>;
+}
+
+#[derive(Error, Debug)]
+pub enum SettleInvoiceError {
+    #[error("Invoice not found")]
+    InvoiceNotFound,
+    #[error("Hash mismatch")]
+    HashMismatch,
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }

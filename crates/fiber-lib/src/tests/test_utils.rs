@@ -41,6 +41,7 @@ use jsonrpsee::{
     rpc_params, server::ServerHandle,
 };
 
+use ractor::RpcReplyPort;
 use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
@@ -63,6 +64,7 @@ use std::{
 };
 use tempfile::TempDir as OldTempDir;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use tokio::sync::oneshot;
 use tokio::sync::RwLock as TokioRwLock;
 use tokio::{
     select,
@@ -93,7 +95,7 @@ use crate::{
 };
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
-pub const MIN_RESERVED_CKB: u128 = 42 * CKB_SHANNONS as u128;
+pub const MIN_RESERVED_CKB: u128 = 99 * CKB_SHANNONS as u128;
 pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000 * CKB_SHANNONS as u128;
 const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 5; // seconds
 
@@ -704,6 +706,24 @@ impl NetworkNode {
         self.store.get_preimage(payment_hash)
     }
 
+    pub async fn settle_invoice(
+        &self,
+        payment_hash: &Hash256,
+        preimage: Hash256,
+    ) -> Result<(), String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                *payment_hash,
+                preimage,
+                rpc_reply,
+            ))
+        };
+
+        call!(self.network_actor, message)
+            .expect("source_node alive")
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn send_payment(
         &self,
         command: SendPaymentCommand,
@@ -1224,6 +1244,23 @@ impl NetworkNode {
                             .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate)),
                     }),
                 )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    pub async fn send_shutdown_command_to_channel(
+        &self,
+        channel_id: Hash256,
+        command: ShutdownCommand,
+    ) {
+        let (send, _recv) = oneshot::channel();
+        let rpc_reply = RpcReplyPort::from(send);
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Shutdown(command, rpc_reply),
+                }),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }

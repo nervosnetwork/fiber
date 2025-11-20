@@ -11,7 +11,7 @@ use ractor::concurrency::Duration;
 use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
-use rand::seq::SliceRandom;
+use rand::seq::{IteratorRandom, SliceRandom};
 use rand::Rng;
 use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
@@ -19,9 +19,11 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr, TransportType};
@@ -75,7 +77,7 @@ use crate::ckb::{
     GetShutdownTxResponse,
 };
 use crate::fiber::channel::{
-    AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
     TxUpdateCommand,
 };
@@ -97,7 +99,9 @@ use crate::fiber::types::{
     FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
 };
 use crate::fiber::KeyPair;
-use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore};
+use crate::invoice::{
+    CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
+};
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
@@ -129,7 +133,7 @@ const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
 const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 
 // The duration for which we will try to maintain the number of peers in connection.
-const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
+const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(1200);
 
 // The duration for which we will check all channels.
 #[cfg(debug_assertions)]
@@ -255,7 +259,7 @@ pub struct PeerInfo {
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
 /// need to hide it from the API. So in case a reply is needed, we need to put
 /// an optional RpcReplyPort in the of the definition of this message.
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
@@ -327,6 +331,18 @@ pub enum NetworkActorCommand {
     BuildPaymentRouter(
         BuildRouterCommand,
         RpcReplyPort<Result<PaymentRouter, String>>,
+    ),
+
+    AddInvoice(
+        CkbInvoice,
+        Option<Hash256>,
+        RpcReplyPort<Result<(), InvoiceError>>,
+    ),
+
+    SettleInvoice(
+        Hash256,
+        Hash256,
+        RpcReplyPort<Result<(), SettleInvoiceError>>,
     ),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
@@ -792,7 +808,7 @@ macro_rules! debug_event {
     };
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, AsRefStr)]
 pub enum NetworkServiceEvent {
     NetworkStarted(PeerId, Vec<MultiAddr>, Vec<Multiaddr>),
     NetworkStopped(PeerId),
@@ -803,7 +819,16 @@ pub enum NetworkServiceEvent {
     // An incoming channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // A funding tx is completed. The watch tower may use this to monitor the channel.
-    RemoteTxComplete(PeerId, Hash256, Script, SettlementData),
+    RemoteTxComplete(
+        PeerId,
+        Hash256,
+        Option<Script>,
+        Privkey,
+        Pubkey,
+        Pubkey,
+        Pubkey,
+        SettlementData,
+    ),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
@@ -822,6 +847,9 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction and a settlement transaction.
     RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
+    // We have signed a valid commitment transaction, and the other party may use
+    // the signature we sent to them to create a complete commitment transaction
+    LocalCommitmentSigned(Hash256, SettlementData),
     // Preimage is created for the payment hash, the first Hash256 is the payment hash,
     // and the second Hash256 is the preimage.
     PreimageCreated(Hash256, Hash256),
@@ -834,7 +862,7 @@ pub enum NetworkServiceEvent {
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
 /// all events are processed by the network actor.
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum NetworkActorEvent {
     /// Network events to be processed by this actor.
     PeerConnected(PeerId, Pubkey, SessionContext),
@@ -909,6 +937,16 @@ pub enum NetworkActorMessage {
     Command(NetworkActorCommand),
     Event(NetworkActorEvent),
     Notification(NetworkServiceEvent),
+}
+
+impl Display for NetworkActorMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Command(command) => write!(f, "Command.{}", command.as_ref()),
+            Self::Event(event) => write!(f, "Event.{}", event.as_ref()),
+            Self::Notification(event) => write!(f, "Notification.{}", event.as_ref()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1348,6 +1386,28 @@ where
                 }
             },
             NetworkActorCommand::MaintainConnections => {
+                debug!("Trying to connect to peers with mutual channels");
+
+                for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    if state.is_connected(&peer_id) {
+                        continue;
+                    }
+                    let addresses = state.get_peer_addresses(&peer_id);
+
+                    debug!(
+                        "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
+                        &channel_id, &peer_id, &channel_state, &addresses
+                    );
+
+                    if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ConnectPeer(addr.to_owned()),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
+                }
+
                 let mut inbound_peer_sessions = state.inbound_peer_sessions();
                 let num_inbound_peers = inbound_peer_sessions.len();
                 let num_outbound_peers = state.num_of_outbound_peers();
@@ -1463,7 +1523,10 @@ where
             }
             NetworkActorCommand::CheckChannelsShutdown => {
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
-                    if matches!(channel_state, ChannelState::ChannelReady) {
+                    if matches!(
+                        channel_state,
+                        ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+                    ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let funding_lock_script = state
                                 .get_cached_channel_funding_lock_script(channel_id, &actor_state);
@@ -1481,11 +1544,20 @@ where
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
-                for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                // peer has active channels but down
+                let mut with_channel_down_peers = HashSet::new();
+                let mut ready_channels_count = 0;
+                let mut shuttingdown_channels_count = 0;
+                for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            ready_channels_count += 1;
                             if actor_state.reestablishing {
                                 continue;
+                            }
+
+                            if !state.peer_session_map.contains_key(&peer_id) {
+                                with_channel_down_peers.insert(peer_id);
                             }
 
                             for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
@@ -1547,15 +1619,22 @@ where
                                 }
                             }
 
+                            let delay_epoch = EpochNumberWithFraction::from_full_value(
+                                actor_state.commitment_delay_epoch,
+                            );
+                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
                             // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
                             // to previous hop, even if later hop send backup RemoveTlc message to us later,
                             // it will be ignored.
+                            let expect_expiry = now
+                                + epoch_delay_milliseconds
+                                + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
                             let expired_tlcs = actor_state
                                 .tlc_state
                                 .received_tlcs
                                 .get_committed_tlcs()
                                 .into_iter()
-                                .filter(|tlc| tlc.expiry < now)
+                                .filter(|tlc| tlc.is_last && tlc.expiry < expect_expiry)
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
                                 info!(
@@ -1594,14 +1673,13 @@ where
 
                             // check whether the next hop have already sent us the RemoveTlc message
                             // for the offered expired tlc, if not we will force close the channel
+                            let expect_expiry = now + epoch_delay_milliseconds;
                             if actor_state
                                 .tlc_state
                                 .offered_tlcs
                                 .get_committed_tlcs()
                                 .iter()
-                                .any(|tlc| {
-                                    tlc.expiry + (CHECK_CHANNELS_INTERVAL.as_millis() as u64) < now
-                                })
+                                .any(|tlc| tlc.expiry < expect_expiry)
                             {
                                 info!(
                                     "Force closing channel {:?} due to expired offered tlc",
@@ -1630,8 +1708,41 @@ where
                                 }
                             }
                         }
+                    } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
+                        shuttingdown_channels_count += 1;
                     }
                 }
+
+                // update metrics
+                #[cfg(feature = "metrics")]
+                {
+                    // channels
+                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
+                        .set(with_channel_down_peers.len() as u32);
+                    metrics::gauge!(crate::metrics::TOTAL_CHANNEL_COUNT)
+                        .set((ready_channels_count + shuttingdown_channels_count) as u32);
+                    metrics::gauge!(crate::metrics::READY_CHANNEL_COUNT)
+                        .set(ready_channels_count as u32);
+                    metrics::gauge!(crate::metrics::SHUTTING_DOWN_CHANNEL_COUNT)
+                        .set(shuttingdown_channels_count as u32);
+
+                    // peers
+                    let total_peers = state.peer_session_map.len();
+                    let outbound_peers = state
+                        .peer_session_map
+                        .iter()
+                        .filter(|(_id, peer)| peer.session_type.is_outbound())
+                        .count();
+                    let inbound_peers = total_peers - outbound_peers;
+                    metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).set(total_peers as u32);
+                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).set(inbound_peers as u32);
+                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).set(outbound_peers as u32);
+                }
+                debug!(
+                    "Check channels: {} ready channels {} shutting down channels, found {} peers down with channels",
+                    ready_channels_count, shuttingdown_channels_count,
+                    with_channel_down_peers.len()
+                );
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
@@ -2178,6 +2289,13 @@ where
                 let _ = rpc.send(Ok(peers));
             }
 
+            NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
+                let _ = reply.send(self.settle_invoice(&myself, hash, preimage));
+            }
+            NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
+                let _ = reply.send(self.add_invoice(invoice, preimage));
+            }
+
             #[cfg(any(debug_assertions, feature = "bench"))]
             NetworkActorCommand::UpdateFeatures(features) => {
                 state.features = features;
@@ -2207,7 +2325,10 @@ where
             return;
         }
         // check channel ready state
-        if state.state == ChannelState::ChannelReady {
+        if matches!(
+            state.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+        ) {
             let channel_id = state.get_id();
             // check shutdown transactions
             let request = GetShutdownTxRequest {
@@ -2241,7 +2362,10 @@ where
             return;
         };
 
-        if state.state != ChannelState::ChannelReady {
+        if !matches!(
+            state.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+        ) {
             return;
         }
 
@@ -2272,6 +2396,49 @@ where
                 }
             }
         }
+    }
+
+    pub fn add_invoice(
+        &self,
+        invoice: CkbInvoice,
+        preimage: Option<Hash256>,
+    ) -> Result<(), InvoiceError> {
+        let payment_hash = invoice.payment_hash();
+        if self.store.get_invoice(payment_hash).is_some() {
+            return Err(InvoiceError::InvoiceAlreadyExists);
+        }
+        self.store.insert_invoice(invoice, preimage)
+    }
+
+    pub fn settle_invoice(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        payment_hash: Hash256,
+        payment_preimage: Hash256,
+    ) -> Result<(), SettleInvoiceError> {
+        let invoice = self
+            .store
+            .get_invoice(&payment_hash)
+            .ok_or(SettleInvoiceError::InvoiceNotFound)?;
+
+        let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+        let hash = hash_algorithm.hash(payment_preimage);
+        if hash.as_slice() != payment_hash.as_ref() {
+            return Err(SettleInvoiceError::HashMismatch);
+        }
+
+        self.store.insert_preimage(payment_hash, payment_preimage);
+
+        let _ = myself.send_message(NetworkActorMessage::new_notification(
+            NetworkServiceEvent::PreimageCreated(payment_hash, payment_preimage),
+        ));
+
+        // We will send network actor a message to settle the invoice immediately if possible.
+        let _ = myself.send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SettleMPPTlcSet(payment_hash),
+        ));
+
+        Ok(())
     }
 
     async fn handle_send_onion_packet_command(
@@ -3284,7 +3451,7 @@ where
             // and falsely believe we updated the node announcement, and then forward this message to other nodes.
             // This is undesirable because we don't want to flood the network with the same message.
             // On the other hand, if the message is too old, we need to create a new one.
-            Some(ref message) if now - message.timestamp < 3600 * 1000 => {
+            Some(ref message) if now.saturating_sub(message.timestamp) < 3600 * 1000 => {
                 debug!("Returning old node announcement message as it is still valid");
             }
             _ => {
@@ -3817,6 +3984,26 @@ where
                                 state.state,
                                 ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
                             ) {
+                                if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                    payment_preimage,
+                                }) = remove_tlc.reason
+                                {
+                                    if let Some(tlc) =
+                                        state.tlc_state.get(&TLCId::Received(remove_tlc.id))
+                                    {
+                                        let payment_hash = tlc.payment_hash;
+                                        self.store.insert_preimage(payment_hash, payment_preimage);
+                                        self.network
+                                            .send_message(NetworkActorMessage::new_notification(
+                                                NetworkServiceEvent::PreimageCreated(
+                                                    payment_hash,
+                                                    payment_preimage,
+                                                ),
+                                            ))
+                                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                                    }
+                                }
+
                                 let operation = RetryableTlcOperation::RemoveTlc(
                                     TLCId::Received(remove_tlc.id),
                                     remove_tlc.reason.clone(),
@@ -3901,18 +4088,6 @@ where
         session: &SessionContext,
     ) {
         debug!("Peer {remote_peer_id:?} connected");
-        #[cfg(feature = "metrics")]
-        {
-            metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).increment(1);
-            match session.ty {
-                SessionType::Inbound => {
-                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).increment(1);
-                }
-                SessionType::Outbound => {
-                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).increment(1);
-                }
-            }
-        }
         self.peer_session_map.insert(
             remote_peer_id.clone(),
             ConnectedPeer {
@@ -3972,27 +4147,7 @@ where
     fn on_peer_disconnected(&mut self, id: &PeerId) {
         debug!("Peer {id:?} disconnected");
         if let Some(peer) = self.peer_session_map.remove(id) {
-            let active_channels = self.session_channels_map.remove(&peer.session_id);
-            #[cfg(feature = "metrics")]
-            {
-                metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).decrement(1);
-                match peer.session_type {
-                    SessionType::Inbound => {
-                        metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).decrement(1);
-                    }
-                    SessionType::Outbound => {
-                        metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).decrement(1);
-                    }
-                }
-
-                if active_channels
-                    .as_ref()
-                    .is_some_and(|channels| !channels.is_empty())
-                {
-                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT).increment(1);
-                }
-            }
-            if let Some(channel_ids) = active_channels {
+            if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
                 for channel_id in channel_ids {
                     if let Some(channel) = self.channels.get(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
@@ -4214,15 +4369,8 @@ where
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);
             debug_event!(_myself, "PeerInit");
-            let active_channels = self.store.get_active_channel_ids_by_peer(&peer_id);
-            #[cfg(feature = "metrics")]
-            {
-                if !active_channels.is_empty() {
-                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT).decrement(1);
-                }
-            }
 
-            for channel_id in active_channels {
+            for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
                 if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
                     error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
                 }
@@ -4668,24 +4816,8 @@ where
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Trying to connect to peers with mutual channels");
-        for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
-            let addresses = state.get_peer_addresses(&peer_id);
-
-            debug!(
-                "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
-                &channel_id, &peer_id, &channel_state, &addresses
-            );
-            for addr in addresses {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ConnectPeer(addr),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            }
-        }
         // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
         myself
             .send_message(NetworkActorMessage::new_command(
@@ -4727,6 +4859,10 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(feature = "metrics")]
+        let start = now_timestamp_as_millis_u64();
+        #[cfg(feature = "metrics")]
+        let name = format!("fiber.network_actor.{}", message);
         match message {
             NetworkActorMessage::Event(event) => {
                 if let Err(err) = self.handle_event(myself, state, event).await {
@@ -4744,6 +4880,14 @@ where
                 }
             }
         }
+
+        #[cfg(feature = "metrics")]
+        {
+            let end = now_timestamp_as_millis_u64();
+            let elapsed = end - start;
+            metrics::histogram!(name).record(elapsed as u32);
+        }
+
         Ok(())
     }
 

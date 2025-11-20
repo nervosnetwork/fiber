@@ -14,6 +14,8 @@ pub mod invoice;
 mod middleware;
 pub mod payment;
 pub mod peer;
+#[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
+pub mod prof;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,6 +37,8 @@ pub mod server {
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
+    #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
+    use crate::rpc::prof::{ProfRpcServer, ProfRpcServerImpl};
     use crate::{
         cch::CchMessage,
         fiber::{
@@ -244,7 +248,10 @@ pub mod server {
         let mut modules = RpcModule::new(());
         if config.is_module_enabled("invoice") {
             modules
-                .merge(InvoiceRpcServerImpl::new(store.clone(), fiber_config).into_rpc())
+                .merge(
+                    InvoiceRpcServerImpl::new(store.clone(), network_actor.clone(), fiber_config)
+                        .into_rpc(),
+                )
                 .unwrap();
         }
         if config.is_module_enabled("graph") {
@@ -307,6 +314,11 @@ pub mod server {
                         .into_rpc(),
                     )
                     .unwrap();
+            }
+
+            #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
+            if config.is_module_enabled("prof") {
+                modules.merge(ProfRpcServerImpl::new().into_rpc()).unwrap();
             }
         }
         if let Some(cch_actor) = cch_actor {

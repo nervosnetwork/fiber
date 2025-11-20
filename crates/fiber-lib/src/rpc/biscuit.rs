@@ -77,7 +77,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     // Cch
     b.rule("send_btc", r#"allow if write("cch");"#);
     b.rule("receive_btc", r#"allow if read("cch");"#);
-    b.rule("get_receive_btc_order", r#"allow if read("cch");"#);
+    b.rule("get_cch_order", r#"allow if read("cch");"#);
     // channels
     b.rule("open_channel", r#"allow if write("channels");"#);
     b.rule("accept_channel", r#"allow if write("channels");"#);
@@ -94,6 +94,8 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "submit_commitment_transaction",
         r#"allow if write("chain");"#,
     );
+    // prof
+    b.rule("pprof", r#"allow if write("pprof");"#);
     // graph
     b.rule("graph_nodes", r#"allow if read("graph");"#);
     b.rule("graph_channels", r#"allow if read("graph");"#);
@@ -104,6 +106,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("parse_invoice", r#"allow if read("invoices");"#);
     b.rule("get_invoice", r#"allow if read("invoices");"#);
     b.rule("cancel_invoice", r#"allow if write("invoices");"#);
+    b.rule("settle_invoice", r#"allow if write("invoices");"#);
 
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);
@@ -127,6 +130,10 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     );
     b.with_rule(
         "update_revocation",
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
+    );
+    b.with_rule(
+        "update_pending_remote_settlement",
         AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
     b.with_rule(
