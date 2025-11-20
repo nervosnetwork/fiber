@@ -2,8 +2,14 @@ on: [push, pull_request, workflow_dispatch]
 
 name: E2E tests
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   e2e-testing:
+    name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -48,26 +54,30 @@ jobs:
             test_env: "test"
             release: "0.202.0"
             extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=fund_from_peer"
-    name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.workflow }}-${{ runner.os }}
       - uses: dsherret/rust-toolchain-file@v1
-      - name: Install dependencies
-        run: |
-          version=${{ matrix.release }}
-          wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
-          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
-            wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
-            tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
-            echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
-            wget "https://github.com/lightningnetwork/lnd/releases/download/v0.18.0-beta/lnd-linux-amd64-v0.18.0-beta.tar.gz"
-            tar -xvaf "lnd-linux-amd64-v0.18.0-beta.tar.gz"
-            echo "$(pwd)/lnd-linux-amd64-v0.18.0-beta" >> $GITHUB_PATH
-          fi
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
+        with:
+          ckb-version: ${{ matrix.release }}
+          install-bitcoin-lnd: ${{ matrix.workflow == 'cross-chain-hub' }}
+          cache-prefix: 'e2e'
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/
+            tests/deploy/udt-init/target/
+          key: e2e-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            e2e-build-${{ runner.os }}-
 
       - name: Run e2e workflow
         id: e2eTests
@@ -98,3 +108,4 @@ jobs:
         with:
           name: e2e-test-${{ matrix.workflow }}-${{ hashFiles('matrix.json') }}-logs
           path: tests/nodes/*.log
+
