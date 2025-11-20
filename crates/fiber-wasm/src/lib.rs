@@ -1,3 +1,4 @@
+#![cfg(target_arch = "wasm32")]
 use std::{
     str::FromStr,
     sync::{Arc, OnceLock, atomic::AtomicU8},

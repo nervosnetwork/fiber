@@ -1,4 +1,4 @@
-use crate::fiber::channel::TlcInfo;
+use crate::fiber::channel::{AppliedFlags, TlcInfo};
 use crate::fiber::channel::{
     CommitmentNumbers, InboundTlcStatus, OutboundTlcStatus, TLCId, TlcState, TlcStatus,
 };
@@ -220,6 +220,7 @@ impl Actor for TlcActor {
                     previous_tlc: None,
                     status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
                     removed_confirmed_at: None,
+                    applied_flags: AppliedFlags::empty(),
                     total_amount: None,
                     payment_secret: None,
                     is_last: false,
@@ -488,6 +489,7 @@ fn test_tlc_state_v2() {
         removed_reason: None,
         previous_tlc: None,
         removed_confirmed_at: None,
+        applied_flags: AppliedFlags::empty(),
         total_amount: None,
         payment_secret: None,
         is_last: false,
@@ -507,6 +509,7 @@ fn test_tlc_state_v2() {
         removed_reason: None,
         previous_tlc: None,
         removed_confirmed_at: None,
+        applied_flags: AppliedFlags::empty(),
         total_amount: None,
         payment_secret: None,
         is_last: false,

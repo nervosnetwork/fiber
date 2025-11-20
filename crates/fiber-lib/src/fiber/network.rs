@@ -1560,11 +1560,11 @@ where
                                 with_channel_down_peers.insert(peer_id);
                             }
 
-                            for tlc in actor_state.tlc_state.received_tlcs.get_committed_tlcs() {
+                            for tlc in actor_state.tlc_state.get_committed_received_tlcs() {
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-                                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
+                                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(tlc)) {
                                         continue;
                                     }
                                 }
@@ -1631,9 +1631,7 @@ where
                                 + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
                             let expired_tlcs = actor_state
                                 .tlc_state
-                                .received_tlcs
-                                .get_committed_tlcs()
-                                .into_iter()
+                                .get_committed_received_tlcs()
                                 .filter(|tlc| tlc.is_last && tlc.expiry < expect_expiry)
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
@@ -1676,9 +1674,7 @@ where
                             let expect_expiry = now + epoch_delay_milliseconds;
                             if actor_state
                                 .tlc_state
-                                .offered_tlcs
-                                .get_committed_tlcs()
-                                .iter()
+                                .get_committed_offered_tlcs()
                                 .any(|tlc| tlc.expiry < expect_expiry)
                             {
                                 info!(

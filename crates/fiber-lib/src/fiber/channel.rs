@@ -795,7 +795,7 @@ where
                         TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
                             | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
                     )
-                    && !state.tlc_state.applied_remove_tlcs.contains(&tlc.tlc_id)
+                    && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
             })
             .map(|tlc| tlc.tlc_id)
             .collect();
@@ -861,9 +861,8 @@ where
         let apply_tlcs: Vec<TlcInfo> = state
             .tlc_state
             .get_committed_received_tlcs()
-            .into_iter()
-            .filter(|tlc| tlc.removed_reason.is_none())
-            .filter(|tlc| !state.tlc_state.applied_add_tlcs.contains(&tlc.tlc_id))
+            .filter(|tlc| tlc.removed_reason.is_none() && tlc.applied_flags.is_empty())
+            .cloned()
             .collect();
 
         for add_tlc in apply_tlcs {
@@ -1029,7 +1028,12 @@ where
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
 
-        state.tlc_state.applied_add_tlcs.insert(add_tlc.tlc_id);
+        let tlc = state
+            .tlc_state
+            .get_mut(&add_tlc.tlc_id)
+            .expect("expect tlc");
+        tlc.applied_flags = AppliedFlags::ADD;
+
         if peeled_onion_packet.is_last() {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
@@ -1345,8 +1349,8 @@ where
         tlc_id: TLCId,
     ) -> ProcessingChannelResult {
         let channel_id = state.get_id();
-        assert!(!state.tlc_state.applied_remove_tlcs.contains(&tlc_id));
-        state.tlc_state.applied_remove_tlcs.insert(tlc_id);
+        let tlc = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");
+        tlc.applied_flags |= AppliedFlags::REMOVE;
 
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
 
@@ -2979,6 +2983,15 @@ impl TlcStatus {
     }
 }
 
+bitflags! {
+    #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+    #[serde(transparent)]
+    pub struct AppliedFlags: u8 {
+        const ADD = 1;
+        const REMOVE = 1 << 1;
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TlcInfo {
     pub channel_id: Hash256,
@@ -3013,6 +3026,7 @@ pub struct TlcInfo {
     ///
     pub previous_tlc: Option<(Hash256, TLCId)>,
     pub removed_confirmed_at: Option<u64>,
+    pub applied_flags: AppliedFlags,
     /// Whether this tlc is the last hop in a multi-path payment
     pub is_last: bool,
 }
@@ -3048,6 +3062,7 @@ impl Debug for TlcInfo {
             .field("removed_reason", &self.removed_reason)
             .field("payment_hash", &self.payment_hash)
             .field("removed_confirmed_at", &self.removed_confirmed_at)
+            .field("applied_flags", &self.applied_flags)
             .finish()
     }
 }
@@ -3154,64 +3169,21 @@ impl PendingTlcs {
     pub fn add_tlc(&mut self, tlc: TlcInfo) {
         self.tlcs.push(tlc);
     }
-
-    pub fn get_committed_tlcs(&self) -> Vec<TlcInfo> {
-        self.tlcs
-            .iter()
-            .filter(|tlc| {
-                if tlc.is_offered() {
-                    matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
-                } else {
-                    matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
-                }
-            })
-            .cloned()
-            .collect()
-    }
-
-    pub fn get_oldest_failed_tlcs(&self) -> Vec<TLCId> {
-        let mut failed_tlcs = self
-            .tlcs
-            .iter()
-            .filter_map(|tlc| {
-                if tlc.is_fail_remove_confirmed() {
-                    Some((tlc.tlc_id, tlc.removed_confirmed_at.unwrap_or(u64::MAX)))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        if failed_tlcs.len() > 1 {
-            failed_tlcs.sort_by_key(|a| a.1);
-            failed_tlcs
-                .iter()
-                .take(failed_tlcs.len() - 1)
-                .map(|(tlc_id, _)| *tlc_id)
-                .collect()
-        } else {
-            return Vec::new();
-        }
-    }
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct TlcState {
     pub offered_tlcs: PendingTlcs,
     pub received_tlcs: PendingTlcs,
-    pub applied_add_tlcs: HashSet<TLCId>,
-    pub applied_remove_tlcs: HashSet<TLCId>,
     pub waiting_ack: bool,
 }
 
 impl TlcState {
     pub fn info(&self) -> String {
         format!(
-            "offer_tlcs: {:?} received_tlcs: {:?} applied_add_tlcs: {:?} applied_remove_tlcs: {:?}",
+            "offer_tlcs: {:?} received_tlcs: {:?}",
             self.offered_tlcs.tlcs.len(),
             self.received_tlcs.tlcs.len(),
-            self.applied_add_tlcs.len(),
-            self.applied_remove_tlcs.len(),
         )
     }
     #[cfg(any(debug_assertions, feature = "bench"))]
@@ -3267,8 +3239,18 @@ impl TlcState {
         }
     }
 
-    pub fn get_committed_received_tlcs(&self) -> Vec<TlcInfo> {
-        self.received_tlcs.get_committed_tlcs()
+    pub fn get_committed_received_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.received_tlcs.tlcs.iter().filter(|tlc| {
+            debug_assert!(tlc.is_received());
+            matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
+        })
+    }
+
+    pub fn get_committed_offered_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs.tlcs.iter().filter(|tlc| {
+            debug_assert!(tlc.is_offered());
+            matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
+        })
     }
 
     pub fn get_next_offering(&self) -> u64 {
@@ -3298,23 +3280,7 @@ impl TlcState {
             .chain(self.received_tlcs.tlcs.iter())
     }
 
-    pub fn all_committed_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
-        self.offered_tlcs
-            .tlcs
-            .iter()
-            .chain(self.received_tlcs.tlcs.iter())
-            .filter(|tlc| {
-                if tlc.is_offered() {
-                    matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
-                } else {
-                    matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
-                }
-            })
-    }
-
     pub fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
-        self.applied_add_tlcs.remove(&tlc_id);
-        self.applied_remove_tlcs.remove(&tlc_id);
         if tlc_id.is_offered() {
             self.offered_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
         } else {
@@ -5324,20 +5290,24 @@ impl ChannelActorState {
         // Remove the oldest failed tlcs from the channel state turns out to be very tricky
         // Because the different parties may have different views on the failed tlcs,
         // so we need to be very careful here.
-
         // The basic idea is to remove the oldest failed tlcs that are confirmed by both parties.
-        // And we need to calculate the oldest failed tlcs independently from two directions,
-        // Because we may have tlc operations from both directions at the same time, order matters.
         // see #475 for more details.
-        let failed_offered_tlcs = self.tlc_state.offered_tlcs.get_oldest_failed_tlcs();
-        let failed_received_tlcs = self.tlc_state.received_tlcs.get_oldest_failed_tlcs();
+        let to_be_removed_ids = self
+            .tlc_state
+            .all_tlcs()
+            .filter_map(|tlc| {
+                if tlc.removed_confirmed_at.is_some()
+                    && tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                {
+                    Some(tlc.tlc_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<TLCId>>();
 
-        for tlc_id in failed_offered_tlcs
-            .iter()
-            .chain(failed_received_tlcs.iter())
-        {
-            debug_assert!(self.tlc_state.applied_remove_tlcs.contains(tlc_id));
-            self.tlc_state.apply_remove_tlc(*tlc_id);
+        for tlc_id in to_be_removed_ids {
+            self.tlc_state.apply_remove_tlc(tlc_id);
         }
     }
 
@@ -5805,7 +5775,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn is_waiting_tlc_ack(&self) -> bool {
+    pub fn is_waiting_tlc_ack(&self) -> bool {
         self.tlc_state.waiting_ack
             || self.remote_revocation_nonce_for_send.is_none()
             || self.remote_revocation_nonce_for_verify.is_none()
@@ -5885,6 +5855,7 @@ impl ChannelActorState {
                 )
             }),
             removed_confirmed_at: None,
+            applied_flags: AppliedFlags::empty(),
             total_amount: None,
             payment_secret: None,
             is_last: false,
@@ -5911,6 +5882,7 @@ impl ChannelActorState {
             removed_reason: None,
             previous_tlc: None,
             removed_confirmed_at: None,
+            applied_flags: AppliedFlags::empty(),
             total_amount: None,
             payment_secret: None,
         };
