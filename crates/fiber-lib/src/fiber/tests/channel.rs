@@ -43,6 +43,8 @@ use ckb_types::{
     packed::{CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
+use musig2::secp::Point;
+use musig2::KeyAggContext;
 use ractor::call;
 use secp256k1::Secp256k1;
 use std::collections::HashSet;
@@ -190,7 +192,7 @@ async fn test_create_private_channel() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (_node_a, _node_b, _new_channel_id, _) = NetworkNode::new_2_nodes_with_established_channel(
         node_a_funding_amount,
@@ -242,7 +244,7 @@ async fn test_send_init_msg_with_different_chain_hash() {
 async fn test_create_channel_with_remote_tlc_info() {
     async fn test(public: bool) {
         let node_a_funding_amount = 100000000000;
-        let node_b_funding_amount = 6200000000;
+        let node_b_funding_amount = 11800000000;
 
         let (node_a, node_b, channel_id, _) = NetworkNode::new_2_nodes_with_established_channel(
             node_a_funding_amount,
@@ -273,7 +275,7 @@ async fn test_create_public_channel() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (_node_a, _node_b, _new_channel_id, _) = NetworkNode::new_2_nodes_with_established_channel(
         node_a_funding_amount,
@@ -285,7 +287,7 @@ async fn test_create_public_channel() {
 
 async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
     let node1_funding_amount = 100000000000;
-    let node2_funding_amount = 6200000000;
+    let node2_funding_amount = 11800000000;
 
     let (mut node1, mut node2, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
@@ -343,7 +345,7 @@ async fn test_create_channel_with_too_large_amounts() {
     let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
     assert!(res.is_err(), "Create channel failed: {:?}", res);
     assert!(res.unwrap_err().to_string().contains(
-        "The total funding amount (18446744069509551614) should be less than 18446744065309551615"
+        "The total funding amount (18446744063809551614) should be less than 18446744053909551615"
     ));
 
     let params = ChannelParameters {
@@ -354,7 +356,7 @@ async fn test_create_channel_with_too_large_amounts() {
     let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
     assert!(res.is_err(), "Create channel failed: {:?}", res);
     assert!(res.unwrap_err().to_string().contains(
-        "The total funding amount (18446744069509551614) should be less than 18446744065309551615"
+        "The total funding amount (18446744063809551614) should be less than 18446744053909551615"
     ));
 
     let params = ChannelParameters {
@@ -383,7 +385,7 @@ async fn test_owned_private_channel_saved_to_the_owner_graph() {
 
 async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) {
     let node1_funding_amount = 100000000000;
-    let node2_funding_amount = 6200000000;
+    let node2_funding_amount = 11800000000;
 
     let (mut node1, mut node2, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
@@ -447,7 +449,7 @@ async fn test_owned_channel_removed_from_graph_on_disconnected_private_channel()
 
 async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     let node1_funding_amount = 100000000000;
-    let node2_funding_amount = 6200000000;
+    let node2_funding_amount = 11800000000;
 
     let (mut node1, mut node2, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
@@ -546,7 +548,7 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, public)
@@ -675,7 +677,7 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     init_tracing();
 
     let node1_funding_amount = 100000000000;
-    let node2_funding_amount = 6200000000;
+    let node2_funding_amount = 11800000000;
 
     let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
     let (_channel_id, funding_tx_hash) = establish_channel_between_nodes(
@@ -721,7 +723,7 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
     init_tracing();
 
     let node1_funding_amount = 100000000000;
-    let node2_funding_amount = 6200000000;
+    let node2_funding_amount = 11800000000;
 
     let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
     let (_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
@@ -746,7 +748,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -795,7 +797,7 @@ async fn test_network_send_payment_send_each_other() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -856,7 +858,7 @@ async fn test_network_send_payment_more_send_each_other() {
     // and the final balance should be same as the initial balance
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -917,7 +919,7 @@ async fn test_network_send_payment_send_with_ack() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -951,7 +953,7 @@ async fn test_network_send_previous_tlc_error() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, mut node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1155,7 +1157,7 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1185,7 +1187,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1234,7 +1236,7 @@ async fn test_network_send_payment_target_not_found() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, _node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1286,7 +1288,7 @@ async fn test_network_send_payment_with_dry_run() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 62000000000;
+    let node_b_funding_amount = 118000000000;
 
     let (node_a, node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1650,7 +1652,7 @@ async fn test_network_send_payment_dry_run_can_still_query() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1706,7 +1708,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1742,7 +1744,7 @@ async fn test_stash_broadcast_messages() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (_node_a, _node_b, _new_channel_id, _) = NetworkNode::new_2_nodes_with_established_channel(
         node_a_funding_amount,
@@ -1756,7 +1758,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funidng_amount = 6200000000;
+    let node_b_funidng_amount = 11800000000;
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -1953,7 +1955,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     wrong_algorithm: HashAlgorithm,
 ) {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, new_channel_id, _) = NetworkNode::new_2_nodes_with_established_channel(
         node_a_funding_amount,
@@ -2492,7 +2494,7 @@ async fn test_network_add_two_tlcs_remove_one() {
 #[tokio::test]
 async fn test_remove_tlc_with_expiry_error() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, _node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -2636,7 +2638,7 @@ async fn test_remove_expired_tlc_in_background() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, _node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -2651,7 +2653,7 @@ async fn test_remove_expired_tlc_in_background() {
         (DEFAULT_COMMITMENT_DELAY_EPOCHS as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0)
             as u64;
 
-    let a_valid_but_small_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds + 100;
+    let a_valid_but_small_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds + 5000;
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
@@ -2676,7 +2678,7 @@ async fn test_remove_expired_tlc_in_background() {
     let tlc_id = add_tlc_result.unwrap().tlc_id;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(
-        epoch_delay_milliseconds + 3000,
+        epoch_delay_milliseconds + 6000,
     ))
     .await;
 
@@ -2698,7 +2700,7 @@ async fn test_remove_expired_tlc_in_background() {
 async fn do_test_add_tlc_duplicated() {
     init_tracing();
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, _node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -2742,7 +2744,7 @@ async fn do_test_add_tlc_duplicated() {
 async fn do_test_add_tlc_waiting_ack() {
     init_tracing();
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11000000000;
 
     let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -3063,7 +3065,7 @@ async fn do_test_add_tlc_value_limit() {
 #[tokio::test]
 async fn do_test_add_tlc_min_tlc_value_limit() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 10000000000;
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
@@ -3160,7 +3162,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
 async fn test_channel_update_tlc_expiry() {
     init_tracing();
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
@@ -3551,7 +3553,7 @@ async fn test_remove_tlc_with_wrong_hash_algorithm() {
 
 async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (mut node_a, mut node_b, new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
@@ -3761,7 +3763,7 @@ async fn test_revoke_old_commitment_transaction() {
         NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
-                funding_amount: 6200000000,
+                funding_amount: 11800000000,
                 shutdown_script: None,
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
@@ -3777,6 +3779,27 @@ async fn test_revoke_old_commitment_transaction() {
         .expect("accept channel success");
     let new_channel_id = accept_channel_result.new_channel_id;
 
+    let x_only_aggregated_pubkey = node_b
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::RemoteTxComplete(
+                _,
+                _,
+                _,
+                _,
+                _,
+                local_funding_pubkey,
+                remote_funding_pubkey,
+                _,
+            ) => {
+                let key_agg_ctx =
+                    KeyAggContext::new(vec![remote_funding_pubkey, local_funding_pubkey])
+                        .expect("Valid pubkeys");
+                Some(key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly())
+            }
+            _ => None,
+        })
+        .await;
+
     let commitment_tx = node_b
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
@@ -3791,6 +3814,7 @@ async fn test_revoke_old_commitment_transaction() {
             _ => None,
         })
         .await;
+
     node_a
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
@@ -3873,9 +3897,9 @@ async fn test_revoke_old_commitment_transaction() {
 
     let witness = [
         XUDT_COMPATIBLE_WITNESS.to_vec(),
-        vec![0xFF],
+        vec![0x00],
         revocation_data.commitment_number.to_be_bytes().to_vec(),
-        revocation_data.x_only_aggregated_pubkey.to_vec(),
+        x_only_aggregated_pubkey.to_vec(),
         revocation_data.aggregated_signature.serialize().to_vec(),
     ]
     .concat();
@@ -3940,7 +3964,7 @@ async fn test_create_channel() {
         NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
-                funding_amount: 6200000000,
+                funding_amount: 11800000000,
                 shutdown_script: None,
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
@@ -4070,7 +4094,7 @@ async fn test_reestablish_channel() {
         NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
-                funding_amount: 6200000000,
+                funding_amount: 11800000000,
                 shutdown_script: None,
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
@@ -4168,7 +4192,7 @@ async fn test_reestablish_channel() {
 #[tokio::test]
 async fn test_force_close_channel_when_remote_is_offline() {
     let (mut node_a, mut node_b, channel_id, _) =
-        NetworkNode::new_2_nodes_with_established_channel(16200000000, 6200000000, true).await;
+        NetworkNode::new_2_nodes_with_established_channel(111800000000, 11800000000, true).await;
 
     node_b.stop().await;
     node_a
@@ -4300,7 +4324,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
 
 #[tokio::test]
 async fn test_commitment_tx_capacity() {
-    let (amount_a, amount_b) = (16200000000, 6200000000);
+    let (amount_a, amount_b) = (111800000000, 11800000000);
     let (node_a, _node_b, channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(amount_a, amount_b, true).await;
 
@@ -4308,10 +4332,9 @@ async fn test_commitment_tx_capacity() {
     let commitment_tx = state.get_latest_commitment_transaction().await.unwrap();
     let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
 
-    // default fee rate is 1000 shannons per kb, and there is a gap of 20 bytes between the mock commitment tx and the real one
-    // ref to fn commitment_tx_size
+    // default fee rate is 1000 shannons per kb
     assert_eq!(
-        amount_a + amount_b - (commitment_tx.data().serialized_size_in_block() + 20) as u128,
+        amount_a + amount_b - commitment_tx.data().serialized_size_in_block() as u128,
         output_capacity as u128
     );
 }
@@ -4321,7 +4344,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (mut node_a, mut node_b, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
@@ -4352,7 +4375,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (mut node_a, mut node_b, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
@@ -4389,7 +4412,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (mut node_a, mut node_b, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
@@ -4432,7 +4455,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (mut node_a, mut node_b, new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
@@ -4539,8 +4562,8 @@ async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
-                shutdown_script: Some(Script::new_builder().args([0u8; 40].pack()).build()),
-                funding_amount: (81 + 1) * 100000000 - 1,
+                shutdown_script: Some(Script::new_builder().args([0u8; 60].pack()).build()),
+                funding_amount: (101 + 1) * 100000000 - 1,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
@@ -4557,10 +4580,9 @@ async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
 
     let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
 
-    assert!(open_channel_result
-        .err()
-        .unwrap()
-        .contains("The funding amount (8199999999) should be greater than or equal to 8200000000"));
+    assert!(open_channel_result.err().unwrap().contains(
+        "The funding amount (10199999999) should be greater than or equal to 10200000000"
+    ));
 }
 
 #[tokio::test]
@@ -4572,8 +4594,8 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
             .base_dir_prefix(&format!("test-fnn-node-{}-", i))
             .fiber_config_updater(|config| {
                 // enable auto accept channel with default value
-                config.auto_accept_channel_ckb_funding_amount = Some(6200000000);
-                config.open_channel_auto_accept_min_ckb_funding_amount = Some(16200000000);
+                config.auto_accept_channel_ckb_funding_amount = Some(11800000000);
+                config.open_channel_auto_accept_min_ckb_funding_amount = Some(111800000000);
             })
             .build()
     })
@@ -4639,7 +4661,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
 #[tokio::test]
 async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 9900000000;
 
     let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -4651,7 +4673,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 21].pack()).build()),
+                        close_script: Some(Script::new_builder().args([0u8; 58].pack()).build()),
                         fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },
@@ -4695,7 +4717,7 @@ async fn test_shutdown_channel_with_invalid_feerate_peer_message() {
     init_tracing();
 
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, mut node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -4721,7 +4743,7 @@ async fn test_shutdown_channel_with_invalid_feerate_peer_message() {
 #[tokio::test]
 async fn test_shutdown_channel_with_different_size_shutdown_script() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     // create a private channel for testing shutdown,
     // https://github.com/nervosnetwork/fiber/issues/431
@@ -4801,7 +4823,7 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
 #[tokio::test]
 async fn test_shutdown_channel_network_graph_will_not_sync_private_channel() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, _channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -4823,7 +4845,7 @@ async fn test_shutdown_channel_network_graph_will_not_sync_private_channel() {
 #[tokio::test]
 async fn test_shutdown_channel_network_graph_with_sync_up() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -4879,7 +4901,7 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
 #[tokio::test]
 async fn test_shutdown_channel_and_shutdown_transaction_hash() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let (node_a, node_b, channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -5004,8 +5026,8 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (MIN_RESERVED_CKB + 900, 5200000000)),
-            ((1, 2), (MIN_RESERVED_CKB + 1000, 5200000000)),
+            ((1, 2), (MIN_RESERVED_CKB + 900, 10800000000)),
+            ((1, 2), (MIN_RESERVED_CKB + 1000, 10800000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
@@ -5076,8 +5098,8 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     let (nodes, _channels) = create_n_nodes_network(
         &[
             ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (MIN_RESERVED_CKB + 1000, 5200000000)),
-            ((1, 2), (MIN_RESERVED_CKB + 900, 6200000000)),
+            ((1, 2), (MIN_RESERVED_CKB + 1000, 10800000000)),
+            ((1, 2), (MIN_RESERVED_CKB + 900, 11800000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
@@ -5112,8 +5134,8 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 900, 5200000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1000, 5200000000)),
+            ((2, 3), (MIN_RESERVED_CKB + 900, 10800000000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1000, 10800000000)),
         ],
         4,
     )
@@ -5181,8 +5203,8 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 1000, 5200000000)),
-            ((2, 3), (MIN_RESERVED_CKB + 900, 6200000000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1000, 10800000000)),
+            ((2, 3), (MIN_RESERVED_CKB + 900, 11800000000)),
         ],
         4,
     )
@@ -5212,7 +5234,7 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
             // even 1000 > 999, but it's not enough for fee, and this is the direct channel
             // so we can check the actual balance of channel
             // the payment will fail
-            ((0, 1), (MIN_RESERVED_CKB + 1000, 5200000000)),
+            ((0, 1), (MIN_RESERVED_CKB + 1000, 10800000000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
@@ -5235,8 +5257,8 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     // the send payment should be succeed
     let (nodes, _channels) = create_n_nodes_network(
         &[
-            ((0, 1), (MIN_RESERVED_CKB + 900, 5200000000)),
-            ((0, 1), (MIN_RESERVED_CKB + 1001, 5200000000)),
+            ((0, 1), (MIN_RESERVED_CKB + 900, 10800000000)),
+            ((0, 1), (MIN_RESERVED_CKB + 1001, 10800000000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],

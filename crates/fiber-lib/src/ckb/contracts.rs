@@ -235,7 +235,7 @@ impl ContractsContext {
                         contract,
                         Script::new_builder()
                             .code_hash(CellOutput::calc_data_hash(&output_data))
-                            .hash_type(ScriptHashType::Data1.into())
+                            .hash_type(ScriptHashType::Data2.into())
                             .build(),
                     );
                 }

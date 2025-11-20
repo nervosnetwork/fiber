@@ -77,7 +77,7 @@ use crate::ckb::{
     GetShutdownTxResponse,
 };
 use crate::fiber::channel::{
-    AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
     TxUpdateCommand,
 };
@@ -819,7 +819,16 @@ pub enum NetworkServiceEvent {
     // An incoming channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // A funding tx is completed. The watch tower may use this to monitor the channel.
-    RemoteTxComplete(PeerId, Hash256, Script, SettlementData),
+    RemoteTxComplete(
+        PeerId,
+        Hash256,
+        Option<Script>,
+        Privkey,
+        Pubkey,
+        Pubkey,
+        Pubkey,
+        SettlementData,
+    ),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
@@ -838,6 +847,9 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction and a settlement transaction.
     RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
+    // We have signed a valid commitment transaction, and the other party may use
+    // the signature we sent to them to create a complete commitment transaction
+    LocalCommitmentSigned(Hash256, SettlementData),
     // Preimage is created for the payment hash, the first Hash256 is the payment hash,
     // and the second Hash256 is the preimage.
     PreimageCreated(Hash256, Hash256),
@@ -1511,7 +1523,10 @@ where
             }
             NetworkActorCommand::CheckChannelsShutdown => {
                 for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
-                    if matches!(channel_state, ChannelState::ChannelReady) {
+                    if matches!(
+                        channel_state,
+                        ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+                    ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let funding_lock_script = state
                                 .get_cached_channel_funding_lock_script(channel_id, &actor_state);
@@ -1604,15 +1619,22 @@ where
                                 }
                             }
 
+                            let delay_epoch = EpochNumberWithFraction::from_full_value(
+                                actor_state.commitment_delay_epoch,
+                            );
+                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
                             // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
                             // to previous hop, even if later hop send backup RemoveTlc message to us later,
                             // it will be ignored.
+                            let expect_expiry = now
+                                + epoch_delay_milliseconds
+                                + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
                             let expired_tlcs = actor_state
                                 .tlc_state
                                 .received_tlcs
                                 .get_committed_tlcs()
                                 .into_iter()
-                                .filter(|tlc| tlc.expiry < now)
+                                .filter(|tlc| tlc.is_last && tlc.expiry < expect_expiry)
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
                                 info!(
@@ -1651,14 +1673,13 @@ where
 
                             // check whether the next hop have already sent us the RemoveTlc message
                             // for the offered expired tlc, if not we will force close the channel
+                            let expect_expiry = now + epoch_delay_milliseconds;
                             if actor_state
                                 .tlc_state
                                 .offered_tlcs
                                 .get_committed_tlcs()
                                 .iter()
-                                .any(|tlc| {
-                                    tlc.expiry + (CHECK_CHANNELS_INTERVAL.as_millis() as u64) < now
-                                })
+                                .any(|tlc| tlc.expiry < expect_expiry)
                             {
                                 info!(
                                     "Force closing channel {:?} due to expired offered tlc",
@@ -2289,7 +2310,7 @@ where
             }
 
             NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
-                let _ = reply.send(self.settle_invoice(&myself, &hash, &preimage));
+                let _ = reply.send(self.settle_invoice(&myself, hash, preimage));
             }
             NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
                 let _ = reply.send(self.add_invoice(invoice, preimage));
@@ -2324,7 +2345,10 @@ where
             return;
         }
         // check channel ready state
-        if state.state == ChannelState::ChannelReady {
+        if matches!(
+            state.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+        ) {
             let channel_id = state.get_id();
             // check shutdown transactions
             let request = GetShutdownTxRequest {
@@ -2358,7 +2382,10 @@ where
             return;
         };
 
-        if state.state != ChannelState::ChannelReady {
+        if !matches!(
+            state.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+        ) {
             return;
         }
 
@@ -2406,12 +2433,12 @@ where
     pub fn settle_invoice(
         &self,
         myself: &ActorRef<NetworkActorMessage>,
-        payment_hash: &Hash256,
-        payment_preimage: &Hash256,
+        payment_hash: Hash256,
+        payment_preimage: Hash256,
     ) -> Result<(), SettleInvoiceError> {
         let invoice = self
             .store
-            .get_invoice(payment_hash)
+            .get_invoice(&payment_hash)
             .ok_or(SettleInvoiceError::InvoiceNotFound)?;
 
         let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
@@ -2420,11 +2447,15 @@ where
             return Err(SettleInvoiceError::HashMismatch);
         }
 
-        self.store.insert_preimage(*payment_hash, *payment_preimage);
+        self.store.insert_preimage(payment_hash, payment_preimage);
+
+        let _ = myself.send_message(NetworkActorMessage::new_notification(
+            NetworkServiceEvent::PreimageCreated(payment_hash, payment_preimage),
+        ));
 
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SettleTlcSet(*payment_hash, None),
+            NetworkActorCommand::SettleTlcSet(payment_hash, None),
         ));
 
         Ok(())
@@ -3440,7 +3471,7 @@ where
             // and falsely believe we updated the node announcement, and then forward this message to other nodes.
             // This is undesirable because we don't want to flood the network with the same message.
             // On the other hand, if the message is too old, we need to create a new one.
-            Some(ref message) if now - message.timestamp < 3600 * 1000 => {
+            Some(ref message) if now.saturating_sub(message.timestamp) < 3600 * 1000 => {
                 debug!("Returning old node announcement message as it is still valid");
             }
             _ => {
@@ -3973,6 +4004,26 @@ where
                                 state.state,
                                 ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
                             ) {
+                                if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                    payment_preimage,
+                                }) = remove_tlc.reason
+                                {
+                                    if let Some(tlc) =
+                                        state.tlc_state.get(&TLCId::Received(remove_tlc.id))
+                                    {
+                                        let payment_hash = tlc.payment_hash;
+                                        self.store.insert_preimage(payment_hash, payment_preimage);
+                                        self.network
+                                            .send_message(NetworkActorMessage::new_notification(
+                                                NetworkServiceEvent::PreimageCreated(
+                                                    payment_hash,
+                                                    payment_preimage,
+                                                ),
+                                            ))
+                                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                                    }
+                                }
+
                                 let operation = RetryableTlcOperation::RemoveTlc(
                                     TLCId::Received(remove_tlc.id),
                                     remove_tlc.reason.clone(),

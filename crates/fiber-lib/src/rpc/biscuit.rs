@@ -133,6 +133,10 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
     b.with_rule(
+        "update_pending_remote_settlement",
+        AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
+    );
+    b.with_rule(
         "update_local_settlement",
         AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );

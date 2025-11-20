@@ -57,6 +57,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `create_watch_channel`](#watchtower-create_watch_channel)
         * [Method `remove_watch_channel`](#watchtower-remove_watch_channel)
         * [Method `update_revocation`](#watchtower-update_revocation)
+        * [Method `update_pending_remote_settlement`](#watchtower-update_pending_remote_settlement)
         * [Method `update_local_settlement`](#watchtower-update_local_settlement)
         * [Method `create_preimage`](#watchtower-create_preimage)
         * [Method `remove_preimage`](#watchtower-remove_preimage)
@@ -909,8 +910,12 @@ Create a new watched channel
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
-* `funding_tx_lock` - <em>`Script`</em>, Channel funding transaction lock script
-* `remote_settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Remote settlement data
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, Funding UDT type script
+* `local_settlement_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to settle the commitment transaction
+* `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to settle the commitment transaction
+* `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key
+* `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 
 ##### Returns
 
@@ -946,6 +951,24 @@ Update revocation
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `revocation_data` - <em>[RevocationData](#type-revocationdata)</em>, Revocation data
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-update_pending_remote_settlement"></a>
+#### Method `update_pending_remote_settlement`
+
+Update pending remote settlement
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 
 ##### Returns
@@ -1382,7 +1405,6 @@ Data needed to revoke an outdated commitment transaction.
 #### Fields
 
 * `commitment_number` - <em>`u64`</em>, The commitment transaction version number that was revoked
-* `x_only_aggregated_pubkey` - The x-only aggregated public key used in the multisig for this commitment transaction
 * `aggregated_signature` - <em>`CompactSignature`</em>, The aggregated signature from both parties that authorizes the revocation
 * `output` - <em>`CellOutput`</em>, The output cell from the revoked commitment transaction
 * `output_data` - <em>`Bytes`</em>, The associated data for the output cell (e.g., UDT amount for token transfers)
@@ -1444,13 +1466,9 @@ Data needed to authorize and execute a settlement transaction.
 
 #### Fields
 
-* `x_only_aggregated_pubkey` - The x-only aggregated public key used in the multi-signature for the settlement transaction
-* `aggregated_signature` - <em>`CompactSignature`</em>, The aggregated signature from both parties that authorizes the settlement transaction
-* `to_local_output` - <em>`CellOutput`</em>, The output cell for the local party (this node's owner) in the settlement transaction
-* `to_local_output_data` - <em>`Bytes`</em>, The associated data for the local output cell (e.g., UDT amount for token transfers)
-* `to_remote_output` - <em>`CellOutput`</em>, The output cell for the remote party (channel partner) in the settlement transaction
-* `to_remote_output_data` - <em>`Bytes`</em>, The associated data for the remote output cell (e.g., UDT amount for token transfers)
-* `tlcs` - <em>Vec<[SettlementTlc](#type-settlementtlc)></em>, The list of Time-Locked Contracts (TLCs) included in this settlement
+* `local_amount` - <em>`u128`</em>, The total amount of CKB/UDT being settled for the local party
+* `remote_amount` - <em>`u128`</em>, The total amount of CKB/UDT being settled for the remote party
+* `tlcs` - <em>Vec<[SettlementTlc](#type-settlementtlc)></em>, The list of pending Time-Locked Contracts (TLCs) included in this settlement
 ---
 
 <a id="#type-settlementtlc"></a>
