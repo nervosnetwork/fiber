@@ -4,7 +4,7 @@ inputs:
   ckb-version:
     description: 'CKB version to install'
     required: true
-    default: '0.116.1'
+    default: '0.202.0'
   install-bitcoin-lnd:
     description: 'Whether to install Bitcoin and LND'
     required: false

@@ -160,7 +160,7 @@ jobs:
       - name: Setup Dependencies
         uses: ./.github/actions/setup-dependencies
         with:
-          ckb-version: '0.116.1'
+          ckb-version: '0.202.0'
           cache-prefix: 'benchmark'
 
       - name: Cache build artifacts
