@@ -914,9 +914,10 @@ where
         });
 
         let tlc = tlc_info.clone();
+        let invoice = self.store.get_invoice(&tlc.payment_hash);
 
-        if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-            let status = self.get_invoice_status(&invoice);
+        if let Some(invoice) = &invoice {
+            let status = self.get_invoice_status(invoice);
             match status {
                 CkbInvoiceStatus::Expired => {
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
@@ -940,15 +941,15 @@ where
                     // add to pending settlement tlc set
                     // the tlc set will be settled by network actor
                     state
-                        .pending_notify_mpp_tlcs
-                        .push((tlc.payment_hash, tlc.id()));
+                        .pending_notify_settle_tlcs
+                        .push((tlc.payment_hash, tlc.id(), true));
 
                     // just return, the tlc set will be settled by network actor
                     return;
                 }
                 _ => {
                     // single path payment
-                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
+                    if !is_invoice_fulfilled(invoice, std::slice::from_ref(&tlc)) {
                         remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                             TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
                             &tlc.shared_secret,
@@ -959,7 +960,13 @@ where
         }
 
         // remove tlc
-        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason);
+        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) && invoice.is_some() {
+            state
+                .pending_notify_settle_tlcs
+                .push((tlc.payment_hash, tlc.id(), false));
+        } else {
+            self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason);
+        }
     }
 
     fn apply_add_tlc_operation(
@@ -1046,10 +1053,7 @@ where
             let invoice = self.store.get_invoice(&payment_hash);
             if let Some(ref invoice) = invoice {
                 let invoice_status = self.get_invoice_status(invoice);
-                if !matches!(
-                    invoice_status,
-                    CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
-                ) {
+                if !matches!(invoice_status, CkbInvoiceStatus::Open) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
                 }
             }
@@ -1130,12 +1134,6 @@ where
                         payment_hash
                     );
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                }
-                // update invoice status to received only all the error checking passed
-                if invoice.is_some() {
-                    self.store
-                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                        .expect("update invoice status failed");
                 }
 
                 if let Some(custom_records) = peeled_onion_packet.current.custom_records {
@@ -1598,7 +1596,6 @@ where
         state: &mut ChannelActorState,
         command: ShutdownCommand,
     ) -> ProcessingChannelResult {
-        debug!("Handling shutdown command: {:?}", &command);
         #[cfg(debug_assertions)]
         state.tlc_state.debug();
         if command.force {
@@ -2725,36 +2722,45 @@ where
         }
 
         // take the pending settlement tlc set
-        let pending_notify_mpp_tcls = std::mem::take(&mut state.pending_notify_mpp_tlcs);
+        let pending_notify_tlcs = std::mem::take(&mut state.pending_notify_settle_tlcs);
 
         self.store.insert_channel_actor_state(state.clone());
 
         // try to settle down tlc set
-        for (payment_hash, tlc_id) in pending_notify_mpp_tcls {
+        for (payment_hash, tlc_id, is_mpp) in pending_notify_tlcs {
             let channel_id = state.get_id();
-            // hold the tlc
-            self.store.insert_payment_hold_tlc(
-                payment_hash,
-                HoldTlc {
-                    channel_id,
-                    tlc_id,
-                    hold_expire_at: now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT,
-                },
-            );
-
-            // set timeout for hold tlc
-            self.network
-                .send_after(Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT), move || {
-                    NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
-                        payment_hash,
+            if is_mpp {
+                // hold the tlc
+                self.store.insert_payment_hold_tlc(
+                    payment_hash,
+                    HoldTlc {
                         channel_id,
                         tlc_id,
-                    ))
-                });
-
+                        hold_expire_at: now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT,
+                    },
+                );
+                // set timeout for hold tlc
+                self.network.send_after(
+                    Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT),
+                    move || {
+                        NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                            payment_hash,
+                            channel_id,
+                            tlc_id,
+                        ))
+                    },
+                );
+            }
             self.network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SettleMPPTlcSet(payment_hash),
+                    NetworkActorCommand::SettleTlcSet(
+                        payment_hash,
+                        if !is_mpp {
+                            Some((state.get_id(), tlc_id))
+                        } else {
+                            None
+                        },
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
@@ -3685,7 +3691,7 @@ pub struct ChannelActorState {
 
     // The TLC set ready to be settled
     #[serde(skip)]
-    pub pending_notify_mpp_tlcs: Vec<(Hash256, u64)>,
+    pub pending_notify_settle_tlcs: Vec<(Hash256, u64, bool)>,
 
     #[serde(skip)]
     pub ephemeral_config: ChannelEphemeralConfig,
@@ -4593,7 +4599,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
-            pending_notify_mpp_tlcs: vec![],
+            pending_notify_settle_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
         };
@@ -4674,7 +4680,7 @@ impl ChannelActorState {
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
-            pending_notify_mpp_tlcs: vec![],
+            pending_notify_settle_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
         }
@@ -6516,7 +6522,8 @@ impl ChannelActorState {
                 } else if flags.contains(AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT)
                     || self.should_local_send_tx_signatures_first()
                 {
-                    // It's our turn to sign and send the signatures to the peer. If we have signed, resign it to reuse the code.
+                    // It's our turn to sign and send the signatures to the peer.
+                    // If we have signed, resign it to reuse the code.
                     self.network()
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::SignFundingTx(

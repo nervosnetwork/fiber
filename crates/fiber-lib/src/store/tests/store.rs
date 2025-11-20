@@ -557,7 +557,7 @@ fn test_channel_actor_state_store() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
-        pending_notify_mpp_tlcs: vec![],
+        pending_notify_settle_tlcs: vec![],
         ephemeral_config: Default::default(),
         private_key: None,
     };
@@ -679,7 +679,7 @@ fn test_serde_channel_actor_state_ciborium() {
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
-        pending_notify_mpp_tlcs: vec![],
+        pending_notify_settle_tlcs: vec![],
         ephemeral_config: Default::default(),
         private_key: None,
     };
