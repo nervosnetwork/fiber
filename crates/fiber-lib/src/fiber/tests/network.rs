@@ -1,6 +1,6 @@
 use crate::fiber::channel::ChannelFlags;
 use crate::fiber::features::FeatureVector;
-use crate::fiber::types::{CommitmentNonce, OpenChannel, RevocationNonce};
+use crate::fiber::types::OpenChannel;
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -983,7 +983,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
 async fn test_abort_funding_on_building_funding_tx() {
     init_tracing();
 
-    let funding_amount_a = 4_200_000_000u128;
+    let funding_amount_a = 9_900_000_000u128;
     let funding_amount_b: u128 = u64::MAX as u128 + 1 - funding_amount_a;
     let mut node_a = NetworkNode::new().await;
     let mut node_b = NetworkNode::new().await;
@@ -1073,7 +1073,7 @@ impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
 
 #[tokio::test]
 async fn test_abort_funding_on_committing_funding_tx_on_chain() {
-    let funding_amount_a = 4_200_000_000u128;
+    let funding_amount_a = 9_900_000_000u128;
     let funding_amount_b: u128 = funding_amount_a;
     let middleware = Box::new(CkbTxFailureMockMiddleware);
     let mut node_a = NetworkNode::new_with_config(
@@ -1162,7 +1162,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
 
 #[tokio::test]
 async fn test_to_be_accepted_channels_number_limit() {
-    let funding_amount = 4_200_000_000u128;
+    let funding_amount = 9_900_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
     let mut node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
@@ -1257,14 +1257,8 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         second_per_commitment_point: gen_rand_fiber_public_key(),
         funding_pubkey: gen_rand_fiber_public_key(),
         tlc_basepoint: gen_rand_fiber_public_key(),
-        next_commitment_nonce: CommitmentNonce {
-            funding: rand_nonce.clone(),
-            commitment: rand_nonce.clone(),
-        },
-        next_revocation_nonce: RevocationNonce {
-            revoke: rand_nonce.clone(),
-            ack: rand_nonce.clone(),
-        },
+        next_commitment_nonce: rand_nonce.clone(),
+        next_revocation_nonce: rand_nonce.clone(),
         // public channel must set this
         channel_announcement_nonce: Some(rand_nonce),
     };
@@ -1274,7 +1268,7 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         single_open_channel_size
     );
 
-    let funding_amount = 4_200_000_000u128;
+    let funding_amount = 9_900_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
     let mut node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()

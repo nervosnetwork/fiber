@@ -665,7 +665,7 @@ async fn test_gossip_store_updates_saving_invalid_message_3() {
 async fn test_our_own_channel_gossip_message_propagated() {
     crate::tests::test_utils::init_tracing();
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 11800000000;
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 

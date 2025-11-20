@@ -1335,14 +1335,14 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         }
     }
 
-    fn get_channel_annnouncement(&self, outpoint: &OutPoint) -> Option<ChannelAnnouncement> {
+    fn get_channel_announcement(&self, outpoint: &OutPoint) -> Option<ChannelAnnouncement> {
         self.store
             .get_latest_channel_announcement(outpoint)
             .map(|(_, m)| m)
-            .or_else(|| self.get_channel_annnouncement_in_memory(outpoint))
+            .or_else(|| self.get_channel_announcement_in_memory(outpoint))
     }
 
-    fn get_channel_annnouncement_in_memory(
+    fn get_channel_announcement_in_memory(
         &self,
         outpoint: &OutPoint,
     ) -> Option<ChannelAnnouncement> {
@@ -1419,7 +1419,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
     fn has_dependencies_available(&self, message: &BroadcastMessage) -> bool {
         match message {
             BroadcastMessage::ChannelUpdate(channel_update) => self
-                .get_channel_annnouncement(&channel_update.channel_outpoint)
+                .get_channel_announcement(&channel_update.channel_outpoint)
                 .is_some(),
             _ => true,
         }

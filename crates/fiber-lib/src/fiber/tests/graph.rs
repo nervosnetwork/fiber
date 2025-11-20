@@ -906,6 +906,8 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
     let last_node = network.keys[n_nodes - 1];
     let timestamp_before_building_route = now_timestamp_as_millis_u64();
     // Send a payment from the first node to the last node
+
+    network.graph.set_add_rand_expiry_delta(false);
     let payment_data = SendPaymentData {
         target_pubkey: last_node.into(),
         amount: 100,

@@ -17,7 +17,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Cch](#module-cch)
         * [Method `send_btc`](#cch-send_btc)
         * [Method `receive_btc`](#cch-receive_btc)
-        * [Method `get_receive_btc_order`](#cch-get_receive_btc_order)
+        * [Method `get_cch_order`](#cch-get_cch_order)
     * [Module Channel](#module-channel)
         * [Method `open_channel`](#channel-open_channel)
         * [Method `accept_channel`](#channel-accept_channel)
@@ -41,6 +41,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
+        * [Method `settle_invoice`](#invoice-settle_invoice)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -56,12 +57,14 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `create_watch_channel`](#watchtower-create_watch_channel)
         * [Method `remove_watch_channel`](#watchtower-remove_watch_channel)
         * [Method `update_revocation`](#watchtower-update_revocation)
+        * [Method `update_pending_remote_settlement`](#watchtower-update_pending_remote_settlement)
         * [Method `update_local_settlement`](#watchtower-update_local_settlement)
         * [Method `create_preimage`](#watchtower-create_preimage)
         * [Method `remove_preimage`](#watchtower-remove_preimage)
 * [RPC Types](#rpc-types)
 
     * [Type `Attribute`](#type-attribute)
+    * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
@@ -118,11 +121,10 @@ Send BTC to a address.
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
 * `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
-* `currency` - <em>[Currency](#type-currency)</em>, Request currency
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `ckb_pay_req` - <em>`String`</em>, Payment request for CKB
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
+* `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
 * `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
@@ -138,10 +140,7 @@ Receive BTC from a payment hash.
 
 ##### Params
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `amount_sats` - <em>`u128`</em>, How many satoshis to receive, excluding cross-chain hub fee.
-* `final_tlc_expiry` - <em>`u64`</em>, Expiry set for the HTLC for the CKB payment to the payee.
+* `fiber_pay_req` - <em>`String`</em>, Fiber payment request string
 
 ##### Returns
 
@@ -149,11 +148,10 @@ Receive BTC from a payment hash.
 * `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `tlc_id` - <em>`Option<u64>`</em>, TLC ID for the CKB payment.
-* `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
+* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
+* `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
+* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
 
@@ -161,14 +159,14 @@ Receive BTC from a payment hash.
 
 
 
-<a id="cch-get_receive_btc_order"></a>
-#### Method `get_receive_btc_order`
+<a id="cch-get_cch_order"></a>
+#### Method `get_cch_order`
 
 Get receive BTC order by payment hash.
 
 ##### Params
 
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
 
 ##### Returns
 
@@ -176,11 +174,10 @@ Get receive BTC order by payment hash.
 * `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
 * `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
-* `btc_pay_req` - <em>`String`</em>, Payment request for BTC
-* `payment_hash` - <em>`String`</em>, Payment hash for the HTLC for both CKB and BTC.
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID for the CKB payment.
-* `tlc_id` - <em>`Option<u64>`</em>, TLC ID for the CKB payment.
-* `amount_sats` - <em>`u128`</em>, Amount will be received by the payee
+* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
+* `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
+* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
 * `fee_sats` - <em>`u128`</em>, Fee in Satoshis
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
 
@@ -541,7 +538,8 @@ Generates a new invoice.
 * `amount` - <em>`u128`</em>, The amount of the invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
-* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
@@ -609,6 +607,24 @@ Cancels an invoice, only when invoice is in status `Open` can be canceled.
 * `invoice_address` - <em>`String`</em>, The encoded invoice address.
 * `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
 * `status` - <em>[CkbInvoiceStatus](#type-ckbinvoicestatus)</em>, The invoice status
+
+---
+
+
+
+<a id="invoice-settle_invoice"></a>
+#### Method `settle_invoice`
+
+Settles an invoice by saving the preimage to this invoice.
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice.
+* `payment_preimage` - <em>[Hash256](#type-hash256)</em>, The payment preimage of the invoice.
+
+##### Returns
+
+* None
 
 ---
 
@@ -894,8 +910,12 @@ Create a new watched channel
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
-* `funding_tx_lock` - <em>`Script`</em>, Channel funding transaction lock script
-* `remote_settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Remote settlement data
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, Funding UDT type script
+* `local_settlement_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to settle the commitment transaction
+* `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to settle the commitment transaction
+* `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key
+* `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 
 ##### Returns
 
@@ -931,6 +951,24 @@ Update revocation
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `revocation_data` - <em>[RevocationData](#type-revocationdata)</em>, Revocation data
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+
+##### Returns
+
+* None
+
+---
+
+
+
+<a id="watchtower-update_pending_remote_settlement"></a>
+#### Method `update_pending_remote_settlement`
+
+Update pending remote settlement
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 
 ##### Returns
@@ -1018,6 +1056,24 @@ The attributes of the invoice
 * `PaymentSecret` - <em>[Hash256](#type-hash256)</em>, The payment secret of the invoice
 ---
 
+<a id="#type-cchinvoice"></a>
+### Type `CchInvoice`
+
+The generated proxy invoice for the incoming payment.
+
+ The JSON representation:
+
+ ```text
+ { "Fiber": String } | { "Lightning": String }
+ ```
+
+
+#### Enum with values of
+
+* `Fiber` - <em>[CkbInvoice](#type-ckbinvoice)</em>, Fiber invoice that once paid, the hub will send the outgoing payment to Lightning
+* `Lightning` - <em>`Bolt11Invoice`</em>, Lightning invoice that once paid, the hub will send the outgoing payment to Fiber
+---
+
 <a id="#type-cchorderstatus"></a>
 ### Type `CchOrderStatus`
 
@@ -1027,9 +1083,10 @@ The status of a cross-chain hub order, will update as the order progresses.
 #### Enum with values of
 
 * `Pending` - Order is created and has not send out payments yet.
-* `Accepted` - HTLC in the first half is accepted.
-* `InFlight` - There's an outgoing payment in flight for the second half.
-* `Succeeded` - Order is settled.
+* `IncomingAccepted` - HTLC in the incoming payment is accepted.
+* `OutgoingInFlight` - There's an outgoing payment in flight.
+* `OutgoingSettled` - The outgoing payment is settled.
+* `Succeeded` - Both payments are settled and the order succeeds.
 * `Failed` - Order is failed.
 ---
 
@@ -1348,7 +1405,6 @@ Data needed to revoke an outdated commitment transaction.
 #### Fields
 
 * `commitment_number` - <em>`u64`</em>, The commitment transaction version number that was revoked
-* `x_only_aggregated_pubkey` - The x-only aggregated public key used in the multisig for this commitment transaction
 * `aggregated_signature` - <em>`CompactSignature`</em>, The aggregated signature from both parties that authorizes the revocation
 * `output` - <em>`CellOutput`</em>, The output cell from the revoked commitment transaction
 * `output_data` - <em>`Bytes`</em>, The associated data for the output cell (e.g., UDT amount for token transfers)
@@ -1410,13 +1466,9 @@ Data needed to authorize and execute a settlement transaction.
 
 #### Fields
 
-* `x_only_aggregated_pubkey` - The x-only aggregated public key used in the multi-signature for the settlement transaction
-* `aggregated_signature` - <em>`CompactSignature`</em>, The aggregated signature from both parties that authorizes the settlement transaction
-* `to_local_output` - <em>`CellOutput`</em>, The output cell for the local party (this node's owner) in the settlement transaction
-* `to_local_output_data` - <em>`Bytes`</em>, The associated data for the local output cell (e.g., UDT amount for token transfers)
-* `to_remote_output` - <em>`CellOutput`</em>, The output cell for the remote party (channel partner) in the settlement transaction
-* `to_remote_output_data` - <em>`Bytes`</em>, The associated data for the remote output cell (e.g., UDT amount for token transfers)
-* `tlcs` - <em>Vec<[SettlementTlc](#type-settlementtlc)></em>, The list of Time-Locked Contracts (TLCs) included in this settlement
+* `local_amount` - <em>`u128`</em>, The total amount of CKB/UDT being settled for the local party
+* `remote_amount` - <em>`u128`</em>, The total amount of CKB/UDT being settled for the remote party
+* `tlcs` - <em>Vec<[SettlementTlc](#type-settlementtlc)></em>, The list of pending Time-Locked Contracts (TLCs) included in this settlement
 ---
 
 <a id="#type-settlementtlc"></a>

@@ -67,6 +67,72 @@ async fn test_send_mpp_basic_two_channels_one_time() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_mpp_to_hold_invoice() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let target_pubkey = node_1.get_public_key();
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::default()
+        .hash(payment_preimage.as_ref())
+        .into();
+    // Add a hold mpp invoice
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20000000000))
+        .payment_hash(payment_hash)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+    node_1.insert_invoice(ckb_invoice.clone(), None);
+
+    let command = SendPaymentCommand {
+        max_parts: Some(2),
+        dry_run: false,
+        invoice: Some(ckb_invoice.to_string()),
+        ..Default::default()
+    };
+
+    let res = node_0.send_payment(command).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    node_1
+        .settle_invoice(&payment_hash, payment_preimage)
+        .await
+        .expect("settle invoice");
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("begin to wait for payment: {} success ...", payment_hash);
+    node_0.wait_until_success(payment_hash).await;
+
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    dbg!(&payment_session.status, &payment_session.attempts_count());
+
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    dbg!(node_0_balance, node_1_balance);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
+
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    dbg!(node_0_balance, node_1_balance);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_send_mpp_will_not_enabled_if_not_set_allow_mpp() {
     init_tracing();
 
@@ -2979,7 +3045,7 @@ async fn test_send_mpp_with_generated_invoice() {
     let too_large_amount_invoice = nodes[1]
         .gen_invoice(NewInvoiceParams {
             amount: 20000000001,
-            payment_preimage: gen_rand_sha256_hash(),
+            payment_preimage: Some(gen_rand_sha256_hash()),
             allow_mpp: Some(true),
             ..Default::default()
         })
@@ -2999,7 +3065,7 @@ async fn test_send_mpp_with_generated_invoice() {
     let ok_invoice = nodes[1]
         .gen_invoice(NewInvoiceParams {
             amount: 20000000000,
-            payment_preimage: gen_rand_sha256_hash(),
+            payment_preimage: Some(gen_rand_sha256_hash()),
             allow_mpp: Some(true),
             ..Default::default()
         })
