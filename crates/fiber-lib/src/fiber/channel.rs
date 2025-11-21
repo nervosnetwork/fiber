@@ -865,15 +865,14 @@ where
     }
 
     async fn try_to_relay_remove_tlc(&self, tlc_info: &TlcInfo, remove_reason: RemoveTlcReason) {
-        let (previous_channel_id, previous_tlc) =
-            tlc_info.previous_tlc.expect("expect previous tlc");
+        let (previous_channel_id, previous_tlc_id) =
+            tlc_info.forwarding_tlc.expect("expect previous tlc");
         debug_assert!(tlc_info.is_offered());
-        debug_assert!(previous_tlc.is_received());
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
 
         let _ = self.register_retryable_relay_tlc_remove(
-            previous_tlc,
+            TLCId::Received(previous_tlc_id),
             previous_channel_id,
             remove_reason,
         );
@@ -1361,12 +1360,27 @@ where
             }
             // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
             // incase watchtower may need preimage to settledown
-            if tlc_info.previous_tlc.is_none() {
+            if tlc_info.forwarding_tlc.is_none() {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
 
-        if tlc_info.previous_tlc.is_none() {
+        if let (
+            Some(ref udt_type_script),
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
+        ) = (state.funding_udt_type_script.clone(), &remove_reason)
+        {
+            let mut tlc_notify_info: TlcNotifyInfo = tlc_info.clone().into();
+            tlc_notify_info.payment_preimage = Some(*payment_preimage);
+            self.subscribers
+                .settled_tlcs_subscribers
+                .send(TlcNotification {
+                    tlc: tlc_notify_info,
+                    channel_id,
+                    script: udt_type_script.clone(),
+                });
+        }
+        if tlc_info.forwarding_tlc.is_none() {
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
             if tlc_info.is_offered() {
@@ -3026,7 +3040,7 @@ pub struct TlcInfo {
     ///  tlc_1 <---> (tlc_1) (tlc_2) <---> (tlc_2) (tlc_3) <----> tlc_3
     ///                ^^^^                 ^^^^
     ///
-    pub previous_tlc: Option<(Hash256, TLCId)>,
+    pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
     /// Whether this tlc is the last hop in a multi-path payment
@@ -5862,12 +5876,9 @@ impl ChannelActorState {
             removed_reason: None,
             onion_packet: command.onion_packet.clone(),
             shared_secret: command.shared_secret,
-            previous_tlc: command.previous_tlc.map(|prev_tlc| {
-                (
-                    prev_tlc.prev_channel_id,
-                    TLCId::Received(prev_tlc.prev_tlc_id),
-                )
-            }),
+            forwarding_tlc: command
+                .previous_tlc
+                .map(|prev_tlc| (prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id)),
             removed_confirmed_at: None,
             applied_flags: AppliedFlags::empty(),
             total_amount: None,
@@ -5894,7 +5905,7 @@ impl ChannelActorState {
             shared_secret: NO_SHARED_SECRET,
             created_at: self.get_current_commitment_numbers(),
             removed_reason: None,
-            previous_tlc: None,
+            forwarding_tlc: None,
             removed_confirmed_at: None,
             applied_flags: AppliedFlags::empty(),
             total_amount: None,
