@@ -283,6 +283,7 @@ pub struct Channel {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Htlc {
     /// The id of the htlc
+    #[serde_as(as = "U64Hex")]
     pub id: u64,
     /// The amount of the htlc
     #[serde_as(as = "U128Hex")]
