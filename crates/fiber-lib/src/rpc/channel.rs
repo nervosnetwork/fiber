@@ -1,3 +1,4 @@
+use crate::fiber::channel::{TLCId, TlcStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
@@ -252,6 +253,8 @@ pub struct Channel {
     /// The received balance of the channel
     #[serde_as(as = "U128Hex")]
     pub received_tlc_balance: u128,
+    /// The list of pending tlcs
+    pub pending_tlcs: Vec<Htlc>,
     /// The hash of the latest commitment transaction
     pub latest_commitment_transaction_hash: Option<H256>,
     /// The time the channel was created at, in milliseconds from UNIX epoch
@@ -273,6 +276,24 @@ pub struct Channel {
     pub tlc_fee_proportional_millionths: u128,
     /// The hash of the shutdown transaction
     pub shutdown_transaction_hash: Option<H256>,
+}
+
+/// The htlc data structure
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Htlc {
+    /// The id of the htlc
+    pub id: u64,
+    /// The amount of the htlc
+    #[serde_as(as = "U128Hex")]
+    pub amount: u128,
+    /// The payment hash of the htlc
+    pub payment_hash: Hash256,
+    /// The expiry of the htlc
+    #[serde_as(as = "U64Hex")]
+    pub expiry: u64,
+    /// The status of the htlc
+    pub status: TlcStatus,
 }
 
 #[serde_as]
@@ -513,6 +534,23 @@ where
                         remote_balance: state.get_remote_balance(),
                         offered_tlc_balance: state.get_offered_tlc_balance(),
                         received_tlc_balance: state.get_received_tlc_balance(),
+                        pending_tlcs: state
+                            .tlc_state
+                            .all_tlcs()
+                            .map(|tlc| {
+                                let id = match tlc.tlc_id {
+                                    TLCId::Offered(id) => id,
+                                    TLCId::Received(id) => id,
+                                };
+                                Htlc {
+                                    id,
+                                    amount: tlc.amount,
+                                    expiry: tlc.expiry,
+                                    payment_hash: tlc.payment_hash,
+                                    status: tlc.status.clone(),
+                                }
+                            })
+                            .collect(),
                         latest_commitment_transaction_hash: state
                             .latest_commitment_transaction
                             .as_ref()

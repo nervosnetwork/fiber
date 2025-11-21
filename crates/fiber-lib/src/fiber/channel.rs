@@ -2919,6 +2919,7 @@ impl TLCId {
     }
 }
 
+/// The status of an outbound tlc
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum OutboundTlcStatus {
     // Offered tlc created and sent to remote party
@@ -2936,6 +2937,7 @@ pub enum OutboundTlcStatus {
     RemoveAckConfirmed,
 }
 
+/// The status of an inbound tlc
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum InboundTlcStatus {
     // Received tlc from remote party, but not committed yet
@@ -2953,9 +2955,12 @@ pub enum InboundTlcStatus {
     RemoveAckConfirmed,
 }
 
+/// The status of a tlc
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum TlcStatus {
+    /// Outbound tlc
     Outbound(OutboundTlcStatus),
+    /// Inbound tlc
     Inbound(InboundTlcStatus),
 }
 
