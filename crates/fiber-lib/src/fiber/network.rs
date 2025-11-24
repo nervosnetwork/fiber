@@ -1892,21 +1892,20 @@ where
                     }
 
                     if let Some(ref invoice) = invoice {
-                        let fulfilled = is_invoice_fulfilled(&invoice, &tlcs);
+                        let fulfilled = is_invoice_fulfilled(invoice, &tlcs);
                         // for non-mpp tlc set, we expect the invoice is fulfilled
-                        if tlc_info.is_some() {
-                            if self.store.get_invoice_status(&payment_hash)
+                        if tlc_info.is_some()
+                            && (self.store.get_invoice_status(&payment_hash)
                                 != Some(CkbInvoiceStatus::Open)
-                                || !fulfilled
-                            {
-                                error!(
-                                    "got in old status: {:?}",
-                                    self.store.get_invoice_status(&payment_hash)
-                                );
-                                validation_fail!(
+                                || !fulfilled)
+                        {
+                            error!(
+                                "got in old status: {:?}",
+                                self.store.get_invoice_status(&payment_hash)
+                            );
+                            validation_fail!(
                                 "Try to settle non-mpp tlc set but invoice is not fulfilled: {:?}"
                             );
-                            }
                         }
                     }
 
@@ -1914,7 +1913,7 @@ where
                     let hash_algorithm = tlcs[0].hash_algorithm;
                     let mpp_mode = match invoice {
                         Some(ref invoice) => {
-                            if !is_invoice_fulfilled(&invoice, &tlcs) {
+                            if !is_invoice_fulfilled(invoice, &tlcs) {
                                 return Ok(());
                             }
                             let mpp_mode = invoice.mpp_mode();
