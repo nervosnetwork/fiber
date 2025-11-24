@@ -25,7 +25,7 @@ use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    error::CchDbError, CchConfig, CchError, CchIncomingEvent, CchIncomingPaymentStatus, CchInvoice,
+    CchConfig, CchDbError, CchError, CchIncomingEvent, CchIncomingPaymentStatus, CchInvoice,
     CchOrder, CchOrderStatus, CchOrdersDb, CchOutgoingPaymentStatus, LndConnectionInfo,
     LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
 };

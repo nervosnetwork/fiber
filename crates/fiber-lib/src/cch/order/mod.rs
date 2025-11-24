@@ -1,3 +1,6 @@
+mod db;
+pub use db::{CchDbError, CchOrdersDb};
+
 use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};

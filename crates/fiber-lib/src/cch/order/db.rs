@@ -1,8 +1,18 @@
 use std::collections::HashMap;
+use thiserror::Error;
 
 use crate::fiber::types::Hash256;
 
-use super::{error::CchDbError, CchOrder};
+use super::CchOrder;
+
+#[derive(Error, Debug)]
+pub enum CchDbError {
+    #[error("Inserting duplicated key: {0}")]
+    Duplicated(String),
+
+    #[error("Key not found: {0}")]
+    NotFound(String),
+}
 
 // TODO: persist orders
 #[derive(Default)]

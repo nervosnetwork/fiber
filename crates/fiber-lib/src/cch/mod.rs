@@ -18,10 +18,7 @@ pub use config::{
 };
 
 mod order;
-pub use order::{CchInvoice, CchOrder, CchOrderStatus};
-
-mod orders_db;
-pub use orders_db::CchOrdersDb;
+pub use order::{CchDbError, CchInvoice, CchOrder, CchOrderStatus, CchOrdersDb};
 
 #[cfg(test)]
 pub mod tests;
