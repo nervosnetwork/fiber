@@ -3537,6 +3537,10 @@ impl SettlementTlc {
         vec.extend_from_slice(&since.value().to_le_bytes());
         vec
     }
+
+    pub fn local_pubkey_hash(&self) -> [u8; 20] {
+        blake160(&self.local_key.pubkey().serialize()).0
+    }
 }
 
 type ScheduledChannelUpdateHandle =
