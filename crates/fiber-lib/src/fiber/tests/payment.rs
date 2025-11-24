@@ -660,6 +660,59 @@ async fn test_send_payment_with_normal_invoice_workflow() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
+async fn test_send_payment_with_hold_invoice_workflow() {
+    init_tracing();
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::CkbHash
+        .hash(payment_preimage.as_ref())
+        .into();
+    let invoice = node_1
+        .gen_invoice(NewInvoiceParams {
+            amount: 1000,
+            description: Some("test invoice".to_string()),
+            payment_hash: Some(payment_hash),
+            ..Default::default()
+        })
+        .await;
+
+    // node_0 -> node_1 will be ok for hold invoice
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.invoice_address),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    println!("res: {:?}", res);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    node_1
+        .settle_invoice(&payment_hash, payment_preimage)
+        .await
+        .expect("settle invoice");
+
+    node_0.wait_until_success(payment_hash).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
 async fn test_send_payment_with_more_capacity_for_payself() {
     init_tracing();
 
@@ -6323,6 +6376,154 @@ async fn test_send_payment_direct_channel_error_from_node_stop() {
         .await;
 
     assert!(payment.unwrap_err().contains("no path found"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_payment_with_same_invoice() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 3),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 3),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (2, 3),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (3, 4),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+        ],
+        5,
+        Some(gen_rpc_config()),
+    )
+    .await;
+
+    let invoice = nodes[4]
+        .gen_invoice(NewInvoiceParams {
+            amount: 100000,
+            ..Default::default()
+        })
+        .await;
+
+    let mut all_sents: HashMap<usize, Hash256> = Default::default();
+
+    for i in 0..=2 {
+        let res = nodes[i]
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.invoice_address.clone()),
+                ..Default::default()
+            })
+            .await;
+        let payment_hash = res.as_ref().expect("send payment ok").payment_hash;
+        all_sents.insert(i, payment_hash);
+    }
+
+    let mut succeeded_count = 0;
+    for (node, payment_hash) in all_sents {
+        nodes[node].wait_until_final_status(payment_hash).await;
+        let status = nodes[node]
+            .get_payment_session(payment_hash)
+            .expect("payment session exist")
+            .status;
+        if status == PaymentStatus::Success {
+            succeeded_count += 1;
+        }
+    }
+    assert_eq!(succeeded_count, 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_payment_two_with_same_invoice() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+        ],
+        3,
+        Some(gen_rpc_config()),
+    )
+    .await;
+
+    let invoice = nodes[2]
+        .gen_invoice(NewInvoiceParams {
+            amount: 100000,
+            ..Default::default()
+        })
+        .await;
+
+    let mut all_sents: HashMap<usize, Hash256> = Default::default();
+
+    for i in 0..=1 {
+        let res = nodes[i]
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.invoice_address.clone()),
+                ..Default::default()
+            })
+            .await;
+        let payment_hash = res.as_ref().expect("send payment ok").payment_hash;
+        all_sents.insert(i, payment_hash);
+    }
+
+    let mut succeeded_count = 0;
+    for (node, payment_hash) in all_sents {
+        nodes[node].wait_until_final_status(payment_hash).await;
+        let status = nodes[node]
+            .get_payment_session(payment_hash)
+            .expect("payment session exist")
+            .status;
+        if status == PaymentStatus::Success {
+            succeeded_count += 1;
+        }
+    }
+    assert_eq!(succeeded_count, 1);
 }
 
 #[tokio::test]

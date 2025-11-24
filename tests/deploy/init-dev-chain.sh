@@ -33,6 +33,7 @@ done
 # Initialize the data directory if it does not exist.
 if ! [[ -d "$data_dir" ]]; then
     ckb init -C "$data_dir" -c dev --force --ba-arg 0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
+    sed -i.bak 's|info|info,ckb-script=debug|g' "$data_dir/ckb.toml"
     cp "$nodes_dir/deployer/dev.toml" "$data_dir/specs/dev.toml"
     sed -i.bak 's|\.\./\.\./deploy/contracts|\.\./\.\./\.\./deploy/contracts|g' "$data_dir/specs/dev.toml"
 

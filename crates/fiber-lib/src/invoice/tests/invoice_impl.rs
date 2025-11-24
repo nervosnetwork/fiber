@@ -487,7 +487,7 @@ fn test_invoice_gen_payment_hash() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_invoice_rand_payment_hash() {
+fn test_invoice_builder_neither_payment_hash_nor_preimage() {
     let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))

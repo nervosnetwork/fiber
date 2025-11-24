@@ -37,7 +37,7 @@ The current rules for each RPC methods:
 // Cch 
 rule("send_btc", r#"allow if write("cch");"#); 
 rule("receive_btc", r#"allow if read("cch");"#); 
-rule("get_receive_btc_order", r#"allow if read("cch");"#); 
+rule("get_cch_order", r#"allow if read("cch");"#); 
 // channels 
 rule("open_channel", r#"allow if write("channels");"#); 
 rule("accept_channel", r#"allow if write("channels");"#); 
@@ -67,6 +67,7 @@ rule("new_invoice", r#"allow if write("invoices");"#);
 rule("parse_invoice", r#"allow if read("invoices");"#); 
 rule("get_invoice", r#"allow if read("invoices");"#); 
 rule("cancel_invoice", r#"allow if write("invoices");"#); 
+rule("settle_invoice", r#"allow if write("invoices");"#); 
 
 // payment 
 rule("send_payment", r#"allow if write("payments");"#); 

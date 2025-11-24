@@ -513,7 +513,7 @@ pub async fn run_integration_test() -> TestResult<()> {
         &ctx.node2.rpc_url,
         &ctx.node3.peer_id,
         "0x0",
-        "0x377939c85200",
+        "0x37785d3ecd00",
     )
     .await?;
 

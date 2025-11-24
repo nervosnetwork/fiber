@@ -2,14 +2,20 @@ on: [push, pull_request]
 
 name: Continuous integration
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-${{ runner.os }}
       - run: |
           make check
           make check-migrate
@@ -19,8 +25,11 @@ jobs:
     name: Cargo Shear
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shear-${{ runner.os }}
       - uses: cargo-bins/cargo-binstall@main
       - run: |
           cargo binstall --no-confirm cargo-shear --force --locked --version 1.1.9
@@ -29,32 +38,42 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ runner.os }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - run: |
+      - name: Run tests
+        run: |
           RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast
+        env:
+          RUST_TEST_THREADS: 2
 
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: fmt-${{ runner.os }}
       - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-${{ runner.os }}
       - run: |
           rustup target add wasm32-unknown-unknown
           make clippy
@@ -65,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check for typos
-        uses: crate-ci/typos@v1.30.0
+        uses: crate-ci/typos@v1.39.0
       - name: Typos info
         if: failure()
         run: |
@@ -77,12 +96,15 @@ jobs:
 
   coverage:
     name: Code Coverage
-    needs: [ test ]
+    needs: [test]
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage-${{ runner.os }}
       - name: Install Grcov
         run: make coverage-install-tools
       - name: Generate Code Coverage Report of Unit Tests
@@ -90,7 +112,7 @@ jobs:
           make coverage-run-unittests
           make coverage-collect-data
       - name: Upload Code Coverage Report of Unit Tests
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           files: coverage-report.info
           env_vars: OS,RUST_TOOLCHAIN
@@ -108,21 +130,25 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         profile: [dev, release]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-${{ matrix.os }}-${{ matrix.profile }}
       - name: Install Dependencies (Windows)
         if: contains(matrix.os, 'windows')
         run: |
           vcpkg integrate install
           vcpkg install openssl:x64-windows-static-md
-      - run: cargo build --locked --verbose --profile ${{ matrix.profile }}
-
+      - name: Build with profile
+        run: cargo build --locked --verbose --profile ${{ matrix.profile }}
 
   benchmark:
     name: Benchmark
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v2
@@ -131,19 +157,28 @@ jobs:
 
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
-      - name: Install dependencies
-        run: |
-          version=0.116.1
-          wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
+        with:
+          ckb-version: '0.202.0'
+          cache-prefix: 'benchmark'
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./tests/deploy/udt-init/target
+            ./tests/perf/target
+          key: build-artifacts-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            build-artifacts-${{ runner.os }}-
 
       - name: Build rust code
         run: |
           cd ./tests/deploy/udt-init && cargo build --locked && cd -
           cd ./tests/perf/ && cargo build --release --locked && cd -
 
-      - name: Get baseline benchmark
+      - name: Run baseline benchmark
         run: |
           echo "Comparing against: origin/${{ github.base_ref }}"
           git checkout origin/${{ github.base_ref }}

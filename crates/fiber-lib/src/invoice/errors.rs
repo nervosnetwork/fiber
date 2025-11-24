@@ -66,4 +66,6 @@ pub enum InvoiceError {
     DescriptionTooLong(usize),
     #[error("Invoice not found")]
     InvoiceNotFound,
+    #[error("Invoice already exists")]
+    InvoiceAlreadyExists,
 }

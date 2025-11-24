@@ -667,11 +667,19 @@ impl InvoiceBuilder {
         self
     }
 
+    /// The hash of the preimage. If hash is set, preimage must be absent.
+    /// This condition indicates a 'hold invoice' for which the tlc must be
+    /// accepted and held until the preimage becomes known.
     pub fn payment_hash(mut self, payment_hash: Hash256) -> Self {
         self.payment_hash = Some(payment_hash);
         self
     }
 
+    /// The preimage to settle an incoming TLC payable to this invoice.
+    /// If preimage is set, hash must be absent. If both preimage and hash
+    /// are absent, a random preimage should be generated and passed into
+    /// the invoice builder, otherwise NeitherPaymenthashNorPreimage error
+    /// is thrown.
     pub fn payment_preimage(mut self, payment_preimage: Hash256) -> Self {
         self.payment_preimage = Some(payment_preimage);
         self

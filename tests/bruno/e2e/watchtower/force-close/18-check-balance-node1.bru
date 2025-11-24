@@ -1,0 +1,41 @@
+meta {
+  name: check balance, the difference should be the fee and invoice (3000000 + fee)
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  let script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  let body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+assert {
+  Number(BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(res.body.result.capacity)): gt 3000000
+  Number(BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(res.body.result.capacity)): lt 3002000
+}

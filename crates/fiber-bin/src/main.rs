@@ -2,7 +2,7 @@ use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
-use fnn::cch::CchMessage;
+use fnn::cch::{CchArgs, CchMessage};
 use fnn::ckb::contracts::TypeIDResolver;
 #[cfg(debug_assertions)]
 use fnn::ckb::contracts::{get_cell_deps, Contract};
@@ -308,16 +308,30 @@ pub async fn main() -> Result<(), ExitMessage> {
         None => (None, None, None),
     };
 
-    let cch_actor = match config.cch {
-        Some(cch_config) => {
+    let cch_actor = match (config.cch, &network_actor) {
+        (Some(cch_config), Some(network_actor)) => {
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;
+            let node_keypair = config
+                .fiber
+                .as_ref()
+                .ok_or_else(|| {
+                    ExitMessage(
+                        "failed to read secret key because fiber config is not available"
+                            .to_string(),
+                    )
+                })?
+                .read_or_generate_secret_key()
+                .map_err(|err| ExitMessage(format!("failed to read secret key: {}", err)))?;
             match start_cch(
-                cch_config,
-                new_tokio_task_tracker(),
-                new_tokio_cancellation_token(),
+                CchArgs {
+                    config: cch_config,
+                    tracker: new_tokio_task_tracker(),
+                    token: new_tokio_cancellation_token(),
+                    network_actor: network_actor.clone(),
+                    node_keypair,
+                },
                 root_actor.get_cell(),
-                network_actor.clone(),
             )
             .await
             {
@@ -350,7 +364,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 }
             }
         }
-        None => None,
+        _ => None,
     };
 
     // Start rpc service
@@ -401,13 +415,21 @@ fn forward_event_to_actor(
         NetworkServiceEvent::RemoteTxComplete(
             _peer_id,
             channel_id,
-            funding_tx_lock,
+            funding_udt_type_script,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
             remote_settlement_data,
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::CreateChannel(
                     channel_id,
-                    funding_tx_lock,
+                    funding_udt_type_script,
+                    local_settlement_key,
+                    remote_settlement_key,
+                    local_funding_pubkey,
+                    remote_funding_pubkey,
                     remote_settlement_data,
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
@@ -445,6 +467,14 @@ fn forward_event_to_actor(
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
+        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
+            watchtower_actor
+                .send_message(WatchtowerMessage::UpdatePendingRemoteSettlement(
+                    channel_id,
+                    settlement_data,
+                ))
+                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
+        }
         NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
             // ignore, the store of channel actor already has stored the preimage
             watchtower_actor
@@ -471,14 +501,22 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         NetworkServiceEvent::RemoteTxComplete(
             _peer_id,
             channel_id,
-            funding_tx_lock,
-            remote_settlement_data,
+            funding_udt_type_script,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
+            settlement_data,
         ) => {
             watchtower_client
                 .create_watch_channel(CreateWatchChannelParams {
                     channel_id,
-                    funding_tx_lock: funding_tx_lock.into(),
-                    remote_settlement_data,
+                    funding_udt_type_script: funding_udt_type_script.map(Into::into),
+                    local_settlement_key,
+                    remote_settlement_key,
+                    local_funding_pubkey,
+                    remote_funding_pubkey,
+                    settlement_data,
                 })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);

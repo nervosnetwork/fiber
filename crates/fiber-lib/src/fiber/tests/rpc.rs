@@ -154,6 +154,7 @@ async fn test_rpc_basic() {
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
         payment_preimage: Some(gen_rand_sha256_hash()),
+        payment_hash: None,
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
         ..Default::default()
@@ -550,6 +551,7 @@ async fn test_rpc_basic_with_auth() {
                 final_expiry_delta: Some(900000 + 1234),
                 udt_type_script: Some(Script::default().into()),
                 payment_preimage: Some(Hash256::default()),
+                payment_hash: None,
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
                 ..Default::default()
             },

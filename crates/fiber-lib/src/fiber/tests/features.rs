@@ -170,7 +170,7 @@ fn test_feature_random() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_featuer_compatibility() {
+fn test_feature_compatibility() {
     let mut vector = FeatureVector::new();
     let mut vector2 = FeatureVector::new();
 
