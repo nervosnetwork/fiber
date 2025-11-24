@@ -824,13 +824,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
                                 if tlc.is_offered() {
                                     if let Some(private_key) =
-                                        settlement_data.tlcs.iter().find_map(|settlement_tlc| {
-                                            settlement_tlc
-                                                .payment_hash
-                                                .as_ref()
-                                                .starts_with(&tlc.payment_hash)
-                                                .then_some(&settlement_tlc.local_key)
-                                        })
+                                        tlc.find_matched_private_key(&settlement_data, false)
                                     {
                                         if current_time > expiry {
                                             unlock_option = Some((
@@ -849,13 +843,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                         warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
                                     }
                                 } else if let Some(private_key) =
-                                    settlement_data.tlcs.iter().find_map(|settlement_tlc| {
-                                        settlement_tlc
-                                            .payment_hash
-                                            .as_ref()
-                                            .starts_with(&tlc.payment_hash)
-                                            .then_some(&settlement_tlc.local_key)
-                                    })
+                                    tlc.find_matched_private_key(&settlement_data, true)
                                 {
                                     if let Some(preimage) = store.search_preimage(&tlc.payment_hash)
                                     {
@@ -928,13 +916,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
                             if !tlc.is_offered() {
                                 if let Some(private_key) =
-                                    settlement_data.tlcs.iter().find_map(|settlement_tlc| {
-                                        settlement_tlc
-                                            .payment_hash
-                                            .as_ref()
-                                            .starts_with(&tlc.payment_hash)
-                                            .then_some(&settlement_tlc.local_key)
-                                    })
+                                    tlc.find_matched_private_key(&settlement_data, false)
                                 {
                                     if current_time > expiry {
                                         unlock_option = Some((
@@ -953,13 +935,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
                                 }
                             } else if let Some(private_key) =
-                                settlement_data.tlcs.iter().find_map(|settlement_tlc| {
-                                    settlement_tlc
-                                        .payment_hash
-                                        .as_ref()
-                                        .starts_with(&tlc.payment_hash)
-                                        .then_some(&settlement_tlc.local_key)
-                                })
+                                tlc.find_matched_private_key(&settlement_data, true)
                             {
                                 if let Some(preimage) = store.search_preimage(&tlc.payment_hash) {
                                     unlock_option = Some((
@@ -1595,6 +1571,26 @@ impl Htlc {
         } else {
             None
         }
+    }
+
+    pub fn find_matched_private_key<'a>(
+        &self,
+        settlement_data: &'a SettlementData,
+        with_preimage: bool,
+    ) -> Option<&'a Privkey> {
+        settlement_data.tlcs.iter().find_map(|settlement_tlc| {
+            let payment_hash_matches = settlement_tlc
+                .payment_hash
+                .as_ref()
+                .starts_with(&self.payment_hash);
+            let pubkey_hash_matches = match (self.is_offered(), with_preimage) {
+                (true, true) | (false, false) => {
+                    self.remote_htlc_pubkey_hash == settlement_tlc.local_pubkey_hash()
+                }
+                _ => self.local_htlc_pubkey_hash == settlement_tlc.local_pubkey_hash(),
+            };
+            (payment_hash_matches && pubkey_hash_matches).then_some(&settlement_tlc.local_key)
+        })
     }
 }
 
