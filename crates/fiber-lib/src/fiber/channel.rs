@@ -1141,7 +1141,8 @@ where
                         .insert_payment_custom_records(&payment_hash, custom_records);
                 }
 
-                self.store_preimage(payment_hash, preimage);
+                // Don't call self.store_preimage here, because it will reveal the preimage to watchtower.
+                self.store.insert_preimage(payment_hash, preimage);
             } else if let Some(invoice) = invoice {
                 // The TLC should be held until the invoice is expired or the TLC itself is
                 // expired.

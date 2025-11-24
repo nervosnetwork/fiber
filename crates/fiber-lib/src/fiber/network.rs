@@ -2445,10 +2445,6 @@ where
 
         self.store.insert_preimage(payment_hash, payment_preimage);
 
-        let _ = myself.send_message(NetworkActorMessage::new_notification(
-            NetworkServiceEvent::PreimageCreated(payment_hash, payment_preimage),
-        ));
-
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(
             NetworkActorCommand::SettleTlcSet(payment_hash, None),
