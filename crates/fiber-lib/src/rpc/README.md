@@ -77,6 +77,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
     * [Type `HopRequire`](#type-hoprequire)
+    * [Type `Htlc`](#type-htlc)
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `InvoiceSignature`](#type-invoicesignature)
     * [Type `NodeInfo`](#type-nodeinfo)
@@ -93,6 +94,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `SettlementData`](#type-settlementdata)
     * [Type `SettlementTlc`](#type-settlementtlc)
     * [Type `TLCId`](#type-tlcid)
+    * [Type `TlcStatus`](#type-tlcstatus)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
@@ -1108,6 +1110,7 @@ The channel data structure
 * `offered_tlc_balance` - <em>`u128`</em>, The offered balance of the channel
 * `remote_balance` - <em>`u128`</em>, The remote balance of the channel
 * `received_tlc_balance` - <em>`u128`</em>, The received balance of the channel
+* `pending_tlcs` - <em>Vec<[Htlc](#type-htlc)></em>, The list of pending tlcs
 * `latest_commitment_transaction_hash` - <em>`Option<H256>`</em>, The hash of the latest commitment transaction
 * `created_at` - <em>`u64`</em>, The time the channel was created at, in milliseconds from UNIX epoch
 * `enabled` - <em>`bool`</em>, Whether the channel is enabled
@@ -1271,6 +1274,21 @@ A hop requirement need to meet when building router, do not including the source
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the node
 * `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
+---
+
+<a id="#type-htlc"></a>
+### Type `Htlc`
+
+The htlc data structure
+
+
+#### Fields
+
+* `id` - <em>`u64`</em>, The id of the htlc
+* `amount` - <em>`u128`</em>, The amount of the htlc
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the htlc
+* `expiry` - <em>`u64`</em>, The expiry of the htlc
+* `status` - <em>[TlcStatus](#type-tlcstatus)</em>, The status of the htlc
 ---
 
 <a id="#type-invoicedata"></a>
@@ -1498,6 +1516,18 @@ The id of a tlc, it can be either offered or received.
 
 * `Offered` - <em>`u64`</em>, Offered tlc id
 * `Received` - <em>`u64`</em>, Received tlc id
+---
+
+<a id="#type-tlcstatus"></a>
+### Type `TlcStatus`
+
+The status of a tlc
+
+
+#### Enum with values of
+
+* `Outbound` - <em>[OutboundTlcStatus](#type-outboundtlcstatus)</em>, Outbound tlc
+* `Inbound` - <em>[InboundTlcStatus](#type-inboundtlcstatus)</em>, Inbound tlc
 ---
 
 <a id="#type-udtarginfo"></a>
