@@ -1098,6 +1098,11 @@ where
                 if !matches!(invoice_status, CkbInvoiceStatus::Open) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
                 }
+
+                // ensure tlc expiry is large than the now + final_tlc_minimum_expiry_delta
+                if invoice.is_tlc_expire_too_soon(add_tlc.expiry) {
+                    return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+                }
             }
 
             let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) else {

@@ -297,6 +297,19 @@ impl CkbInvoice {
         })
     }
 
+    pub fn is_tlc_expire_too_soon(&self, tlc_expiry: u64) -> bool {
+        let now = UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_millis();
+        let required_expiry = now
+            + (self
+                .final_tlc_minimum_expiry_delta()
+                .cloned()
+                .unwrap_or_default() as u128);
+        (tlc_expiry as u128) < required_expiry
+    }
+
     /// Check that the invoice is signed correctly and that key recovery works
     pub fn check_signature(&self) -> Result<(), InvoiceError> {
         if self.signature.is_none() {
