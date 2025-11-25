@@ -5,6 +5,7 @@ use tracing::debug;
 use crate::{
     create_n_nodes_network_with_params,
     fiber::{
+        builtin_records::BasicMppPaymentData,
         channel::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
         },
@@ -12,10 +13,8 @@ use crate::{
         features::FeatureVector,
         hash_algorithm::HashAlgorithm,
         network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
-        payment::{AttemptStatus, PaymentStatus},
-        types::{
-            BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
-        },
+        payment::{AttemptStatus, MppMode, PaymentStatus},
+        types::{Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
     },
     gen_rand_secp256k1_public_key, gen_rand_sha256_hash, gen_rpc_config,
@@ -97,7 +96,7 @@ async fn test_send_mpp_to_hold_invoice() {
         .amount(Some(20000000000))
         .payment_hash(payment_hash)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -151,8 +150,8 @@ async fn test_send_mpp_will_not_enabled_if_not_set_allow_mpp() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -201,7 +200,7 @@ async fn test_send_mpp_without_payment_secret_will_fail() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .build();
 
     let error = ckb_invoice.unwrap_err().to_string();
@@ -517,7 +516,7 @@ async fn test_send_mpp_fee_rate() {
         .amount(Some(1_500_000_000))
         .payment_preimage(preimage)
         .payee_pub_key(node_2.pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -549,8 +548,8 @@ async fn test_mpp_tlc_set() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -559,7 +558,7 @@ async fn test_mpp_tlc_set() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -688,8 +687,8 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -698,7 +697,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -826,8 +825,8 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -836,7 +835,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -930,8 +929,8 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -940,7 +939,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1031,8 +1030,8 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -1041,7 +1040,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1181,8 +1180,8 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -1191,7 +1190,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1358,8 +1357,8 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -1368,7 +1367,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1508,8 +1507,8 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -1521,7 +1520,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         .amount(Some(30000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1724,8 +1723,8 @@ async fn test_mpp_tlc_set_timeout() {
         2,
     )
     .await;
-    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-    let source_node = &mut node_0;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &node_0;
     let target_pubkey = node_1.pubkey;
 
     let preimage = gen_rand_sha256_hash();
@@ -1734,7 +1733,7 @@ async fn test_mpp_tlc_set_timeout() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -1911,7 +1910,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -2057,7 +2056,7 @@ async fn test_send_mpp_dry_run_will_be_ok_with_single_path() {
         .await;
         let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&node_2, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(&node_2, amount, None, true, MppMode::BasicMpp)
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2099,7 +2098,7 @@ async fn test_send_mpp_direct_channels_dry_run() {
         let [node_0, node_1, _node_2] = nodes.try_into().expect("ok nodes");
 
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&node_1, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(&node_1, amount, None, true, MppMode::BasicMpp)
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2144,7 +2143,7 @@ async fn test_send_mpp_dry_run_single_path_mixed_with_multiple_paths() {
         .await;
         let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
         let res = node_0
-            .send_mpp_payment_with_dry_run_option(&node_2, amount, None, true)
+            .send_mpp_payment_with_dry_run_option(&node_2, amount, None, true, MppMode::BasicMpp)
             .await;
 
         if let Some(count) = expect_routers_count {
@@ -2194,7 +2193,7 @@ async fn test_send_mpp_will_succeed_with_retry_first_hops() {
     let [node_0, node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2249,7 +2248,7 @@ async fn test_send_mpp_will_succeed_with_retry_2_channels() {
     let [node_0, node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2306,7 +2305,7 @@ async fn test_send_mpp_will_fail_with_retry_3_channels() {
     let [node_0, node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2352,7 +2351,7 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
     let [node_0, node_1] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_1, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2398,7 +2397,7 @@ async fn test_send_mpp_will_fail_with_disable_single_path() {
     let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_2, 30000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_2, 30000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2449,7 +2448,7 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
     let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_2, 300000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_2, 300000, None, true, MppMode::BasicMpp)
         .await;
 
     let query_res = res.unwrap();
@@ -2494,9 +2493,9 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
         3,
     )
     .await;
-    let [node_0, mut node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+    let [node_0, mut node_1, node_2] = nodes.try_into().expect("ok nodes");
 
-    let target_node = &mut node_2;
+    let target_node = &node_2;
     let amount = 300000;
     let target_pubkey = target_node.get_public_key();
     let preimage = gen_rand_sha256_hash();
@@ -2504,7 +2503,7 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -2573,8 +2572,8 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
             2,
         )
         .await;
-        let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
-        let source_node = &mut node_0;
+        let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+        let source_node = &node_0;
         let target_pubkey = node_1.pubkey;
 
         let payment_secret = gen_rand_sha256_hash();
@@ -2681,9 +2680,9 @@ async fn test_send_payment_with_invoice_removed_from_last_hop() {
         3,
     )
     .await;
-    let [node_0, _node_1, mut node_2] = nodes.try_into().expect("ok nodes");
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
 
-    let target_node = &mut node_2;
+    let target_node = &node_2;
     let amount = 300000;
     let target_pubkey = target_node.get_public_key();
     let preimage = gen_rand_sha256_hash();
@@ -2691,7 +2690,7 @@ async fn test_send_payment_with_invoice_removed_from_last_hop() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -2737,7 +2736,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
         .amount(Some(20000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -3212,6 +3211,7 @@ async fn test_send_payment_custom_records_not_in_range() {
                 max_parts: Some(2),
                 ..Default::default()
             },
+            MppMode::BasicMpp,
         )
         .await;
 
@@ -3237,7 +3237,13 @@ async fn test_mpp_can_not_find_path_filter_target_node_features() {
     let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_1, 20000000000, Some(2), true)
+        .send_mpp_payment_with_dry_run_option(
+            &node_1,
+            20000000000,
+            Some(2),
+            true,
+            MppMode::BasicMpp,
+        )
         .await;
     eprintln!("query res: {:?}", res);
 
@@ -3251,7 +3257,13 @@ async fn test_mpp_can_not_find_path_filter_target_node_features() {
         .await;
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_1, 20000000000, Some(2), true)
+        .send_mpp_payment_with_dry_run_option(
+            &node_1,
+            20000000000,
+            Some(2),
+            true,
+            MppMode::BasicMpp,
+        )
         .await;
     eprintln!("query res: {:?}", res);
 
@@ -3281,7 +3293,7 @@ async fn test_mpp_fail_on_total_amount_not_match() {
         .amount(Some(15000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -3361,6 +3373,7 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
                 200 * CKB_SHANNONS as u128,
                 Some(2),
                 true,
+                MppMode::BasicMpp,
             )
             .await;
         eprintln!("query res: {:?}", res);
@@ -3391,6 +3404,7 @@ async fn test_mpp_can_not_find_path_filter_middle_node_features() {
                 200 * CKB_SHANNONS as u128,
                 Some(2),
                 true,
+                MppMode::BasicMpp,
             )
             .await;
         eprintln!("query res: {:?}", res);
@@ -3550,7 +3564,7 @@ async fn test_send_3_nodes_pay_self() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build()
         .expect("build invoice success");
@@ -3627,14 +3641,14 @@ async fn test_send_mpp_respect_min_tlc_value() {
     assert!(res.is_ok());
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_2, 28000, Some(3), true)
+        .send_mpp_payment_with_dry_run_option(&node_2, 28000, Some(3), true, MppMode::BasicMpp)
         .await;
 
     eprintln!("res: {:?}", res);
     assert!(res.is_err());
 
     let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_2, 30000, None, true)
+        .send_mpp_payment_with_dry_run_option(&node_2, 30000, None, true, MppMode::BasicMpp)
         .await;
     debug!("res: {:?}", res);
     assert!(res.is_ok());
@@ -3659,8 +3673,8 @@ async fn test_send_mpp_can_retry() {
     )
     .await;
     let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
-    let res = node_0.send_mpp_payment(&node_3, 30000000000, Some(3)).await;
     node_1.disable_channel_stealthy(channels[3]).await;
+    let res = node_0.send_mpp_payment(&node_3, 30000000000, Some(3)).await;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     eprintln!("res: {:?}", res);

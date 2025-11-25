@@ -5,6 +5,7 @@ use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
 };
+use crate::fiber::builtin_records::AmpPaymentData;
 use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 #[cfg(any(debug_assertions, feature = "bench"))]
@@ -904,6 +905,19 @@ where
         tlc_id: TLCId,
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
+        let parent_payment_hash = tlc_info
+            .parent_payment_hash
+            .unwrap_or(tlc_info.payment_hash);
+
+        // MPP or AMP
+        if tlc_info.total_amount.is_some() {
+            // add to pending settlement tlc set
+            // the tlc set will be settled by network actor
+            state
+                .pending_notify_settle_tlcs
+                .push((parent_payment_hash, tlc_info.id(), true));
+            return;
+        }
 
         let Some(preimage) = self.store.get_preimage(&tlc_info.payment_hash) else {
             return;
@@ -922,13 +936,13 @@ where
                 CkbInvoiceStatus::Expired => {
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceExpired),
-                        &tlc.shared_secret,
+                        &tlc_info.shared_secret,
                     ));
                 }
                 CkbInvoiceStatus::Cancelled => {
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::InvoiceCancelled),
-                        &tlc.shared_secret,
+                        &tlc_info.shared_secret,
                     ));
                 }
                 CkbInvoiceStatus::Paid => {
@@ -937,28 +951,17 @@ where
                     error!("invoice already paid, ignore");
                     return;
                 }
-                _ if invoice.allow_mpp() => {
-                    // add to pending settlement tlc set
-                    // the tlc set will be settled by network actor
-                    state
-                        .pending_notify_settle_tlcs
-                        .push((tlc.payment_hash, tlc.id(), true));
-
-                    // just return, the tlc set will be settled by network actor
-                    return;
-                }
                 _ => {
                     // single path payment
                     if !is_invoice_fulfilled(invoice, std::slice::from_ref(&tlc)) {
                         remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                             TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
-                            &tlc.shared_secret,
+                            &tlc_info.shared_secret,
                         ));
                     }
                 }
             }
         }
-
         // remove tlc
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) && invoice.is_some() {
             state
@@ -1034,6 +1037,7 @@ where
     ) -> ProcessingChannelResult {
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
+        let channel_id = state.get_id();
 
         let tlc = state
             .tlc_state
@@ -1050,7 +1054,16 @@ where
                 return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
             }
 
-            let invoice = self.store.get_invoice(&payment_hash);
+            let basic_mpp_payment_data = peeled_onion_packet.basic_mpp_custom_records();
+            let atomic_mpp_payment_data = peeled_onion_packet.atomic_mpp_custom_records();
+            let is_atomic_mpp = atomic_mpp_payment_data.is_some();
+
+            let parent_payment_hash = atomic_mpp_payment_data
+                .as_ref()
+                .map(|a| a.payment_hash)
+                .unwrap_or(payment_hash);
+
+            let invoice = self.store.get_invoice(&parent_payment_hash);
             if let Some(ref invoice) = invoice {
                 let invoice_status = self.get_invoice_status(invoice);
                 if !matches!(invoice_status, CkbInvoiceStatus::Open) {
@@ -1066,8 +1079,8 @@ where
             tlc.is_last = true;
 
             // extract MPP total payment fields from onion packet
-            match (&invoice, peeled_onion_packet.mpp_custom_records()) {
-                (Some(invoice), Some(record)) => {
+            match (&invoice, basic_mpp_payment_data, atomic_mpp_payment_data) {
+                (Some(invoice), Some(record), None) => {
                     if record.total_amount < invoice.amount.unwrap_or_default() {
                         error!(
                             "total amount is less than invoice amount: {:?}",
@@ -1092,8 +1105,24 @@ where
                     tlc.payment_secret = Some(record.payment_secret);
                     tlc.total_amount = Some(record.total_amount);
                 }
-                (Some(invoice), None) => {
-                    if invoice.allow_mpp() {
+                (_, None, Some(record)) => {
+                    tlc.total_amount = Some(record.total_amount);
+                    tlc.parent_payment_hash = Some(parent_payment_hash);
+                    // now save amp_record with parent payment_hash as key
+                    self.store.insert_atomic_mpp_payment_data(
+                        parent_payment_hash,
+                        channel_id,
+                        tlc.tlc_id.into(),
+                        record.clone(),
+                    );
+                }
+                (Some(invoice), _, None) if invoice.atomic_mpp() => {
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "invoice is atomic mpp but no MPP records in onion packet".to_string(),
+                    ));
+                }
+                (Some(invoice), None, _) => {
+                    if invoice.basic_mpp() {
                         // FIXME: whether we allow MPP without MPP records in onion packet?
                         // currently we allow it pay with enough amount
                         // TODO: add a unit test of using single path payment pay MPP invoice successfully
@@ -1107,7 +1136,7 @@ where
                         return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
                     }
                 }
-                (None, Some(_record)) => {
+                (None, Some(_), _) => {
                     error!("invoice not found for MPP payment: {:?}", payment_hash);
                     return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
                         "invoice not found".to_string(),
@@ -1143,6 +1172,8 @@ where
 
                 // Don't call self.store_preimage here, because it will reveal the preimage to watchtower.
                 self.store.insert_preimage(payment_hash, preimage);
+            } else if is_atomic_mpp {
+                // atomic mpp don't have preimage
             } else if let Some(invoice) = invoice {
                 // The TLC should be held until the invoice is expired or the TLC itself is
                 // expired.
@@ -3015,6 +3046,8 @@ pub struct TlcInfo {
     pub total_amount: Option<u128>,
     /// bolt04 payment secret, only exists for last hop in multi-path payment
     pub payment_secret: Option<Hash256>,
+    /// atomic parent payment_hash
+    pub parent_payment_hash: Option<Hash256>,
     /// The attempt id associate with the tlc, only on outbound tlc
     /// only exists for first hop in multi-path payment
     pub attempt_id: Option<u64>,
@@ -5804,6 +5837,13 @@ impl ChannelActorState {
         if is_sent {
             // local peer can not sent more tlc amount than they have
             let pending_sent_amount = self.get_offered_tlc_balance();
+            debug!(
+                "add_amount: {}, to_local_amount:{} - pending_sent_amount:{} = {}",
+                add_amount,
+                self.to_local_amount,
+                pending_sent_amount,
+                self.to_local_amount.saturating_sub(pending_sent_amount)
+            );
             if add_amount > self.to_local_amount.saturating_sub(pending_sent_amount) {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
@@ -5823,6 +5863,13 @@ impl ChannelActorState {
         } else {
             // remote peer can not sent more tlc amount than they have
             let pending_recv_amount = self.get_received_tlc_balance();
+            debug!(
+                "remote_amount: {}, to_remote_amount:{} - pending_recv_amount:{} = {}",
+                add_amount,
+                self.to_remote_amount,
+                pending_recv_amount,
+                self.to_local_amount.saturating_sub(pending_recv_amount)
+            );
             if add_amount > self.to_remote_amount.saturating_sub(pending_recv_amount) {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
@@ -5858,6 +5905,7 @@ impl ChannelActorState {
             attempt_id: command.attempt_id,
             amount: command.amount,
             payment_hash: command.payment_hash,
+            parent_payment_hash: None,
             expiry: command.expiry,
             hash_algorithm: command.hash_algorithm,
             created_at: self.get_current_commitment_numbers(),
@@ -5885,6 +5933,7 @@ impl ChannelActorState {
             channel_id: self.get_id(),
             amount: message.amount,
             payment_hash: message.payment_hash,
+            parent_payment_hash: None,
             attempt_id: None,
             expiry: message.expiry,
             hash_algorithm: message.hash_algorithm,
@@ -7611,6 +7660,17 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
+    fn insert_atomic_mpp_payment_data(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+        payment_data: AmpPaymentData,
+    );
+    fn get_atomic_mpp_payment_data(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Vec<((Hash256, u64), AmpPaymentData)>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

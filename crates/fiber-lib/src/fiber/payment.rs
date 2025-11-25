@@ -6,10 +6,17 @@ use crate::fiber::network::DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::types::PaymentHopData;
+use crate::fiber::PaymentCustomRecords;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum MppMode {
+    BasicMpp,
+    AtomicMpp,
+}
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
@@ -165,6 +172,14 @@ impl PaymentSession {
         self.request.allow_mpp()
     }
 
+    pub fn is_basic_mpp(&self) -> bool {
+        self.request.is_basic_mpp()
+    }
+
+    pub fn is_atomic_mpp(&self) -> bool {
+        self.request.is_atomic_mpp()
+    }
+
     pub fn payment_hash(&self) -> Hash256 {
         self.request.payment_hash
     }
@@ -278,6 +293,7 @@ impl PaymentSession {
             last_updated_at: now,
             last_error: None,
             status: AttemptStatus::Created,
+            custom_records: None,
         }
     }
 
@@ -454,6 +470,7 @@ pub struct Attempt {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub last_error: Option<String>,
+    pub custom_records: Option<PaymentCustomRecords>,
 }
 
 impl Attempt {

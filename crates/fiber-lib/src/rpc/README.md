@@ -549,6 +549,7 @@ Generates a new invoice.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
+* `allow_atomic_mpp` - <em>`Option<bool>`</em>, Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
 
 ##### Returns
 
@@ -660,6 +661,9 @@ Sends a payment to a peer.
 * `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
+* `amp` - <em>`Option<bool>`</em>, whether to use AMP for the payment, default is false
+ Note: this is also required if the invoice is AMP invoice
+       this option is exclusive with `keysend` option, and `payment_hash` must be None
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
@@ -794,6 +798,9 @@ Sends a payment to a peer with specified router
   }
  ```
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
+* `amp` - <em>`Option<bool>`</em>, whether to use AMP for the payment, default is false
+ Note: this is also required if the invoice is AMP invoice
+       this option is exclusive with `keysend` option, and `payment_hash` must be None
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `dry_run` - <em>`Option<bool>`</em>, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
  it's useful for the sender to double check the payment before sending it to the network,
@@ -1056,6 +1063,7 @@ The attributes of the invoice
 * `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
 * `Feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
 * `PaymentSecret` - <em>[Hash256](#type-hash256)</em>, The payment secret of the invoice
+* `Reuse` - <em>`bool`</em>, Reuse
 ---
 
 <a id="#type-cchinvoice"></a>

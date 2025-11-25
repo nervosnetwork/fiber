@@ -12,12 +12,16 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
-use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
+use crate::fiber::builtin_records::{AmpPaymentData, BasicMppPaymentData};
+use ckb_jsonrpc_types::CellOutput;
+use ckb_types::H256;
+use num_enum::IntoPrimitive;
+use num_enum::TryFromPrimitive;
+use std::convert::TryFrom;
+use std::fmt::Debug;
 
 use anyhow::anyhow;
 use bitcoin::hashes::Hash;
-use ckb_jsonrpc_types::CellOutput;
-use ckb_types::H256;
 use ckb_types::{
     core::FeeRate,
     packed::{Byte32 as MByte32, BytesVec, OutPoint, Script, Transaction},
@@ -28,8 +32,6 @@ use fiber_sphinx::{OnionErrorPacket, SphinxError};
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
-use num_enum::IntoPrimitive;
-use num_enum::TryFromPrimitive;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use secp256k1::{
@@ -40,8 +42,6 @@ use secp256k1::{Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::cmp::Ordering;
-use std::convert::TryFrom;
-use std::fmt::Debug;
 use std::fmt::Display;
 use std::str::FromStr;
 use strum::{AsRefStr, EnumString};
@@ -3683,55 +3683,6 @@ impl_traits!(FiberMessage);
 pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
-
-#[derive(Eq, PartialEq, Debug)]
-/// Bolt04 basic MPP payment data record
-pub struct BasicMppPaymentData {
-    pub payment_secret: Hash256,
-    pub total_amount: u128,
-}
-
-impl BasicMppPaymentData {
-    // record type for payment data record in bolt04
-    // custom records key from 65536 is reserved for internal usage
-    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 1;
-
-    pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
-        Self {
-            payment_secret,
-            total_amount,
-        }
-    }
-
-    fn to_vec(&self) -> Vec<u8> {
-        let mut vec = Vec::new();
-        vec.extend_from_slice(self.payment_secret.as_ref());
-        vec.extend_from_slice(&self.total_amount.to_le_bytes());
-        vec
-    }
-
-    pub fn write(&self, custom_records: &mut PaymentCustomRecords) {
-        custom_records
-            .data
-            .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
-    }
-
-    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Self> {
-        custom_records
-            .data
-            .get(&Self::CUSTOM_RECORD_KEY)
-            .and_then(|data| {
-                if data.len() != 32 + 16 {
-                    return None;
-                }
-                let secret: [u8; 32] = data[..32].try_into().unwrap();
-                let payment_secret = Hash256::from(secret);
-                let total_amount = u128::from_le_bytes(data[32..].try_into().unwrap());
-                Some(Self::new(payment_secret, total_amount))
-            })
-    }
-}
-
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
@@ -3902,11 +3853,18 @@ pub struct PeeledPaymentOnionPacket {
 }
 
 impl PeeledPaymentOnionPacket {
-    pub fn mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
+    pub fn basic_mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
         self.current
             .custom_records
             .as_ref()
             .and_then(BasicMppPaymentData::read)
+    }
+
+    pub fn atomic_mpp_custom_records(&self) -> Option<AmpPaymentData> {
+        self.current
+            .custom_records
+            .as_ref()
+            .and_then(AmpPaymentData::read)
     }
 }
 
@@ -4125,7 +4083,7 @@ impl ::std::str::FromStr for NodeId {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct HoldTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,

@@ -139,6 +139,11 @@ pub struct SendPaymentCommandParams {
     /// keysend payment
     pub keysend: Option<bool>,
 
+    /// whether to use AMP for the payment, default is false
+    /// Note: this is also required if the invoice is AMP invoice
+    ///       this option is exclusive with `keysend` option, and `payment_hash` must be None
+    pub amp: Option<bool>,
+
     /// udt type script for the payment
     pub udt_type_script: Option<Script>,
 
@@ -175,6 +180,7 @@ pub struct SendPaymentCommandParams {
     /// default is false
     pub dry_run: Option<bool>,
 }
+
 /// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -269,6 +275,11 @@ pub struct SendPaymentWithRouterParams {
 
     /// keysend payment
     pub keysend: Option<bool>,
+
+    /// whether to use AMP for the payment, default is false
+    /// Note: this is also required if the invoice is AMP invoice
+    ///       this option is exclusive with `keysend` option, and `payment_hash` must be None
+    pub amp: Option<bool>,
 
     /// udt type script for the payment
     pub udt_type_script: Option<Script>,
@@ -386,6 +397,7 @@ where
                     max_fee_amount: params.max_fee_amount,
                     max_parts: params.max_parts,
                     keysend: params.keysend,
+                    atomic_mpp: params.amp,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
                     custom_records: params.custom_records.clone().map(|records| records.into()),

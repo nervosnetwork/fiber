@@ -623,7 +623,8 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -673,7 +674,8 @@ fn test_graph_build_router_fee_rate_optimize() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
 
@@ -715,7 +717,8 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -867,7 +870,8 @@ fn test_graph_build_route_three_nodes_amount() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -926,7 +930,8 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1016,7 +1021,8 @@ fn test_graph_build_route_below_min_tlc_value() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1053,7 +1059,8 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1098,7 +1105,8 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1162,7 +1170,8 @@ fn test_graph_mark_failed_channel() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1192,7 +1201,8 @@ fn test_graph_mark_failed_channel() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1233,7 +1243,8 @@ fn test_graph_session_router() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1287,7 +1298,8 @@ fn test_graph_mark_failed_node() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1315,7 +1327,8 @@ fn test_graph_mark_failed_node() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1345,7 +1358,8 @@ fn test_graph_mark_failed_node() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1372,7 +1386,8 @@ fn test_graph_mark_failed_node() {
         dry_run: false,
         custom_records: None,
         router: vec![],
-        allow_mpp: false,
+        allow_basic_mpp: false,
+        allow_atomic_mpp: false,
         channel_stats: Default::default(),
     };
     let route = network

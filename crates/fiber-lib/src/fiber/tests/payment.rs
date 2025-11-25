@@ -1,4 +1,5 @@
 #![allow(clippy::needless_range_loop)]
+use crate::fiber::builtin_records::BasicMppPaymentData;
 use crate::fiber::channel::*;
 use crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
@@ -3151,11 +3152,10 @@ async fn test_send_payment_middle_hop_balance_is_not_enough() {
     // 2 -> 3 don't have enough balance
     node_0.wait_until_failed(res.payment_hash).await;
     let result = node_0.get_payment_result(res.payment_hash).await;
-    eprintln!("debug result: {:?}", result);
     assert!(result
         .failed_error
         .expect("got error")
-        .contains("Failed to build route"));
+        .contains("PathFind error: no path found"));
 }
 
 #[tokio::test]
@@ -5005,6 +5005,7 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
                 max_fee_amount: None,
                 max_parts: None,
                 keysend: None,
+                atomic_mpp: None,
                 udt_type_script: None,
                 dry_run: false,
                 hop_hints: None,
@@ -5558,7 +5559,7 @@ async fn test_payment_with_payment_data_record() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(true)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -5659,7 +5660,7 @@ async fn test_payment_with_insufficient_total_amount() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -5785,7 +5786,7 @@ async fn test_payment_with_wrong_payment_secret() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -5899,7 +5900,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -6012,7 +6013,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
         .amount(Some(10000000000))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .payment_secret(payment_secret)
         .build()
         .expect("build invoice success");
@@ -6523,4 +6524,104 @@ async fn test_send_payment_two_with_same_invoice() {
         }
     }
     assert_eq!(succeeded_count, 1);
+}
+
+#[tokio::test]
+async fn test_send_payment_3_nodes_failed_last_hop() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) => {
+                msg.starts_with("Channel is now ready")
+            }
+            _ => false,
+        })
+        .await;
+
+    node_2.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(100),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    node_0
+        .wait_until_failed(payment.unwrap().payment_hash)
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node_2.start().await;
+
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) => {
+                msg.starts_with("Channel is now ready")
+            }
+            _ => false,
+        })
+        .await;
+
+    node_0.clear_history().await;
+
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(100),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    debug!("payment: {:?}", payment);
+    node_0
+        .wait_until_success(payment.unwrap().payment_hash)
+        .await;
+}
+
+#[tokio::test]
+async fn test_send_payment_mpp_can_not_be_keysend() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+    let node_2_pubkey = node_2.pubkey;
+    let res = node_0
+        .send_mpp_payment_with_command(
+            &node_2,
+            100,
+            SendPaymentCommand {
+                target_pubkey: Some(node_2_pubkey),
+                keysend: Some(true),
+                allow_self_payment: false,
+                dry_run: false,
+                ..Default::default()
+            },
+            MppMode::BasicMpp,
+        )
+        .await;
+    eprintln!("res: {:?}", res);
+    assert!(res
+        .unwrap_err()
+        .contains("keysend payment should not have invoice"));
 }

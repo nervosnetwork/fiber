@@ -62,9 +62,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BasicMppPaymentData, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
-    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
-    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
+    Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey, RemoveTlcFulfill,
+    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
@@ -76,6 +76,8 @@ use crate::ckb::{
     CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxRequest,
     GetShutdownTxResponse,
 };
+use crate::fiber::amp::{AmpChild, AmpChildDesc, AmpSecret};
+use crate::fiber::builtin_records::{AmpPaymentData, BasicMppPaymentData};
 use crate::fiber::channel::{
     tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
@@ -91,6 +93,7 @@ use crate::fiber::config::{
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::GraphChannelStat;
+use crate::fiber::payment::MppMode;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
@@ -102,8 +105,8 @@ use crate::fiber::KeyPair;
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
-use crate::utils::payment::is_invoice_fulfilled;
-use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
+use crate::utils::payment::{is_atomic_mpp_fulfilled, is_invoice_fulfilled};
+use crate::{gen_rand_sha256_hash, now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -401,6 +404,8 @@ pub struct SendPaymentCommand {
     pub max_parts: Option<u64>,
     // keysend payment, default is false
     pub keysend: Option<bool>,
+    // allow atomic mpp, default is false,
+    pub atomic_mpp: Option<bool>,
     // udt type script
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
@@ -528,7 +533,8 @@ pub struct SendPaymentData {
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
     pub router: Vec<RouterHop>,
-    pub allow_mpp: bool,
+    pub allow_basic_mpp: bool,
+    pub allow_atomic_mpp: bool,
     pub dry_run: bool,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
@@ -543,7 +549,7 @@ impl SendPaymentData {
             .transpose()
             .map_err(|_| "invoice is invalid".to_string())?;
 
-        if let Some(invoice) = invoice.clone() {
+        if let Some(ref invoice) = invoice {
             if invoice.is_expired() {
                 return Err("invoice is expired".to_string());
             }
@@ -623,16 +629,20 @@ impl SendPaymentData {
         }
 
         let keysend = command.keysend.unwrap_or(false);
-        let (payment_hash, preimage) = if !keysend {
-            (
-                validate_field(
-                    command.payment_hash,
-                    invoice.as_ref().map(|i| *i.payment_hash()),
-                    "payment_hash",
-                )?,
-                None,
-            )
-        } else {
+        let atomic_mpp = command.atomic_mpp.unwrap_or(false);
+        let invoice_atomic_mpp = invoice.as_ref().map_or(atomic_mpp, |inv| inv.atomic_mpp());
+
+        if keysend && atomic_mpp {
+            return Err("keysend and AMP cannot be both true".to_string());
+        }
+        if invoice_atomic_mpp && !atomic_mpp {
+            return Err("It is a AMP invoice, need to set amp flag in SendPayment".to_string());
+        }
+        if atomic_mpp && !invoice_atomic_mpp {
+            return Err("AMP flag can not set for a non-AMP invoice".to_string());
+        }
+
+        let (payment_hash, preimage) = if keysend {
             if invoice.is_some() {
                 return Err("keysend payment should not have invoice".to_string());
             }
@@ -647,6 +657,17 @@ impl SendPaymentData {
             // use the default payment hash algorithm here for keysend payment
             let payment_hash: Hash256 = blake2b_256(preimage).into();
             (payment_hash, Some(preimage))
+        } else if atomic_mpp {
+            (gen_rand_sha256_hash(), None)
+        } else {
+            (
+                validate_field(
+                    command.payment_hash,
+                    invoice.as_ref().map(|i| *i.payment_hash()),
+                    "payment_hash",
+                )?,
+                None,
+            )
         };
 
         if udt_type_script.is_none() && amount >= u64::MAX as u128 {
@@ -670,21 +691,25 @@ impl SendPaymentData {
         }
 
         let hop_hints = command.hop_hints.unwrap_or_default();
+        let basic_mpp = invoice.as_ref().is_some_and(|inv| inv.basic_mpp());
+        let is_mpp_payment = basic_mpp || atomic_mpp;
 
-        let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
+        if basic_mpp && atomic_mpp {
+            // invoice rpc already make sure this
+            return Err("basic_mpp and atomic_mpp cannot be both true".to_string());
+        }
+
         let payment_secret = invoice
             .as_ref()
             .and_then(|inv| inv.payment_secret().cloned());
-        if allow_mpp && payment_secret.is_none() {
-            return Err("payment secret is required for multi-path payment".to_string());
-        }
-        if allow_mpp
+
+        if is_mpp_payment
             && command
                 .max_parts
                 .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAX_PARTS_LIMIT)
         {
             return Err(format!(
-                "invalid max_parts, value should be in range [1, {}]",
+                "invalid max_parts, value should be in range [2, {}]",
                 PAYMENT_MAX_PARTS_LIMIT
             ));
         }
@@ -712,8 +737,13 @@ impl SendPaymentData {
         }
 
         let mut custom_records = command.custom_records;
-        // bolt04 write payment data record to custom records if payment secret is set
-        if let Some(payment_secret) = payment_secret {
+        if basic_mpp {
+            let Some(payment_secret) = payment_secret else {
+                // if basic mpp, payment secret is required
+                return Err("payment secret is required for multi-path payment".to_string());
+            };
+
+            // bolt04 write payment data record to custom records if payment secret is set
             let records = custom_records.get_or_insert_with(PaymentCustomRecords::default);
             BasicMppPaymentData::new(payment_secret, amount).write(records);
         }
@@ -734,7 +764,8 @@ impl SendPaymentData {
             custom_records,
             allow_self_payment: command.allow_self_payment,
             hop_hints,
-            allow_mpp,
+            allow_basic_mpp: basic_mpp,
+            allow_atomic_mpp: atomic_mpp,
             router: vec![],
             dry_run: command.dry_run,
             channel_stats: Default::default(),
@@ -747,7 +778,15 @@ impl SendPaymentData {
 
     pub fn allow_mpp(&self) -> bool {
         // only allow mpp if max_parts is greater than 1 and not keysend
-        self.allow_mpp && self.max_parts() > 1 && !self.keysend
+        (self.allow_basic_mpp || self.allow_atomic_mpp) && self.max_parts() > 1 && !self.keysend
+    }
+
+    pub fn is_basic_mpp(&self) -> bool {
+        self.allow_basic_mpp
+    }
+
+    pub fn is_atomic_mpp(&self) -> bool {
+        self.allow_atomic_mpp
     }
 }
 
@@ -1266,8 +1305,22 @@ where
                     &channel_id, &tx_hash, &peer_id
                 );
             }
-            NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
+            NetworkActorEvent::TlcRemoveReceived(attempt_hash, attempt_id, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
+                let payment_hash = attempt_id
+                    .and_then(|id| {
+                        self.store
+                            .get_payment_hash_with_attempt_hash(attempt_hash, id)
+                    })
+                    .or(Some(attempt_hash));
+                let Some(payment_hash) = payment_hash else {
+                    error!(
+                        "Failed to find payment hash for attempt_hash {:?}, attempt_id {:?}",
+                        attempt_hash, attempt_id
+                    );
+                    return Ok(());
+                };
+
                 self.on_remove_tlc_event(
                     myself.clone(),
                     state,
@@ -1295,7 +1348,9 @@ where
                     .resume_payment_session(myself, state, payment_hash, attempt_id)
                     .await;
             }
-            NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
+            NetworkActorEvent::AddTlcResult(attempt_hash, attempt_id, error_info, previous_tlc) => {
+                let payment_hash =
+                    self.get_payment_hash_from_attempt_hash(attempt_hash, attempt_id);
                 self.on_add_tlc_result_event(
                     myself,
                     state,
@@ -1329,6 +1384,20 @@ where
             }
         }
         Ok(())
+    }
+
+    pub fn get_payment_hash_from_attempt_hash(
+        &self,
+        attempt_hash: Hash256,
+        attempt_id: Option<u64>,
+    ) -> Hash256 {
+        if let Some(attempt_id) = attempt_id {
+            self.store
+                .get_payment_hash_with_attempt_hash(attempt_hash, attempt_id)
+                .unwrap_or(attempt_hash)
+        } else {
+            attempt_hash
+        }
     }
 
     pub async fn handle_command(
@@ -1444,9 +1513,9 @@ where
 
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
-                                "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
-                                num_outbound_peers, state.min_outbound_peers
-                            );
+                        "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
+                        num_outbound_peers, state.min_outbound_peers
+                    );
                     return Ok(());
                 }
 
@@ -1486,9 +1555,9 @@ where
                     debug!("Peer to connect: {:?}, {:?}", peer_id, addresses);
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
-                                    "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
-                                    peer_id, session
-                                );
+                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                            peer_id, session
+                        );
                         continue;
                     }
 
@@ -1765,6 +1834,11 @@ where
                 }
             }
             NetworkActorCommand::SettleTlcSet(payment_hash, tlc_info) => {
+                // NOTE: there are three scenarios to settle a tlc set:
+                // 1. non-mpp tlc set: tlc_info is Some(_), including hold tlc which may don't have preimage yet
+                // 2. mpp tlc set with invoice: tlc_info is None
+                // 3. atomic mpp tlc set without invoice: tlc_info is None
+
                 let tlc_ids = if let Some((channel_id, tlc_id)) = tlc_info {
                     vec![(channel_id, tlc_id)]
                 } else {
@@ -1782,61 +1856,180 @@ where
                         state.get_received_tlc(tlc_id).cloned()
                     })
                     .collect();
-
-                let not_mpp = tlc_info.is_some();
-                let mut tlc_fail = None;
-
-                // check if all tlcs have the same total amount
-                if tlcs.len() > 1
-                    && !tlcs
-                        .windows(2)
-                        .all(|w| w[0].total_amount == w[1].total_amount)
-                {
-                    error!("TLCs have inconsistent total_amount: {:?}", tlcs);
-                    tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
-                }
-                let Some(invoice) = self.store.get_invoice(&payment_hash) else {
-                    error!(
-                        "Try to settle mpp tlc set, but invoice not found for payment hash {:?}",
-                        payment_hash
-                    );
+                if tlcs.is_empty() {
                     return Ok(());
-                };
+                }
 
-                let fulfilled = is_invoice_fulfilled(&invoice, &tlcs);
-                if not_mpp {
-                    if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open)
-                        || !fulfilled
-                    {
-                        tlc_fail =
-                            Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
+                let invoice = self.store.get_invoice(&payment_hash);
+                let preimage = self.store.get_preimage(&payment_hash);
+                if invoice.is_some() && preimage.is_none() {
+                    // hold tlc may not have preimage yet
+                    return Ok(());
+                }
+
+                // we generally set all validation error as IncorrectOrUnknownPaymentDetails, this failure
+                // is expected to be the scenarios malicious sender have sent a inconsistent data with MPP,
+                // and we don't want to keep them in the database.
+                let mut tlc_preimage_map = HashMap::new();
+                let tlc_fail = 'validation: {
+                    macro_rules! validation_fail {
+                        ($msg:expr) => {{
+                            error!($msg, payment_hash);
+                            break 'validation Some(TlcErr::new(
+                                TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+                            ));
+                        }};
                     }
-                } else if !fulfilled {
-                    return Ok(());
-                }
 
-                // if we have enough tlcs to fulfill the invoice, update invoice status to Received
-                // for hold invoice we may don't have preimages yet, so just update status here
-                self.store
-                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                    .expect("update invoice status failed");
+                    // check if all tlcs have the same total amount
+                    if tlcs.len() > 1
+                        && !tlcs.windows(2).all(|w| {
+                            w[0].total_amount == w[1].total_amount
+                                && w[0].hash_algorithm == w[1].hash_algorithm
+                        })
+                    {
+                        validation_fail!("TLCs have inconsistent information: {:?}");
+                    }
 
-                let Some(preimage) = self.store.get_preimage(&payment_hash) else {
-                    return Ok(());
+                    if let Some(ref invoice) = invoice {
+                        let fulfilled = is_invoice_fulfilled(invoice, &tlcs);
+                        // for non-mpp tlc set, we expect the invoice is fulfilled
+                        if tlc_info.is_some()
+                            && (self.store.get_invoice_status(&payment_hash)
+                                != Some(CkbInvoiceStatus::Open)
+                                || !fulfilled)
+                        {
+                            error!(
+                                "got in old status: {:?}",
+                                self.store.get_invoice_status(&payment_hash)
+                            );
+                            validation_fail!(
+                                "Try to settle non-mpp tlc set but invoice is not fulfilled: {:?}"
+                            );
+                        }
+                    }
+
+                    // check if tlc set are fulfilled
+                    let hash_algorithm = tlcs[0].hash_algorithm;
+                    let mpp_mode = match invoice {
+                        Some(ref invoice) => {
+                            if !is_invoice_fulfilled(invoice, &tlcs) {
+                                return Ok(());
+                            }
+                            let mpp_mode = invoice.mpp_mode();
+                            if invoice.hash_algorithm().cloned().unwrap_or_default()
+                                != hash_algorithm
+                            {
+                                validation_fail!("TLCs hash_algorithm does not match invoice for mpp payment_hash: {:?}");
+                            }
+                            mpp_mode
+                        }
+                        None => {
+                            if !is_atomic_mpp_fulfilled(&tlcs) {
+                                return Ok(());
+                            }
+                            Some(MppMode::AtomicMpp)
+                        }
+                    };
+
+                    // Generate preimages based on MPP mode
+                    match mpp_mode {
+                        Some(MppMode::BasicMpp) | None => {
+                            let Some(preimage) = preimage else {
+                                validation_fail!("can not get preimage for payment: {:?}");
+                            };
+
+                            for tlc in tlcs.iter() {
+                                tlc_preimage_map.insert((tlc.channel_id, tlc.id()), preimage);
+                            }
+                        }
+                        Some(MppMode::AtomicMpp) => {
+                            let mut tlcs_mpp_data =
+                                self.store.get_atomic_mpp_payment_data(&payment_hash);
+
+                            if tlcs_mpp_data.len() != tlcs.len() {
+                                validation_fail!(
+                                    "atomic mpp don't have enough mpp data for payment_hash: {:?}"
+                                );
+                            }
+
+                            tlcs_mpp_data.sort_by(|(_, a), (_, b)| a.index().cmp(&b.index()));
+                            let index: Vec<u16> =
+                                tlcs_mpp_data.iter().map(|(_, data)| data.index()).collect();
+
+                            let total_count = tlcs_mpp_data[0].1.total_amp_count;
+                            if tlcs_mpp_data
+                                .iter()
+                                .any(|(_, data)| data.total_amp_count != total_count)
+                            {
+                                validation_fail!("atomic mpp total count are not the same for payment_hash: {:?}");
+                            }
+
+                            let expected_index: Vec<u16> = (0..total_count).collect();
+                            if index != expected_index {
+                                validation_fail!(
+                                    "atomic mpp index are not expected for payment_hash: {:?}"
+                                );
+                            }
+
+                            let child_descs: Vec<AmpChildDesc> = tlcs_mpp_data
+                                .iter()
+                                .map(|(_, data)| data.child_desc.clone())
+                                .collect();
+                            let children =
+                                AmpChild::reconstruct_amp_children(&child_descs, hash_algorithm);
+                            debug_assert_eq!(child_descs.len(), children.len());
+
+                            for (((channel_id, tlc_id), _), child) in
+                                tlcs_mpp_data.iter().zip(children.iter())
+                            {
+                                tlc_preimage_map.insert((*channel_id, *tlc_id), child.preimage);
+                            }
+
+                            // verify the preimages
+                            for tlc in tlcs.iter() {
+                                let payment_hash = tlc.payment_hash;
+                                let preimage = tlc_preimage_map
+                                    .get(&(tlc.channel_id, tlc.id()))
+                                    .expect("must got preimage");
+                                let hash: Hash256 = hash_algorithm.hash(preimage.as_ref()).into();
+                                if hash != payment_hash {
+                                    validation_fail!(
+                                        "verify AMP preimage for payment hash {:?} is not valid"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    None
                 };
+
+                if invoice.is_some() {
+                    // if we have enough tlcs to fulfill the invoice, update invoice status to Received
+                    // for hold invoice we may don't have preimages yet, so just update status here
+                    self.store
+                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                        .expect("update invoice status failed");
+                }
 
                 // remove tlcs
                 for tlc in tlcs {
                     let (send, _recv) = oneshot::channel();
                     let rpc_reply = RpcReplyPort::from(send);
+
                     let remove_reason = match tlc_fail.clone() {
                         Some(tlc_fail) => RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                             tlc_fail,
                             &tlc.shared_secret,
                         )),
-                        None => RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                            payment_preimage: preimage,
-                        }),
+                        None => {
+                            let preimage = *tlc_preimage_map
+                                .get(&(tlc.channel_id, tlc.id()))
+                                .expect("must got preimage");
+                            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                payment_preimage: preimage,
+                            })
+                        }
                     };
 
                     match state
@@ -2606,23 +2799,23 @@ where
                         TlcErr::new(TlcErrorCode::InvalidOnionError)
                     });
                 debug!("on_remove_tlc: {:?}", error_detail.error_code);
-                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                let need_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
                     error_detail.clone(),
                     false,
                 );
                 debug!(
-                    "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
+                    "payment_hash: {:?} set attempt failed with: {:?} need_retry: {:?}",
                     payment_hash,
                     error_detail.error_code.as_ref(),
-                    need_to_retry
+                    need_retry
                 );
 
                 self.set_attempt_fail_with_error(
                     &mut session,
                     &mut attempt,
                     error_detail.error_code.as_ref(),
-                    need_to_retry,
+                    need_retry,
                 );
 
                 if attempt.is_retrying() {
@@ -2704,12 +2897,19 @@ where
 
             session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
 
-            let hops = graph
+            let mut hops = graph
                 .build_route(amount, None, max_fee, &session.request)
-                .map_err(|e| {
-                    Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
-                })?;
+                .map_err(|e| Error::BuildPaymentRouteError(e.to_string()))?;
 
+            // reuse the previous custom_records in hops
+            if session.is_atomic_mpp() {
+                hops.last_mut().expect("hops not empty").custom_records = attempt
+                    .route_hops
+                    .last()
+                    .expect("hops not empty")
+                    .custom_records
+                    .clone();
+            }
             attempt.update_route(hops);
         }
 
@@ -2722,6 +2922,7 @@ where
         session: &mut PaymentSession,
     ) -> Result<Vec<Attempt>, Error> {
         let graph = self.network_graph.read().await;
+        let amp_mpp = session.request.allow_atomic_mpp;
         let source = graph.get_source_pubkey();
         let active_parts = session.attempts().filter(|a| a.is_active()).count();
         let mut remain_amount = session.remain_amount();
@@ -2807,11 +3008,55 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
+        // generate custom records for amp_mpp
+        if amp_mpp {
+            self.set_amp_custom_records(
+                &mut result,
+                session.payment_hash(),
+                session.remain_amount(),
+            );
+        }
+
         for attempt in &result {
             session.append_attempt(attempt.clone());
         }
 
         return Ok(result);
+    }
+
+    fn set_amp_custom_records(
+        &self,
+        attempts: &mut [Attempt],
+        payment_hash: Hash256,
+        total_amount: u128,
+    ) {
+        debug_assert!(!attempts.is_empty());
+
+        let root = AmpSecret::random();
+        let secrets = AmpSecret::gen_random_sequence(root, attempts.len() as u16);
+        let hash_algorithm = attempts[0].route_hops.first().unwrap().hash_algorithm;
+
+        let total_count = attempts.len() as u16;
+        let child_descs: Vec<_> = secrets
+            .iter()
+            .enumerate()
+            .map(|(i, &share)| AmpChildDesc::new(i as u16, share))
+            .collect();
+
+        let children = AmpChild::reconstruct_amp_children(&child_descs, hash_algorithm);
+        for (index, (attempt, child)) in attempts.iter_mut().zip(&children).enumerate() {
+            let last_hop = attempt.route_hops.last_mut().expect("last hop");
+            let amp_data = AmpPaymentData::new(
+                payment_hash,
+                total_count,
+                child_descs[index].clone(),
+                total_amount,
+            );
+            let mut custom_records = last_hop.custom_records.clone().unwrap_or_default();
+            amp_data.write(&mut custom_records);
+            last_hop.custom_records = Some(custom_records);
+            attempt.hash = child.hash;
+        }
     }
 
     async fn send_payment_onion_packet(
@@ -2834,8 +3079,8 @@ where
             Ok(packet) => packet,
             Err(e) => {
                 let err = format!(
-                    "Failed to create onion packet: {:?}, error: {:?}",
-                    attempt.hash, e
+                    "Failed to create onion packet for attempt_hash: {:?} with payment_hash: {:?}, error: {:?}",
+                    attempt.hash, attempt.payment_hash, e
                 );
                 self.set_attempt_fail_with_error(session, attempt, &err, false);
                 return Err(Error::FirstHopError(err, false));
@@ -2848,7 +3093,7 @@ where
                 SendOnionPacketCommand {
                     peeled_onion_packet,
                     previous_tlc: None,
-                    payment_hash: attempt.payment_hash,
+                    payment_hash: attempt.hash,
                     attempt_id: Some(attempt.id),
                 },
             )
@@ -2857,7 +3102,7 @@ where
             Err(error_detail) => {
                 self.update_graph_with_tlc_fail(&state.network, &error_detail)
                     .await;
-                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                let need_retry = self.network_graph.write().await.record_attempt_fail(
                     attempt,
                     error_detail.clone(),
                     true,
@@ -2866,8 +3111,8 @@ where
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
                 );
-                self.set_attempt_fail_with_error(session, attempt, &err, need_to_retry);
-                return Err(Error::FirstHopError(err, need_to_retry));
+                self.set_attempt_fail_with_error(session, attempt, &err, need_retry);
+                return Err(Error::FirstHopError(err, need_retry));
             }
             Ok(_) => {
                 self.store.insert_attempt(attempt.clone());
@@ -2930,7 +3175,7 @@ where
             }
             Some((error, tlc_err)) => {
                 self.update_graph_with_tlc_fail(&myself, &tlc_err).await;
-                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                let need_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
                     tlc_err.clone(),
                     true,
@@ -2939,7 +3184,7 @@ where
                     &mut session,
                     &mut attempt,
                     &error.to_string(),
-                    need_to_retry,
+                    need_retry,
                 );
                 // retry the current attempt if it is retryable
                 if attempt.is_retrying() {
@@ -3066,8 +3311,8 @@ where
                     .resend_payment_attempt(myself, state, session, &mut attempt)
                     .await
                 {
-                    Err(err) if session.allow_mpp() => {
-                        // usually `resend_payment_route` will only try build a route with same amount,
+                    Err(err) if session.is_basic_mpp() => {
+                        // usually `resend_payment_attempt` will only try build a route with same amount,
                         // because most of the time, resend payment caused by the first hop
                         // error with WaitingTlcAck, if resend failed we should try more attempts in MPP,
                         // so we may create more attempts with different split amounts
@@ -3081,6 +3326,11 @@ where
                             &err.to_string(),
                             false,
                         );
+                        // for atomic mpp, we are sure now one of attempt already failed and we will not retry
+                        // so it's safe we update payment_session status to failed
+                        if session.is_atomic_mpp() {
+                            self.set_payment_fail_with_error(session, "Part of AMP failed");
+                        }
                         return Err(err);
                     }
                     _ => {}

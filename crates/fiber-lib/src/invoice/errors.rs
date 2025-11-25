@@ -47,12 +47,14 @@ pub enum InvoiceError {
     DuplicatedAttributeKey(String),
     #[error("Payment secret is required for MPP payments")]
     PaymentSecretRequiredForMpp,
-    /// Both set payment_hash and payment_preimage
-    #[error("Both payment_hash and payment_preimage are set")]
-    BothPaymenthashAndPreimage,
+    #[error("Can not set both basic MPP and atomic MPP")]
+    BothBasicMPPAndAtomicMPP,
     /// Neither payment_hash nor payment_preimage is set
     #[error("Neither payment_hash nor payment_preimage is set")]
     NeitherPaymenthashNorPreimage,
+    /// Both set payment_hash and payment_preimage
+    #[error("Both payment_hash and payment_preimage are set")]
+    BothPaymenthashAndPreimage,
     /// An error occurred during signing
     #[error("Sign error")]
     SignError,

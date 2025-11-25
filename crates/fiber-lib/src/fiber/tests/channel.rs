@@ -3064,6 +3064,7 @@ async fn do_test_add_tlc_value_limit() {
         .expect("node_b alive");
         // sleep for a while to make sure the AddTlc processed by both party
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        eprintln!("add_tlc_result: {:?}", add_tlc_result);
         assert!(add_tlc_result.is_ok());
     }
 }
@@ -4977,7 +4978,10 @@ async fn test_send_payment_with_channel_balance_error() {
     let res = source_node.get_payment_result(payment_hash).await;
 
     assert_eq!(res.status, PaymentStatus::Failed);
-    assert!(res.failed_error.unwrap().contains("Failed to build route"));
+    assert!(res
+        .failed_error
+        .unwrap()
+        .contains("PathFind error: no path found"));
 
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry

@@ -1,3 +1,5 @@
+pub mod amp;
+pub mod builtin_records;
 pub mod channel;
 pub mod config;
 pub mod features;

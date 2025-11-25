@@ -3,6 +3,7 @@ use super::utils::*;
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gen::invoice::{self as gen_invoice, *};
 use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::payment::MppMode;
 use crate::fiber::serde_utils::{duration_hex, EntityHex, U128Hex, U64Hex};
 use crate::fiber::types::Hash256;
 use crate::invoice::InvoiceError;
@@ -348,11 +349,32 @@ impl CkbInvoice {
     attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
     attr_getter!(payment_secret, PaymentSecret, Hash256);
 
-    pub fn allow_mpp(&self) -> bool {
+    fn has_feature<F>(&self, feature_check: F) -> bool
+    where
+        F: Fn(&FeatureVector) -> bool,
+    {
         self.data
             .attrs
             .iter()
-            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()))
+            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature_check(feature)))
+    }
+
+    pub fn basic_mpp(&self) -> bool {
+        self.has_feature(|feature| feature.supports_basic_mpp())
+    }
+
+    pub fn atomic_mpp(&self) -> bool {
+        self.has_feature(|feature| feature.supports_atomic_mpp())
+    }
+
+    pub fn mpp_mode(&self) -> Option<MppMode> {
+        if self.basic_mpp() {
+            Some(MppMode::BasicMpp)
+        } else if self.atomic_mpp() {
+            Some(MppMode::AtomicMpp)
+        } else {
+            None
+        }
     }
 }
 
@@ -675,7 +697,10 @@ impl InvoiceBuilder {
     attr_setter!(payment_secret, PaymentSecret, Hash256);
     attr_setter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 
-    pub fn allow_mpp(self, allow_mpp: bool) -> Self {
+    fn update_feature_vector<F>(self, updater: F) -> Self
+    where
+        F: FnOnce(&mut FeatureVector),
+    {
         let mut feature_vector = self
             .attrs
             .iter()
@@ -688,12 +713,28 @@ impl InvoiceBuilder {
             })
             .unwrap_or_else(FeatureVector::new);
 
-        if allow_mpp {
-            feature_vector.set_basic_mpp_optional();
-        } else {
-            feature_vector.unset_basic_mpp_optional();
-        }
+        updater(&mut feature_vector);
         self.add_attr(Attribute::Feature(feature_vector))
+    }
+
+    pub fn allow_basic_mpp(self, allow_mpp: bool) -> Self {
+        self.update_feature_vector(|feature_vector| {
+            if allow_mpp {
+                feature_vector.set_basic_mpp_optional();
+            } else {
+                feature_vector.unset_basic_mpp_optional();
+            }
+        })
+    }
+
+    pub fn allow_atomic_mpp(self, allow_atomic_mpp: bool) -> Self {
+        self.update_feature_vector(|feature_vector| {
+            if allow_atomic_mpp {
+                feature_vector.set_atomic_mpp_optional();
+            } else {
+                feature_vector.unset_atomic_mpp_optional();
+            }
+        })
     }
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
@@ -742,16 +783,22 @@ impl InvoiceBuilder {
     }
 
     fn check_attrs_valid(&self) -> Result<(), InvoiceError> {
-        let allow_mpp = self.attrs.iter().any(
+        let allow_basic_mpp = self.attrs.iter().any(
             |attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()),
+        );
+        let allow_atomic_mpp = self.attrs.iter().any(
+            |attr| matches!(attr, Attribute::Feature(feature) if feature.supports_atomic_mpp()),
         );
         let payment_secret = self.attrs.iter().find_map(|attr| match attr {
             Attribute::PaymentSecret(secret) => Some(secret),
             _ => None,
         });
 
-        if allow_mpp && payment_secret.is_none() {
+        if allow_basic_mpp && payment_secret.is_none() {
             return Err(InvoiceError::PaymentSecretRequiredForMpp);
+        }
+        if allow_basic_mpp && allow_atomic_mpp {
+            return Err(InvoiceError::BothBasicMPPAndAtomicMPP);
         }
         // check is there any duplicate attribute key set
         for (i, attr) in self.attrs.iter().enumerate() {

@@ -10,6 +10,7 @@ use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
 use crate::fiber::payment::Attempt;
+use crate::fiber::payment::MppMode;
 use crate::fiber::payment::PaymentSession;
 use crate::fiber::payment::PaymentStatus;
 use crate::fiber::payment::SessionRoute;
@@ -749,6 +750,27 @@ impl NetworkNode {
                 dry_run: false,
                 ..Default::default()
             },
+            MppMode::BasicMpp,
+        )
+        .await
+    }
+
+    pub async fn send_atomic_mpp_payment(
+        &self,
+        target_node: &NetworkNode,
+        amount: u128,
+        max_parts: Option<u64>,
+    ) -> Result<SendPaymentResponse, String> {
+        self.send_mpp_payment_with_command(
+            target_node,
+            amount,
+            SendPaymentCommand {
+                max_parts,
+                dry_run: false,
+                atomic_mpp: Some(true),
+                ..Default::default()
+            },
+            MppMode::AtomicMpp,
         )
         .await
     }
@@ -759,6 +781,7 @@ impl NetworkNode {
         amount: u128,
         max_parts: Option<u64>,
         dry_run: bool,
+        mode: MppMode,
     ) -> Result<SendPaymentResponse, String> {
         self.send_mpp_payment_with_command(
             target_node,
@@ -768,6 +791,7 @@ impl NetworkNode {
                 dry_run,
                 ..Default::default()
             },
+            mode,
         )
         .await
     }
@@ -777,21 +801,40 @@ impl NetworkNode {
         target_node: &NetworkNode,
         amount: u128,
         command: SendPaymentCommand,
+        mode: MppMode,
     ) -> Result<SendPaymentResponse, String> {
         let target_pubkey = target_node.get_public_key();
-        let preimage = gen_rand_sha256_hash();
-        let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
-            .amount(Some(amount))
-            .payment_preimage(preimage)
-            .payee_pub_key(target_pubkey.into())
-            .allow_mpp(true)
-            .payment_secret(gen_rand_sha256_hash())
-            .build()
-            .expect("build invoice success");
 
-        target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
+        let mut builder = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payee_pub_key(target_pubkey.into());
+        let preimage = match mode {
+            MppMode::BasicMpp => {
+                let preimage = gen_rand_sha256_hash();
+                builder = builder
+                    .allow_basic_mpp(true)
+                    .payment_preimage(preimage)
+                    .payment_secret(gen_rand_sha256_hash());
+                Some(preimage)
+            }
+
+            MppMode::AtomicMpp => {
+                // use a random hash for atomic mpp
+                builder = builder
+                    .allow_atomic_mpp(true)
+                    .payment_hash(gen_rand_sha256_hash());
+                None
+            }
+        };
+        let ckb_invoice = builder.build().expect("build invoice success");
+        target_node.insert_invoice(ckb_invoice.clone(), preimage);
         let mut command = command.clone();
         command.invoice = Some(ckb_invoice.to_string());
+        let atomic_mpp = match mode {
+            MppMode::BasicMpp => None,
+            MppMode::AtomicMpp => Some(true),
+        };
+        command.atomic_mpp = atomic_mpp;
 
         self.send_payment(command).await
     }
@@ -931,6 +974,7 @@ impl NetworkNode {
         params: P,
     ) -> Result<R, String> {
         let response = self.send_rpc_request_raw(method, params).await?;
+        debug!("test rpc response: {}", response);
         let result = serde_json::from_value::<R>(response.clone())
             .map_err(|e| format!("failed to deserialize response: {}", e))?;
         Ok(result)

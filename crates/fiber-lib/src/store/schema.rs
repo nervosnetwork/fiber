@@ -30,7 +30,9 @@ pub(crate) const PAYMENT_SESSION_PREFIX: u8 = 192;
 pub(crate) const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
 pub(crate) const PAYMENT_CUSTOM_RECORD_PREFIX: u8 = 194;
 pub(crate) const ATTEMPT_PREFIX: u8 = 195;
+pub(crate) const ATTEMPT_HASH_PREFIX: u8 = 196;
 pub(crate) const HOLD_TLC_PREFIX: u8 = 197;
+pub(crate) const HOLD_TLC_ATOMIC_PAYMENT_DATA_PREFIX: u8 = 198;
 #[cfg(feature = "watchtower")]
 mod watchtower {
     pub(crate) const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;

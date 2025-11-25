@@ -492,7 +492,6 @@ fn test_invoice_builder_neither_payment_hash_nor_preimage() {
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
-
     assert_eq!(
         invoice.err(),
         Some(InvoiceError::NeitherPaymenthashNorPreimage)
@@ -576,41 +575,58 @@ fn test_invoice_with_mpp_option() {
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
-    assert!(!invoice.allow_mpp());
+    assert!(!invoice.basic_mpp());
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(gen_rand_sha256_hash())
-        .allow_mpp(true)
+        .allow_basic_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
-    assert!(invoice.allow_mpp());
+    assert!(invoice.basic_mpp());
 
     let serialized_invoice = serde_json::to_string(&invoice).unwrap();
     eprintln!("Serialized invoice: {}", serialized_invoice);
     let deserialized_invoice: CkbInvoice =
         serde_json::from_str(&serialized_invoice).expect("Failed to deserialize invoice");
     assert_eq!(deserialized_invoice, invoice);
-    assert!(deserialized_invoice.allow_mpp());
+    assert!(deserialized_invoice.basic_mpp());
 
     let human_readable_invoice = invoice.to_string();
     let parsed_invoice: CkbInvoice = human_readable_invoice
         .parse()
         .expect("Failed to parse invoice");
     assert_eq!(parsed_invoice, invoice);
-    assert!(parsed_invoice.allow_mpp());
+    assert!(parsed_invoice.basic_mpp());
     assert!(parsed_invoice.payment_secret().is_some());
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(gen_rand_sha256_hash())
-        .allow_mpp(false)
+        .allow_basic_mpp(false)
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
-    assert!(!invoice.allow_mpp());
+    assert!(!invoice.basic_mpp());
     let payment_secret = invoice.payment_secret();
     assert!(payment_secret.is_none());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_basic_mpp_and_atomic_mpp() {
+    let private_key = gen_rand_secp256k1_private_key();
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .allow_basic_mpp(true)
+        .allow_atomic_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    let err = invoice.unwrap_err();
+    assert_eq!(err, InvoiceError::BothBasicMPPAndAtomicMPP)
 }

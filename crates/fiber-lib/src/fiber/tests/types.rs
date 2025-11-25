@@ -1,15 +1,16 @@
 use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
+        amp::{AmpChild, AmpChildDesc, AmpSecret},
+        builtin_records::{AmpPaymentData, BasicMppPaymentData},
         config::AnnouncedNodeName,
         features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BasicMppPaymentData,
-            BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId, PaymentHopData,
-            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
-            NO_SHARED_SECRET,
+            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BroadcastMessageID, Cursor,
+            Hash256, NodeAnnouncement, NodeId, PaymentHopData, PeeledPaymentOnionPacket, Privkey,
+            Pubkey, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
@@ -30,7 +31,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -534,13 +535,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "80a0e9d4ed35eb76e086038983dfd2572e7298a795b4cde7b113d805eeb495192cf552e4cc631e73fee76c4f0479a33327488f8a99978a10e2583b7faba2cf61",
-            "044e5172e9a9d7b383c15f40d8dac30f86422e7082af2b4d7db7f5484b4a1701",
+            "cfe5d1dde285bac326fb290899c14bd05b9afa013c61c3c9338daca07ab0d287647c2101482bc193913b91da0e9284ebd352f1139149b8943876c78ff46608fc",
+            "e387e01002f45594d36577ac53c822f8712b378ed52e8dde3bfbdb3b01b29abc",
             node1(),
         ),
         (
-            "3a1eea2e372e5c3bc53d1c283d449afbfff029308fe59e111a23ad32163d2a6f58128e21083e128a05d34fb8c0068a1f4fa6e4ae12e370d3051591df151a957a",
-            "db96ac7278d1db7b03eefdc4d21c952e3aee8a4be87a82c8c0e66a87e8897a81",
+            "1fec23d92c9fc9fafd39f477bf1fbb79cfb8f63604a6aeb0712cfd7dbe31e4e21a174f4e6733e78970f4489859aa1ba615fe712d4d212dd7f1c1a6678dff5d00",
+            "3e612fcfa66885352ac18e1fdd602199fb125fa4435ea509f472c0c870b0d307",
             node2(),
         ),
     ] {
@@ -728,4 +729,187 @@ fn test_basic_mpp_custom_records() {
 
     let new_record = BasicMppPaymentData::read(&payment_custom_records).unwrap();
     assert_eq!(new_record, record);
+}
+
+#[test]
+fn test_amp_custom_records() {
+    let mut payment_custom_records = PaymentCustomRecords::default();
+    let parent_payment_hash = gen_rand_sha256_hash();
+    let amp_record = AmpPaymentData::new(
+        parent_payment_hash,
+        3,
+        AmpChildDesc::new(0, AmpSecret::random()),
+        1000,
+    );
+    amp_record.write(&mut payment_custom_records);
+
+    let new_amp_record = AmpPaymentData::read(&payment_custom_records).unwrap();
+    assert_eq!(new_amp_record, amp_record);
+}
+
+#[test]
+fn test_share_xor() {
+    let share1 = AmpSecret::random();
+    let share2 = AmpSecret::random();
+    let result = share1.xor(&share2);
+
+    // XOR is commutative
+    assert_eq!(result, share2.xor(&share1));
+
+    // XOR with self should be zero
+    assert_eq!(share1.xor(&share1), AmpSecret::zero());
+}
+
+#[test]
+fn test_derive_child() {
+    let root = AmpSecret::random();
+    let share = AmpSecret::random();
+
+    let amp_data = AmpChildDesc::new(4, share);
+    let child = AmpChild::derive_child(root, amp_data.clone(), HashAlgorithm::Sha256);
+
+    assert_ne!(child.preimage, Hash256::default());
+    assert_ne!(child.hash, Hash256::default());
+
+    // Deriving the same child should produce the same result
+    let child2 = AmpChild::derive_child(root, amp_data, HashAlgorithm::Sha256);
+    assert_eq!(child, child2);
+}
+
+#[test]
+fn test_different_indices_produce_different_children() {
+    let root = AmpSecret::random();
+    let share = AmpSecret::random();
+
+    let child1 = AmpChild::derive_child(root, AmpChildDesc::new(0, share), HashAlgorithm::Sha256);
+    let child2 = AmpChild::derive_child(root, AmpChildDesc::new(1, share), HashAlgorithm::Sha256);
+
+    assert_ne!(child1.preimage, child2.preimage);
+    assert_ne!(child1.hash, child2.hash);
+}
+
+#[test]
+fn test_reconstruct_children() {
+    let root = AmpSecret::random();
+    let share1 = AmpSecret::random();
+    let share2 = root.xor(&share1); // share2 = root ^ share1
+
+    let desc1 = AmpChildDesc::new(0, share1);
+    let desc2 = AmpChildDesc::new(1, share2);
+
+    let children =
+        AmpChild::reconstruct_amp_children(&[desc1.clone(), desc2.clone()], HashAlgorithm::Sha256);
+
+    assert_eq!(children.len(), 2);
+
+    // Verify that the children are correctly derived from the reconstructed root
+    let expected_child1 = AmpChild::derive_child(root, desc1, HashAlgorithm::Sha256);
+    let expected_child2 = AmpChild::derive_child(root, desc2, HashAlgorithm::Sha256);
+
+    assert_eq!(children[0], expected_child1);
+    assert_eq!(children[1], expected_child2);
+}
+
+#[test]
+fn test_reconstruct_single_child() {
+    let root = AmpSecret::random();
+    let share = root;
+    let desc = AmpChildDesc::new(0, share);
+
+    let children = AmpChild::reconstruct_amp_children(&[desc.clone()], HashAlgorithm::Sha256);
+
+    assert_eq!(children.len(), 1);
+
+    // Verify that the child is correctly derived from the reconstructed root
+    let expected_child = AmpChild::derive_child(root, desc, HashAlgorithm::Sha256);
+    assert_eq!(children[0], expected_child);
+}
+
+#[test]
+fn test_reconstruct_n_children() {
+    let root = AmpSecret::random();
+    let shares = AmpSecret::gen_random_sequence(root, 100);
+    let descs: Vec<AmpChildDesc> = shares
+        .iter()
+        .enumerate()
+        .map(|(i, &share)| AmpChildDesc::new(i as u16, share))
+        .collect();
+
+    // last hop will reconstruct children and derive them
+    let children = AmpChild::reconstruct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
+
+    assert_eq!(children.len(), descs.len());
+
+    // Verify that each child is correctly derived from the reconstructed root
+    for (i, desc) in descs.iter().enumerate() {
+        let expected_child = AmpChild::derive_child(root, desc.clone(), HashAlgorithm::Sha256);
+        assert_eq!(children[i], expected_child);
+    }
+
+    // if we only reconstruct the first 10 children, they should not be the same
+    let first_10_children = &descs[0..10];
+    let children = AmpChild::reconstruct_amp_children(first_10_children, HashAlgorithm::Sha256);
+
+    // the derived child is not equal to expected child
+    for (i, desc) in first_10_children.iter().enumerate() {
+        let expected_child = AmpChild::derive_child(root, desc.clone(), HashAlgorithm::Sha256);
+        assert_ne!(children[i], expected_child);
+    }
+}
+
+#[test]
+fn test_reconstruct_empty_children() {
+    let children = AmpChild::reconstruct_amp_children(&[], HashAlgorithm::Sha256);
+    assert!(children.is_empty());
+}
+
+#[test]
+fn test_part_of_attempt_retry() {
+    let root = AmpSecret::random();
+    let shares = AmpSecret::gen_random_sequence(root, 5);
+    let descs: Vec<AmpChildDesc> = shares
+        .iter()
+        .enumerate()
+        .map(|(i, &share)| AmpChildDesc::new(i as u16, share))
+        .collect();
+
+    let children = AmpChild::reconstruct_amp_children(&descs.clone(), HashAlgorithm::Sha256);
+
+    assert_eq!(children.len(), descs.len());
+
+    let retried_index = [1, 2];
+    let new_attempts_count = 9;
+
+    let old_descs: Vec<_> = descs
+        .iter()
+        .filter(|d| !retried_index.contains(&d.index))
+        .cloned()
+        .collect();
+
+    let mut new_root_share = AmpSecret::zero();
+    let removed_descs: Vec<_> = descs
+        .iter()
+        .filter(|d| retried_index.contains(&d.index))
+        .collect();
+    for d in removed_descs.iter() {
+        new_root_share = new_root_share.xor(&d.secret);
+    }
+
+    let old_index: HashSet<u16> = old_descs.iter().map(|d| d.index).collect();
+    let all_index: HashSet<u16> = (0..new_attempts_count as u16).collect();
+
+    let mut new_descs = old_descs.clone();
+    let new_indexes: Vec<_> = all_index.difference(&old_index).collect();
+    let new_shares = AmpSecret::gen_random_sequence(new_root_share, new_indexes.len() as u16);
+    for (i, share) in new_indexes.iter().zip(new_shares.iter()) {
+        let desc = AmpChildDesc::new(**i, *share);
+        new_descs.push(desc);
+    }
+
+    // Verify that each child is correctly derived from the reconstructed root
+    let mut original_root_share = AmpSecret::zero();
+    for a in new_descs.iter() {
+        original_root_share = original_root_share.xor(&a.secret);
+    }
+    assert_eq!(original_root_share, root);
 }

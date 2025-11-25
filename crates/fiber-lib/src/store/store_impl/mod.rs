@@ -19,6 +19,7 @@ use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
+use crate::fiber::builtin_records::AmpPaymentData;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
@@ -201,14 +202,13 @@ impl Store {
             .expect("channel_id should be 32 bytes");
 
         let tlc_id: u64 =
-            u64::from_le_bytes(key[65..].try_into().expect("tlc_id should be 8 bytes"));
+            u64::from_le_bytes(key[65..73].try_into().expect("tlc_id should be 8 bytes"));
 
-        let expired_at: u64 = deserialize_from(value, "HoldTlc");
-
+        let hold_expire_at: u64 = deserialize_from(value, "HoldTlc");
         let hold_tlc = HoldTlc {
             channel_id: channel_id.into(),
             tlc_id,
-            hold_expire_at: expired_at,
+            hold_expire_at,
         };
 
         (payment_hash.into(), hold_tlc)
@@ -237,7 +237,9 @@ pub enum KeyValue {
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(PeerId, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
+    AttemptToPaymentHash((Hash256, u64), Hash256),
     HoldTlc((Hash256, Hash256, u64), u64),
+    HoldTlcAtomicPaymentData((Hash256, Hash256, u64), AmpPaymentData),
 }
 
 /// Recorded store changes.
@@ -301,6 +303,12 @@ impl StoreKeyValue for KeyValue {
                 &attempt_id.to_le_bytes(),
             ]
             .concat(),
+            KeyValue::AttemptToPaymentHash((attempt_hash, attempt_id), _) => [
+                &[ATTEMPT_HASH_PREFIX],
+                attempt_hash.as_ref(),
+                &attempt_id.to_le_bytes(),
+            ]
+            .concat(),
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(node_id, channel_id, _) => [
                 &[WATCHTOWER_CHANNEL_PREFIX],
@@ -343,8 +351,15 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(payment_hash, _data) => {
                 [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
             }
-            KeyValue::HoldTlc((payment_hash, channel_id, tlc_id), _hold_tlc) => [
+            KeyValue::HoldTlc((payment_hash, channel_id, tlc_id), _expired_at) => [
                 &[HOLD_TLC_PREFIX],
+                payment_hash.as_ref(),
+                channel_id.as_ref(),
+                &tlc_id.to_le_bytes(),
+            ]
+            .concat(),
+            KeyValue::HoldTlcAtomicPaymentData((payment_hash, channel_id, tlc_id), _data) => [
+                &[HOLD_TLC_ATOMIC_PAYMENT_DATA_PREFIX],
                 payment_hash.as_ref(),
                 channel_id.as_ref(),
                 &tlc_id.to_le_bytes(),
@@ -365,6 +380,9 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
             KeyValue::Attempt(_, attempt) => serialize_to_vec(attempt, "Attempt"),
+            KeyValue::AttemptToPaymentHash(_, payment_hash) => {
+                serialize_to_vec(payment_hash, "Hash256")
+            }
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(_, _, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
@@ -387,7 +405,8 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PaymentCustomRecord(_, custom_records) => {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
-            KeyValue::HoldTlc(_, expired_at) => serialize_to_vec(expired_at, "HoldTlc"),
+            KeyValue::HoldTlc(_, expired_at) => serialize_to_vec(&expired_at, "HoldTlc"),
+            KeyValue::HoldTlcAtomicPaymentData(_, data) => serialize_to_vec(data, "AMPPaymentData"),
         }
     }
 }
@@ -519,6 +538,16 @@ impl ChannelActorStateStore for Store {
         .concat();
         let mut batch = self.batch();
         batch.delete(prefix);
+
+        // remove atomic mpp payment_data
+        let prefix = [
+            &[HOLD_TLC_ATOMIC_PAYMENT_DATA_PREFIX],
+            payment_hash.as_ref(),
+            channel_id.as_ref(),
+            &tlc_id.to_le_bytes(),
+        ]
+        .concat();
+        batch.delete(prefix);
         batch.commit();
     }
 
@@ -540,6 +569,44 @@ impl ChannelActorStateStore for Store {
                 acc.entry(payment_hash).or_default().push(hold_tlc);
                 acc
             })
+    }
+
+    fn insert_atomic_mpp_payment_data(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+        payment_data: AmpPaymentData,
+    ) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::HoldTlcAtomicPaymentData(
+            (payment_hash, channel_id, tlc_id),
+            payment_data,
+        ));
+        batch.commit();
+    }
+
+    fn get_atomic_mpp_payment_data(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Vec<((Hash256, u64), AmpPaymentData)> {
+        let prefix = [
+            &[HOLD_TLC_ATOMIC_PAYMENT_DATA_PREFIX],
+            payment_hash.as_ref(),
+        ]
+        .concat();
+        self.prefix_iterator(&prefix)
+            .map(|(key, value)| {
+                let channel_id: [u8; 32] = key[33..65]
+                    .try_into()
+                    .expect("channel_id should be 32 bytes");
+                let tlc_id: u64 =
+                    u64::from_le_bytes(key[65..73].try_into().expect("tlc_id should be 8 bytes"));
+                let payment_data: AmpPaymentData =
+                    deserialize_from(value.as_ref(), "AMPPaymentData");
+                ((channel_id.into(), tlc_id), payment_data)
+            })
+            .collect()
     }
 }
 
@@ -668,6 +735,10 @@ impl NetworkGraphStateStore for Store {
     fn insert_attempt(&self, attempt: Attempt) {
         assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
         let mut batch = self.batch();
+        batch.put_kv(KeyValue::AttemptToPaymentHash(
+            (attempt.hash, attempt.id),
+            attempt.payment_hash,
+        ));
         batch.put_kv(KeyValue::Attempt(
             (attempt.payment_hash, attempt.id),
             attempt,
@@ -682,11 +753,35 @@ impl NetworkGraphStateStore for Store {
             .collect()
     }
 
+    fn get_payment_hash_with_attempt_hash(
+        &self,
+        attempt_hash: Hash256,
+        attempt_id: u64,
+    ) -> Option<Hash256> {
+        let key = [
+            &[ATTEMPT_HASH_PREFIX],
+            attempt_hash.as_ref(),
+            &attempt_id.to_le_bytes(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "Hash256"))
+    }
+
     fn delete_attempts(&self, payment_hash: Hash256) {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
-        for (key, _) in self.prefix_iterator(&prefix) {
+        let mut attempt_to_payments = vec![];
+        for (key, value) in self.prefix_iterator(&prefix) {
+            let attempt: Attempt = deserialize_from(value.as_ref(), "Attempt");
+            attempt_to_payments.push(KeyValue::AttemptToPaymentHash(
+                (attempt.hash, attempt.id),
+                attempt.payment_hash,
+            ));
             batch.delete(key);
+        }
+        for attempt_hash in attempt_to_payments {
+            batch.delete(attempt_hash.key());
         }
         batch.commit();
     }

@@ -55,6 +55,8 @@ pub enum Attribute {
     Feature(Vec<String>),
     /// The payment secret of the invoice
     PaymentSecret(Hash256),
+    /// Reuse
+    Reuse(bool),
 }
 
 /// The metadata of the invoice
@@ -162,6 +164,8 @@ pub struct NewInvoiceParams {
     pub hash_algorithm: Option<HashAlgorithm>,
     /// Whether allow payment to use MPP
     pub allow_mpp: Option<bool>,
+    /// Whether use atomic mpp, if use atomic mpp there will be no preimage generated.
+    pub allow_atomic_mpp: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -374,47 +378,64 @@ where
                 ));
             }
         }
+
         let mut invoice_builder = InvoiceBuilder::new(params.currency).amount(Some(params.amount));
 
+        let basic_mpp = params.allow_mpp.unwrap_or_default();
+        let atomic_mpp = params.allow_atomic_mpp.unwrap_or_default();
+        let payment_hash = params
+            .payment_hash
+            .or_else(|| atomic_mpp.then(gen_rand_sha256_hash));
+        let need_gen_preimage = payment_hash.is_none();
+
         // If both preimage and hash are absent, a random preimage is generated.
-        let preimage_opt = match (params.payment_preimage, params.payment_hash) {
-            (Some(preimage), _) => Some(preimage),
-            (None, None) => Some(gen_rand_sha256_hash()),
-            _ => None,
-        };
+        let preimage_opt = params
+            .payment_preimage
+            .or_else(|| need_gen_preimage.then(gen_rand_sha256_hash));
 
         if let Some(preimage) = preimage_opt {
             invoice_builder = invoice_builder.payment_preimage(preimage);
         }
-        if let Some(hash) = params.payment_hash {
+        if let Some(hash) = payment_hash {
             invoice_builder = invoice_builder.payment_hash(hash);
         }
+
         if let Some(description) = params.description.clone() {
             invoice_builder = invoice_builder.description(description);
         };
         if let Some(expiry) = params.expiry {
-            let duration: Duration = Duration::from_secs(expiry);
-            invoice_builder = invoice_builder.expiry_time(duration);
+            invoice_builder = invoice_builder.expiry_time(Duration::from_secs(expiry));
         };
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
         };
 
-        if let Some(allow_mpp) = params.allow_mpp {
-            invoice_builder = invoice_builder.allow_mpp(allow_mpp);
-            if allow_mpp {
-                if !self
-                    .node_features
-                    .as_ref()
-                    .is_some_and(|f| f.supports_basic_mpp())
-                {
-                    return error("Node does not support MPP, please enable MPP feature");
-                }
-                let mut rng = rand::thread_rng();
-                let payment_secret: [u8; 32] = rng.gen();
-                invoice_builder = invoice_builder.payment_secret(payment_secret.into());
+        if basic_mpp {
+            if !self
+                .node_features
+                .as_ref()
+                .is_some_and(|f| f.supports_basic_mpp())
+            {
+                return error("Node does not support MPP, please enable MPP feature");
             }
+            invoice_builder = invoice_builder.allow_basic_mpp(true);
+
+            let mut rng = rand::thread_rng();
+            let payment_secret: [u8; 32] = rng.gen();
+            invoice_builder = invoice_builder.payment_secret(payment_secret.into());
         };
+
+        if atomic_mpp {
+            if !self
+                .node_features
+                .as_ref()
+                .is_some_and(|f| f.supports_atomic_mpp())
+            {
+                return error("Node does not support Atomic MPP, please enable Atomic MPP feature");
+            }
+            invoice_builder = invoice_builder.allow_atomic_mpp(true);
+        }
+
         if let Some(final_expiry_delta) = params.final_expiry_delta {
             if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
                 return error(&format!(

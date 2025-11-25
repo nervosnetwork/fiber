@@ -241,7 +241,7 @@ impl From<super::super::fiber::graph::ChannelInfo> for ChannelInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GraphChannelsResult {
     /// A list of channels.
     pub channels: Vec<ChannelInfo>,
