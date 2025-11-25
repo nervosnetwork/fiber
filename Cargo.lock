@@ -2173,7 +2173,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-bin"
-version = "0.6.0-rc5"
+version = "0.6.0"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
@@ -2275,7 +2275,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.6.0-rc5"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
