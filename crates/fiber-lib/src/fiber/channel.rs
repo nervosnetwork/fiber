@@ -952,7 +952,8 @@ where
                             Some(invoice_expiry) => u64::try_from(
                                 invoice_expiry
                                     .as_millis()
-                                    .saturating_add(invoice.data.timestamp),
+                                    .saturating_add(invoice.data.timestamp)
+                                    .min(tlc.expiry.into()),
                             )
                             .unwrap_or(u64::MAX),
                             None => tlc.expiry,
