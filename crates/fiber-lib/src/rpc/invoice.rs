@@ -411,21 +411,22 @@ where
                 invoice_builder = invoice_builder.payment_secret(payment_secret.into());
             }
         };
-        if let Some(final_expiry_delta) = params.final_expiry_delta {
-            if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
-                return error(&format!(
-                    "final_expiry_delta must be greater than or equal to {}",
-                    MIN_TLC_EXPIRY_DELTA
-                ));
-            }
-            if final_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
-                return error(&format!(
-                    "final_expiry_delta must be less than or equal to {}",
-                    MAX_PAYMENT_TLC_EXPIRY_LIMIT
-                ));
-            }
-            invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
-        };
+
+        let final_expiry_delta = params.final_expiry_delta.unwrap_or(MIN_TLC_EXPIRY_DELTA);
+        if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
+            return error(&format!(
+                "final_expiry_delta must be greater than or equal to {}",
+                MIN_TLC_EXPIRY_DELTA
+            ));
+        }
+        if final_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+            return error(&format!(
+                "final_expiry_delta must be less than or equal to {}",
+                MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
+        invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
+
         if let Some(udt_type_script) = &params.udt_type_script {
             invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());
         };

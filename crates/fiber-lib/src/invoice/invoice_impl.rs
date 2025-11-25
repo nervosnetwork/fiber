@@ -113,7 +113,7 @@ pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
-    /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
+    /// The final tlc minimum expiry delta, in milliseconds, default is 160 minutes
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
     /// The expiry time of the invoice, in seconds
