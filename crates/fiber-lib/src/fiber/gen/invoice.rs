@@ -2665,154 +2665,6 @@ impl From<Uint128> for AmountOpt {
     }
 }
 #[derive(Clone)]
-pub struct FinalHtlcTimeout(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for FinalHtlcTimeout {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for FinalHtlcTimeout {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for FinalHtlcTimeout {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "value", self.value())?;
-        write!(f, " }}")
-    }
-}
-impl ::core::default::Default for FinalHtlcTimeout {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        FinalHtlcTimeout::new_unchecked(v)
-    }
-}
-impl FinalHtlcTimeout {
-    const DEFAULT_VALUE: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
-    pub const TOTAL_SIZE: usize = 8;
-    pub const FIELD_SIZES: [usize; 1] = [8];
-    pub const FIELD_COUNT: usize = 1;
-    pub fn value(&self) -> Uint64 {
-        Uint64::new_unchecked(self.0.slice(0..8))
-    }
-    pub fn as_reader<'r>(&'r self) -> FinalHtlcTimeoutReader<'r> {
-        FinalHtlcTimeoutReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for FinalHtlcTimeout {
-    type Builder = FinalHtlcTimeoutBuilder;
-    const NAME: &'static str = "FinalHtlcTimeout";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        FinalHtlcTimeout(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        FinalHtlcTimeoutReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        FinalHtlcTimeoutReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder().value(self.value())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct FinalHtlcTimeoutReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for FinalHtlcTimeoutReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for FinalHtlcTimeoutReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for FinalHtlcTimeoutReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "value", self.value())?;
-        write!(f, " }}")
-    }
-}
-impl<'r> FinalHtlcTimeoutReader<'r> {
-    pub const TOTAL_SIZE: usize = 8;
-    pub const FIELD_SIZES: [usize; 1] = [8];
-    pub const FIELD_COUNT: usize = 1;
-    pub fn value(&self) -> Uint64Reader<'r> {
-        Uint64Reader::new_unchecked(&self.as_slice()[0..8])
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for FinalHtlcTimeoutReader<'r> {
-    type Entity = FinalHtlcTimeout;
-    const NAME: &'static str = "FinalHtlcTimeoutReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        FinalHtlcTimeoutReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len != Self::TOTAL_SIZE {
-            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct FinalHtlcTimeoutBuilder {
-    pub(crate) value: Uint64,
-}
-impl FinalHtlcTimeoutBuilder {
-    pub const TOTAL_SIZE: usize = 8;
-    pub const FIELD_SIZES: [usize; 1] = [8];
-    pub const FIELD_COUNT: usize = 1;
-    pub fn value(mut self, v: Uint64) -> Self {
-        self.value = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for FinalHtlcTimeoutBuilder {
-    type Entity = FinalHtlcTimeout;
-    const NAME: &'static str = "FinalHtlcTimeoutBuilder";
-    fn expected_length(&self) -> usize {
-        Self::TOTAL_SIZE
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(self.value.as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        FinalHtlcTimeout::new_unchecked(inner.into())
-    }
-}
-#[derive(Clone)]
 pub struct FinalHtlcMinimumExpiryDelta(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for FinalHtlcMinimumExpiryDelta {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -4608,7 +4460,7 @@ impl ::core::default::Default for InvoiceAttr {
 }
 impl InvoiceAttr {
     const DEFAULT_VALUE: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const ITEMS_COUNT: usize = 10;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -4617,14 +4469,13 @@ impl InvoiceAttr {
         match self.item_id() {
             0 => ExpiryTime::new_unchecked(inner).into(),
             1 => Description::new_unchecked(inner).into(),
-            2 => FinalHtlcTimeout::new_unchecked(inner).into(),
-            3 => FinalHtlcMinimumExpiryDelta::new_unchecked(inner).into(),
-            4 => FallbackAddr::new_unchecked(inner).into(),
-            5 => Feature::new_unchecked(inner).into(),
-            6 => UdtScript::new_unchecked(inner).into(),
-            7 => PayeePublicKey::new_unchecked(inner).into(),
-            8 => HashAlgorithm::new_unchecked(inner).into(),
-            9 => PaymentSecret::new_unchecked(inner).into(),
+            2 => FinalHtlcMinimumExpiryDelta::new_unchecked(inner).into(),
+            3 => FallbackAddr::new_unchecked(inner).into(),
+            4 => Feature::new_unchecked(inner).into(),
+            5 => UdtScript::new_unchecked(inner).into(),
+            6 => PayeePublicKey::new_unchecked(inner).into(),
+            7 => HashAlgorithm::new_unchecked(inner).into(),
+            8 => PaymentSecret::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -4681,7 +4532,7 @@ impl<'r> ::core::fmt::Display for InvoiceAttrReader<'r> {
     }
 }
 impl<'r> InvoiceAttrReader<'r> {
-    pub const ITEMS_COUNT: usize = 10;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -4690,14 +4541,13 @@ impl<'r> InvoiceAttrReader<'r> {
         match self.item_id() {
             0 => ExpiryTimeReader::new_unchecked(inner).into(),
             1 => DescriptionReader::new_unchecked(inner).into(),
-            2 => FinalHtlcTimeoutReader::new_unchecked(inner).into(),
-            3 => FinalHtlcMinimumExpiryDeltaReader::new_unchecked(inner).into(),
-            4 => FallbackAddrReader::new_unchecked(inner).into(),
-            5 => FeatureReader::new_unchecked(inner).into(),
-            6 => UdtScriptReader::new_unchecked(inner).into(),
-            7 => PayeePublicKeyReader::new_unchecked(inner).into(),
-            8 => HashAlgorithmReader::new_unchecked(inner).into(),
-            9 => PaymentSecretReader::new_unchecked(inner).into(),
+            2 => FinalHtlcMinimumExpiryDeltaReader::new_unchecked(inner).into(),
+            3 => FallbackAddrReader::new_unchecked(inner).into(),
+            4 => FeatureReader::new_unchecked(inner).into(),
+            5 => UdtScriptReader::new_unchecked(inner).into(),
+            6 => PayeePublicKeyReader::new_unchecked(inner).into(),
+            7 => HashAlgorithmReader::new_unchecked(inner).into(),
+            8 => PaymentSecretReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -4725,14 +4575,13 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
         match item_id {
             0 => ExpiryTimeReader::verify(inner_slice, compatible),
             1 => DescriptionReader::verify(inner_slice, compatible),
-            2 => FinalHtlcTimeoutReader::verify(inner_slice, compatible),
-            3 => FinalHtlcMinimumExpiryDeltaReader::verify(inner_slice, compatible),
-            4 => FallbackAddrReader::verify(inner_slice, compatible),
-            5 => FeatureReader::verify(inner_slice, compatible),
-            6 => UdtScriptReader::verify(inner_slice, compatible),
-            7 => PayeePublicKeyReader::verify(inner_slice, compatible),
-            8 => HashAlgorithmReader::verify(inner_slice, compatible),
-            9 => PaymentSecretReader::verify(inner_slice, compatible),
+            2 => FinalHtlcMinimumExpiryDeltaReader::verify(inner_slice, compatible),
+            3 => FallbackAddrReader::verify(inner_slice, compatible),
+            4 => FeatureReader::verify(inner_slice, compatible),
+            5 => UdtScriptReader::verify(inner_slice, compatible),
+            6 => PayeePublicKeyReader::verify(inner_slice, compatible),
+            7 => HashAlgorithmReader::verify(inner_slice, compatible),
+            8 => PaymentSecretReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -4741,7 +4590,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct InvoiceAttrBuilder(pub(crate) InvoiceAttrUnion);
 impl InvoiceAttrBuilder {
-    pub const ITEMS_COUNT: usize = 10;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<InvoiceAttrUnion>,
@@ -4771,7 +4620,6 @@ impl molecule::prelude::Builder for InvoiceAttrBuilder {
 pub enum InvoiceAttrUnion {
     ExpiryTime(ExpiryTime),
     Description(Description),
-    FinalHtlcTimeout(FinalHtlcTimeout),
     FinalHtlcMinimumExpiryDelta(FinalHtlcMinimumExpiryDelta),
     FallbackAddr(FallbackAddr),
     Feature(Feature),
@@ -4784,7 +4632,6 @@ pub enum InvoiceAttrUnion {
 pub enum InvoiceAttrUnionReader<'r> {
     ExpiryTime(ExpiryTimeReader<'r>),
     Description(DescriptionReader<'r>),
-    FinalHtlcTimeout(FinalHtlcTimeoutReader<'r>),
     FinalHtlcMinimumExpiryDelta(FinalHtlcMinimumExpiryDeltaReader<'r>),
     FallbackAddr(FallbackAddrReader<'r>),
     Feature(FeatureReader<'r>),
@@ -4806,9 +4653,6 @@ impl ::core::fmt::Display for InvoiceAttrUnion {
             }
             InvoiceAttrUnion::Description(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, Description::NAME, item)
-            }
-            InvoiceAttrUnion::FinalHtlcTimeout(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, FinalHtlcTimeout::NAME, item)
             }
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(ref item) => {
                 write!(
@@ -4849,9 +4693,6 @@ impl<'r> ::core::fmt::Display for InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Description(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, Description::NAME, item)
             }
-            InvoiceAttrUnionReader::FinalHtlcTimeout(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, FinalHtlcTimeout::NAME, item)
-            }
             InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(ref item) => {
                 write!(
                     f,
@@ -4887,7 +4728,6 @@ impl InvoiceAttrUnion {
         match self {
             InvoiceAttrUnion::ExpiryTime(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::Description(ref item) => write!(f, "{}", item),
-            InvoiceAttrUnion::FinalHtlcTimeout(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::FallbackAddr(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::Feature(ref item) => write!(f, "{}", item),
@@ -4903,7 +4743,6 @@ impl<'r> InvoiceAttrUnionReader<'r> {
         match self {
             InvoiceAttrUnionReader::ExpiryTime(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::Description(ref item) => write!(f, "{}", item),
-            InvoiceAttrUnionReader::FinalHtlcTimeout(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::FallbackAddr(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::Feature(ref item) => write!(f, "{}", item),
@@ -4922,11 +4761,6 @@ impl ::core::convert::From<ExpiryTime> for InvoiceAttrUnion {
 impl ::core::convert::From<Description> for InvoiceAttrUnion {
     fn from(item: Description) -> Self {
         InvoiceAttrUnion::Description(item)
-    }
-}
-impl ::core::convert::From<FinalHtlcTimeout> for InvoiceAttrUnion {
-    fn from(item: FinalHtlcTimeout) -> Self {
-        InvoiceAttrUnion::FinalHtlcTimeout(item)
     }
 }
 impl ::core::convert::From<FinalHtlcMinimumExpiryDelta> for InvoiceAttrUnion {
@@ -4974,11 +4808,6 @@ impl<'r> ::core::convert::From<DescriptionReader<'r>> for InvoiceAttrUnionReader
         InvoiceAttrUnionReader::Description(item)
     }
 }
-impl<'r> ::core::convert::From<FinalHtlcTimeoutReader<'r>> for InvoiceAttrUnionReader<'r> {
-    fn from(item: FinalHtlcTimeoutReader<'r>) -> Self {
-        InvoiceAttrUnionReader::FinalHtlcTimeout(item)
-    }
-}
 impl<'r> ::core::convert::From<FinalHtlcMinimumExpiryDeltaReader<'r>>
     for InvoiceAttrUnionReader<'r>
 {
@@ -5022,7 +4851,6 @@ impl InvoiceAttrUnion {
         match self {
             InvoiceAttrUnion::ExpiryTime(item) => item.as_bytes(),
             InvoiceAttrUnion::Description(item) => item.as_bytes(),
-            InvoiceAttrUnion::FinalHtlcTimeout(item) => item.as_bytes(),
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(item) => item.as_bytes(),
             InvoiceAttrUnion::FallbackAddr(item) => item.as_bytes(),
             InvoiceAttrUnion::Feature(item) => item.as_bytes(),
@@ -5036,7 +4864,6 @@ impl InvoiceAttrUnion {
         match self {
             InvoiceAttrUnion::ExpiryTime(item) => item.as_slice(),
             InvoiceAttrUnion::Description(item) => item.as_slice(),
-            InvoiceAttrUnion::FinalHtlcTimeout(item) => item.as_slice(),
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(item) => item.as_slice(),
             InvoiceAttrUnion::FallbackAddr(item) => item.as_slice(),
             InvoiceAttrUnion::Feature(item) => item.as_slice(),
@@ -5050,21 +4877,19 @@ impl InvoiceAttrUnion {
         match self {
             InvoiceAttrUnion::ExpiryTime(_) => 0,
             InvoiceAttrUnion::Description(_) => 1,
-            InvoiceAttrUnion::FinalHtlcTimeout(_) => 2,
-            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(_) => 3,
-            InvoiceAttrUnion::FallbackAddr(_) => 4,
-            InvoiceAttrUnion::Feature(_) => 5,
-            InvoiceAttrUnion::UdtScript(_) => 6,
-            InvoiceAttrUnion::PayeePublicKey(_) => 7,
-            InvoiceAttrUnion::HashAlgorithm(_) => 8,
-            InvoiceAttrUnion::PaymentSecret(_) => 9,
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(_) => 2,
+            InvoiceAttrUnion::FallbackAddr(_) => 3,
+            InvoiceAttrUnion::Feature(_) => 4,
+            InvoiceAttrUnion::UdtScript(_) => 5,
+            InvoiceAttrUnion::PayeePublicKey(_) => 6,
+            InvoiceAttrUnion::HashAlgorithm(_) => 7,
+            InvoiceAttrUnion::PaymentSecret(_) => 8,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             InvoiceAttrUnion::ExpiryTime(_) => "ExpiryTime",
             InvoiceAttrUnion::Description(_) => "Description",
-            InvoiceAttrUnion::FinalHtlcTimeout(_) => "FinalHtlcTimeout",
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(_) => "FinalHtlcMinimumExpiryDelta",
             InvoiceAttrUnion::FallbackAddr(_) => "FallbackAddr",
             InvoiceAttrUnion::Feature(_) => "Feature",
@@ -5078,7 +4903,6 @@ impl InvoiceAttrUnion {
         match self {
             InvoiceAttrUnion::ExpiryTime(item) => item.as_reader().into(),
             InvoiceAttrUnion::Description(item) => item.as_reader().into(),
-            InvoiceAttrUnion::FinalHtlcTimeout(item) => item.as_reader().into(),
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(item) => item.as_reader().into(),
             InvoiceAttrUnion::FallbackAddr(item) => item.as_reader().into(),
             InvoiceAttrUnion::Feature(item) => item.as_reader().into(),
@@ -5095,7 +4919,6 @@ impl<'r> InvoiceAttrUnionReader<'r> {
         match self {
             InvoiceAttrUnionReader::ExpiryTime(item) => item.as_slice(),
             InvoiceAttrUnionReader::Description(item) => item.as_slice(),
-            InvoiceAttrUnionReader::FinalHtlcTimeout(item) => item.as_slice(),
             InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(item) => item.as_slice(),
             InvoiceAttrUnionReader::FallbackAddr(item) => item.as_slice(),
             InvoiceAttrUnionReader::Feature(item) => item.as_slice(),
@@ -5109,21 +4932,19 @@ impl<'r> InvoiceAttrUnionReader<'r> {
         match self {
             InvoiceAttrUnionReader::ExpiryTime(_) => 0,
             InvoiceAttrUnionReader::Description(_) => 1,
-            InvoiceAttrUnionReader::FinalHtlcTimeout(_) => 2,
-            InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(_) => 3,
-            InvoiceAttrUnionReader::FallbackAddr(_) => 4,
-            InvoiceAttrUnionReader::Feature(_) => 5,
-            InvoiceAttrUnionReader::UdtScript(_) => 6,
-            InvoiceAttrUnionReader::PayeePublicKey(_) => 7,
-            InvoiceAttrUnionReader::HashAlgorithm(_) => 8,
-            InvoiceAttrUnionReader::PaymentSecret(_) => 9,
+            InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(_) => 2,
+            InvoiceAttrUnionReader::FallbackAddr(_) => 3,
+            InvoiceAttrUnionReader::Feature(_) => 4,
+            InvoiceAttrUnionReader::UdtScript(_) => 5,
+            InvoiceAttrUnionReader::PayeePublicKey(_) => 6,
+            InvoiceAttrUnionReader::HashAlgorithm(_) => 7,
+            InvoiceAttrUnionReader::PaymentSecret(_) => 8,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             InvoiceAttrUnionReader::ExpiryTime(_) => "ExpiryTime",
             InvoiceAttrUnionReader::Description(_) => "Description",
-            InvoiceAttrUnionReader::FinalHtlcTimeout(_) => "FinalHtlcTimeout",
             InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(_) => "FinalHtlcMinimumExpiryDelta",
             InvoiceAttrUnionReader::FallbackAddr(_) => "FallbackAddr",
             InvoiceAttrUnionReader::Feature(_) => "Feature",
@@ -5141,11 +4962,6 @@ impl From<ExpiryTime> for InvoiceAttr {
 }
 impl From<Description> for InvoiceAttr {
     fn from(value: Description) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl From<FinalHtlcTimeout> for InvoiceAttr {
-    fn from(value: FinalHtlcTimeout) -> Self {
         Self::new_builder().set(value).build()
     }
 }

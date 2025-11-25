@@ -113,9 +113,6 @@ pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
-    /// The final tlc time out, in milliseconds
-    FinalHtlcTimeout(u64),
-    #[serde(with = "U64Hex")]
     /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
@@ -512,9 +509,6 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::Description(value) => InvoiceAttrUnion::Description(
                 Description::new_builder().value(value.pack()).build(),
             ),
-            Attribute::FinalHtlcTimeout(value) => InvoiceAttrUnion::FinalHtlcTimeout(
-                FinalHtlcTimeout::new_builder().value(value.pack()).build(),
-            ),
             Attribute::FinalHtlcMinimumExpiryDelta(value) => {
                 InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(
                     FinalHtlcMinimumExpiryDelta::new_builder()
@@ -563,9 +557,6 @@ impl From<InvoiceAttr> for Attribute {
             InvoiceAttrUnion::ExpiryTime(x) => {
                 let seconds: u64 = x.value().unpack();
                 Attribute::ExpiryTime(Duration::from_secs(seconds))
-            }
-            InvoiceAttrUnion::FinalHtlcTimeout(x) => {
-                Attribute::FinalHtlcTimeout(x.value().unpack())
             }
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(x) => {
                 Attribute::FinalHtlcMinimumExpiryDelta(x.value().unpack())

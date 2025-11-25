@@ -98,7 +98,7 @@ fn test_store_invoice() {
         .amount(Some(1280))
         .payment_preimage(preimage)
         .fallback_address("address".to_string())
-        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(5))
         .build()
         .unwrap();
 
@@ -999,7 +999,7 @@ fn test_store_change_watcher() {
         .amount(Some(1280))
         .payment_preimage(preimage)
         .fallback_address("address".to_string())
-        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(5))
         .build()
         .unwrap();
     let payment_hash = *invoice.payment_hash();

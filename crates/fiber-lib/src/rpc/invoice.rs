@@ -33,9 +33,6 @@ use tentacle::secio::SecioKeyPair;
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
-    /// The final tlc time out, in milliseconds
-    FinalHtlcTimeout(u64),
-    #[serde(with = "U64Hex")]
     /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
@@ -93,7 +90,6 @@ pub struct CkbInvoice {
 impl From<InternalAttribute> for Attribute {
     fn from(attr: InternalAttribute) -> Self {
         match attr {
-            InternalAttribute::FinalHtlcTimeout(timeout) => Attribute::FinalHtlcTimeout(timeout),
             InternalAttribute::FinalHtlcMinimumExpiryDelta(delta) => {
                 Attribute::FinalHtlcMinimumExpiryDelta(delta)
             }
