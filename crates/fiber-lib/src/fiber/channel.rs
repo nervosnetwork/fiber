@@ -904,8 +904,24 @@ where
         tlc_id: TLCId,
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
+        let invoice = self.store.get_invoice(&tlc_info.payment_hash);
 
         let Some(preimage) = self.store.get_preimage(&tlc_info.payment_hash) else {
+            // For hold invoice, let Network actor check whether to update the invoice status to
+            // Received.
+            let is_mpp = invoice.map(|i| i.allow_mpp()).unwrap_or_default();
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SettleTlcSet(
+                        tlc_info.payment_hash,
+                        if !is_mpp {
+                            Some((state.get_id(), tlc_info.tlc_id.into()))
+                        } else {
+                            None
+                        },
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             return;
         };
 
@@ -914,7 +930,6 @@ where
         });
 
         let tlc = tlc_info.clone();
-        let invoice = self.store.get_invoice(&tlc.payment_hash);
 
         if let Some(invoice) = &invoice {
             let status = self.get_invoice_status(invoice);
@@ -1163,6 +1178,18 @@ where
                         tlc_id: add_tlc.tlc_id.into(),
                         hold_expire_at,
                     },
+                );
+                let timeout_command =
+                    NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                        payment_hash,
+                        add_tlc.channel_id,
+                        add_tlc.tlc_id.into(),
+                    ));
+                self.network.send_after(
+                    Duration::from_millis(
+                        hold_expire_at.saturating_sub(now_timestamp_as_millis_u64()),
+                    ),
+                    move || timeout_command,
                 );
             } else {
                 error!("preimage is not found for payment hash: {:?}", payment_hash);
