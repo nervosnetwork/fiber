@@ -22,7 +22,18 @@ jobs:
           # - cross-chain-hub
           - router-pay
           - udt-router-pay
-          - watchtower
+          - watchtower/force-close
+          - watchtower/force-close-after-multiple-payments
+          - watchtower/force-close-after-open-channel
+          - watchtower/force-close-preimage
+          - watchtower/force-close-preimage-multiple
+          - watchtower/force-close-remote-with-pending-tlcs-and-stop-watchtower
+          - watchtower/force-close-remote-without-pending-tlcs-and-stop-watchtower
+          - watchtower/force-close-with-consecutive-settlement
+          - watchtower/force-close-with-pending-tlcs
+          - watchtower/force-close-with-pending-tlcs-and-stop-watchtower
+          - watchtower/force-close-with-pending-tlcs-and-udt
+          - watchtower/revocation
         release:
           - "0.202.0"
         test_env:
@@ -85,6 +96,9 @@ jobs:
           set -euo pipefail
           # Save matrix values to generate unique ID for upload-artifact
           echo '${{ toJSON(matrix) }}' > matrix.json
+          # Create a safe workflow name for artifact upload (replace / with -)
+          SAFE_WORKFLOW_NAME="${{ matrix.workflow }}"
+          echo "SAFE_WORKFLOW_NAME=${SAFE_WORKFLOW_NAME//\//-}" >> $GITHUB_ENV
 
           # Prebuild the program so that we can run the following script faster
           cargo build --locked
@@ -106,6 +120,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure() && steps.e2eTests.outcome == 'failure'
         with:
-          name: e2e-test-${{ matrix.workflow }}-${{ hashFiles('matrix.json') }}-logs
+          name: e2e-test-${{ env.SAFE_WORKFLOW_NAME }}-${{ hashFiles('matrix.json') }}-logs
           path: tests/nodes/*.log
 
