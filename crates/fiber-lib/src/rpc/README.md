@@ -1588,3 +1588,4 @@ The UDT script which is used to identify the UDT configuration for a Fiber Node
 * `hash_type` - <em>`ScriptHashType`</em>, The hash type of the script.
 * `args` - <em>`String`</em>, The arguments of the script.
 ---
+
