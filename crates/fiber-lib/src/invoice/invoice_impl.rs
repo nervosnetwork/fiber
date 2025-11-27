@@ -113,7 +113,7 @@ pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
-    /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
+    /// The final tlc minimum expiry delta, in milliseconds, default is 160 minutes
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
     /// The expiry time of the invoice, in seconds
@@ -295,6 +295,19 @@ impl CkbInvoice {
                     expiry_time < now
                 })
         })
+    }
+
+    pub fn is_tlc_expire_too_soon(&self, tlc_expiry: u64) -> bool {
+        let now = UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_millis();
+        let required_expiry = now
+            + (self
+                .final_tlc_minimum_expiry_delta()
+                .cloned()
+                .unwrap_or_default() as u128);
+        (tlc_expiry as u128) < required_expiry
     }
 
     /// Check that the invoice is signed correctly and that key recovery works

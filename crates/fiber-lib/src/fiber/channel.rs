@@ -952,7 +952,8 @@ where
                             Some(invoice_expiry) => u64::try_from(
                                 invoice_expiry
                                     .as_millis()
-                                    .saturating_add(invoice.data.timestamp),
+                                    .saturating_add(invoice.data.timestamp)
+                                    .min(tlc.expiry.into()),
                             )
                             .unwrap_or(u64::MAX),
                             None => tlc.expiry,
@@ -1097,6 +1098,11 @@ where
                 let invoice_status = self.get_invoice_status(invoice);
                 if !matches!(invoice_status, CkbInvoiceStatus::Open) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
+                }
+
+                // ensure tlc expiry is large than the now + final_tlc_minimum_expiry_delta
+                if invoice.is_tlc_expire_too_soon(add_tlc.expiry) {
+                    return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
                 }
             }
 
