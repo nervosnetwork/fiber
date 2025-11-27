@@ -558,6 +558,11 @@ impl From<InvoiceAttr> for Attribute {
                 let seconds: u64 = x.value().unpack();
                 Attribute::ExpiryTime(Duration::from_secs(seconds))
             }
+
+            InvoiceAttrUnion::FinalHtlcTimeout(_x) => {
+                // This attribute is deprecated since v0.6.0, but we still keep it in molecule for consistency
+                panic!("Invoice attribute FinalHtlcTimeout is deprecated in v0.6.0");
+            }
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(x) => {
                 Attribute::FinalHtlcMinimumExpiryDelta(x.value().unpack())
             }
