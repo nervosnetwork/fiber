@@ -1046,7 +1046,6 @@ The attributes of the invoice
 
 #### Enum with values of
 
-* `FinalHtlcTimeout` - <em>`u64`</em>, The final tlc time out, in milliseconds
 * `FinalHtlcMinimumExpiryDelta` - <em>`u64`</em>, The final tlc minimum expiry delta, in milliseconds, default is 1 day
 * `ExpiryTime` - <em>`Duration`</em>, The expiry time of the invoice, in seconds
 * `Description` - <em>`String`</em>, The description of the invoice
@@ -1589,4 +1588,3 @@ The UDT script which is used to identify the UDT configuration for a Fiber Node
 * `hash_type` - <em>`ScriptHashType`</em>, The hash type of the script.
 * `args` - <em>`String`</em>, The arguments of the script.
 ---
-

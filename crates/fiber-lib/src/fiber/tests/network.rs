@@ -863,7 +863,6 @@ fn test_send_payment_validate_invoice() {
         .fallback_address("address".to_string())
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
-        .add_attr(Attribute::FinalHtlcTimeout(5))
         .add_attr(Attribute::Description("description".to_string()))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
@@ -943,7 +942,6 @@ fn test_send_payment_validate_invoice() {
         .fallback_address("address".to_string())
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
-        .add_attr(Attribute::FinalHtlcTimeout(5))
         .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(11))
         .add_attr(Attribute::Description("description".to_string()))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))

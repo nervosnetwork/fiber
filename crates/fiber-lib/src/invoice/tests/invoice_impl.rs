@@ -34,7 +34,6 @@ fn mock_invoice() -> CkbInvoice {
                 .unwrap()
                 .as_millis(),
             attrs: vec![
-                Attribute::FinalHtlcTimeout(5),
                 Attribute::FinalHtlcMinimumExpiryDelta(12),
                 Attribute::Description("description".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(1024)),
@@ -60,7 +59,6 @@ fn mock_determined_invoice() -> CkbInvoice {
             payment_hash: [3u8; 32].into(),
             timestamp: Duration::from_secs(1024).as_millis(),
             attrs: vec![
-                Attribute::FinalHtlcTimeout(5),
                 Attribute::FinalHtlcMinimumExpiryDelta(12),
                 Attribute::Description("description".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(1024)),
@@ -178,7 +176,6 @@ fn test_invoice_bc32m_not_same() {
             payment_hash: [0u8; 32].into(),
             timestamp: 0,
             attrs: vec![
-                Attribute::FinalHtlcTimeout(5),
                 Attribute::FinalHtlcMinimumExpiryDelta(12),
                 Attribute::Description("description hello".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(1024)),
@@ -221,7 +218,6 @@ fn test_invoice_builder() {
         .fallback_address("address".to_string())
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
-        .add_attr(Attribute::FinalHtlcTimeout(5))
         .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
@@ -235,7 +231,7 @@ fn test_invoice_builder() {
     assert_eq!(invoice.currency, Currency::Fibb);
     assert_eq!(invoice.amount, Some(1280));
     assert_eq!(invoice.payment_hash(), &gen_payment_hash);
-    assert_eq!(invoice.data.attrs.len(), 7);
+    assert_eq!(invoice.data.attrs.len(), 6);
     assert!(invoice.check_signature().is_ok());
 }
 
@@ -251,7 +247,6 @@ fn test_invoice_check_signature() {
         .fallback_address("address".to_string())
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
-        .add_attr(Attribute::FinalHtlcTimeout(5))
         .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
@@ -264,7 +259,7 @@ fn test_invoice_check_signature() {
 
     // modify the some element then check signature will fail
     let mut invoice_clone = invoice.clone();
-    invoice_clone.data.attrs[0] = Attribute::FinalHtlcTimeout(6);
+    invoice_clone.data.attrs[0] = Attribute::FinalHtlcMinimumExpiryDelta(6);
     assert_eq!(
         invoice_clone.check_signature(),
         Err(InvoiceError::InvalidSignature)
@@ -284,7 +279,6 @@ fn test_invoice_check_signature() {
         .fallback_address("address".to_string())
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
-        .add_attr(Attribute::FinalHtlcTimeout(5))
         .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .build()
         .unwrap();
@@ -309,7 +303,6 @@ fn test_invoice_signature_check() {
         .fallback_address("address".to_string())
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key.into())
-        .add_attr(Attribute::FinalHtlcTimeout(5))
         .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
@@ -326,15 +319,15 @@ fn test_invoice_builder_duplicated_attr() {
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(gen_payment_hash)
-        .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcTimeout(6))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(5))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(6))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
     assert_eq!(
         invoice.err(),
         Some(InvoiceError::DuplicatedAttributeKey(format!(
             "{:?}",
-            Attribute::FinalHtlcTimeout(5)
+            Attribute::FinalHtlcMinimumExpiryDelta(5)
         )))
     );
 }
@@ -349,7 +342,7 @@ fn test_invoice_check_description_length() {
         .amount(Some(1280))
         .payment_hash(gen_payment_hash)
         .description("a".repeat(MAX_DESCRIPTION_LEN + 1))
-        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(5))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
     assert!(invoice.is_err());
@@ -438,8 +431,8 @@ fn test_invoice_serialize() {
     eprintln!("{:?}", bincode);
     let check_sum = blake2b_256(&bincode);
     let expect_check_sum = [
-        168, 120, 74, 42, 101, 19, 106, 192, 101, 97, 97, 237, 107, 124, 175, 49, 149, 137, 212,
-        75, 217, 64, 239, 42, 138, 4, 219, 200, 8, 123, 112, 75,
+        38, 221, 140, 227, 251, 1, 147, 191, 6, 48, 16, 116, 213, 5, 191, 200, 21, 10, 45, 240,
+        253, 151, 254, 36, 221, 117, 127, 217, 185, 24, 99, 13,
     ];
     assert_eq!(check_sum, &expect_check_sum[..]);
     eprintln!("{:?}", check_sum);

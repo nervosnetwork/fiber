@@ -15,8 +15,7 @@ interface NewInvoiceParams {
     hash_algorithm?: HashAlgorithm;
 }
 type CkbScript = HexString;
-type Attribute = { FinalHtlcTimeout: HexString } |
-{ FinalHtlcMinimumExpiryDelta: HexString } |
+type Attribute = { FinalHtlcMinimumExpiryDelta: HexString } |
 { ExpiryTime: HexString } |
 { Description: string } |
 { FallbackAddr: string } |
