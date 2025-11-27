@@ -1,5 +1,5 @@
 meta {
-  name: generate a few blocks for settlement tx1 committed
+  name: generate a few blocks for onchain timestamp updates
   type: http
   seq: 17
 }
@@ -28,7 +28,12 @@ assert {
   res.status: eq 200
 }
 
+script:pre-request {
+  // Wait until the first TLC expires
+  await new Promise(r => setTimeout(r, 12000));
+}
+
 script:post-response {
-  // Wait for the settlement tx2 to be generated
+  // Wait for the settlement tx1 to be generated
   await new Promise(r => setTimeout(r, 5000));
 }

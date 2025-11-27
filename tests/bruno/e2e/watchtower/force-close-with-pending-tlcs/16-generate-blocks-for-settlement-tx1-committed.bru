@@ -1,7 +1,7 @@
 meta {
-  name: generate a few blocks for onchain timestamp updates
+  name: generate a few blocks for settlement tx1 committed
   type: http
-  seq: 18
+  seq: 16
 }
 
 post {
@@ -28,12 +28,7 @@ assert {
   res.status: eq 200
 }
 
-script:pre-request {
-  // wait 20 seconds for the onchain timestamp to be updated
-  await new Promise(r => setTimeout(r, 20000));
-}
-
 script:post-response {
-  // Wait for the settlement tx1 to be generated
+  // Wait for the settlement tx1 to be committed
   await new Promise(r => setTimeout(r, 5000));
 }
