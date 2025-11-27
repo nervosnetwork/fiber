@@ -2443,7 +2443,30 @@ where
             return Err(SettleInvoiceError::HashMismatch);
         }
 
+        // Allow only settling Received invoice. When the invoice is Received, it's safe to notify
+        // that the preimage can be revealed.
+        match self.store.get_invoice_status(&payment_hash) {
+            Some(CkbInvoiceStatus::Received) => {}
+            Some(CkbInvoiceStatus::Open) => {
+                if invoice.is_expired() {
+                    return Err(SettleInvoiceError::InvoiceAlreadyExpired);
+                }
+                return Err(SettleInvoiceError::InvoiceStillOpen);
+            }
+            Some(CkbInvoiceStatus::Cancelled) => {
+                return Err(SettleInvoiceError::InvoiceAlreadyCancelled);
+            }
+            Some(CkbInvoiceStatus::Expired) => {
+                return Err(SettleInvoiceError::InvoiceAlreadyExpired);
+            }
+            Some(CkbInvoiceStatus::Paid) => return Err(SettleInvoiceError::InvoiceAlreadyPaid),
+            None => return Err(SettleInvoiceError::InvoiceNotFound),
+        }
+
         self.store.insert_preimage(payment_hash, payment_preimage);
+        let _ = myself.send_message(NetworkActorMessage::new_notification(
+            NetworkServiceEvent::PreimageCreated(payment_hash, payment_preimage),
+        ));
 
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(

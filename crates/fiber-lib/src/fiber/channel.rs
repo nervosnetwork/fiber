@@ -897,6 +897,105 @@ where
         );
     }
 
+    fn try_to_settle_down_tlc_with_invoice(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tlc: TlcInfo,
+        invoice: CkbInvoice,
+    ) {
+        let status = self.get_invoice_status(&invoice);
+        let remove_reason = match status {
+            CkbInvoiceStatus::Expired => RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::InvoiceExpired),
+                &tlc.shared_secret,
+            )),
+            CkbInvoiceStatus::Cancelled => RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::InvoiceCancelled),
+                &tlc.shared_secret,
+            )),
+            CkbInvoiceStatus::Paid => {
+                // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
+                // this maybe happened when process is killed and restart
+                error!("invoice already paid, ignore");
+                return;
+            }
+            _ => {
+                let is_mpp = invoice.allow_mpp();
+                let has_preimage = self.store.get_preimage(&tlc.payment_hash).is_some();
+
+                if !is_mpp && !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
+                    // Single path with insufficient amount
+                    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::AmountBelowMinimum),
+                        &tlc.shared_secret,
+                    ))
+                } else {
+                    // Remaining cases:
+                    // - mpp
+                    // - non-mpp && amount sufficient
+
+                    // Leave this to the SettleTlcSet handler in the Network Actor.
+                    let hold_expire_at = if has_preimage {
+                        // Not a hold invoice.
+                        if is_mpp {
+                            // Use the default expiry for mpp
+                            now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT
+                        } else {
+                            // Use 0 to indicate to not create HoldTLC for single path payment
+                            // with preimage.
+                            0
+                        }
+                    } else {
+                        // A hold invoice. Ensure the expiry is large enough for manual settlement via RPC.
+                        match invoice.expiry_time() {
+                            Some(invoice_expiry) => u64::try_from(
+                                invoice_expiry
+                                    .as_millis()
+                                    .saturating_add(invoice.data.timestamp),
+                            )
+                            .unwrap_or(u64::MAX),
+                            None => tlc.expiry,
+                        }
+                    };
+                    state
+                        .pending_notify_settle_tlcs
+                        .push(PendingNotifySettleTlc {
+                            payment_hash: tlc.payment_hash,
+                            tlc_id: tlc.id(),
+                            is_mpp,
+                            hold_expire_at,
+                        });
+
+                    return;
+                }
+            }
+        };
+
+        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason);
+    }
+
+    fn try_to_settle_down_tlc_without_invoice(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tlc: TlcInfo,
+    ) {
+        // When a TLC has no associated invoice, it cannot be a hold invoice or MPP payment.
+        // Check if we have the preimage: if yes, fulfill the TLC.
+        let Some(payment_preimage) = self.store.get_preimage(&tlc.payment_hash) else {
+            // This TLC was likely created manually by AddTlc (typically for test scenarios); it can be safely ignored.
+            return;
+        };
+
+        self.register_retryable_tlc_remove(
+            myself,
+            state,
+            tlc.tlc_id,
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
+        );
+    }
+
     fn try_to_settle_down_tlc(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -904,68 +1003,11 @@ where
         tlc_id: TLCId,
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
-
-        let Some(preimage) = self.store.get_preimage(&tlc_info.payment_hash) else {
-            return;
-        };
-
-        let mut remove_reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-            payment_preimage: preimage,
-        });
-
-        let tlc = tlc_info.clone();
-        let invoice = self.store.get_invoice(&tlc.payment_hash);
-
-        if let Some(invoice) = &invoice {
-            let status = self.get_invoice_status(invoice);
-            match status {
-                CkbInvoiceStatus::Expired => {
-                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(TlcErrorCode::InvoiceExpired),
-                        &tlc.shared_secret,
-                    ));
-                }
-                CkbInvoiceStatus::Cancelled => {
-                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(TlcErrorCode::InvoiceCancelled),
-                        &tlc.shared_secret,
-                    ));
-                }
-                CkbInvoiceStatus::Paid => {
-                    // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
-                    // this maybe happened when process is killed and restart
-                    error!("invoice already paid, ignore");
-                    return;
-                }
-                _ if invoice.allow_mpp() => {
-                    // add to pending settlement tlc set
-                    // the tlc set will be settled by network actor
-                    state
-                        .pending_notify_settle_tlcs
-                        .push((tlc.payment_hash, tlc.id(), true));
-
-                    // just return, the tlc set will be settled by network actor
-                    return;
-                }
-                _ => {
-                    // single path payment
-                    if !is_invoice_fulfilled(invoice, std::slice::from_ref(&tlc)) {
-                        remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
-                            &tlc.shared_secret,
-                        ));
-                    }
-                }
+        match self.store.get_invoice(&tlc_info.payment_hash) {
+            Some(invoice) => {
+                self.try_to_settle_down_tlc_with_invoice(myself, state, tlc_info, invoice)
             }
-        }
-
-        // remove tlc
-        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) && invoice.is_some() {
-            state
-                .pending_notify_settle_tlcs
-                .push((tlc.payment_hash, tlc.id(), false));
-        } else {
-            self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason);
+            None => self.try_to_settle_down_tlc_without_invoice(myself, state, tlc_info),
         }
     }
 
@@ -1143,31 +1185,12 @@ where
 
                 // Don't call self.store_preimage here, because it will reveal the preimage to watchtower.
                 self.store.insert_preimage(payment_hash, preimage);
-            } else if let Some(invoice) = invoice {
-                // The TLC should be held until the invoice is expired or the TLC itself is
-                // expired.
-                let hold_expire_at = match invoice.expiry_time() {
-                    Some(invoice_expiry) => u64::try_from(
-                        invoice_expiry
-                            .as_millis()
-                            .saturating_add(invoice.data.timestamp),
-                    )
-                    .unwrap_or(u64::MAX),
-                    None => add_tlc.expiry,
-                };
-                // Save TLC for the Hold Invoice
-                self.store.insert_payment_hold_tlc(
-                    payment_hash,
-                    HoldTlc {
-                        channel_id: add_tlc.channel_id,
-                        tlc_id: add_tlc.tlc_id.into(),
-                        hold_expire_at,
-                    },
-                );
-            } else {
+            } else if invoice.is_none() {
+                // Preimage is required for TLC without associated invoice.
                 error!("preimage is not found for payment hash: {:?}", payment_hash);
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
+            // else: hold invoice, pass though to try_to_settle_down_tlc
         } else {
             if add_tlc.expiry
                 < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
@@ -2728,29 +2751,34 @@ where
         self.store.insert_channel_actor_state(state.clone());
 
         // try to settle down tlc set
-        for (payment_hash, tlc_id, is_mpp) in pending_notify_tlcs {
+        for PendingNotifySettleTlc {
+            payment_hash,
+            tlc_id,
+            is_mpp,
+            hold_expire_at,
+        } in pending_notify_tlcs
+        {
             let channel_id = state.get_id();
-            if is_mpp {
-                // hold the tlc
+            // Hold the tlc
+            let expiry_duration =
+                Duration::from_millis(hold_expire_at.saturating_sub(now_timestamp_as_millis_u64()));
+            if !expiry_duration.is_zero() {
                 self.store.insert_payment_hold_tlc(
                     payment_hash,
                     HoldTlc {
                         channel_id,
                         tlc_id,
-                        hold_expire_at: now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT,
+                        hold_expire_at,
                     },
                 );
                 // set timeout for hold tlc
-                self.network.send_after(
-                    Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT),
-                    move || {
-                        NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
-                            payment_hash,
-                            channel_id,
-                            tlc_id,
-                        ))
-                    },
-                );
+                self.network.send_after(expiry_duration, move || {
+                    NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                        payment_hash,
+                        channel_id,
+                        tlc_id,
+                    ))
+                });
             }
             self.network
                 .send_message(NetworkActorMessage::new_command(
@@ -3551,6 +3579,14 @@ impl SettlementTlc {
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingNotifySettleTlc {
+    pub payment_hash: Hash256,
+    pub tlc_id: u64,
+    pub is_mpp: bool,
+    pub hold_expire_at: u64,
+}
+
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelActorState {
@@ -3701,7 +3737,7 @@ pub struct ChannelActorState {
 
     // The TLC set ready to be settled
     #[serde(skip)]
-    pub pending_notify_settle_tlcs: Vec<(Hash256, u64, bool)>,
+    pub pending_notify_settle_tlcs: Vec<PendingNotifySettleTlc>,
 
     #[serde(skip)]
     pub ephemeral_config: ChannelEphemeralConfig,

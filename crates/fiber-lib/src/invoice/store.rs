@@ -35,6 +35,14 @@ pub enum SettleInvoiceError {
     InvoiceNotFound,
     #[error("Hash mismatch")]
     HashMismatch,
+    #[error("Invoice is still open")]
+    InvoiceStillOpen,
+    #[error("Invoice is already cancelled")]
+    InvoiceAlreadyCancelled,
+    #[error("Invoice is already expired")]
+    InvoiceAlreadyExpired,
+    #[error("Invoice is already paid")]
+    InvoiceAlreadyPaid,
     #[error("Internal error: {0}")]
     InternalError(String),
 }
