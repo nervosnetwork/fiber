@@ -440,7 +440,7 @@ fn test_verify_hard_coded_node_announcement() {
                             "e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419",
                         )
                         .expect("valid hash"),
-                        hash_type: ScriptHashType::Data1,
+                        hash_type: ScriptHashType::Data2,
                         args: "0x.*".to_string(),
                     },
                     auto_accept_amount: Some(1000),
@@ -462,7 +462,7 @@ fn test_verify_hard_coded_node_announcement() {
                             "50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
                         )
                         .expect("valid hash"),
-                        hash_type: ScriptHashType::Data1,
+                        hash_type: ScriptHashType::Data2,
                         args: "0x.*".to_string(),
                     },
                     auto_accept_amount: Some(1000),
@@ -534,8 +534,8 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "80a0e9d4ed35eb76e086038983dfd2572e7298a795b4cde7b113d805eeb495192cf552e4cc631e73fee76c4f0479a33327488f8a99978a10e2583b7faba2cf61",
-            "044e5172e9a9d7b383c15f40d8dac30f86422e7082af2b4d7db7f5484b4a1701",
+            "7cd5e05013bd41c8de80fdef75d6ffd1be45408d8e2a8cd54f0994d2bfdb590826583e662e05ca39cdb844f796fc43c4627746a485fc8e54c1859f710122008a",
+            "18564fef8fcea0fcef42a982d4df86a0dd0b7838159e05a12aa4e74498aca4ff",
             node1(),
         ),
         (
@@ -632,7 +632,7 @@ fn test_convert_udt_arg_info() {
                 "e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419",
             )
             .expect("valid hash"),
-            hash_type: ScriptHashType::Data1,
+            hash_type: ScriptHashType::Data2,
             args: "0x.*".to_string(),
         },
         auto_accept_amount: Some(1000),

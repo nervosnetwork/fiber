@@ -48,7 +48,7 @@ fn get_udt_info(udt_kind: &str) -> (H256, H256, usize) {
 
 fn gen_dev_udt_handler(udt_kind: &str) -> SudtHandler {
     let (data_hash, genesis_tx, index) = get_udt_info(udt_kind);
-    let script_id = ScriptId::new_data1(data_hash);
+    let script_id = ScriptId::new(data_hash, ScriptHashType::Data2);
 
     let udt_cell_dep = CellDep::new_builder()
         .out_point(
@@ -162,7 +162,7 @@ fn generate_udt_type_script(udt_kind: &str, address: &str) -> ckb_types::packed:
     let (code_hash, _, _) = get_udt_info(udt_kind);
     Script::new_builder()
         .code_hash(code_hash.pack())
-        .hash_type(ScriptHashType::Data1.into())
+        .hash_type(ScriptHashType::Data2.into())
         .args(sudt_owner_lock_script.calc_script_hash().as_bytes().pack())
         .build()
 }
@@ -294,7 +294,7 @@ fn generate_nodes_config() {
             auto_accept_amount: Some(1000),
             script: UdtScript {
                 code_hash: code_hash,
-                hash_type: "Data1".to_string(),
+                hash_type: "Data2".to_string(),
                 args: "0x.*".to_string(),
             },
             cell_deps: vec![UdtDep {

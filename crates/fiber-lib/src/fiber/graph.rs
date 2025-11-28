@@ -1680,6 +1680,13 @@ where
 
                 debug_assert_eq!(to, cur_hop.node_id);
                 if &udt_type_script != channel_info.udt_type_script() {
+                    if tracing::enabled!(tracing::Level::TRACE)
+                        && udt_type_script.is_some()
+                        && channel_info.udt_type_script().is_some()
+                    {
+                        // Common errors that channel and payment uses different UDT type scripts
+                        trace!("skip channel because of different UDT type scripts: payment: {:?}, channel: {:?}", udt_type_script, channel_info.udt_type_script());
+                    }
                     continue;
                 }
 
