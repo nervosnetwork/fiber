@@ -11,8 +11,8 @@ while [ $retry_count -lt 100 ]; do
         break
     else
         retry_count=$((retry_count + 1))
-        echo "File $port_file not found. Retrying in 30 seconds..."
-        sleep 30
+        echo "File $port_file not found. Retrying in 10 seconds..."
+        sleep 10
     fi
 done
 
