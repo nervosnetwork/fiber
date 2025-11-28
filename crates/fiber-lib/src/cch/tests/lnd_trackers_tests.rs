@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    cch::{LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage},
+    cch::trackers::{LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage},
     fiber::types::Hash256,
 };
 

@@ -1084,10 +1084,10 @@ The status of a cross-chain hub order, will update as the order progresses.
 
 #### Enum with values of
 
-* `Pending` - Order is created and has not received the incoming payment
-* `IncomingAccepted` - HTLC in the incoming payment is accepted.
-* `OutgoingInFlight` - There's an outgoing payment in flight.
-* `OutgoingSettled` - The outgoing payment is settled.
+* `Pending` - Order is created and waiting for the incoming invoice to collect enough TLCs.
+* `IncomingAccepted` - The incoming invoice collected the required TLCs and is ready to send outgoing payment to obtain the preimage.
+* `OutgoingInFlight` - The outgoing payment is in flight.
+* `OutgoingSucceeded` - The outgoing payment is settled and preimage has been obtained.
 * `Succeeded` - Both payments are settled and the order succeeds.
 * `Failed` - Order is failed.
 ---

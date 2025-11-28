@@ -1,5 +1,10 @@
 mod db;
+mod state_machine;
+mod status;
+
 pub use db::{CchDbError, CchOrdersDb};
+pub use state_machine::{CchOrderAction, CchOrderStateMachine, CchOrderTransition};
+pub use status::CchOrderStatus;
 
 use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
@@ -12,24 +17,6 @@ use crate::{
     },
     invoice::CkbInvoice,
 };
-
-/// The status of a cross-chain hub order, will update as the order progresses.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum CchOrderStatus {
-    /// Order is created and has not received the incoming payment
-    Pending = 0,
-    /// HTLC in the incoming payment is accepted.
-    IncomingAccepted = 1,
-    /// There's an outgoing payment in flight.
-    OutgoingInFlight = 2,
-    /// The outgoing payment is settled.
-    OutgoingSettled = 3,
-    /// Both payments are settled and the order succeeds.
-    Succeeded = 4,
-    /// Order is failed.
-    Failed = 5,
-}
 
 /// The generated proxy invoice for the incoming payment.
 ///
@@ -74,50 +61,12 @@ pub struct CchOrder {
     pub fee_sats: u128,
 
     pub status: CchOrderStatus,
+
+    pub failure_reason: Option<String>,
 }
 
 impl CchOrder {
-    pub fn is_incoming_invoice_fiber(&self) -> bool {
-        matches!(self.incoming_invoice, CchInvoice::Fiber(_))
-    }
-    pub fn is_incoming_invoice_lnd(&self) -> bool {
-        matches!(self.incoming_invoice, CchInvoice::Lightning(_))
-    }
-    pub fn is_outgoing_payment_fiber(&self) -> bool {
-        self.is_incoming_invoice_lnd()
-    }
-    pub fn is_outgoing_payment_lnd(&self) -> bool {
-        self.is_incoming_invoice_fiber()
-    }
-
-    pub fn is_awaiting_invoice_event(&self) -> bool {
-        self.status.is_awaiting_invoice_event()
-    }
-    pub fn is_awaiting_fiber_invoice_event(&self) -> bool {
-        self.is_awaiting_invoice_event() && self.is_incoming_invoice_fiber()
-    }
-    pub fn is_awaiting_lnd_invoice_event(&self) -> bool {
-        self.is_awaiting_invoice_event() && self.is_incoming_invoice_lnd()
-    }
-    pub fn is_awaiting_payment_event(&self) -> bool {
-        self.status.is_awaiting_payment_event()
-    }
-    pub fn is_awaiting_fiber_payment_event(&self) -> bool {
-        self.is_awaiting_payment_event() && self.is_outgoing_payment_fiber()
-    }
-    pub fn is_awaiting_lnd_payment_event(&self) -> bool {
-        self.is_awaiting_payment_event() && self.is_outgoing_payment_lnd()
-    }
-}
-
-impl CchOrderStatus {
-    pub fn is_awaiting_invoice_event(&self) -> bool {
-        matches!(self, CchOrderStatus::Pending)
-    }
-    pub fn is_awaiting_payment_event(&self) -> bool {
-        matches!(
-            self,
-            CchOrderStatus::IncomingAccepted | CchOrderStatus::OutgoingInFlight
-        )
+    pub fn is_final(&self) -> bool {
+        self.status == CchOrderStatus::Succeeded || self.status == CchOrderStatus::Failed
     }
 }

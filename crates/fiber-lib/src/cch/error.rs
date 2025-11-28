@@ -1,4 +1,4 @@
-use crate::time::SystemTimeError;
+use crate::{cch::CchOrderStatus, time::SystemTimeError};
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
@@ -23,6 +23,8 @@ pub enum CchError {
     ReceiveBTCOrderAmountTooLarge,
     #[error("Expect preimage in settled payment but missing")]
     SettledPaymentMissingPreimage,
+    #[error("Invalid transition from {0:?} to {1:?}")]
+    InvalidTransition(CchOrderStatus, CchOrderStatus),
     #[error("System time error: {0}")]
     SystemTimeError(#[from] SystemTimeError),
     #[error("JSON serialization error: {0}")]

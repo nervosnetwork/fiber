@@ -5,10 +5,10 @@
 //!
 //! ## Key Features
 //!
-//! - **Concurrent Tracking**: Tracks up to 5 invoices simultaneously to avoid overwhelming LND
-//! - **Queue Management**: Maintains FIFO queue for pending invoice tracking requests
-//! - **Timeout**: Re-queues active invoices after 5 minutes to prevent indefinite blocking
-//! - **Completion Handling**: Properly cleans up when tracker tasks complete, timeout or fail
+//! - **Concurrent Tracking**: Tracks up to 5 invoices simultaneously to avoid overwhelming LND.
+//! - **Queue Management**: Maintains FIFO queue for pending invoice tracking requests.
+//! - **Timeout**: Re-queues active invoices after 5 minutes to prevent indefinite blocking.
+//! - **Completion Handling**: Properly cleans up when tracker tasks complete, timeout or fail.
 //!
 //! ## Architecture
 //!
@@ -39,8 +39,9 @@ use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    cch::{CchIncomingEvent, CchIncomingPaymentStatus, CchOutgoingPaymentStatus},
-    fiber::types::Hash256,
+    cch::trackers::CchTrackingEvent,
+    fiber::{payment::PaymentStatus as FiberPaymentStatus, types::Hash256},
+    invoice::CkbInvoiceStatus,
 };
 
 const MAX_CONCURRENT_INVOICE_TRACKERS: usize = 5;
@@ -118,7 +119,7 @@ pub struct StateSnapshot {
 
 /// Arguments for starting the LndTrackerActor
 pub struct LndTrackerArgs {
-    pub port: Arc<OutputPort<CchIncomingEvent>>,
+    pub port: Arc<OutputPort<CchTrackingEvent>>,
     pub lnd_connection: LndConnectionInfo,
     pub token: CancellationToken,
     pub tracker: TaskTracker,
@@ -126,7 +127,7 @@ pub struct LndTrackerArgs {
 
 /// State for the LndTrackerActor
 pub struct LndTrackerState {
-    port: Arc<OutputPort<CchIncomingEvent>>,
+    port: Arc<OutputPort<CchTrackingEvent>>,
     lnd_connection: LndConnectionInfo,
     token: CancellationToken,
     tracker: TaskTracker,
@@ -143,7 +144,7 @@ pub struct LndTrackerState {
 ///
 /// ## Payment Tracking
 /// - Automatically tracks all LND payments in the background
-/// - Sends `CchIncomingEvent::PaymentChanged` events to the output port
+/// - Sends `CchTrackingEvent::PaymentChanged` events to the output port
 ///
 /// ## Invoice Tracking
 /// - Supports tracking individual invoices via `LndTrackerMessage::TrackInvoice`
@@ -159,7 +160,7 @@ pub struct LndTrackerState {
 /// use tokio_util::{sync::CancellationToken, task::TaskTracker};
 ///
 /// // Create output port for events
-/// let port = Arc::new(OutputPort::<CchIncomingEvent>::default());
+/// let port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 ///
 /// // Create connection info
 /// let lnd_connection = LndConnectionInfo {
@@ -312,27 +313,23 @@ impl LndTrackerState {
                 payment_hash,
             };
 
-            // Spawned Task Completion Flow:
-            // 1. Clone actor reference and payment hash before moving into async task
-            // 2. Spawn tracker in background (tokio::spawn)
-            // 3. Capture result from tracker.run()
-            // 4. ALWAYS send InvoiceTrackerCompleted message back to actor
-            //    - This ensures we decrement counter and remove from queue
-            //    - Even on error, the tracker has quit, so we must clean up
-
+            // ALWAYS send InvoiceTrackerCompleted message back to actor
+            // - This ensures we decrement counter and remove from queue
+            // - Even on error, the tracker has quit, so we must clean up
             let myself_clone = myself.clone();
             self.tracker.spawn(async move {
                 select! {
                     _ = sleep(INVOICE_TRACKING_TIMEOUT) => {
+                        let _ = tracker;
                         myself_clone.cast(LndTrackerMessage::InvoiceTrackerCompleted {
                             payment_hash,
                             completed_successfully: false,
                         }).expect("cast LndTrackerMessage");
                     }
-                    result = tracker.run() => {
+                    completed_successfully = tracker.run() => {
                         myself_clone.cast(LndTrackerMessage::InvoiceTrackerCompleted {
                             payment_hash,
-                            completed_successfully: result.is_ok(),
+                            completed_successfully,
                         }).expect("cast LndTrackerMessage");
                     }
                 }
@@ -352,48 +349,31 @@ impl LndTrackerState {
 
 /// Internal struct for tracking payments
 struct PaymentTracker {
-    port: Arc<OutputPort<CchIncomingEvent>>,
+    port: Arc<OutputPort<CchTrackingEvent>>,
     lnd_connection: LndConnectionInfo,
     token: CancellationToken,
 }
 
 impl PaymentTracker {
     async fn run(self) {
+        let token = self.token.clone();
+        let fut = self.run_loop();
+        token.run_until_cancelled(fut).await;
+    }
+
+    async fn run_loop(self) {
         tracing::debug!("PaymentTracker: will connect {}", self.lnd_connection.uri);
 
-        loop {
-            select! {
-                result = self.run_inner() => {
-                    match result {
-                        Ok(_) => {
-                            break;
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                "Error tracking LND payments, retry 15 seconds later: {:?}",
-                                err
-                            );
-                            select! {
-                                _ = sleep(Duration::from_secs(15)) => {
-                                    // continue
-                                }
-                                _ = self.token.cancelled() => {
-                                    tracing::debug!("Cancellation received, shutting down payment tracker");
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-                _ = self.token.cancelled() => {
-                    tracing::debug!("Cancellation received, shutting down payment tracker");
-                    return;
-                }
-            }
+        while let Err(err) = self.run_once().await {
+            tracing::error!(
+                "Error tracking LND payments, retry 15 seconds later: {:?}",
+                err
+            );
+            sleep(Duration::from_secs(15)).await;
         }
     }
 
-    async fn run_inner(&self) -> Result<()> {
+    async fn run_once(&self) -> Result<()> {
         let mut client = self.lnd_connection.create_router_client().await?;
         let mut stream = client
             .track_payments(routerrpc::TrackPaymentsRequest {
@@ -403,95 +383,53 @@ impl PaymentTracker {
             .into_inner();
 
         loop {
-            select! {
-                payment_opt = stream.next() => {
-                    match payment_opt {
-                        Some(Ok(payment)) => self.on_payment(payment).await?,
-                        Some(Err(err)) => return Err(err.into()),
-                        None => return Err(anyhow!("unexpected closed stream")),
-                    }
-                }
-                _ = self.token.cancelled() => {
-                    tracing::debug!("Cancellation received, shutting down payment tracker");
-                    return Ok(());
-                }
+            match stream.next().await {
+                Some(Ok(payment)) => self.on_payment(payment).await?,
+                Some(Err(err)) => return Err(err.into()),
+                None => return Err(anyhow!("unexpected closed stream")),
             }
         }
     }
 
     async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
         tracing::debug!("payment: {:?}", payment);
-        let payment_preimage = if !payment.payment_preimage.is_empty() {
-            Some(Hash256::from_str(&payment.payment_preimage)?)
-        } else {
-            None
-        };
-        use lnrpc::payment::PaymentStatus;
-        let status: CchOutgoingPaymentStatus = PaymentStatus::try_from(payment.status)
-            .unwrap_or(PaymentStatus::InFlight)
-            .into();
-
-        let event = CchIncomingEvent::PaymentChanged {
-            payment_hash: Hash256::from_str(&payment.payment_hash)?,
-            payment_preimage,
-            status,
-        };
-        self.port.send(event);
+        self.port.send(map_lnd_payment_changed_event(payment)?);
         Ok(())
     }
 }
 
 /// Internal struct for tracking individual invoices
 struct InvoiceTracker {
-    port: Arc<OutputPort<CchIncomingEvent>>,
+    port: Arc<OutputPort<CchTrackingEvent>>,
     payment_hash: Hash256,
     lnd_connection: LndConnectionInfo,
     token: CancellationToken,
 }
 
 impl InvoiceTracker {
-    async fn run(self) -> Result<()> {
-        tracing::debug!(
-            "InvoiceTracker: will connect {} for payment_hash={}",
-            self.lnd_connection.uri,
-            self.payment_hash
-        );
-
-        loop {
-            select! {
-                result = self.run_inner() => {
-                    match result {
-                        Ok(_) => {
-                            tracing::debug!("InvoiceTracker completed successfully for payment_hash={}", self.payment_hash);
-                            return Ok(());
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                "Error tracking LND invoice {}, retry 15 seconds later: {:?}",
-                                self.payment_hash,
-                                err
-                            );
-                            select! {
-                                _ = sleep(Duration::from_secs(15)) => {
-                                    // continue
-                                }
-                                _ = self.token.cancelled() => {
-                                    tracing::debug!("Cancellation received, shutting down invoice tracker");
-                                    return Err(anyhow!("Cancelled"));
-                                }
-                            }
-                        }
-                    }
-                }
-                _ = self.token.cancelled() => {
-                    tracing::debug!("Cancellation received, shutting down invoice tracker");
-                    return Err(anyhow!("Cancelled"));
-                }
-            }
-        }
+    /// Return true if the tracker completed successfully
+    async fn run(self) -> bool {
+        let token = self.token.clone();
+        let fut = self.run_loop();
+        token.run_until_cancelled(fut).await.is_some()
     }
 
-    async fn run_inner(&self) -> Result<()> {
+    async fn run_loop(&self) {
+        while let Err(err) = self.run_once().await {
+            tracing::error!(
+                "Error tracking LND invoice {}, retry 15 seconds later: {:?}",
+                self.payment_hash,
+                err
+            );
+            sleep(Duration::from_secs(15)).await;
+        }
+        tracing::debug!(
+            "InvoiceTracker completed successfully for payment_hash={}",
+            self.payment_hash
+        );
+    }
+
+    async fn run_once(&self) -> Result<()> {
         let mut client = self.lnd_connection.create_invoices_client().await?;
         let mut stream = client
             .subscribe_single_invoice(invoicesrpc::SubscribeSingleInvoiceRequest {
@@ -501,20 +439,14 @@ impl InvoiceTracker {
             .into_inner();
 
         loop {
-            select! {
-                invoice_opt = stream.next() => {
-                    match invoice_opt {
-                        Some(Ok(invoice)) => if self.on_invoice(invoice).await? {
-                            return Ok(());
-                        },
-                        Some(Err(err)) => return Err(err.into()),
-                        None => return Err(anyhow!("unexpected closed stream")),
+            match stream.next().await {
+                Some(Ok(invoice)) => {
+                    if self.on_invoice(invoice).await? {
+                        return Ok(());
                     }
                 }
-                _ = self.token.cancelled() => {
-                    tracing::debug!("Cancellation received, shutting down invoice tracker");
-                    return Ok(());
-                }
+                Some(Err(err)) => return Err(err.into()),
+                None => return Err(anyhow!("unexpected closed stream")),
             }
         }
     }
@@ -522,19 +454,69 @@ impl InvoiceTracker {
     // Return true to quit the tracker
     async fn on_invoice(&self, invoice: lnrpc::Invoice) -> Result<bool> {
         tracing::debug!("[InvoiceTracker] invoice: {:?}", invoice);
-        use lnrpc::invoice::InvoiceState;
-        let status: CchIncomingPaymentStatus = InvoiceState::try_from(invoice.state)
-            .unwrap_or(InvoiceState::Open)
-            .into();
-
-        let event = CchIncomingEvent::InvoiceChanged {
-            payment_hash: Hash256::try_from(invoice.r_hash.as_slice())?,
-            status,
-        };
-        self.port.send(event);
+        let event = map_lnd_invoice_changed_event(invoice)?;
+        self.port.send(event.clone());
 
         // Quit tracker when the status is final
-        Ok(status == CchIncomingPaymentStatus::Settled
-            || status == CchIncomingPaymentStatus::Failed)
+        Ok(matches!(
+            event,
+            CchTrackingEvent::InvoiceChanged {
+                status: CkbInvoiceStatus::Paid
+                    | CkbInvoiceStatus::Cancelled
+                    | CkbInvoiceStatus::Expired,
+                ..
+            }
+        ))
+    }
+}
+
+/// LND represents missing payment preimage using all zeros hash.
+fn is_payment_preimage_empty(payment_preimage: &str) -> bool {
+    // check payment_preimage is all zeros
+    payment_preimage.is_empty() || payment_preimage.chars().all(|c| c == '0')
+}
+
+pub fn map_lnd_payment_changed_event(payment: lnrpc::Payment) -> Result<CchTrackingEvent> {
+    let payment_preimage = if !is_payment_preimage_empty(&payment.payment_preimage) {
+        Some(Hash256::from_str(&payment.payment_preimage)?)
+    } else {
+        None
+    };
+    let status = map_lnd_payment_status(payment.status());
+
+    Ok(CchTrackingEvent::PaymentChanged {
+        payment_hash: Hash256::from_str(&payment.payment_hash)?,
+        payment_preimage,
+        status,
+    })
+}
+
+fn map_lnd_invoice_changed_event(invoice: lnrpc::Invoice) -> Result<CchTrackingEvent> {
+    let status = map_lnd_invoice_status(invoice.state());
+
+    Ok(CchTrackingEvent::InvoiceChanged {
+        payment_hash: Hash256::try_from(invoice.r_hash.as_slice())?,
+        status,
+    })
+}
+
+fn map_lnd_payment_status(status: lnrpc::payment::PaymentStatus) -> FiberPaymentStatus {
+    use lnrpc::payment::PaymentStatus;
+    match status {
+        PaymentStatus::Unknown => FiberPaymentStatus::Created,
+        PaymentStatus::InFlight => FiberPaymentStatus::Inflight,
+        PaymentStatus::Succeeded => FiberPaymentStatus::Success,
+        PaymentStatus::Failed => FiberPaymentStatus::Failed,
+        PaymentStatus::Initiated => FiberPaymentStatus::Created,
+    }
+}
+
+fn map_lnd_invoice_status(status: lnrpc::invoice::InvoiceState) -> CkbInvoiceStatus {
+    use lnrpc::invoice::InvoiceState;
+    match status {
+        InvoiceState::Open => CkbInvoiceStatus::Open,
+        InvoiceState::Settled => CkbInvoiceStatus::Paid,
+        InvoiceState::Canceled => CkbInvoiceStatus::Cancelled,
+        InvoiceState::Accepted => CkbInvoiceStatus::Received,
     }
 }
