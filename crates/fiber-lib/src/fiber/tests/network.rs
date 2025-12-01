@@ -993,6 +993,8 @@ async fn test_abort_funding_on_building_funding_tx() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: true,
+                one_way: false,
+
                 shutdown_script: None,
                 funding_amount: funding_amount_a,
                 funding_udt_type_script: None,
@@ -1093,6 +1095,8 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: true,
+                one_way: false,
+
                 shutdown_script: None,
                 funding_amount: funding_amount_a,
                 funding_udt_type_script: None,
@@ -1183,6 +1187,8 @@ async fn test_to_be_accepted_channels_number_limit() {
             OpenChannelCommand {
                 peer_id: node_peer_id.clone(),
                 public: true,
+                one_way: false,
+
                 shutdown_script: None,
                 funding_amount,
                 funding_udt_type_script: None,
@@ -1289,6 +1295,8 @@ async fn test_to_be_accepted_channels_bytes_limit() {
             OpenChannelCommand {
                 peer_id: node_peer_id.clone(),
                 public: true,
+                one_way: false,
+
                 shutdown_script: None,
                 funding_amount,
                 funding_udt_type_script: None,

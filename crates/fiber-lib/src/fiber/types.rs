@@ -621,6 +621,10 @@ impl OpenChannel {
         self.channel_flags.contains(ChannelFlags::PUBLIC)
     }
 
+    pub fn is_one_way(&self) -> bool {
+        self.channel_flags.contains(ChannelFlags::ONE_WAY)
+    }
+
     pub fn mem_size(&self) -> usize {
         let static_size = std::mem::size_of_val(self);
         let funding_udt_type_script_size = self

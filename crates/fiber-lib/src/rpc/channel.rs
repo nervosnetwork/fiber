@@ -44,6 +44,9 @@ pub struct OpenChannelParams {
     /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
     pub public: Option<bool>,
 
+    /// Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
+    pub one_way: Option<bool>,
+
     /// The type script of the UDT to fund the channel with, an optional parameter.
     pub funding_udt_type_script: Option<Script>,
 
@@ -445,6 +448,7 @@ where
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(true),
+                    one_way: params.one_way.unwrap_or(false),
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch

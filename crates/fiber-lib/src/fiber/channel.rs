@@ -307,6 +307,7 @@ pub struct OpenChannelParameter {
     pub seed: [u8; 32],
     pub tlc_info: ChannelTlcInfo,
     pub public_channel_info: Option<PublicChannelInfo>,
+    pub is_one_way: bool,
     pub funding_udt_type_script: Option<Script>,
     pub shutdown_script: Script,
     pub channel_id_sender: oneshot::Sender<Hash256>,
@@ -2418,6 +2419,7 @@ where
 
                 let counterpart_pubkeys = (&open_channel).into();
                 let public = open_channel.is_public();
+                let is_one_way = open_channel.is_one_way();
                 let OpenChannel {
                     channel_id,
                     chain_hash,
@@ -2445,6 +2447,12 @@ where
                     ))));
                 }
 
+                if public && is_one_way {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "An one-way channel cannot be public".to_string(),
+                    )));
+                }
+
                 // TODO: we may reject the channel opening request here
                 // if the peer want to open a public channel, but we don't want to.
                 if public && (channel_announcement_nonce.is_none() || public_channel_info.is_none())
@@ -2465,6 +2473,7 @@ where
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     public_channel_info,
+                    is_one_way,
                     local_funding_amount,
                     local_reserved_ckb_amount,
                     *commitment_fee_rate,
@@ -2543,6 +2552,7 @@ where
                 seed,
                 tlc_info,
                 public_channel_info,
+                is_one_way,
                 funding_udt_type_script,
                 shutdown_script,
                 channel_id_sender,
@@ -2568,6 +2578,7 @@ where
 
                 let mut channel = ChannelActorState::new_outbound_channel(
                     public_channel_info,
+                    is_one_way,
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
@@ -3621,6 +3632,10 @@ pub struct ChannelActorState {
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
 
+    // Is this channel one-way?
+    // Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
+    pub is_one_way: bool,
+
     // TODO: consider transaction fee while building the commitment transaction.
     // The invariant here is that the sum of `to_local_amount` and `to_remote_amount`
     // should be equal to the total amount of the channel.
@@ -3945,6 +3960,7 @@ bitflags! {
     #[serde(transparent)]
     pub struct ChannelFlags: u8 {
         const PUBLIC = 1;
+        const ONE_WAY = 1 << 1;
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -4557,6 +4573,7 @@ impl ChannelActorState {
     pub fn new_inbound_channel(
         temp_channel_id: Hash256,
         public_channel_info: Option<PublicChannelInfo>,
+        is_one_way: bool,
         local_value: u128,
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
@@ -4607,6 +4624,7 @@ impl ChannelActorState {
             funding_tx: None,
             funding_tx_confirmed_at: None,
             is_acceptor: true,
+            is_one_way,
             funding_udt_type_script,
             to_local_amount: local_value,
             to_remote_amount: remote_value,
@@ -4664,6 +4682,7 @@ impl ChannelActorState {
     #[allow(clippy::too_many_arguments)]
     pub fn new_outbound_channel(
         public_channel_info: Option<PublicChannelInfo>,
+        is_one_way: bool,
         seed: &[u8],
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
@@ -4694,6 +4713,7 @@ impl ChannelActorState {
             funding_tx_confirmed_at: None,
             funding_udt_type_script,
             is_acceptor: false,
+            is_one_way,
             to_local_amount,
             to_remote_amount: 0,
             commitment_fee_rate,

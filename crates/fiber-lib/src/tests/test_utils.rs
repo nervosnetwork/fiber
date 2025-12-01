@@ -419,6 +419,7 @@ pub(crate) async fn create_channel_with_nodes(
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: params.public,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: params.node_a_funding_amount,
                 funding_udt_type_script: params.funding_udt_type_script,

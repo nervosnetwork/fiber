@@ -366,6 +366,7 @@ pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
     pub public: bool,
+    pub one_way: bool,
     pub shutdown_script: Option<Script>,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
@@ -3538,6 +3539,7 @@ where
             peer_id,
             funding_amount,
             public,
+            one_way,
             shutdown_script,
             funding_udt_type_script,
             commitment_fee_rate,
@@ -3551,6 +3553,12 @@ where
         } = open_channel;
 
         self.check_feature_compatibility(&peer_id)?;
+
+        if public && one_way {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "An one-way channel cannot be public".to_string(),
+            ));
+        }
 
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
@@ -3607,6 +3615,7 @@ where
                             .unwrap_or(self.tlc_fee_proportional_millionths),
                     ),
                     public_channel_info: public.then_some(PublicChannelInfo::new()),
+                    is_one_way: one_way,
                     funding_udt_type_script,
                     shutdown_script,
                     channel_id_sender: tx,
