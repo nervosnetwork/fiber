@@ -1314,19 +1314,17 @@ where
                 hash_algorithm,
                 expiry: now + r.incoming_tlc_expiry + rand_tlc_expiry_delta,
                 funding_tx_hash: r.channel_outpoint.tx_hash().into(),
-                payment_preimage: None,
-                custom_records: None,
+                ..Default::default()
             });
         }
 
         hops_data.push(PaymentHopData {
             amount: max_amount,
-            next_hop: None,
             hash_algorithm,
             expiry: now + payment_data.final_tlc_expiry_delta + rand_tlc_expiry_delta,
-            funding_tx_hash: Default::default(),
             payment_preimage: payment_data.preimage,
             custom_records: payment_data.custom_records.clone(),
+            ..Default::default()
         });
         // assert there is no duplicate node in the route
         assert_eq!(

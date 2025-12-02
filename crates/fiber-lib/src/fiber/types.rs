@@ -17,6 +17,7 @@ use crate::fiber::network::USER_CUSTOM_RECORDS_MAX_INDEX;
 use anyhow::anyhow;
 use bitcoin::hashes::Hash;
 use ckb_jsonrpc_types::CellOutput;
+use ckb_types::packed::BytesOpt;
 use ckb_types::H256;
 use ckb_types::{
     core::FeeRate,
@@ -3737,7 +3738,7 @@ impl BasicMppPaymentData {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PaymentHopData {
     /// The amount of the tlc, <= total amount
     pub amount: u128,
@@ -3747,6 +3748,7 @@ pub struct PaymentHopData {
     pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
     pub custom_records: Option<PaymentCustomRecords>,
+    pub trampoline_onion: Option<Vec<u8>>,
 }
 
 const PACKET_DATA_LEN: usize = 6500;
@@ -3760,6 +3762,7 @@ pub struct CurrentPaymentHopData {
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
     pub custom_records: Option<PaymentCustomRecords>,
+    pub trampoline_onion: Option<Vec<u8>>,
 }
 
 impl From<PaymentHopData> for CurrentPaymentHopData {
@@ -3771,6 +3774,7 @@ impl From<PaymentHopData> for CurrentPaymentHopData {
             hash_algorithm: hop.hash_algorithm,
             funding_tx_hash: hop.funding_tx_hash,
             custom_records: hop.custom_records,
+            trampoline_onion: hop.trampoline_onion,
         }
     }
 }
@@ -3785,6 +3789,7 @@ impl From<CurrentPaymentHopData> for PaymentHopData {
             funding_tx_hash: hop.funding_tx_hash,
             custom_records: hop.custom_records,
             next_hop: None,
+            trampoline_onion: hop.trampoline_onion,
         }
     }
 }
@@ -3860,6 +3865,11 @@ impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
                     .set(payment_hop_data.custom_records.map(|x| x.into()))
                     .build(),
             )
+            .trampoline_onion(
+                BytesOpt::new_builder()
+                    .set(payment_hop_data.trampoline_onion.map(|x| x.pack()))
+                    .build(),
+            )
             .build()
     }
 }
@@ -3884,6 +3894,10 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
                 .map(|x| x.try_into())
                 .and_then(Result::ok),
             custom_records: payment_hop_data.custom_records().to_opt().map(|x| x.into()),
+            trampoline_onion: payment_hop_data
+                .trampoline_onion()
+                .to_opt()
+                .map(|x| x.raw_data().into()),
         }
     }
 }

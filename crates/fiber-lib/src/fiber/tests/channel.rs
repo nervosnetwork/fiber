@@ -970,19 +970,12 @@ async fn test_network_send_previous_tlc_error() {
             amount: 2,
             expiry: 3,
             next_hop: Some(keys[0].pubkey()),
-            funding_tx_hash: Hash256::default(),
-            hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 8,
             expiry: 9,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
-            hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
@@ -1072,19 +1065,12 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
             amount: 300000000,
             expiry: 3,
             next_hop: Some(keys[0].pubkey()),
-            funding_tx_hash: Hash256::default(),
-            hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 300300000,
             expiry: 9,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
-            hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
     let generated_payment_hash = gen_rand_sha256_hash();

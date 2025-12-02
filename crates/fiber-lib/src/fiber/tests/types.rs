@@ -150,28 +150,21 @@ fn test_peeled_onion_packet() {
             amount: 2,
             expiry: 3,
             next_hop: Some(keys[1].pubkey()),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 5,
             expiry: 6,
             next_hop: Some(keys[2].pubkey()),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 8,
             expiry: 9,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
     let packet = PeeledPaymentOnionPacket::create(
@@ -222,20 +215,15 @@ fn test_peeled_large_onion_packet() {
                 amount: 2,
                 expiry: 3,
                 next_hop: Some(key.pubkey()),
-                funding_tx_hash: Hash256::default(),
                 hash_algorithm: HashAlgorithm::Sha256,
-                payment_preimage: None,
-                custom_records: None,
+                ..Default::default()
             });
         }
         hops_infos.push(PaymentHopData {
             amount: 8,
             expiry: 9,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         });
 
         let packet = PeeledPaymentOnionPacket::create(
@@ -595,13 +583,12 @@ fn test_verify_payment_hop_data() {
     let hop_data = PaymentHopData {
         amount: 1000,
         expiry: 1000,
-        next_hop: None,
-        funding_tx_hash: Hash256::default(),
         hash_algorithm: HashAlgorithm::Sha256,
         payment_preimage: Some([1; 32].into()),
         custom_records: Some(PaymentCustomRecords {
             data: vec![(1, vec![2, 3])].into_iter().collect(),
         }),
+        ..Default::default()
     };
 
     let data = pack_hop_data(&hop_data);
@@ -669,12 +656,12 @@ fn test_convert_payment_hop_data() {
         amount: 1000,
         expiry: 1000,
         next_hop: Some(public_key),
-        funding_tx_hash: Hash256::default(),
         hash_algorithm: HashAlgorithm::Sha256,
         payment_preimage: Some([1; 32].into()),
         custom_records: Some(PaymentCustomRecords {
             data: vec![(1, vec![2, 3])].into_iter().collect(),
         }),
+        ..Default::default()
     };
     let payment_hop_data_gen = molecule_fiber::PaymentHopData::from(payment_hop_data.clone());
     assert_eq!(payment_hop_data, payment_hop_data_gen.clone().into());

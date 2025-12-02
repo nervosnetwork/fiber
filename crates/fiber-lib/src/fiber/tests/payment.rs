@@ -5524,19 +5524,16 @@ async fn test_payment_with_payment_data_record() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -5626,19 +5623,16 @@ async fn test_payment_with_insufficient_total_amount() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -5752,19 +5746,16 @@ async fn test_payment_with_wrong_payment_secret() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -5865,19 +5856,16 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
             amount: 9000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 9000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -5975,19 +5963,14 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
             amount: 9000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 9000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
 

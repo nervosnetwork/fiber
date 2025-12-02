@@ -512,19 +512,16 @@ async fn test_mpp_tlc_set() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -652,19 +649,16 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -789,19 +783,16 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -890,19 +881,14 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
 
@@ -995,19 +981,17 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
             funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -1156,19 +1140,16 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
                 amount: 10000000000,
                 expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                 next_hop: Some(target_pubkey),
-                funding_tx_hash: Hash256::default(),
                 hash_algorithm,
-                payment_preimage: None,
                 custom_records: Some(custom_records.clone()),
+                ..Default::default()
             },
             PaymentHopData {
                 amount: 10000000000,
                 expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                next_hop: None,
-                funding_tx_hash: Hash256::default(),
                 hash_algorithm,
-                payment_preimage: None,
                 custom_records: Some(custom_records.clone()),
+                ..Default::default()
             },
         ];
 
@@ -1322,19 +1303,16 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -1474,19 +1452,16 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -1687,19 +1662,16 @@ async fn test_mpp_tlc_set_timeout() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -1862,19 +1834,14 @@ async fn test_mpp_tlc_set_without_payment_data() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
 
@@ -2523,19 +2490,18 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
                 amount: 10000000000,
                 expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                 next_hop: Some(target_pubkey),
-                funding_tx_hash: Hash256::default(),
                 hash_algorithm,
                 payment_preimage: Some(preimage),
                 custom_records: Some(custom_records.clone()),
+                ..Default::default()
             },
             PaymentHopData {
                 amount: 10000000000,
                 expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                next_hop: None,
-                funding_tx_hash: Hash256::default(),
                 hash_algorithm,
                 payment_preimage: Some(preimage),
                 custom_records: Some(custom_records.clone()),
+                ..Default::default()
             },
         ];
 
@@ -2689,19 +2655,16 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -3720,17 +3683,13 @@ async fn test_send_payment_tlc_expiry_soon_first_hop() {
             next_hop: Some(node_1.pubkey),
             funding_tx_hash,
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 1000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Default::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
 
@@ -3811,8 +3770,7 @@ async fn test_send_payment_tlc_expiry_soon() {
             next_hop: Some(node_1.pubkey),
             funding_tx_hash,
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 1000,
@@ -3820,17 +3778,14 @@ async fn test_send_payment_tlc_expiry_soon() {
             next_hop: Some(node_2.pubkey),
             funding_tx_hash: node_1.get_channel_funding_tx(&channels[1]).unwrap(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 1000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
             funding_tx_hash: node_1.get_channel_funding_tx(&channels[1]).unwrap(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
 
