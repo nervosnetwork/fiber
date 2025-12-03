@@ -97,7 +97,11 @@ impl CchOrderStateMachine {
     fn allow_transition(from: CchOrderStatus, to: CchOrderStatus) -> bool {
         match (from, to) {
             (CchOrderStatus::Pending, CchOrderStatus::IncomingAccepted) => true,
-            (CchOrderStatus::IncomingAccepted, CchOrderStatus::OutgoingInFlight) => true,
+            // When the payment succeeds immediately, we can transit to the `OutgoingSucceeded` directly.
+            (
+                CchOrderStatus::IncomingAccepted,
+                CchOrderStatus::OutgoingInFlight | CchOrderStatus::OutgoingSucceeded,
+            ) => true,
             (CchOrderStatus::OutgoingInFlight, CchOrderStatus::OutgoingSucceeded) => true,
             (CchOrderStatus::OutgoingSucceeded, CchOrderStatus::Succeeded) => true,
             (_, CchOrderStatus::Failed) => true,

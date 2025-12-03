@@ -1,11 +1,11 @@
 meta {
-  name: 15-node3-list-channel
+  name: 15-check-payee-received-wrapped-btc
   type: http
-  seq: 16
+  seq: 15
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -22,7 +22,7 @@ body:json {
     "method": "list_channels",
     "params": [
       {
-        "peer_id": "{{NODE1_PEERID}}"
+        "peer_id": "{{NODE3_PEERID}}"
       }
     ]
   }
@@ -31,5 +31,6 @@ body:json {
 assert {
   res.body.error: isUndefined
   res.body.result.channels: isDefined
-  res.body.result.channels.map(channel => channel.channel_id): notContains {{N1N3_CHANNEL_ID}}
+  res.body.result.channels[0].channel_id: eq {{N1N3_CHANNEL_ID}}
+  res.body.result.channels[0].remote_balance: eq "0xc350"
 }
