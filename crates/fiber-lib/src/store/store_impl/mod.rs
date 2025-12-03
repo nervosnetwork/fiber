@@ -20,7 +20,9 @@ use std::path::Path;
 use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
+use crate::fiber::payment::{
+    Attempt, AttemptStatus, PaymentCustomRecords, PaymentSession, PaymentStatus,
+};
 use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
 #[cfg(feature = "watchtower")]
 use crate::fiber::types::{Privkey, Pubkey};
@@ -29,7 +31,7 @@ use crate::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         graph::NetworkGraphStateStore,
         history::{Direction, TimedResult},
-        network::{NetworkActorStateStore, PaymentCustomRecords, PersistentNetworkActorState},
+        network::{NetworkActorStateStore, PersistentNetworkActorState},
         types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
