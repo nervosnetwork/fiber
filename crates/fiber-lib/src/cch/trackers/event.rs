@@ -9,6 +9,7 @@ pub enum CchTrackingEvent {
         /// The payment hash of the invoice.
         payment_hash: Hash256,
         status: CkbInvoiceStatus,
+        failure_reason: Option<String>,
     },
 
     PaymentChanged {
@@ -17,6 +18,7 @@ pub enum CchTrackingEvent {
         /// The preimage of the invoice.
         payment_preimage: Option<Hash256>,
         status: PaymentStatus,
+        failure_reason: Option<String>,
     },
 }
 

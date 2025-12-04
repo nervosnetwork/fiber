@@ -486,6 +486,7 @@ pub fn map_lnd_payment_changed_event(payment: lnrpc::Payment) -> Result<CchTrack
 
     Ok(CchTrackingEvent::PaymentChanged {
         payment_hash: Hash256::from_str(&payment.payment_hash)?,
+        failure_reason: None,
         payment_preimage,
         status,
     })
@@ -496,6 +497,7 @@ fn map_lnd_invoice_changed_event(invoice: lnrpc::Invoice) -> Result<CchTrackingE
 
     Ok(CchTrackingEvent::InvoiceChanged {
         payment_hash: Hash256::try_from(invoice.r_hash.as_slice())?,
+        failure_reason: None,
         status,
     })
 }

@@ -9,10 +9,12 @@ use crate::{
 pub enum CchOrderEvent {
     IncomingInvoiceChanged {
         status: CkbInvoiceStatus,
+        failure_reason: Option<String>,
     },
     OutgoingPaymentChanged {
         status: PaymentStatus,
         payment_preimage: Option<Hash256>,
+        failure_reason: Option<String>,
     },
 }
 
@@ -59,20 +61,25 @@ impl CchOrderStateMachine {
         let prev_status = order.status;
 
         match event {
-            CchOrderEvent::IncomingInvoiceChanged { status } => {
-                Self::try_transite_to(&mut order, status.into(), || {
-                    format!("incoming invoice failed: {}", status)
+            CchOrderEvent::IncomingInvoiceChanged {
+                status,
+                failure_reason,
+            } => {
+                Self::try_transite_to(&mut order, status.into(), move || {
+                    failure_reason.unwrap_or_else(|| format!("incoming invoice failed: {}", status))
                 })?;
             }
             CchOrderEvent::OutgoingPaymentChanged {
                 status,
                 payment_preimage,
+                failure_reason,
             } => {
                 if status == PaymentStatus::Success && payment_preimage.is_none() {
                     return Err(CchError::SettledPaymentMissingPreimage);
                 }
-                Self::try_transite_to(&mut order, status.into(), || {
-                    format!("outgoing payment failed: {:?}", status)
+                Self::try_transite_to(&mut order, status.into(), move || {
+                    failure_reason
+                        .unwrap_or_else(|| format!("outgoing payment failed: {:?}", status))
                 })?;
                 if order.payment_preimage.is_none() {
                     order.payment_preimage = payment_preimage;
@@ -137,14 +144,20 @@ impl From<CchTrackingEvent> for CchOrderEvent {
             CchTrackingEvent::InvoiceChanged {
                 payment_hash: _,
                 status,
-            } => CchOrderEvent::IncomingInvoiceChanged { status },
+                failure_reason,
+            } => CchOrderEvent::IncomingInvoiceChanged {
+                status,
+                failure_reason,
+            },
             CchTrackingEvent::PaymentChanged {
                 payment_hash: _,
                 status,
                 payment_preimage,
+                failure_reason,
             } => CchOrderEvent::OutgoingPaymentChanged {
                 status,
                 payment_preimage,
+                failure_reason,
             },
         }
     }

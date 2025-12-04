@@ -33,6 +33,7 @@ impl CchFiberStoreWatcher {
             } => Some(CchTrackingEvent::InvoiceChanged {
                 payment_hash: *payment_hash,
                 status: *invoice_status,
+                failure_reason: None,
             }),
             StoreChange::PutPaymentSession {
                 payment_hash,
@@ -46,6 +47,7 @@ impl CchFiberStoreWatcher {
                         payment_hash: *payment_hash,
                         payment_preimage,
                         status,
+                        failure_reason: None,
                     },
                 )
             }
@@ -58,6 +60,7 @@ impl CchFiberStoreWatcher {
                     payment_hash: *payment_hash,
                     payment_preimage: Some(*payment_preimage),
                     status: PaymentStatus::Success,
+                    failure_reason: None,
                 })
             }
         }

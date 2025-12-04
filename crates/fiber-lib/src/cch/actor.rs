@@ -392,6 +392,15 @@ impl CchState {
             Err(err) => return Err(err.into()),
             Ok(order) => order,
         };
+        if order.is_final() {
+            tracing::debug!(
+                "order {} is {:?}, skipping tracking event {:?}",
+                order.payment_hash,
+                order.status,
+                event
+            );
+            return Ok(vec![]);
+        }
 
         let CchOrderTransition {
             order,
