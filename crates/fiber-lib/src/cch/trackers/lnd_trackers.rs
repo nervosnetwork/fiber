@@ -190,13 +190,8 @@ impl LndTrackerActor {
         args: LndTrackerArgs,
         root_actor: ActorCell,
     ) -> Result<ActorRef<LndTrackerMessage>> {
-        let (actor, _handle) = Actor::spawn_linked(
-            Some("lnd_tracker_actor".to_string()),
-            LndTrackerActor,
-            args,
-            root_actor,
-        )
-        .await?;
+        // Use None for actor name to allow multiple instances (e.g., in tests)
+        let (actor, _handle) = Actor::spawn_linked(None, LndTrackerActor, args, root_actor).await?;
         Ok(actor)
     }
 }

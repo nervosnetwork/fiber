@@ -1,5 +1,5 @@
 mod db;
-mod state_machine;
+pub(crate) mod state_machine;
 mod status;
 
 pub use db::{CchDbError, CchOrdersDb};

@@ -54,6 +54,10 @@ pub enum CchMessage {
         payment_hash: Hash256,
         action: CchOrderAction,
     },
+
+    /// Test-only message to insert an order directly into the database
+    #[cfg(test)]
+    InsertOrder(CchOrder, RpcReplyPort<Result<(), CchError>>),
 }
 
 impl From<CchTrackingEvent> for CchMessage {
@@ -232,6 +236,18 @@ impl Actor for CchActor {
                     );
                 }
 
+                Ok(())
+            }
+            #[cfg(test)]
+            CchMessage::InsertOrder(order, port) => {
+                let result = state
+                    .orders_db
+                    .insert_cch_order(order)
+                    .await
+                    .map_err(Into::into);
+                if !port.is_closed() {
+                    let _ = port.send(result);
+                }
                 Ok(())
             }
         }
