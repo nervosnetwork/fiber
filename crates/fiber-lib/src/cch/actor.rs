@@ -29,7 +29,15 @@ use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
-pub const ACTION_RETRY_INTERNAL_MILLIS: u64 = 1000; // 1s
+pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
+pub const ACTION_RETRY_MAX_MILLIS: u64 = 600_000; // 10 minute max delay
+
+fn calculate_retry_delay(retry_count: u32) -> Duration {
+    // Exponential backoff starting from ACTION_RETRY_BASE_MILLIS, capped at ACTION_RETRY_MAX_MILLIS
+    let max_shift = (ACTION_RETRY_MAX_MILLIS / ACTION_RETRY_BASE_MILLIS).ilog2();
+    let delay = ACTION_RETRY_BASE_MILLIS.saturating_mul(1 << retry_count.min(max_shift));
+    Duration::from_millis(delay.min(ACTION_RETRY_MAX_MILLIS))
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SendBTC {
@@ -53,6 +61,7 @@ pub enum CchMessage {
     ExecuteAction {
         payment_hash: Hash256,
         action: CchOrderAction,
+        retry_count: u32,
     },
 
     /// Test-only message to insert an order directly into the database
@@ -216,6 +225,7 @@ impl Actor for CchActor {
             CchMessage::ExecuteAction {
                 payment_hash,
                 action,
+                retry_count,
             } => {
                 let order = match state.orders_db.get_cch_order(&payment_hash).await {
                     Err(CchDbError::NotFound(_)) => return Ok(()),
@@ -223,17 +233,22 @@ impl Actor for CchActor {
                     Ok(order) => order,
                 };
                 if let Err(err) = ActionDispatcher::execute(state, &myself, &order, action).await {
-                    tracing::error!("failed to execute action {:?}: {}", action, err);
-                    // Retry the action later. The action executor will only
-                    // cease retrying if it handles the error internally and
-                    // returns OK.
-                    myself.send_after(
-                        Duration::from_millis(ACTION_RETRY_INTERNAL_MILLIS),
-                        move || CchMessage::ExecuteAction {
-                            payment_hash,
-                            action,
-                        },
+                    let delay = calculate_retry_delay(retry_count);
+                    tracing::error!(
+                        "failed to execute action {:?} (retry {}): {}, retrying in {:?}",
+                        action,
+                        retry_count,
+                        err,
+                        delay
                     );
+                    // Retry the action later with exponential backoff. The action
+                    // executor will only cease retrying if it handles the error
+                    // internally and returns OK.
+                    myself.send_after(delay, move || CchMessage::ExecuteAction {
+                        payment_hash,
+                        action,
+                        retry_count: retry_count.saturating_add(1),
+                    });
                 }
 
                 Ok(())
@@ -439,6 +454,7 @@ fn append_actions(
         myself.send_message(CchMessage::ExecuteAction {
             payment_hash,
             action,
+            retry_count: 0,
         })?;
     }
     Ok(())
