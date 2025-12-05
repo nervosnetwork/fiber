@@ -196,7 +196,6 @@ impl Actor for CchActor {
                 let result = state
                     .orders_db
                     .get_cch_order(&payment_hash)
-                    .await
                     .map_err(Into::into);
                 if !port.is_closed() {
                     // ignore error
@@ -227,10 +226,9 @@ impl Actor for CchActor {
                 action,
                 retry_count,
             } => {
-                let order = match state.orders_db.get_cch_order(&payment_hash).await {
-                    Err(CchDbError::NotFound(_)) => return Ok(()),
-                    Err(err) => return Err(err.into()),
-                    Ok(order) => order,
+                let order = match state.get_active_order_or_none(&payment_hash)? {
+                    None => return Ok(()),
+                    Some(order) => order,
                 };
                 if let Err(err) = ActionDispatcher::execute(state, &myself, &order, action).await {
                     let delay = calculate_retry_delay(retry_count);
@@ -255,11 +253,7 @@ impl Actor for CchActor {
             }
             #[cfg(test)]
             CchMessage::InsertOrder(order, port) => {
-                let result = state
-                    .orders_db
-                    .insert_cch_order(order)
-                    .await
-                    .map_err(Into::into);
+                let result = state.orders_db.insert_cch_order(order).map_err(Into::into);
                 if !port.is_closed() {
                     let _ = port.send(result);
                 }
@@ -270,6 +264,26 @@ impl Actor for CchActor {
 }
 
 impl CchState {
+    /// Get a CCH order by payment hash, returning None if not found.
+    /// This handles the common pattern of checking for NotFound vs other errors.
+    fn get_order_or_none(&mut self, payment_hash: &Hash256) -> Result<Option<CchOrder>, CchError> {
+        match self.orders_db.get_cch_order(payment_hash) {
+            Err(CchDbError::NotFound(_)) => Ok(None),
+            Err(err) => Err(err.into()),
+            Ok(order) => Ok(Some(order)),
+        }
+    }
+
+    /// Get a CCH order by payment hash, returning None if not found or the order status is final.
+    fn get_active_order_or_none(
+        &mut self,
+        payment_hash: &Hash256,
+    ) -> Result<Option<CchOrder>, CchError> {
+        Ok(self
+            .get_order_or_none(payment_hash)?
+            .filter(|order| !order.is_final()))
+    }
+
     async fn send_btc(&mut self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
@@ -345,7 +359,7 @@ impl CchState {
             wrapped_btc_type_script,
         };
 
-        self.orders_db.insert_cch_order(order.clone()).await?;
+        self.orders_db.insert_cch_order(order.clone())?;
         Ok(order)
     }
 
@@ -410,7 +424,7 @@ impl CchState {
             wrapped_btc_type_script,
         };
 
-        self.orders_db.insert_cch_order(order.clone()).await?;
+        self.orders_db.insert_cch_order(order.clone())?;
         Ok(order)
     }
 
@@ -418,20 +432,10 @@ impl CchState {
         &mut self,
         event: CchTrackingEvent,
     ) -> Result<Vec<CchOrderAction>> {
-        let order = match self.orders_db.get_cch_order(event.payment_hash()).await {
-            Err(CchDbError::NotFound(_)) => return Ok(vec![]),
-            Err(err) => return Err(err.into()),
-            Ok(order) => order,
+        let order = match self.get_active_order_or_none(event.payment_hash())? {
+            None => return Ok(vec![]),
+            Some(order) => order,
         };
-        if order.is_final() {
-            tracing::debug!(
-                "order {} is {:?}, skipping tracking event {:?}",
-                order.payment_hash,
-                order.status,
-                event
-            );
-            return Ok(vec![]);
-        }
 
         let CchOrderTransition {
             order,
@@ -439,7 +443,7 @@ impl CchState {
             actions,
         } = CchOrderStateMachine::apply(order, event.into())?;
         if dirty {
-            self.orders_db.update_cch_order(order.clone()).await?;
+            self.orders_db.update_cch_order(order.clone())?;
         }
         Ok(actions)
     }
