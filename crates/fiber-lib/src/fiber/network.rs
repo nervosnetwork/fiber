@@ -1632,6 +1632,8 @@ where
                         .set(ready_channels_count as u32);
                     metrics::gauge!(crate::metrics::SHUTTING_DOWN_CHANNEL_COUNT)
                         .set(shuttingdown_channels_count as u32);
+                    metrics::gauge!(crate::metrics::INFLIGHT_PAYMENTS_COUNT)
+                        .set(state.inflight_payments.len() as u32);
 
                     // peers
                     let total_peers = state.peer_session_map.len();
