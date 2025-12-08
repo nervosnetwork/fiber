@@ -5,7 +5,7 @@ use crate::Result;
 use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
 use ckb_sdk::{traits::DefaultCellCollector, CkbRpcAsyncClient};
 use ckb_types::core::ScriptHashType;
-use ckb_types::prelude::Builder;
+use ckb_types::prelude::{Builder, Pack};
 use ckb_types::H256;
 use ckb_types::{
     core::DepType,
@@ -269,6 +269,27 @@ pub struct UdtArgInfo {
 /// The UDT configurations
 #[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
+
+impl UdtCfgInfos {
+    /// Find a matching UDT info by script (code_hash, hash_type, and args pattern)
+    pub fn find_matching_udt(&self, udt_script: &Script) -> Option<&UdtArgInfo> {
+        use regex::Regex;
+        for udt in &self.0 {
+            if let Ok(hash_type) = udt_script.hash_type().try_into() {
+                if udt.script.code_hash.pack() == udt_script.code_hash()
+                    && udt.script.hash_type == hash_type
+                {
+                    let args = format!("0x{:x}", udt_script.args().raw_data());
+                    let pattern = Regex::new(&udt.script.args).expect("invalid expression");
+                    if pattern.is_match(&args) {
+                        return Some(udt);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
 
 impl FromStr for UdtCfgInfos {
     type Err = serde_json::Error;
