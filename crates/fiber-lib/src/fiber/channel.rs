@@ -433,7 +433,9 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                    state.handle_reestablish_channel_message(myself, reestablish_channel)?;
+                    state
+                        .handle_reestablish_channel_message(myself, reestablish_channel)
+                        .await?;
                     if !state.reestablishing {
                         state.schedule_next_retry_task(myself);
                     }
@@ -645,7 +647,9 @@ where
                 Ok(())
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                state.handle_reestablish_channel_message(myself, reestablish_channel)?;
+                state
+                    .handle_reestablish_channel_message(myself, reestablish_channel)
+                    .await?;
                 Ok(())
             }
             FiberChannelMessage::TxAbort(_) => {
@@ -1332,42 +1336,7 @@ where
             signature: None,
         });
 
-        let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
-
-        // Only automatically reply shutdown if only their shutdown message is sent.
-        // If we are in a state other than only their shutdown is sent,
-        // e.g. our shutdown message is also sent, or we are trying to force shutdown,
-        // we should not reply.
-        let should_we_reply_shutdown = matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
-        if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
-            let close_script = state.get_local_shutdown_script();
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        state.get_remote_peer_id(),
-                        FiberMessage::shutdown(Shutdown {
-                            channel_id: state.get_id(),
-                            close_script: close_script.clone(),
-                            fee_rate: FeeRate::from_u64(0),
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            state.local_shutdown_info = Some(ShutdownInfo {
-                close_script,
-                fee_rate: 0,
-                signature: None,
-            });
-            flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-            debug!("Auto accept shutdown ...");
-        }
-
-        // TODO: there maybe some tlcs still not settled when shutdown,
-        // we need to check if we need to trigger remove tlc for previous channel
-        // maybe could be done in cron task from network actor.
-        state.update_state(ChannelState::ShuttingDown(flags));
-        state.maybe_transfer_to_shutdown().await?;
-
+        state.step_shutting_down(flags).await?;
         Ok(())
     }
 
@@ -6760,7 +6729,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn handle_reestablish_channel_message(
+    async fn handle_reestablish_channel_message(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         reestablish_channel: &ReestablishChannel,
@@ -6773,9 +6742,16 @@ impl ChannelActorState {
         let network = self.network();
         self.notify_funding_tx(&network);
         match self.state {
-            ChannelState::NegotiatingFunding(_flags) => {
-                // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
-                // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
+            ChannelState::NegotiatingFunding(_)
+            | ChannelState::CollaboratingFundingTx(_)
+            | ChannelState::SigningCommitment(_) => {
+                // Abort funding. It's better to resume the funding workflow, but it will make the code more complex.
+                // Consider refactoring the code to better support restarting in the future.
+                myself
+                    .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                        StopReason::AbortFunding,
+                    )))
+                    .expect("myself alive");
             }
             ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_) => {
                 self.on_reestablished_channel_ready(myself);
@@ -6839,12 +6815,26 @@ impl ChannelActorState {
                 self.on_reestablished_channel_ready(myself);
                 debug_event!(network, "Reestablished channel in ChannelReady");
             }
-            _ => {
-                // TODO: @quake we need to handle other states.
-                warn!(
-                    "Unhandled reestablish channel message in state {:?}",
-                    &self.state
-                );
+            ChannelState::ShuttingDown(flags) => {
+                // Resend the shutdown message to the peer if we have not received the peer's shutdown message.
+                if !flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) {
+                    self.network()
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::shutdown(Shutdown {
+                                    channel_id: self.get_id(),
+                                    close_script: self.get_local_shutdown_script().clone(),
+                                    fee_rate: FeeRate::from_u64(self.commitment_fee_rate),
+                                }),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+                self.step_shutting_down(flags).await?;
+            }
+            ChannelState::Closed(_) => {
+                myself.stop(Some("ChannelClosed".to_string()));
             }
         }
         Ok(())
@@ -7616,6 +7606,47 @@ impl ChannelActorState {
 
     pub fn has_pending_operations(&self) -> bool {
         !self.retryable_tlc_operations.is_empty()
+    }
+
+    /// Perform the next step in shutting down the channel.
+    async fn step_shutting_down(&mut self, flags: ShuttingDownFlags) -> ProcessingChannelResult {
+        let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+
+        // Only automatically reply shutdown if only their shutdown message is sent.
+        // If we are in a state other than only their shutdown is sent,
+        // e.g. our shutdown message is also sent, or we are trying to force shutdown,
+        // we should not reply.
+        let should_we_reply_shutdown = matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
+        if self.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
+            let close_script = self.get_local_shutdown_script();
+            self.network()
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        self.get_remote_peer_id(),
+                        FiberMessage::shutdown(Shutdown {
+                            channel_id: self.get_id(),
+                            close_script: close_script.clone(),
+                            fee_rate: FeeRate::from_u64(0),
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            self.local_shutdown_info = Some(ShutdownInfo {
+                close_script,
+                fee_rate: 0,
+                signature: None,
+            });
+            flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
+            debug!("Auto accept shutdown ...");
+        }
+
+        // TODO: there maybe some tlcs still not settled when shutdown,
+        // we need to check if we need to trigger remove tlc for previous channel
+        // maybe could be done in cron task from network actor.
+        self.update_state(ChannelState::ShuttingDown(flags));
+        self.maybe_transfer_to_shutdown().await?;
+
+        Ok(())
     }
 }
 
