@@ -1127,6 +1127,10 @@ where
             }
         };
 
+        if !session.is_dry_run() {
+            self.store.insert_attempt(attempt.clone());
+        }
+
         match call_t!(
             self.network,
             |tx| {
@@ -1160,7 +1164,6 @@ where
                 return Err(Error::FirstHopError(err, need_to_retry));
             }
             Ok(_) => {
-                self.store.insert_attempt(attempt.clone());
                 return Ok(());
             }
         }

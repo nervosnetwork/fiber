@@ -2687,6 +2687,10 @@ where
         let (Some(mut session), Some(mut attempt)) =
             self.get_payment_session_with_attempt(payment_hash, attempt_id)
         else {
+            warn!(
+                "Payment session not found: {:?} attempt_id: {:?}",
+                payment_hash, attempt_id
+            );
             return;
         };
 
