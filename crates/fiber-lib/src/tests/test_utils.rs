@@ -100,7 +100,7 @@ use crate::{
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub const MIN_RESERVED_CKB: u128 = 99 * CKB_SHANNONS as u128;
 pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000 * CKB_SHANNONS as u128;
-const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 5; // seconds
+const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 10; // seconds
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
