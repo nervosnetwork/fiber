@@ -93,8 +93,8 @@ use crate::fiber::graph::GraphChannelStat;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
-    Attempt, AttemptStatus, HopHint, PaymentActor, PaymentActorArguments, PaymentActorMessage,
-    PaymentCustomRecords, PaymentSession, PaymentStatus, SendPaymentCommand,
+    Attempt, AttemptStatus, HopHint, PaymentActor, PaymentActorArguments, PaymentActorInitCommand,
+    PaymentActorMessage, PaymentCustomRecords, PaymentSession, PaymentStatus, SendPaymentCommand,
     SendPaymentWithRouterCommand, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use crate::fiber::serde_utils::EntityHex;
@@ -1190,7 +1190,17 @@ where
                         .send_message(PaymentActorMessage::RetrySendPayment(attempt_id))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 } else {
-                    error!("Can't find inflight payment actor for {payment_hash:?} {attempt_id:?}");
+                    debug!("Can't find inflight payment actor for {payment_hash:?} {attempt_id:?}, start a new payment actor");
+
+                    let (send, _recv) = oneshot::channel::<Result<_, _>>();
+                    let port = RpcReplyPort::from(send);
+                    self.start_payment_actor(
+                        myself,
+                        state,
+                        PaymentActorInitCommand::Resume(payment_hash, attempt_id),
+                        port,
+                    )
+                    .await;
                 }
             }
             NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
@@ -2133,8 +2143,13 @@ where
                     }
                 };
 
-                self.start_payment_actor(myself, state, payment_request, reply)
-                    .await;
+                self.start_payment_actor(
+                    myself,
+                    state,
+                    PaymentActorInitCommand::Send(payment_request),
+                    reply,
+                )
+                .await;
             }
             NetworkActorCommand::SendPaymentWithRouter(payment_request, reply) => {
                 let source = self.network_graph.read().await.get_source_pubkey();
@@ -2146,8 +2161,13 @@ where
                         return Ok(());
                     }
                 };
-                self.start_payment_actor(myself, state, payment_request, reply)
-                    .await;
+                self.start_payment_actor(
+                    myself,
+                    state,
+                    PaymentActorInitCommand::Send(payment_request),
+                    reply,
+                )
+                .await;
             }
             NetworkActorCommand::BuildPaymentRouter(build_payment_router, reply) => {
                 match self.on_build_payment_router(build_payment_router).await {
@@ -2742,10 +2762,13 @@ where
         &self,
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
-        payment_request: SendPaymentData,
+        init_command: PaymentActorInitCommand,
         reply: RpcReplyPort<Result<SendPaymentResponse, String>>,
     ) {
-        let payment_hash = payment_request.payment_hash;
+        let payment_hash = match &init_command {
+            PaymentActorInitCommand::Send(payment_request) => payment_request.payment_hash,
+            PaymentActorInitCommand::Resume(payment_hash, _) => *payment_hash,
+        };
 
         if state.inflight_payments.contains_key(&payment_hash) {
             error!("Already had a payment actor with the same hash {payment_hash:?}");
@@ -2756,7 +2779,7 @@ where
         }
 
         let args = PaymentActorArguments {
-            payment_request,
+            init_command,
             send_payment_reply: Some(reply),
         };
         match Actor::spawn_linked(

@@ -704,8 +704,14 @@ pub enum PaymentActorMessage {
     CheckPayment,
 }
 
+pub enum PaymentActorInitCommand {
+    Send(SendPaymentData),
+    Resume(Hash256, Option<u64>),
+}
+
 pub struct PaymentActorState {
-    payment_request: SendPaymentData,
+    payment_hash: Hash256,
+    init_command: PaymentActorInitCommand,
     send_payment_reply: Option<RpcReplyPort<Result<SendPaymentResponse, String>>>,
 
     // the number of pending retrying send payments, we track it for
@@ -718,11 +724,16 @@ pub struct PaymentActorState {
 impl PaymentActorState {
     pub fn new(args: PaymentActorArguments) -> Self {
         let PaymentActorArguments {
-            payment_request,
+            init_command,
             send_payment_reply,
         } = args;
+        let payment_hash = match &init_command {
+            PaymentActorInitCommand::Send(payment_request) => payment_request.payment_hash,
+            PaymentActorInitCommand::Resume(payment_hash, _) => *payment_hash,
+        };
         Self {
-            payment_request,
+            payment_hash,
+            init_command,
             send_payment_reply,
             retry_send_payment_count: 0,
         }
@@ -730,7 +741,7 @@ impl PaymentActorState {
 }
 
 pub struct PaymentActorArguments {
-    pub payment_request: SendPaymentData,
+    pub init_command: PaymentActorInitCommand,
     pub send_payment_reply: Option<RpcReplyPort<Result<SendPaymentResponse, String>>>,
 }
 
@@ -765,7 +776,7 @@ where
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let state: PaymentActorState = PaymentActorState::new(args);
+        let state = PaymentActorState::new(args);
         Ok(state)
     }
 
@@ -778,12 +789,15 @@ where
             let (send, _recv) = oneshot::channel::<Result<_, _>>();
             RpcReplyPort::from(send)
         });
-        myself
-            .send_message(PaymentActorMessage::SendPayment(
-                state.payment_request.clone(),
-                reply,
-            ))
-            .map_err(Into::into)
+        let init_msg = match &state.init_command {
+            PaymentActorInitCommand::Send(payment_request) => {
+                PaymentActorMessage::SendPayment(payment_request.clone(), reply)
+            }
+            PaymentActorInitCommand::Resume(_payment_hash, attempt_id) => {
+                PaymentActorMessage::RetrySendPayment(*attempt_id)
+            }
+        };
+        myself.send_message(init_msg).map_err(Into::into)
     }
 
     async fn post_stop(
@@ -794,7 +808,7 @@ where
         debug!("Payment actor is stopped {:?}", myself.get_name());
         self.network
             .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::PaymentActorStopped(state.payment_request.payment_hash),
+                NetworkActorEvent::PaymentActorStopped(state.payment_hash),
             ))
             .map_err(Into::into)
     }
@@ -884,7 +898,6 @@ where
                 }
             }
             PaymentActorMessage::RetrySendPayment(attempt_id) => {
-                state.retry_send_payment_count = state.retry_send_payment_count.saturating_sub(1);
                 let _ = self
                     .resume_payment_session(myself.clone(), state, attempt_id)
                     .await;
@@ -902,10 +915,7 @@ where
         myself: ActorRef<PaymentActorMessage>,
         state: &mut PaymentActorState,
     ) {
-        if let Some(session) = self
-            .store
-            .get_payment_session(state.payment_request.payment_hash)
-        {
+        if let Some(session) = self.store.get_payment_session(state.payment_hash) {
             if session.status.is_final() {
                 myself.stop(Some(format!(
                     "Payment complete with status {:?}",
@@ -1208,7 +1218,7 @@ where
         state: &mut PaymentActorState,
         attempt_id: Option<u64>,
     ) -> Result<(), Error> {
-        let payment_hash = state.payment_request.payment_hash;
+        let payment_hash = state.payment_hash;
 
         self.update_graph().await;
         let Some(mut session) = self.store.get_payment_session(payment_hash) else {
