@@ -4058,7 +4058,7 @@ where
     }
 
     async fn on_payment_actor_stopped(&mut self, payment_hash: Hash256) {
-        warn!("Payment actor stopped {payment_hash}");
+        debug!("Payment actor stopped {payment_hash}");
         if self.inflight_payments.remove(&payment_hash).is_none() {
             error!("Can't find inflight payment actor");
         }
