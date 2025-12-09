@@ -297,6 +297,8 @@ async fn setup_test_harness() -> TestHarness {
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
         wrapped_btc_type_script_args: "0x".to_string(),
+        // Use a low minimum expiry for testing (test invoices have 1-hour expiry)
+        min_outgoing_invoice_expiry_delta_seconds: 60,
         ..Default::default()
     };
 
@@ -468,8 +470,7 @@ async fn test_receive_btc_happy_path() {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs(),
-        expires_after: 3600,
-        ckb_final_tlc_expiry_delta: 40,
+        expiry_delta_seconds: 3600,
         wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
         outgoing_pay_req: fiber_invoice.to_string(),
         incoming_invoice: CchInvoice::Lightning(lightning_invoice),

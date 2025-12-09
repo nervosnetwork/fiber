@@ -40,12 +40,9 @@ pub struct CchOrder {
     // Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
     pub created_at: u64,
-    // Seconds after timestamp that the order expires
+    // Relative expiry time in seconds from `created_at` that the order expires
     #[serde_as(as = "U64Hex")]
-    pub expires_after: u64,
-    // The minimal expiry delta in milliseconds of the final TLC hop in the CKB network
-    #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry_delta: u64,
+    pub expiry_delta_seconds: u64,
 
     pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 

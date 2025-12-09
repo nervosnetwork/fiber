@@ -32,8 +32,7 @@ fn create_order_with_lightning_invoice(status: CchOrderStatus) -> CchOrder {
 
     CchOrder {
         created_at: 1000,
-        expires_after: 3600,
-        ckb_final_tlc_expiry_delta: 86400000,
+        expiry_delta_seconds: 3600,
         wrapped_btc_type_script: ckb_jsonrpc_types::Script {
             code_hash: Default::default(),
             hash_type: ckb_jsonrpc_types::ScriptHashType::Data,
@@ -88,8 +87,7 @@ fn create_order_with_fiber_invoice(status: CchOrderStatus) -> CchOrder {
 
     CchOrder {
         created_at: 1000,
-        expires_after: 3600,
-        ckb_final_tlc_expiry_delta: 86400000,
+        expiry_delta_seconds: 3600,
         wrapped_btc_type_script: ckb_jsonrpc_types::Script {
             code_hash: Default::default(),
             hash_type: ckb_jsonrpc_types::ScriptHashType::Data,

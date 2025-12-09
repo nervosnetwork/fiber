@@ -2,12 +2,14 @@ use std::path::PathBuf;
 
 use clap_serde_derive::ClapSerde;
 
-/// Default cross-chain order expiry time in seconds.
-pub const DEFAULT_ORDER_EXPIRY_TIME: u64 = 3600;
-/// Default BTC final-hop HTLC expiry time in seconds.
-pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_TIME: u64 = 36;
-/// Default CKB final-hop HTLC expiry delta in timestamp (in milliseconds), 24 hours.
-pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
+/// Default cross-chain order relative expiry time in seconds.
+pub const DEFAULT_ORDER_EXPIRY_DELTA_SECONDS: u64 = 24 * 60 * 60; // 24 hours
+/// Default BTC final-hop HTLC expiry time in blocks.
+pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS: u64 = 120; // 20 hours
+/// Default CKB final-hop HTLC expiry delta in seconds.
+pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS: u64 = 20 * 60 * 60; // 20 hours
+/// Default minimum outgoing invoice relative expiry time in seconds.
+pub const DEFAULT_MIN_OUTGOING_INVOICE_EXPIRY_DELTA_SECONDS: u64 = 6 * 60 * 60; // 6 hours
 
 // Use prefix `cch-`/`CCH_`
 #[derive(ClapSerde, Debug, Clone)]
@@ -56,14 +58,14 @@ pub struct CchConfig {
     pub wrapped_btc_type_script_args: String,
 
     /// Cross-chain order expiry time in seconds.
-    #[default(DEFAULT_ORDER_EXPIRY_TIME)]
+    #[default(DEFAULT_ORDER_EXPIRY_DELTA_SECONDS)]
     #[arg(
-        name = "CCH_ORDER_EXPIRY",
-        long = "cch-order-expiry",
+        name = "CCH_ORDER_EXPIRY_DELTA_SECONDS",
+        long = "cch-order-expiry-delta-seconds",
         env,
-        help = format!("order expiry time in seconds, default is {}", DEFAULT_ORDER_EXPIRY_TIME),
+        help = format!("order relative expiry time in seconds, default is {}", DEFAULT_ORDER_EXPIRY_DELTA_SECONDS),
     )]
-    pub order_expiry: u64,
+    pub order_expiry_delta_seconds: u64,
 
     #[default(0)]
     #[arg(
@@ -84,24 +86,34 @@ pub struct CchConfig {
     pub fee_rate_per_million_sats: u64,
 
     /// Final tlc expiry time for BTC network.
-    #[default(DEFAULT_BTC_FINAL_TLC_EXPIRY_TIME)]
+    #[default(DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS)]
     #[arg(
-        name = "CCH_BTC_FINAL_TLC_EXPIRY",
-        long = "cch-btc-final-tlc-expiry",
+        name = "CCH_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS",
+        long = "cch-btc-final-tlc-expiry-delta-blocks",
         env,
-        help = format!("final tlc expiry time in seconds for BTC network, default is {}", DEFAULT_BTC_FINAL_TLC_EXPIRY_TIME),
+        help = format!("final tlc relative expiry time in blocks for BTC network, default is {}", DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS),
     )]
-    pub btc_final_tlc_expiry: u64,
+    pub btc_final_tlc_expiry_delta_blocks: u64,
 
     /// Tlc expiry time for CKB network in blocks.
-    #[default(DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA)]
+    #[default(DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS)]
     #[arg(
-        name = "CCH_CKB_FINAL_TLC_EXPIRY_DELTA",
-        long = "cch-ckb-final-tlc-expiry-delta",
+        name = "CCH_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS",
+        long = "cch-ckb-final-tlc-expiry-delta-seconds",
         env,
-        help = format!("final tlc expiry delta in timestamp for CKB network, default is {}", DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA),
+        help = format!("final tlc relative expiry time in seconds for CKB network, default is {}", DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS),
     )]
-    pub ckb_final_tlc_expiry_delta: u64,
+    pub ckb_final_tlc_expiry_delta_seconds: u64,
+
+    /// Minimum acceptable relative expiry time in seconds for the cch outgoing invoice.
+    #[default(DEFAULT_MIN_OUTGOING_INVOICE_EXPIRY_DELTA_SECONDS)]
+    #[arg(
+        name = "CCH_MIN_OUTGOING_INVOICE_EXPIRY_DELTA_SECONDS",
+        long = "cch-min-outgoing-invoice-expiry-delta-seconds",
+        env,
+        help = format!("minimum acceptable relative expiry time in seconds for the cch outgoing invoice, default is {}", DEFAULT_MIN_OUTGOING_INVOICE_EXPIRY_DELTA_SECONDS),
+    )]
+    pub min_outgoing_invoice_expiry_delta_seconds: u64,
 
     /// Ignore the failure when starting the cch service.
     #[default(false)]

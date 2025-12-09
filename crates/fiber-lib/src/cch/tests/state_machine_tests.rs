@@ -30,8 +30,7 @@ fn create_test_order(status: CchOrderStatus) -> CchOrder {
 
     CchOrder {
         created_at: 1700000000,
-        expires_after: 3600,
-        ckb_final_tlc_expiry_delta: 86400000,
+        expiry_delta_seconds: 3600,
         wrapped_btc_type_script: ckb_jsonrpc_types::Script {
             code_hash: Default::default(),
             hash_type: ckb_jsonrpc_types::ScriptHashType::Data,

@@ -28,7 +28,6 @@ use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
 pub const ACTION_RETRY_MAX_MILLIS: u64 = 600_000; // 10 minute max delay
 
@@ -291,11 +290,16 @@ impl CchState {
         tracing::debug!("BTC invoice: {:?}", invoice);
         let payment_hash = (*invoice.payment_hash()).into();
 
-        let expiry = invoice
+        let outgoing_invoice_expiry_delta_seconds = invoice
             .expires_at()
             .and_then(|expired_at| expired_at.checked_sub(duration_since_epoch))
             .map(|duration| duration.as_secs())
             .ok_or(CchError::BTCInvoiceExpired)?;
+        if outgoing_invoice_expiry_delta_seconds
+            < self.config.min_outgoing_invoice_expiry_delta_seconds
+        {
+            return Err(CchError::OutgoingInvoiceExpiryTooShort);
+        }
 
         let amount_msat = invoice
             .amount_milli_satoshis()
@@ -324,8 +328,8 @@ impl CchState {
             .amount(Some(invoice_amount_sats))
             .payment_hash(payment_hash)
             .hash_algorithm(HashAlgorithm::Sha256)
-            .expiry_time(Duration::from_secs(expiry))
-            .final_expiry_delta(self.config.ckb_final_tlc_expiry_delta)
+            .expiry_time(Duration::from_secs(outgoing_invoice_expiry_delta_seconds))
+            .final_expiry_delta(self.config.ckb_final_tlc_expiry_delta_seconds * 1000)
             .udt_type_script(wrapped_btc_type_script.clone().into())
             .payee_pub_key(self.node_keypair.0)
             .build_with_sign(|hash| {
@@ -346,9 +350,8 @@ impl CchState {
 
         let order = CchOrder {
             amount_sats: invoice_amount_sats,
-            ckb_final_tlc_expiry_delta: self.config.ckb_final_tlc_expiry_delta,
             created_at: duration_since_epoch.as_secs(),
-            expires_after: expiry,
+            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
             failure_reason: None,
             incoming_invoice: CchInvoice::Fiber(invoice),
             outgoing_pay_req: send_btc.btc_pay_req,
@@ -367,9 +370,27 @@ impl CchState {
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
         let payment_hash = *invoice.payment_hash();
         let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
-        let final_tlc_minimum_expiry_delta =
-            *invoice.final_tlc_minimum_expiry_delta().unwrap_or(&0);
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        // Convert timestamp + expiry_time to the expiry time relative to `duration_since`.
+        let outgoing_invoice_expiry_delta_seconds = match invoice.expiry_time() {
+            Some(expiry) => invoice
+                .data
+                .timestamp
+                .checked_add(expiry.as_millis())
+                .and_then(|expiry_at| {
+                    u64::try_from(expiry_at / 1000)
+                        .unwrap_or(u64::MAX)
+                        .checked_sub(duration_since_epoch.as_secs())
+                })
+                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
+            // CKB invoice has no default expiry, use minimal * 2 to create the invoice
+            None => self.config.min_outgoing_invoice_expiry_delta_seconds * 2,
+        };
+        if outgoing_invoice_expiry_delta_seconds
+            < self.config.min_outgoing_invoice_expiry_delta_seconds
+        {
+            return Err(CchError::OutgoingInvoiceExpiryTooShort);
+        }
 
         let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
             / 1_000_000u128
@@ -385,8 +406,8 @@ impl CchState {
         let req = invoicesrpc::AddHoldInvoiceRequest {
             hash: payment_hash.as_ref().to_vec(),
             value_msat: (amount_sats * 1_000u128) as i64,
-            expiry: DEFAULT_ORDER_EXPIRY_SECONDS as i64,
-            cltv_expiry: self.config.btc_final_tlc_expiry + final_tlc_minimum_expiry_delta,
+            expiry: outgoing_invoice_expiry_delta_seconds as i64,
+            cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
             ..Default::default()
         };
         let add_invoice_resp = client
@@ -410,9 +431,8 @@ impl CchState {
         )
         .into();
         let order = CchOrder {
-            ckb_final_tlc_expiry_delta: final_tlc_minimum_expiry_delta,
             created_at: duration_since_epoch.as_secs(),
-            expires_after: DEFAULT_ORDER_EXPIRY_SECONDS,
+            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
             failure_reason: None,
             incoming_invoice: CchInvoice::Lightning(incoming_invoice),
             outgoing_pay_req: receive_btc.fiber_pay_req,
