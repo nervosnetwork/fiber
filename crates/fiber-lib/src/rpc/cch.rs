@@ -31,7 +31,7 @@ pub struct CchOrderResponse {
     /// Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
-    // Relative expiry time in seconds from `created_at` that the order expires
+    /// Relative expiry time in seconds from `created_at` that the order expires
     #[serde_as(as = "U64Hex")]
     pub expiry_delta_seconds: u64,
 
