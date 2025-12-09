@@ -25,10 +25,14 @@ pub enum CchError {
     CKBInvoiceMissingAmount,
     #[error("CKB invoice final TLC expiry delta exceeds safe limit for cross-chain swap")]
     CKBInvoiceFinalTlcExpiryDeltaTooLarge,
+    #[error("CKB invoice hash algorithm is not SHA256, which is required for LND compatibility")]
+    CKBInvoiceIncompatibleHashAlgorithm,
     #[error("ReceiveBTC order payment amount is too small")]
     ReceiveBTCOrderAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too large")]
     ReceiveBTCOrderAmountTooLarge,
+    #[error("Wrapped BTC type script mismatch")]
+    WrappedBTCTypescriptMismatch,
     #[error("Expect preimage in settled payment but missing")]
     SettledPaymentMissingPreimage,
     #[error("Preimage hash mismatch")]

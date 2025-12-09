@@ -424,6 +424,38 @@ impl CchState {
             return Err(CchError::ReceiveBTCOrderAmountTooLarge);
         }
 
+        // Verify wrapped_btc_type_script matches invoice UDT type script
+        let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
+            Contract::SimpleUDT,
+            hex::decode(
+                self.config
+                    .wrapped_btc_type_script_args
+                    .trim_start_matches("0x"),
+            )
+            .map_err(|_| {
+                CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
+            })?
+            .as_ref(),
+        )
+        .into();
+
+        // Verify invoice UDT type script matches configured wrapped_btc_type_script
+        if let Some(invoice_udt_script) = invoice.udt_type_script() {
+            let invoice_script: ckb_jsonrpc_types::Script = invoice_udt_script.clone().into();
+            if invoice_script.code_hash != wrapped_btc_type_script.code_hash
+                || invoice_script.hash_type != wrapped_btc_type_script.hash_type
+                || invoice_script.args != wrapped_btc_type_script.args
+            {
+                return Err(CchError::WrappedBTCTypescriptMismatch);
+            }
+        }
+
+        // Validate hash algorithm - must be SHA256 for LND compatibility
+        let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+        if hash_algorithm != HashAlgorithm::Sha256 {
+            return Err(CchError::CKBInvoiceIncompatibleHashAlgorithm);
+        }
+
         let mut client = self.lnd_connection.create_invoices_client().await?;
         let req = invoicesrpc::AddHoldInvoiceRequest {
             hash: payment_hash.as_ref().to_vec(),
@@ -439,19 +471,6 @@ impl CchState {
             .into_inner();
         let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
 
-        let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
-            Contract::SimpleUDT,
-            hex::decode(
-                self.config
-                    .wrapped_btc_type_script_args
-                    .trim_start_matches("0x"),
-            )
-            .map_err(|_| {
-                CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
-            })?
-            .as_ref(),
-        )
-        .into();
         let order = CchOrder {
             created_at: duration_since_epoch.as_secs(),
             expiry_delta_seconds: self.config.order_expiry_delta_seconds,

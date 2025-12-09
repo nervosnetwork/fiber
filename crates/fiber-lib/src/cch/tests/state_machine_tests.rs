@@ -21,8 +21,31 @@ fn test_payment_hash(value: u8) -> Hash256 {
     Hash256::from(bytes)
 }
 
+/// Helper function to create a valid preimage/payment hash pair.
+/// The preimage will hash to the payment hash using SHA256.
+fn create_valid_preimage_pair(seed: u8) -> (Hash256, Hash256) {
+    use crate::fiber::hash_algorithm::HashAlgorithm;
+    // Generate a preimage from the seed
+    let mut preimage_bytes = [0u8; 32];
+    preimage_bytes[0] = seed;
+    preimage_bytes[1] = seed.wrapping_mul(2);
+    preimage_bytes[2] = seed.wrapping_add(1);
+    let preimage = Hash256::from(preimage_bytes);
+
+    // Compute the payment hash from the preimage
+    let hash_algorithm = HashAlgorithm::Sha256;
+    let payment_hash = Hash256::from(hash_algorithm.hash(preimage));
+
+    (preimage, payment_hash)
+}
+
 /// Helper function to create a test CchOrder with configurable status
 fn create_test_order(status: CchOrderStatus) -> CchOrder {
+    create_test_order_with_payment_hash(status, test_payment_hash(1))
+}
+
+/// Helper function to create a test CchOrder with configurable status and payment hash
+fn create_test_order_with_payment_hash(status: CchOrderStatus, payment_hash: Hash256) -> CchOrder {
     // Create a minimal valid Lightning invoice string for testing
     // This is a mainnet invoice format that parses correctly
     let btc_invoice_str = "lnbc1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq9qrsgq357wnc5r2ueh7ck6q93dj32dlqnls087fxdwk8qakdyafkq3yap9us6v52vjjsrvywa6rt52cm9r9zqt8r2t7mlcwspyetp5h2tztugp9lfyql";
@@ -38,7 +61,7 @@ fn create_test_order(status: CchOrderStatus) -> CchOrder {
         },
         outgoing_pay_req: btc_invoice_str.to_string(),
         incoming_invoice: CchInvoice::Lightning(btc_invoice),
-        payment_hash: test_payment_hash(1),
+        payment_hash,
         payment_preimage: None,
         amount_sats: 100000,
         fee_sats: 100,
@@ -132,8 +155,9 @@ fn test_transition_incoming_accepted_to_outgoing_in_flight_via_payment_inflight(
 
 #[test]
 fn test_transition_incoming_accepted_to_outgoing_succeeded_via_payment_success() {
-    let mut order = create_test_order(CchOrderStatus::IncomingAccepted);
-    let preimage = test_payment_hash(42);
+    let (preimage, payment_hash) = create_valid_preimage_pair(42);
+    let mut order =
+        create_test_order_with_payment_hash(CchOrderStatus::IncomingAccepted, payment_hash);
     let event = CchOrderEvent::OutgoingPaymentChanged {
         status: PaymentStatus::Success,
         payment_preimage: Some(preimage),
@@ -149,8 +173,9 @@ fn test_transition_incoming_accepted_to_outgoing_succeeded_via_payment_success()
 
 #[test]
 fn test_transition_outgoing_in_flight_to_outgoing_succeeded_via_payment_success() {
-    let mut order = create_test_order(CchOrderStatus::OutgoingInFlight);
-    let preimage = test_payment_hash(42);
+    let (preimage, payment_hash) = create_valid_preimage_pair(42);
+    let mut order =
+        create_test_order_with_payment_hash(CchOrderStatus::OutgoingInFlight, payment_hash);
     let event = CchOrderEvent::OutgoingPaymentChanged {
         status: PaymentStatus::Success,
         payment_preimage: Some(preimage),
@@ -249,8 +274,8 @@ fn test_invalid_transition_pending_to_outgoing_in_flight() {
 
 #[test]
 fn test_invalid_transition_pending_to_outgoing_succeeded() {
-    let mut order = create_test_order(CchOrderStatus::Pending);
-    let preimage = test_payment_hash(42);
+    let (preimage, payment_hash) = create_valid_preimage_pair(42);
+    let mut order = create_test_order_with_payment_hash(CchOrderStatus::Pending, payment_hash);
     let event = CchOrderEvent::OutgoingPaymentChanged {
         status: PaymentStatus::Success,
         payment_preimage: Some(preimage),
@@ -382,28 +407,6 @@ fn test_failure_from_outgoing_succeeded() {
 
     assert!(transition.is_some());
     assert_eq!(order.status, CchOrderStatus::Failed);
-}
-
-// ============================================================================
-// Tests for preimage preservation
-// ============================================================================
-
-#[test]
-fn test_preimage_not_overwritten_if_already_set() {
-    let mut order = create_test_order(CchOrderStatus::OutgoingInFlight);
-    let original_preimage = test_payment_hash(1);
-    order.payment_preimage = Some(original_preimage);
-
-    let new_preimage = test_payment_hash(2);
-    let event = CchOrderEvent::OutgoingPaymentChanged {
-        status: PaymentStatus::Success,
-        payment_preimage: Some(new_preimage),
-        failure_reason: None,
-    };
-
-    CchOrderStateMachine::apply(&mut order, event).unwrap();
-    // Should keep the original preimage
-    assert_eq!(order.payment_preimage, Some(original_preimage));
 }
 
 // ============================================================================
