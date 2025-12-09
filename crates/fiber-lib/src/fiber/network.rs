@@ -2747,21 +2747,31 @@ where
         let graph = self.network_graph.read().await;
         let source = graph.get_source_pubkey();
         let active_parts = session.attempts().filter(|a| a.is_active()).count();
+        let is_self_pay = source == session.request.target_pubkey;
         let mut remain_amount = session.remain_amount();
         let mut max_fee = session.remain_fee_amount();
         let mut result = vec![];
 
         if remain_amount == 0 {
             let error = format!("Send amount {} is not expected to be 0", remain_amount);
-            self.set_payment_fail_with_error(session, &error);
             return Err(Error::SendPaymentError(error));
         }
 
         session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+        let amount_low_bound = Some(1);
         let mut attempt_id = session.attempts_count() as u64;
         let mut target_amount = remain_amount;
-        let amount_low_bound = Some(1);
+        let mut single_path_max = None;
         let mut iteration = 0;
+
+        if session.max_parts() > 1 && !is_self_pay {
+            let path_max = graph.find_path_max_capacity(&session.request)?;
+            if path_max * (session.max_parts() as u128) < remain_amount {
+                let error = "Failed to build enough routes for MPP payment".to_string();
+                return Err(Error::SendPaymentError(error));
+            }
+            single_path_max = Some(path_max);
+        }
 
         while (result.len() < session.max_parts() - active_parts) && remain_amount > 0 {
             iteration += 1;
@@ -2776,7 +2786,6 @@ where
             match graph.build_route(target_amount, amount_low_bound, max_fee, &session.request) {
                 Err(e) => {
                     let error = format!("Failed to build route, {}", e);
-                    self.set_payment_fail_with_error(session, &error);
                     return Err(Error::SendPaymentError(error));
                 }
                 Ok(hops) => {
@@ -2816,7 +2825,11 @@ where
                     }
                     let current_amount = session_route.receiver_amount();
                     remain_amount -= current_amount;
-                    target_amount = remain_amount;
+                    target_amount = if let Some(single) = single_path_max {
+                        single.min(remain_amount)
+                    } else {
+                        remain_amount
+                    };
                     if let Some(fee) = max_fee {
                         max_fee = Some(fee - session_route.fee());
                     }
@@ -2833,7 +2846,6 @@ where
 
         if remain_amount > 0 {
             let error = "Failed to build enough routes for MPP payment".to_string();
-            self.set_payment_fail_with_error(session, &error);
             return Err(Error::SendPaymentError(error));
         }
 

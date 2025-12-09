@@ -469,6 +469,9 @@ pub struct NetworkGraph<S> {
 
     #[cfg(test)]
     pub(crate) add_rand_expiry_delta: bool,
+
+    #[cfg(feature = "metrics")]
+    payment_find_path_stats: Arc<Mutex<HashMap<Hash256, u128>>>,
 }
 
 #[derive(Error, Debug)]
@@ -537,6 +540,8 @@ where
             announce_private_addr,
             #[cfg(test)]
             add_rand_expiry_delta: true,
+            #[cfg(feature = "metrics")]
+            payment_find_path_stats: Default::default(),
         };
         network_graph.load_from_store();
         network_graph
@@ -762,7 +767,7 @@ where
         // Note: we don't check the tlc_expiry_delta is too small here, because it does not effect
         // the path finding, and a too small tlc_expiry_delta only makes the hop itself more risky.
         if channel_update.tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
-            error!(
+            warn!(
                 "Channel update has too large expiry delta: {} > {}, channel update: {:?}",
                 channel_update.tlc_expiry_delta, MAX_PAYMENT_TLC_EXPIRY_LIMIT, &channel_update
             );
@@ -1137,6 +1142,22 @@ where
         self.source = source;
     }
 
+    /// Get the number of find_path calls for a specific payment_hash
+    #[cfg(feature = "metrics")]
+    pub fn get_payment_find_path_count(&self, payment_hash: &Hash256) -> u128 {
+        self.payment_find_path_stats
+            .lock()
+            .get(payment_hash)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Remove the find_path stats for a specific payment_hash
+    #[cfg(feature = "metrics")]
+    pub fn remove_payment_find_path_stats(&self, payment_hash: &Hash256) {
+        self.payment_find_path_stats.lock().remove(payment_hash);
+    }
+
     /// Returns a list of `PaymentHopData` for all nodes in the route,
     /// including the origin and the target node.
     pub fn build_route(
@@ -1170,16 +1191,13 @@ where
                 Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
                     if payment_data.allow_mpp() && amount_low_bound < amount =>
                 {
-                    let Ok(res) = self.binary_find_path_in_range(
+                    self.binary_find_path_in_range(
                         source,
                         amount.saturating_sub(1),
                         amount_low_bound,
                         max_fee_amount,
                         payment_data,
-                    ) else {
-                        return Err(PathFindError::NoPathFound);
-                    };
-                    res
+                    )?
                 }
                 Err(err) => return Err(err),
             }
@@ -1200,10 +1218,16 @@ where
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<RouterHop>, PathFindError> {
+        #[cfg(feature = "metrics")]
+        {
+            let mut stats = self.payment_find_path_stats.lock();
+            *stats.entry(payment_data.payment_hash).or_insert(0) += 1;
+        }
+
         self.find_path(
             source,
             payment_data.target_pubkey,
-            amount,
+            Some(amount),
             max_fee_amount,
             payment_data.udt_type_script.clone(),
             payment_data.final_tlc_expiry_delta,
@@ -1213,6 +1237,34 @@ where
             &payment_data.channel_stats,
             payment_data.allow_mpp(),
         )
+    }
+
+    pub fn find_path_max_capacity(
+        &self,
+        payment_data: &SendPaymentData,
+    ) -> Result<u128, PathFindError> {
+        #[cfg(feature = "metrics")]
+        {
+            let mut stats = self.payment_find_path_stats.lock();
+            *stats.entry(payment_data.payment_hash).or_insert(0) += 1;
+        }
+
+        match self.find_path(
+            self.get_source_pubkey(),
+            payment_data.target_pubkey,
+            None,
+            None,
+            payment_data.udt_type_script.clone(),
+            payment_data.final_tlc_expiry_delta,
+            payment_data.tlc_expiry_limit,
+            payment_data.allow_self_payment,
+            &payment_data.hop_hints,
+            &payment_data.channel_stats,
+            payment_data.allow_mpp(),
+        ) {
+            Ok(p) => Ok(p.last().expect("must got hop").amount_received),
+            Err(err) => Err(err),
+        }
     }
 
     // This function attempts to find a path for the given `amount` using binary search.
@@ -1472,7 +1524,7 @@ where
         &self,
         source: Pubkey,
         target: Pubkey,
-        amount: u128,
+        amount: Option<u128>,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
         final_tlc_expiry: u64,
@@ -1489,18 +1541,20 @@ where
 
         let route_to_self = source == target;
 
-        if amount == 0 {
-            return Err(PathFindError::Amount(
-                "amount must be greater than 0".to_string(),
-            ));
-        }
+        if let Some(amount) = amount {
+            if amount == 0 {
+                return Err(PathFindError::Amount(
+                    "amount must be greater than 0".to_string(),
+                ));
+            }
 
-        if amount.checked_add(max_fee_amount.unwrap_or(0)).is_none() {
-            return Err(PathFindError::Amount(format!(
-                "amount {} + max_fee_amount {} overflow",
-                amount,
-                max_fee_amount.unwrap_or(0)
-            )));
+            if amount.checked_add(max_fee_amount.unwrap_or(0)).is_none() {
+                return Err(PathFindError::Amount(format!(
+                    "amount {} + max_fee_amount {} overflow",
+                    amount,
+                    max_fee_amount.unwrap_or(0)
+                )));
+            }
         }
 
         if source == target && !allow_self {
@@ -1516,9 +1570,10 @@ where
         }
 
         if route_to_self {
+            let check_amount = amount.unwrap_or(0);
             let direct_channels = self.adjust_target_for_route_self(
                 source,
-                amount,
+                check_amount,
                 final_tlc_expiry,
                 &udt_type_script,
                 tlc_expiry_limit,
@@ -1527,12 +1582,12 @@ where
             );
             for (edge, new_target, expiry_delta, fee) in direct_channels {
                 let final_tlc_expiry = final_tlc_expiry.saturating_add(expiry_delta);
-                let amount = amount.saturating_add(fee);
+                let next_amount = amount.map(|a| a.saturating_add(fee));
                 let max_fee_amount = max_fee_amount.map(|x| x.saturating_sub(fee));
                 if let Ok(res) = self.inner_find_path(
                     source,
                     new_target,
-                    amount,
+                    next_amount,
                     max_fee_amount,
                     udt_type_script.clone(),
                     final_tlc_expiry,
@@ -1571,7 +1626,7 @@ where
         &self,
         source: Pubkey,
         target: Pubkey,
-        amount: u128,
+        amount: Option<u128>,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
         final_tlc_expiry_delta: u64,
@@ -1596,7 +1651,10 @@ where
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
 
         let expiry = final_tlc_expiry_delta;
-        if !route_to_self {
+        let is_max_capacity_search = amount.is_none();
+        let search_amount = amount.unwrap_or(0);
+
+        if !route_to_self && !is_max_capacity_search {
             // The calculation of probability and distance requires a capacity of the channel.
             // We don't know the capacity of the channels in the hop hints. We just assume that the capacity
             // of these channels is sufficiently large.
@@ -1620,13 +1678,14 @@ where
                 // We didn't use the outbound fees for B in channel 2 at all. This is different from lnd,
                 // which calculates both the inbound fees in channel 1 and the outbound fees in channel 2.
                 // For now, we set the fees to be 0. We may need to change this in the future.
-                let fee =
-                    calculate_tlc_forward_fee(amount, hint.fee_rate as u128).map_err(|err| {
+                let fee = calculate_tlc_forward_fee(search_amount, hint.fee_rate as u128).map_err(
+                    |err| {
                         PathFindError::Overflow(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
                         ))
-                    })?;
+                    },
+                )?;
                 // hop hint is only used for private channels, we assume there is no tlc_min_value limit
                 let tlc_min_val = 0;
                 self.eval_and_update(
@@ -1635,7 +1694,7 @@ where
                     sufficiently_large_capacity,
                     hint.pubkey,
                     target,
-                    amount,
+                    search_amount,
                     fee,
                     expiry,
                     hint.tlc_expiry_delta,
@@ -1648,15 +1707,19 @@ where
                 );
             }
         }
-        assert_ne!(source, target);
+        debug_assert_ne!(source, target);
 
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
             tlc_min_value: 0,
-            weight: 0,
+            weight: if is_max_capacity_search { u128::MAX } else { 0 },
             distance: 0,
-            amount_to_send: amount,
+            amount_to_send: if is_max_capacity_search {
+                u128::MAX
+            } else {
+                search_amount
+            },
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
@@ -1697,6 +1760,54 @@ where
                 }
 
                 edges_expanded += 1;
+
+                if is_max_capacity_search {
+                    let cur_capacity = cur_hop.weight;
+                    let edge_capacity = channel_info.capacity;
+                    // TODO: check htlc_maximum_msat if available in ChannelUpdateInfo
+                    if !channel_update.enabled {
+                        continue;
+                    }
+
+                    let expiry_delta = if is_source {
+                        0
+                    } else {
+                        channel_update.tlc_expiry_delta
+                    };
+                    let incoming_tlc_expiry =
+                        cur_hop.incoming_tlc_expiry.saturating_add(expiry_delta);
+                    if incoming_tlc_expiry > tlc_expiry_limit {
+                        continue;
+                    }
+
+                    let new_capacity = cur_capacity.min(edge_capacity);
+                    let old_entry = distances.get(&from);
+                    let old_capacity = old_entry.map(|n| n.weight).unwrap_or(0);
+
+                    if new_capacity > old_capacity {
+                        let new_distance = u128::MAX - new_capacity;
+                        let new_node = NodeHeapElement {
+                            node_id: from,
+                            weight: new_capacity,
+                            distance: new_distance,
+                            amount_to_send: new_capacity,
+                            tlc_min_value: 0,
+                            incoming_tlc_expiry,
+                            fee_charged: 0,
+                            probability: 1.0,
+                            pending_count: 0,
+                            next_hop: Some(RouterHop {
+                                target: cur_hop.node_id,
+                                channel_outpoint: channel_info.out_point().clone(),
+                                amount_received: new_capacity,
+                                incoming_tlc_expiry,
+                            }),
+                        };
+                        distances.insert(from, new_node.clone());
+                        nodes_heap.push(new_node);
+                    }
+                    continue;
+                }
 
                 let next_hop_received_amount = cur_hop.amount_to_send;
                 let fee = if is_source {
@@ -1742,13 +1853,15 @@ where
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
-                    if amount_to_send > amount.saturating_add(max_fee_amount) {
-                        debug!(
-                            "amount_to_send: {:?} is greater than sum_amount sum_amount: {:?}",
-                            amount_to_send,
-                            amount + max_fee_amount
-                        );
-                        continue;
+                    if let Some(amount) = amount {
+                        if amount_to_send > amount.saturating_add(max_fee_amount) {
+                            debug!(
+                                "amount_to_send: {:?} is greater than sum_amount sum_amount: {:?}",
+                                amount_to_send,
+                                amount + max_fee_amount
+                            );
+                            continue;
+                        }
                     }
                 }
 

@@ -227,7 +227,7 @@ impl MockNetworkGraph {
         self.graph.find_path(
             source,
             target,
-            amount,
+            Some(amount),
             Some(max_fee),
             None,
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -252,7 +252,7 @@ impl MockNetworkGraph {
         self.graph.find_path(
             source,
             target,
-            amount,
+            Some(amount),
             Some(max_fee),
             Some(udt_type_script),
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -741,7 +741,7 @@ fn test_graph_find_path_err() {
     let route = network.graph.find_path(
         node1.into(),
         no_exits_public_key.into(),
-        100,
+        Some(100),
         Some(1000),
         None,
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -756,7 +756,7 @@ fn test_graph_find_path_err() {
     let route = network.graph.find_path(
         no_exits_public_key.into(),
         node1.into(),
-        100,
+        Some(100),
         Some(1000),
         None,
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -783,7 +783,7 @@ fn test_graph_find_path_node_order() {
     let route = network.graph.find_path(
         node1.into(),
         node3.into(),
-        100,
+        Some(100),
         Some(1000),
         None,
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -812,7 +812,7 @@ fn test_graph_build_route_with_expiry_limit() {
     let route = network.graph.find_path(
         node1.into(),
         node2.into(),
-        100,
+        Some(100),
         Some(1000),
         None,
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -827,7 +827,7 @@ fn test_graph_build_route_with_expiry_limit() {
     let route = network.graph.find_path(
         node1.into(),
         node2.into(),
-        100,
+        Some(100),
         Some(1000),
         None,
         FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -1276,6 +1276,7 @@ fn test_graph_mark_failed_node() {
         invoice: None,
         final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -1827,7 +1828,7 @@ fn test_graph_find_path_source_with_multiple_edges_fee_rate() {
         .find_path(
             node1.into(),
             node3.into(),
-            100,
+            Some(100),
             Some(1000),
             None,
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -1872,7 +1873,7 @@ fn test_graph_find_path_source_with_multiple_edges_with_different_fee_rate() {
         .find_path(
             node1.into(),
             node3.into(),
-            100,
+            Some(100),
             Some(1000),
             None,
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -1917,7 +1918,7 @@ fn test_graph_find_path_source_with_multiple_edges_with_invalid_tlc_delta() {
         .find_path(
             node1.into(),
             node3.into(),
-            100,
+            Some(100),
             Some(1000),
             None,
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -1970,7 +1971,7 @@ fn test_graph_find_path_will_consider_tlc_expiry_delta() {
         .find_path(
             node1.into(),
             node3.into(),
-            100000,
+            Some(100000),
             Some(1000),
             None,
             FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
@@ -1985,4 +1986,98 @@ fn test_graph_find_path_will_consider_tlc_expiry_delta() {
     eprintln!("router: {:?}", route);
     // source node will not charge fee, even the edges[2] fee rate is high
     assert_eq!(route[1].channel_outpoint, network.edges[1].2);
+}
+
+#[test]
+fn test_graph_find_path_max_capacity() {
+    init_tracing();
+
+    let mut network = MockNetworkGraph::new(6);
+    let node1 = network.keys[1];
+    let node4 = network.keys[4];
+
+    // Path 1: 1 -> 2 -> 4, capacity 100
+    network.add_edge(1, 2, Some(100), Some(0));
+    network.add_edge(2, 4, Some(100), Some(0));
+
+    // Path 2: 1 -> 3 -> 4, capacity 500
+    network.add_edge(1, 3, Some(500), Some(0));
+    network.add_edge(3, 4, Some(500), Some(0));
+
+    let route = network
+        .graph
+        .find_path(
+            node1.into(),
+            node4.into(),
+            None, // Find max capacity path
+            None,
+            None,
+            FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+            false,
+            &[],
+            &Default::default(),
+            true,
+        )
+        .unwrap();
+
+    eprintln!("router: {:?}", route);
+    assert_eq!(route.len(), 2);
+    // Should choose path via node 3 (index 1 in route, since route is reversed? No, route is source to target)
+    // Route[0] is 1->3, Route[1] is 3->4.
+    // We expect edges[2] and edges[3]
+    assert_eq!(route[0].channel_outpoint, network.edges[2].2);
+    assert_eq!(route[1].channel_outpoint, network.edges[3].2);
+
+    // Check amount_received (capacity)
+    // The bottleneck capacity is 500.
+    assert_eq!(route[0].amount_received, 500);
+    assert_eq!(route[1].amount_received, 500);
+}
+
+#[test]
+fn test_graph_find_path_max_capacity_with_fee_rate() {
+    init_tracing();
+
+    let mut network = MockNetworkGraph::new(6);
+    let node1 = network.keys[1];
+    let node4 = network.keys[4];
+
+    // Path 1: 1 -> 2 -> 4, capacity 100
+    network.add_edge(1, 2, Some(100), Some(10));
+    network.add_edge(2, 4, Some(100), Some(10));
+
+    // Path 2: 1 -> 3 -> 4, capacity 500
+    network.add_edge(1, 3, Some(500), Some(10));
+    network.add_edge(3, 4, Some(500), Some(10));
+
+    let route = network
+        .graph
+        .find_path(
+            node1.into(),
+            node4.into(),
+            None, // Find max capacity path
+            None,
+            None,
+            FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+            false,
+            &[],
+            &Default::default(),
+            true,
+        )
+        .unwrap();
+
+    eprintln!("router: {:?}", route);
+    assert_eq!(route.len(), 2);
+    // Should choose path via node 3 (index 1 in route, since route is reversed? No, route is source to target)
+    // Route[0] is 1->3, Route[1] is 3->4.
+    // We expect edges[2] and edges[3]
+    assert_eq!(route[0].channel_outpoint, network.edges[2].2);
+    assert_eq!(route[1].channel_outpoint, network.edges[3].2);
+
+    // Check amount_received (capacity)
+    // Now we don't consider fee rate for max_capacity_search
+    assert_eq!(route[0].amount_received, 500);
+    assert_eq!(route[1].amount_received, 500);
 }
