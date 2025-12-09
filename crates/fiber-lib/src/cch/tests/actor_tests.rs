@@ -344,12 +344,14 @@ fn create_test_lightning_invoice() -> lightning_invoice::Bolt11Invoice {
     let payment_secret = lightning_invoice::PaymentSecret([0u8; 32]);
 
     // Build the invoice with current timestamp (will be valid for 1 hour)
+    // Use 36 blocks (~6 hours) for final CLTV, which is less than half of the default
+    // CKB final TLC expiry (20 hours), satisfying the cross-chain safety requirement.
     LnInvoiceBuilder::new(LnCurrency::Bitcoin)
         .description("test invoice".to_string())
         .payment_hash(payment_hash)
         .payment_secret(payment_secret)
         .current_timestamp()
-        .min_final_cltv_expiry_delta(144)
+        .min_final_cltv_expiry_delta(36)
         .amount_milli_satoshis(100_000_000) // 100k sats
         .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
         .expect("build lightning invoice")

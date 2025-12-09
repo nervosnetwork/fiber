@@ -290,6 +290,15 @@ impl CchState {
         tracing::debug!("BTC invoice: {:?}", invoice);
         let payment_hash = (*invoice.payment_hash()).into();
 
+        // Validate that outgoing BTC invoice's final CLTV is less than half of incoming CKB invoice's final TLC expiry.
+        // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
+        // BTC uses blocks (~10 min each), CKB uses seconds.
+        let btc_final_cltv_seconds = invoice.min_final_cltv_expiry_delta() * 600;
+        let ckb_final_tlc_seconds = self.config.ckb_final_tlc_expiry_delta_seconds;
+        if btc_final_cltv_seconds >= ckb_final_tlc_seconds / 2 {
+            return Err(CchError::BTCInvoiceFinalTlcExpiryDeltaTooLarge);
+        }
+
         let outgoing_invoice_expiry_delta_seconds = invoice
             .expires_at()
             .and_then(|expired_at| expired_at.checked_sub(duration_since_epoch))
@@ -370,6 +379,19 @@ impl CchState {
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
         let payment_hash = *invoice.payment_hash();
         let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
+
+        // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
+        // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
+        // CKB uses milliseconds, BTC uses blocks (~10 min each).
+        let ckb_final_tlc_millis = invoice
+            .final_tlc_minimum_expiry_delta()
+            .copied()
+            .unwrap_or(0);
+        let btc_final_cltv_millis = self.config.btc_final_tlc_expiry_delta_blocks * 600 * 1000;
+        if ckb_final_tlc_millis >= btc_final_cltv_millis / 2 {
+            return Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge);
+        }
+
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
         // Convert timestamp + expiry_time to the expiry time relative to `duration_since`.
         let outgoing_invoice_expiry_delta_seconds = match invoice.expiry_time() {

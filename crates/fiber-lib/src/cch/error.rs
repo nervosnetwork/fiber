@@ -15,16 +15,16 @@ pub enum CchError {
     BTCInvoiceExpired,
     #[error("BTC invoice missing amount")]
     BTCInvoiceMissingAmount,
-    #[error("BTC invoice final TLC expiry delta is too small")]
-    BTCInvoiceFinalTlcExpiryDeltaTooSmall,
+    #[error("BTC invoice final TLC expiry delta exceeds safe limit for cross-chain swap")]
+    BTCInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("CKB invoice error: {0}")]
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
     #[error("CKB invoice expired")]
     CKBInvoiceExpired,
     #[error("CKB invoice missing amount")]
     CKBInvoiceMissingAmount,
-    #[error("CKB invoice final TLC expiry delta is too small")]
-    CKBInvoiceFinalTlcExpiryDeltaTooSmall,
+    #[error("CKB invoice final TLC expiry delta exceeds safe limit for cross-chain swap")]
+    CKBInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("ReceiveBTC order payment amount is too small")]
     ReceiveBTCOrderAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too large")]

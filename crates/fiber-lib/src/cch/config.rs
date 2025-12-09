@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use clap_serde_derive::ClapSerde;
 
 /// Default cross-chain order relative expiry time in seconds.
-pub const DEFAULT_ORDER_EXPIRY_DELTA_SECONDS: u64 = 24 * 60 * 60; // 24 hours
+pub const DEFAULT_ORDER_EXPIRY_DELTA_SECONDS: u64 = 36 * 60 * 60; // 36 hours
 /// Default BTC final-hop HTLC expiry time in blocks.
-pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS: u64 = 120; // 20 hours
+pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS: u64 = 180; // 30 hours
 /// Default CKB final-hop HTLC expiry delta in seconds.
-pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS: u64 = 20 * 60 * 60; // 20 hours
+pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS: u64 = 30 * 60 * 60; // 30 hours
 /// Default minimum outgoing invoice relative expiry time in seconds.
 pub const DEFAULT_MIN_OUTGOING_INVOICE_EXPIRY_DELTA_SECONDS: u64 = 6 * 60 * 60; // 6 hours
 
