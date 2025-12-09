@@ -2814,12 +2814,19 @@ where
                             );
                         }
                     }
-                    remain_amount -= session_route.receiver_amount();
+                    let current_amount = session_route.receiver_amount();
+                    remain_amount -= current_amount;
                     target_amount = remain_amount;
                     if let Some(fee) = max_fee {
                         max_fee = Some(fee - session_route.fee());
                     }
                     result.push(attempt);
+                    if remain_amount > 0
+                        && remain_amount
+                            > current_amount * (session.max_parts() - result.len()) as u128
+                    {
+                        break;
+                    }
                 }
             };
         }

@@ -3409,7 +3409,7 @@ async fn test_send_mpp_with_reverse_node_send_back() {
         4,
     )
     .await;
-    let [node_0, _node_1, node_2, _node_3] = nodes.try_into().expect("2 nodes");
+    let [node_0, _node_1, node_2, _node_3] = nodes.try_into().expect("4 nodes");
 
     // node 0 send to node 2 with 30000000000 CKB
     for _ in 0..3 {
@@ -3429,7 +3429,9 @@ async fn test_send_mpp_with_reverse_node_send_back() {
         .send_mpp_payment(&node_2, 20000000000, Some(16))
         .await;
     eprintln!("res: {:?}", res);
-    assert!(res.unwrap_err().contains("no path found"));
+    assert!(res
+        .unwrap_err()
+        .contains("Failed to build enough routes for MPP payment"));
 
     // now node 2 send back to node 0 20000000000 CKB
     for _ in 0..2 {
@@ -4026,4 +4028,27 @@ async fn test_send_payment_mpp_with_node_not_in_graph() {
 
     let error = payment_hash.unwrap_err().to_string();
     assert!(error.contains("no path found"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_mpp_find_path_perf() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let result = node_0
+        .send_mpp_payment(&node_2, 100000 * 30, Some(10))
+        .await;
+
+    assert!(result.is_err());
 }
