@@ -31,6 +31,8 @@ pub enum CchError {
     ReceiveBTCOrderAmountTooLarge,
     #[error("Expect preimage in settled payment but missing")]
     SettledPaymentMissingPreimage,
+    #[error("Preimage hash mismatch")]
+    PreimageHashMismatch,
     #[error("Invalid transition from {0:?} to {1:?}")]
     InvalidTransition(CchOrderStatus, CchOrderStatus),
     #[error("System time error: {0}")]

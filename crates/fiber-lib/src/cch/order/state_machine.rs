@@ -44,6 +44,15 @@ impl CchOrderStateMachine {
                 if status == PaymentStatus::Success && payment_preimage.is_none() {
                     return Err(CchError::SettledPaymentMissingPreimage);
                 }
+                // Verify preimage hashes to payment_hash if provided
+                if let Some(ref preimage) = payment_preimage {
+                    use crate::fiber::hash_algorithm::HashAlgorithm;
+                    let hash_algorithm = HashAlgorithm::Sha256;
+                    let computed_hash = hash_algorithm.hash(*preimage);
+                    if computed_hash.as_slice() != order.payment_hash.as_ref() {
+                        return Err(CchError::PreimageHashMismatch);
+                    }
+                }
                 let new_status = Self::try_transite_to(order, status.into(), move || {
                     failure_reason
                         .unwrap_or_else(|| format!("outgoing payment failed: {:?}", status))
