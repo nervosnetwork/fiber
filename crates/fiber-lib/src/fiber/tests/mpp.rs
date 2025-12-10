@@ -58,25 +58,26 @@ async fn test_send_mpp_basic_two_channels_one_time() {
         .await
         .unwrap();
     eprintln!("find_path_count: {}", find_path_count);
+    assert_eq!(find_path_count, 4);
 
-    // let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    // dbg!(&payment_session.status, &payment_session.attempts_count());
+    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    dbg!(&payment_session.status, &payment_session.attempts_count());
 
-    // let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
-    // let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
-    // dbg!(node_0_balance, node_1_balance);
-    // assert_eq!(node_0_balance, 0);
-    // assert_eq!(node_1_balance, 10000000000);
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[0]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
+    dbg!(node_0_balance, node_1_balance);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
 
-    // let node_0_balance = node_0.get_local_balance_from_channel(channels[1]);
-    // let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
-    // dbg!(node_0_balance, node_1_balance);
-    // assert_eq!(node_0_balance, 0);
-    // assert_eq!(node_1_balance, 10000000000);
+    let node_0_balance = node_0.get_local_balance_from_channel(channels[1]);
+    let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    dbg!(node_0_balance, node_1_balance);
+    assert_eq!(node_0_balance, 0);
+    assert_eq!(node_1_balance, 10000000000);
 
-    // let invoice = node_1.get_invoice_status(&payment_hash).unwrap();
-    // eprintln!("invoice status: {:?}", invoice);
-    // assert_eq!(invoice, CkbInvoiceStatus::Paid);
+    let invoice = node_1.get_invoice_status(&payment_hash).unwrap();
+    eprintln!("invoice status: {:?}", invoice);
+    assert_eq!(invoice, CkbInvoiceStatus::Paid);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

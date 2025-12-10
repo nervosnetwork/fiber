@@ -1313,25 +1313,27 @@ where
             );
             match self.find_path_with_payment_data(source, mid, max_fee_amount, payment_data) {
                 Ok(route) => {
-                    // Found a path for `mid`.
-                    // Try to see if this path can support the target `amount`.
-                    // If it can, we found a valid path for the target amount and we can stop the binary search.
-                    if let Some(optimized_route) = self.check_route_amount(
-                        &route,
-                        source,
-                        amount,
-                        max_fee_amount,
-                        payment_data,
-                    ) {
+                    // Try to find the max capacity on this path up to `amount`.
+                    let (optimized_route, optimized_amount) = self
+                        .find_max_routable_amount_on_path(
+                            &route,
+                            source,
+                            mid,
+                            amount,
+                            max_fee_amount,
+                            payment_data,
+                        );
+
+                    if optimized_amount == amount {
                         return Ok((optimized_route, amount));
                     }
 
-                    if mid > amount_for_best_route {
-                        best_route_found = Some(route);
-                        amount_for_best_route = mid;
+                    if optimized_amount > amount_for_best_route {
+                        best_route_found = Some(optimized_route);
+                        amount_for_best_route = optimized_amount;
                     }
 
-                    low = mid.saturating_add(1);
+                    low = optimized_amount.saturating_add(1);
                 }
                 Err(PathFindError::NoPathFound) => {
                     // `mid` is too high, try smaller.
@@ -1351,9 +1353,45 @@ where
         }
     }
 
+    fn find_max_routable_amount_on_path(
+        &self,
+        route: &[RouterHop],
+        source: Pubkey,
+        lower_bound: u128,
+        upper_bound: u128,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
+    ) -> (Vec<RouterHop>, u128) {
+        if let Some(res) =
+            self.check_amount_on_route(route, source, upper_bound, max_fee_amount, payment_data)
+        {
+            return (res, upper_bound);
+        }
+
+        let mut low = lower_bound;
+        let mut high = upper_bound.saturating_sub(1);
+        let mut best_amount = lower_bound;
+        let mut best_route = route.to_vec();
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if let Some(res) =
+                self.check_amount_on_route(route, source, mid, max_fee_amount, payment_data)
+            {
+                debug!("haha update from: {} => new mid {:?}", best_amount, mid);
+                best_amount = mid;
+                best_route = res;
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+        (best_route, best_amount)
+    }
+
     // Checks if the given route can support the specified amount.
     // Returns the route with updated amounts if successful.
-    fn check_route_amount(
+    fn check_amount_on_route(
         &self,
         route: &[RouterHop],
         source: Pubkey,
