@@ -1314,6 +1314,7 @@ where
             match self.find_path_with_payment_data(source, mid, max_fee_amount, payment_data) {
                 Ok(route) => {
                     // Try to find the max capacity on this path up to `amount`.
+                    // the binary check in find_max_routable_amount_on_path is cheaper
                     let (optimized_route, optimized_amount) = self
                         .find_max_routable_amount_on_path(
                             &route,
@@ -1368,23 +1369,35 @@ where
             return (res, upper_bound);
         }
 
-        let mut low = lower_bound;
-        let mut high = upper_bound.saturating_sub(1);
-        let mut best_amount = lower_bound;
         let mut best_route = route.to_vec();
+        let mut best_amount = lower_bound;
 
-        while low < high {
+        let mut low = lower_bound + 1;
+        let mut high = upper_bound.saturating_sub(1);
+
+        while low <= high {
             let mid = low + (high - low) / 2;
             if let Some(res) =
                 self.check_amount_on_route(route, source, mid, max_fee_amount, payment_data)
             {
-                debug!("haha update from: {} => new mid {:?}", best_amount, mid);
                 best_amount = mid;
                 best_route = res;
                 low = mid + 1;
             } else {
                 high = mid - 1;
             }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            // make sure the logic in check_amount_on_route is consistent with find_path_with_payment_data
+            let res = self.find_path_with_payment_data(
+                source,
+                best_route.last().unwrap().amount_received,
+                max_fee_amount,
+                payment_data,
+            );
+            debug_assert!(res.is_ok(), "must find path for best amount");
         }
         (best_route, best_amount)
     }
@@ -1409,23 +1422,28 @@ where
         let mut current_probability = 1.0;
         let mut current_pending_count = 0;
 
-        // Iterate backwards to calculate required input amounts and check constraints
         for i in (0..new_route.len()).rev() {
             let hop = &mut new_route[i];
             let from_node = if i == 0 { source } else { route[i - 1].target };
+            let is_source = from_node == source;
 
-            // Update hop data
-            hop.amount_received = current_amount;
-            hop.incoming_tlc_expiry = current_expiry;
+            let (channel_info, channel_update) =
+                self.get_outbound_channel_info_and_update(&hop.channel_outpoint, from_node);
 
-            // Get channel info
-            let (channel_info, channel_update) = self
-                .get_outbound_channel_info_and_update(&hop.channel_outpoint, from_node)
-                .into();
             let channel_info = channel_info?;
             let channel_update = channel_update?;
 
-            // Check capacity and liquidity
+            let fee = if is_source {
+                0
+            } else {
+                calculate_tlc_forward_fee(current_amount, channel_update.fee_rate as u128).ok()?
+            };
+            let amount_to_send = current_amount.checked_add(fee)?;
+
+            // Now update hop data with the amount this hop will receive
+            hop.amount_received = current_amount;
+            hop.incoming_tlc_expiry = current_expiry;
+
             let sent_node = channel_info.get_send_node(from_node)?;
             let sent_amount = payment_data
                 .channel_stats
@@ -1436,11 +1454,14 @@ where
                 limit = limit.min(liq.saturating_sub(sent_amount));
             }
 
-            if current_amount > limit {
+            if amount_to_send > limit {
                 return None;
             }
 
-            // Check probability
+            if amount_to_send < channel_update.tlc_minimum_value && !payment_data.allow_mpp {
+                return None;
+            }
+
             let probability = self.history.eval_probability(
                 from_node,
                 hop.target,
@@ -1465,11 +1486,8 @@ where
                 return None;
             }
 
-            // Calculate input for next iteration (which is previous hop)
-            if from_node != source {
-                let fee_rate = channel_update.fee_rate as u128;
-                let fee = calculate_tlc_forward_fee(current_amount, fee_rate).ok()?;
-                current_amount = current_amount.checked_add(fee)?;
+            current_amount = amount_to_send;
+            if !is_source {
                 current_expiry = current_expiry.checked_add(channel_update.tlc_expiry_delta)?;
             }
         }
@@ -2049,6 +2067,10 @@ where
             // TODO check total outbound balance and return error if it's not enough
             // this can help us early return if the payment is not possible to be sent
             // otherwise when PathFind error is returned, we need to retry with half amount
+            error!(
+                "no path found from {:?} to {:?} for amount: {:?}",
+                source, target, amount
+            );
             return Err(PathFindError::NoPathFound);
         }
         if let Some(edge) = last_edge {
