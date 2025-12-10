@@ -1267,10 +1267,8 @@ where
         }
     }
 
-    // This function attempts to find a path for the given `amount` using binary search.
+    // This function attempts to find a path for the given `amount` using max capacity search.
     // It will try to find the largest feasible sub-amount that can be sent.
-    // not a efficient algorithm, but it is simple and works for most cases.
-    // maybe we can use a more efficient algorithm in the future.
     fn binary_find_path_in_range(
         &self,
         source: Pubkey,
@@ -1280,10 +1278,9 @@ where
         payment_data: &SendPaymentData,
     ) -> Result<(Vec<RouterHop>, u128), PathFindError> {
         debug!(
-            "binary_find_path_in_range for amount: {} low_bound: {} max_fee_amount: {:?}",
+            "find_path_in_range (max capacity) for amount: {} low_bound: {} max_fee_amount: {:?}",
             amount, amount_low_bound, max_fee_amount
         );
-
         let mut low = amount_low_bound;
         let mut high = amount;
 
@@ -1301,7 +1298,7 @@ where
         let max_liquidity = direct_channel_amounts.iter().max().copied().unwrap_or(0);
         high = high.min(max_liquidity);
 
-        const MAX_BINARY_SEARCH_ITERATIONS: usize = 20;
+        const MAX_BINARY_SEARCH_ITERATIONS: usize = 50;
         let mut best_route_found: Option<Vec<RouterHop>> = None;
         let mut amount_for_best_route: u128 = 0;
         let mut iterations = 0;
@@ -1314,14 +1311,26 @@ where
                 "binary_find_path_in_range iterations: {} mid: {}",
                 iterations, mid
             );
-
             match self.find_path_with_payment_data(source, mid, max_fee_amount, payment_data) {
                 Ok(route) => {
-                    // Found a path for `mid`. Store it and try for a larger amount.
+                    // Found a path for `mid`.
+                    // Try to see if this path can support the target `amount`.
+                    // If it can, we found a valid path for the target amount and we can stop the binary search.
+                    if let Some(optimized_route) = self.check_route_amount(
+                        &route,
+                        source,
+                        amount,
+                        max_fee_amount,
+                        payment_data,
+                    ) {
+                        return Ok((optimized_route, amount));
+                    }
+
                     if mid > amount_for_best_route {
                         best_route_found = Some(route);
                         amount_for_best_route = mid;
                     }
+
                     low = mid.saturating_add(1);
                 }
                 Err(PathFindError::NoPathFound) => {
@@ -1340,6 +1349,102 @@ where
         } else {
             return Err(PathFindError::NoPathFound);
         }
+    }
+
+    // Checks if the given route can support the specified amount.
+    // Returns the route with updated amounts if successful.
+    fn check_route_amount(
+        &self,
+        route: &[RouterHop],
+        source: Pubkey,
+        amount: u128,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
+    ) -> Option<Vec<RouterHop>> {
+        if route.is_empty() {
+            return None;
+        }
+
+        let mut new_route = route.to_vec();
+        let mut current_amount = amount;
+        let mut current_expiry = payment_data.final_tlc_expiry_delta;
+        let mut current_probability = 1.0;
+        let mut current_pending_count = 0;
+
+        // Iterate backwards to calculate required input amounts and check constraints
+        for i in (0..new_route.len()).rev() {
+            let hop = &mut new_route[i];
+            let from_node = if i == 0 { source } else { route[i - 1].target };
+
+            // Update hop data
+            hop.amount_received = current_amount;
+            hop.incoming_tlc_expiry = current_expiry;
+
+            // Get channel info
+            let (channel_info, channel_update) = self
+                .get_outbound_channel_info_and_update(&hop.channel_outpoint, from_node)
+                .into();
+            let channel_info = channel_info?;
+            let channel_update = channel_update?;
+
+            // Check capacity and liquidity
+            let sent_node = channel_info.get_send_node(from_node)?;
+            let sent_amount = payment_data
+                .channel_stats
+                .get_channel_sent_amount(channel_info.out_point(), sent_node);
+
+            let mut limit = channel_info.capacity().saturating_sub(sent_amount);
+            if let Some(liq) = channel_update.outbound_liquidity {
+                limit = limit.min(liq.saturating_sub(sent_amount));
+            }
+
+            if current_amount > limit {
+                return None;
+            }
+
+            // Check probability
+            let probability = self.history.eval_probability(
+                from_node,
+                hop.target,
+                &hop.channel_outpoint,
+                current_amount,
+                channel_info.capacity(),
+            );
+
+            current_probability *= probability;
+
+            let pending_count = payment_data
+                .channel_stats
+                .get_channel_count(&hop.channel_outpoint)
+                + current_pending_count;
+            current_pending_count = pending_count;
+
+            if pending_count > 0 {
+                current_probability *= (0.95f64).powi(pending_count as i32);
+            }
+
+            if current_probability < DEFAULT_MIN_PROBABILITY {
+                return None;
+            }
+
+            // Calculate input for next iteration (which is previous hop)
+            if from_node != source {
+                let fee_rate = channel_update.fee_rate as u128;
+                let fee = calculate_tlc_forward_fee(current_amount, fee_rate).ok()?;
+                current_amount = current_amount.checked_add(fee)?;
+                current_expiry = current_expiry.checked_add(channel_update.tlc_expiry_delta)?;
+            }
+        }
+
+        // Check max fee
+        if let Some(max_fee) = max_fee_amount {
+            let total_fee = current_amount.checked_sub(amount)?;
+            if total_fee > max_fee {
+                return None;
+            }
+        }
+
+        Some(new_route)
     }
 
     fn build_router_from_path(
@@ -2175,7 +2280,7 @@ where
                     fee,
                     RouterHop {
                         target: to,
-                        channel_outpoint: channel_outpoint.clone(),
+                        channel_outpoint: channel_info.channel_outpoint.clone(),
                         amount_received: agg_amount,
                         incoming_tlc_expiry: agg_tlc_expiry,
                     },
