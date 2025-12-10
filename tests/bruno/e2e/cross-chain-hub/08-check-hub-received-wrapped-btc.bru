@@ -50,8 +50,8 @@ script:post-response {
   if (i < n) {
     console.log(`Try ${i+1}/${n}`);
   }
-
-  if (parseInt(res.body.result.channels[0].local_balance, 16) >= 100000) {
+  
+  if (parseInt(res.body.result.channels[0].local_balance, 16) === 100000) {
     console.log("Hub has received the payment");
     await new Promise(r => setTimeout(r, 1000));
     bru.setVar("iteration", 0);
