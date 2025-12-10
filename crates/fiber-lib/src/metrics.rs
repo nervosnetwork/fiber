@@ -9,6 +9,7 @@ pub const TOTAL_PEER_COUNT: &str = "fiber.total_peer_count";
 pub const INBOUND_PEER_COUNT: &str = "fiber.inbound_peer_count";
 pub const OUTBOUND_PEER_COUNT: &str = "fiber.outbound_peer_count";
 pub const DOWN_WITH_CHANNEL_PEER_COUNT: &str = "fiber.down_with_channel_peer_count";
+pub const SEND_PAYMENT_FIND_PATH_COUNT: &str = "fiber.send_payment_find_path_count";
 
 pub fn start_metrics(metrics_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let socket_addr = metrics_addr

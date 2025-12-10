@@ -893,6 +893,22 @@ impl NetworkNode {
         .await
     }
 
+    pub async fn get_payment_find_path_count(&self, payment_hash: Hash256) -> Option<u128> {
+        let graph = self.network_graph.read().await;
+        let res = graph
+            .payment_find_path_stats
+            .lock()
+            .get(&payment_hash)
+            .copied();
+        res
+    }
+
+    pub async fn get_payment_path_count_sum(&self) -> u128 {
+        let graph = self.network_graph.read().await;
+        let res = graph.payment_find_path_stats.lock().values().sum();
+        res
+    }
+
     pub fn set_auth_token(&mut self, token: String) {
         self.auth_token = Some(token);
     }

@@ -470,8 +470,8 @@ pub struct NetworkGraph<S> {
     #[cfg(test)]
     pub(crate) add_rand_expiry_delta: bool,
 
-    #[cfg(feature = "metrics")]
-    payment_find_path_stats: Arc<Mutex<HashMap<Hash256, u128>>>,
+    #[cfg(any(feature = "metrics", test))]
+    pub(crate) payment_find_path_stats: Arc<Mutex<HashMap<Hash256, u128>>>,
 }
 
 #[derive(Error, Debug)]
@@ -540,7 +540,7 @@ where
             announce_private_addr,
             #[cfg(test)]
             add_rand_expiry_delta: true,
-            #[cfg(feature = "metrics")]
+            #[cfg(any(feature = "metrics", test))]
             payment_find_path_stats: Default::default(),
         };
         network_graph.load_from_store();
@@ -1143,7 +1143,7 @@ where
     }
 
     /// Get the number of find_path calls for a specific payment_hash
-    #[cfg(feature = "metrics")]
+    #[cfg(any(feature = "metrics", test))]
     pub fn get_payment_find_path_count(&self, payment_hash: &Hash256) -> u128 {
         self.payment_find_path_stats
             .lock()
@@ -1153,7 +1153,7 @@ where
     }
 
     /// Remove the find_path stats for a specific payment_hash
-    #[cfg(feature = "metrics")]
+    #[cfg(any(feature = "metrics", test))]
     pub fn remove_payment_find_path_stats(&self, payment_hash: &Hash256) {
         self.payment_find_path_stats.lock().remove(payment_hash);
     }
@@ -1218,7 +1218,7 @@ where
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<RouterHop>, PathFindError> {
-        #[cfg(feature = "metrics")]
+        #[cfg(any(feature = "metrics", test))]
         {
             let mut stats = self.payment_find_path_stats.lock();
             *stats.entry(payment_data.payment_hash).or_insert(0) += 1;
@@ -1243,7 +1243,7 @@ where
         &self,
         payment_data: &SendPaymentData,
     ) -> Result<u128, PathFindError> {
-        #[cfg(feature = "metrics")]
+        #[cfg(any(feature = "metrics", test))]
         {
             let mut stats = self.payment_find_path_stats.lock();
             *stats.entry(payment_data.payment_hash).or_insert(0) += 1;
@@ -1301,7 +1301,7 @@ where
         let max_liquidity = direct_channel_amounts.iter().max().copied().unwrap_or(0);
         high = high.min(max_liquidity);
 
-        const MAX_BINARY_SEARCH_ITERATIONS: usize = 50;
+        const MAX_BINARY_SEARCH_ITERATIONS: usize = 20;
         let mut best_route_found: Option<Vec<RouterHop>> = None;
         let mut amount_for_best_route: u128 = 0;
         let mut iterations = 0;
@@ -1310,7 +1310,10 @@ where
             iterations += 1;
 
             let mid = low + (high - low) / 2;
-            debug!("iterations: {} mid: {}", iterations, mid);
+            debug!(
+                "binary_find_path_in_range iterations: {} mid: {}",
+                iterations, mid
+            );
 
             match self.find_path_with_payment_data(source, mid, max_fee_amount, payment_data) {
                 Ok(route) => {

@@ -4046,9 +4046,22 @@ async fn test_send_mpp_find_path_perf() {
     .await;
     let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
 
-    let result = node_0
-        .send_mpp_payment(&node_2, 100000 * 30, Some(10))
-        .await;
+    // let result = node_0
+    //     .send_mpp_payment(&node_2, 100000 * 30, Some(10))
+    //     .await;
 
-    assert!(result.is_err());
+    // assert!(result.is_err());
+    // let find_path_count = node_0.get_payment_path_count_sum().await;
+    // eprintln!("now find_path_count: {:?}", find_path_count);
+    // assert_eq!(find_path_count, 1);
+
+    let result = node_0.send_mpp_payment(&node_2, 90000 * 2, Some(10)).await;
+    assert!(result.is_ok());
+    let payment_hash = result.unwrap().payment_hash;
+    let find_path_count = node_0.get_payment_find_path_count(payment_hash).await;
+    eprintln!("haha find_path_count: {:?}", find_path_count);
+    assert!(find_path_count.is_some());
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 }

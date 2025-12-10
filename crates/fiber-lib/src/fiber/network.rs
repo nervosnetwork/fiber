@@ -3185,13 +3185,32 @@ where
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
+        #[cfg(feature = "metrics")]
+        let payment_hash = payment_data.payment_hash;
+
         if !payment_data.dry_run && state.retry_send_payment_count >= MAX_RETRY_SEND_PAYMENTS {
             return Err(Error::InvalidParameter(
                 "Too many pending retrying payment requests".to_string(),
             ));
         }
-        self.send_payment_with_payment_data(myself, state, payment_data)
-            .await
+        let res = self
+            .send_payment_with_payment_data(myself, state, payment_data)
+            .await;
+
+        #[cfg(feature = "metrics")]
+        {
+            if let Some(count) = self
+                .network_graph
+                .read()
+                .await
+                .payment_find_path_stats
+                .lock()
+                .get(&payment_hash)
+            {
+                metrics::gauge!(crate::metrics::SEND_PAYMENT_FIND_PATH_COUNT).set(*count as u32);
+            }
+        }
+        res
     }
 
     async fn on_send_payment_with_router(
