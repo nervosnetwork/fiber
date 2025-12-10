@@ -1538,10 +1538,6 @@ where
             probability *= (0.95f64).powi(pending_count as i32);
         }
 
-        debug!(
-            "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
-            probability, channel_outpoint, from, target
-        );
         if probability < DEFAULT_MIN_PROBABILITY {
             debug!("probability is too low: {:?}", probability);
             return;
@@ -1689,7 +1685,6 @@ where
         }
     }
 
-    // Helper function to get inbound edges for a node, optionally constrained by a route
     fn get_inbound_edges_for_node(
         &self,
         cur_node: Pubkey,
@@ -1697,40 +1692,31 @@ where
         route: Option<&[RouterHop]>,
     ) -> Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
         if let Some(route) = route {
-            // Find the current node in the route and get the edge leading to it
             route
                 .iter()
                 .enumerate()
                 .find(|(_, hop)| hop.target == cur_node)
                 .and_then(|(idx, hop)| {
-                    // Determine the sender node based on position in route
                     let from = if idx == 0 {
                         source
                     } else {
                         route[idx - 1].target
                     };
-
-                    // Get channel info and update for this specific edge
-                    self.get_outbound_channel_info_and_update(&hop.channel_outpoint, from)
-                        .0
-                        .and_then(|channel_info| {
-                            let channel_update = if channel_info.node1() == from {
-                                channel_info.update_of_node1.as_ref()
-                            } else {
-                                channel_info.update_of_node2.as_ref()
-                            }?;
-                            Some(vec![(from, cur_node, channel_info, channel_update)])
-                        })
+                    if let (Some(channel_info), Some(update)) =
+                        self.get_outbound_channel_info_and_update(&hop.channel_outpoint, from)
+                    {
+                        Some(vec![(from, cur_node, channel_info, update)])
+                    } else {
+                        Default::default()
+                    }
                 })
                 .unwrap_or_default()
         } else {
-            // No route constraint: explore all inbound edges
             self.get_node_inbounds(cur_node).collect()
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    // Process max capacity search for an edge
     fn process_max_capacity_edge(
         &self,
         cur_hop: &NodeHeapElement,
