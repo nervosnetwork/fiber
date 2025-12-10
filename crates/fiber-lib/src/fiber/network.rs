@@ -1710,7 +1710,7 @@ where
                 }
 
                 // update metrics
-                #[cfg(feature = "metrics")]
+                #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
                 {
                     // channels
                     metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
@@ -3185,7 +3185,7 @@ where
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
-        #[cfg(feature = "metrics")]
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let payment_hash = payment_data.payment_hash;
 
         if !payment_data.dry_run && state.retry_send_payment_count >= MAX_RETRY_SEND_PAYMENTS {
@@ -3197,7 +3197,7 @@ where
             .send_payment_with_payment_data(myself, state, payment_data)
             .await;
 
-        #[cfg(feature = "metrics")]
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         {
             if let Some(count) = self
                 .network_graph
@@ -4932,9 +4932,9 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        #[cfg(feature = "metrics")]
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let start = now_timestamp_as_millis_u64();
-        #[cfg(feature = "metrics")]
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let name = format!("fiber.network_actor.{}", message);
         match message {
             NetworkActorMessage::Event(event) => {
@@ -4954,7 +4954,7 @@ where
             }
         }
 
-        #[cfg(feature = "metrics")]
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         {
             let end = now_timestamp_as_millis_u64();
             let elapsed = end - start;

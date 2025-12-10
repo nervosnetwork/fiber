@@ -767,7 +767,7 @@ where
         // Note: we don't check the tlc_expiry_delta is too small here, because it does not effect
         // the path finding, and a too small tlc_expiry_delta only makes the hop itself more risky.
         if channel_update.tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
-            warn!(
+            error!(
                 "Channel update has too large expiry delta: {} > {}, channel update: {:?}",
                 channel_update.tlc_expiry_delta, MAX_PAYMENT_TLC_EXPIRY_LIMIT, &channel_update
             );

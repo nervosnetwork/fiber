@@ -146,10 +146,21 @@ pub fn init_tracing() {
     static INIT: Once = Once::new();
 
     INIT.call_once(|| {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .pretty()
-            .init();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .pretty()
+                .init();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // In wasm32, SystemTime is not supported, so we disable timestamps
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .without_time()
+                .init();
+        }
     });
 }
 
