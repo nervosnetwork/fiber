@@ -1321,7 +1321,6 @@ where
                             source,
                             mid,
                             amount,
-                            max_fee_amount,
                             payment_data,
                         );
 
@@ -1360,11 +1359,9 @@ where
         source: Pubkey,
         lower_bound: u128,
         upper_bound: u128,
-        max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> (Vec<RouterHop>, u128) {
-        if let Some(res) =
-            self.check_amount_on_route(route, source, upper_bound, max_fee_amount, payment_data)
+        if let Ok(res) = self.probe_max_capacity_for_route(source, upper_bound, route, payment_data)
         {
             return (res, upper_bound);
         }
@@ -1377,9 +1374,7 @@ where
 
         while low <= high {
             let mid = low + (high - low) / 2;
-            if let Some(res) =
-                self.check_amount_on_route(route, source, mid, max_fee_amount, payment_data)
-            {
+            if let Ok(res) = self.probe_max_capacity_for_route(source, mid, route, payment_data) {
                 best_amount = mid;
                 best_route = res;
                 low = mid + 1;
@@ -1387,120 +1382,30 @@ where
                 high = mid - 1;
             }
         }
-
-        #[cfg(debug_assertions)]
-        {
-            // make sure the logic in check_amount_on_route is consistent with find_path_with_payment_data
-            let res = self.find_path_with_payment_data(
-                source,
-                best_route.last().unwrap().amount_received,
-                max_fee_amount,
-                payment_data,
-            );
-            debug_assert!(res.is_ok(), "must find path for best amount");
-        }
         (best_route, best_amount)
     }
 
-    // Checks if the given route can support the specified amount.
-    // Returns the route with updated amounts if successful.
-    fn check_amount_on_route(
+    fn probe_max_capacity_for_route(
         &self,
-        route: &[RouterHop],
         source: Pubkey,
         amount: u128,
-        max_fee_amount: Option<u128>,
+        route: &[RouterHop],
         payment_data: &SendPaymentData,
-    ) -> Option<Vec<RouterHop>> {
-        if route.is_empty() {
-            return None;
-        }
-
-        let mut new_route = route.to_vec();
-        let mut current_amount = amount;
-        let mut current_expiry = payment_data.final_tlc_expiry_delta;
-        let mut current_probability = 1.0;
-        let mut current_pending_count = 0;
-
-        for i in (0..new_route.len()).rev() {
-            let hop = &mut new_route[i];
-            let from_node = if i == 0 { source } else { route[i - 1].target };
-            let is_source = from_node == source;
-
-            let (channel_info, channel_update) =
-                self.get_outbound_channel_info_and_update(&hop.channel_outpoint, from_node);
-
-            let channel_info = channel_info?;
-            let channel_update = channel_update?;
-
-            let fee = if is_source {
-                0
-            } else {
-                calculate_tlc_forward_fee(current_amount, channel_update.fee_rate as u128).ok()?
-            };
-            let amount_to_send = current_amount.checked_add(fee)?;
-
-            // Now update hop data with the amount this hop will receive
-            hop.amount_received = current_amount;
-            hop.incoming_tlc_expiry = current_expiry;
-
-            let sent_node = channel_info.get_send_node(from_node)?;
-            let sent_amount = payment_data
-                .channel_stats
-                .get_channel_sent_amount(channel_info.out_point(), sent_node);
-
-            let mut limit = channel_info.capacity().saturating_sub(sent_amount);
-            if let Some(liq) = channel_update.outbound_liquidity {
-                limit = limit.min(liq.saturating_sub(sent_amount));
-            }
-
-            if amount_to_send > limit {
-                return None;
-            }
-
-            if amount_to_send < channel_update.tlc_minimum_value && !payment_data.allow_mpp {
-                return None;
-            }
-
-            let probability = self.history.eval_probability(
-                from_node,
-                hop.target,
-                &hop.channel_outpoint,
-                current_amount,
-                channel_info.capacity(),
-            );
-
-            current_probability *= probability;
-
-            let pending_count = payment_data
-                .channel_stats
-                .get_channel_count(&hop.channel_outpoint)
-                + current_pending_count;
-            current_pending_count = pending_count;
-
-            if pending_count > 0 {
-                current_probability *= (0.95f64).powi(pending_count as i32);
-            }
-
-            if current_probability < DEFAULT_MIN_PROBABILITY {
-                return None;
-            }
-
-            current_amount = amount_to_send;
-            if !is_source {
-                current_expiry = current_expiry.checked_add(channel_update.tlc_expiry_delta)?;
-            }
-        }
-
-        // Check max fee
-        if let Some(max_fee) = max_fee_amount {
-            let total_fee = current_amount.checked_sub(amount)?;
-            if total_fee > max_fee {
-                return None;
-            }
-        }
-
-        Some(new_route)
+    ) -> Result<std::vec::Vec<RouterHop>, PathFindError> {
+        self.inner_find_path(
+            source,
+            payment_data.target_pubkey,
+            Some(amount),
+            payment_data.max_fee_amount,
+            payment_data.udt_type_script.clone(),
+            payment_data.final_tlc_expiry_delta,
+            payment_data.tlc_expiry_limit,
+            &payment_data.hop_hints,
+            &payment_data.channel_stats,
+            payment_data.allow_mpp(),
+            None,
+            Some(route),
+        )
     }
 
     fn build_router_from_path(
@@ -1760,6 +1665,7 @@ where
                     channel_stats,
                     allow_mpp,
                     Some(edge),
+                    None,
                 ) {
                     return Ok(res);
                 }
@@ -1778,8 +1684,105 @@ where
                 channel_stats,
                 allow_mpp,
                 None,
+                None,
             )
         }
+    }
+
+    // Helper function to get inbound edges for a node, optionally constrained by a route
+    fn get_inbound_edges_for_node(
+        &self,
+        cur_node: Pubkey,
+        source: Pubkey,
+        route: Option<&[RouterHop]>,
+    ) -> Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        if let Some(route) = route {
+            // Find the current node in the route and get the edge leading to it
+            route
+                .iter()
+                .enumerate()
+                .find(|(_, hop)| hop.target == cur_node)
+                .and_then(|(idx, hop)| {
+                    // Determine the sender node based on position in route
+                    let from = if idx == 0 {
+                        source
+                    } else {
+                        route[idx - 1].target
+                    };
+
+                    // Get channel info and update for this specific edge
+                    self.get_outbound_channel_info_and_update(&hop.channel_outpoint, from)
+                        .0
+                        .and_then(|channel_info| {
+                            let channel_update = if channel_info.node1() == from {
+                                channel_info.update_of_node1.as_ref()
+                            } else {
+                                channel_info.update_of_node2.as_ref()
+                            }?;
+                            Some(vec![(from, cur_node, channel_info, channel_update)])
+                        })
+                })
+                .unwrap_or_default()
+        } else {
+            // No route constraint: explore all inbound edges
+            self.get_node_inbounds(cur_node).collect()
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    // Process max capacity search for an edge
+    fn process_max_capacity_edge(
+        &self,
+        cur_hop: &NodeHeapElement,
+        from: Pubkey,
+        is_source: bool,
+        channel_info: &ChannelInfo,
+        channel_update: &ChannelUpdateInfo,
+        tlc_expiry_limit: u64,
+        distances: &mut HashMap<Pubkey, NodeHeapElement>,
+        nodes_heap: &mut NodeHeap,
+    ) -> bool {
+        if !channel_update.enabled {
+            return false;
+        }
+
+        let expiry_delta = if is_source {
+            0
+        } else {
+            channel_update.tlc_expiry_delta
+        };
+        let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry.saturating_add(expiry_delta);
+        if incoming_tlc_expiry > tlc_expiry_limit {
+            return false;
+        }
+
+        let cur_capacity = cur_hop.weight;
+        let edge_capacity = channel_info.capacity;
+        let new_capacity = cur_capacity.min(edge_capacity);
+        let old_capacity = distances.get(&from).map(|n| n.weight).unwrap_or(0);
+
+        if new_capacity > old_capacity {
+            let new_node = NodeHeapElement {
+                node_id: from,
+                weight: new_capacity,
+                distance: u128::MAX - new_capacity,
+                amount_to_send: new_capacity,
+                tlc_min_value: 0,
+                incoming_tlc_expiry,
+                fee_charged: 0,
+                probability: 1.0,
+                pending_count: 0,
+                next_hop: Some(RouterHop {
+                    target: cur_hop.node_id,
+                    channel_outpoint: channel_info.out_point().clone(),
+                    amount_received: new_capacity,
+                    incoming_tlc_expiry,
+                }),
+            };
+            distances.insert(from, new_node.clone());
+            nodes_heap.push(new_node);
+        }
+        true
     }
 
     // the algorithm works from target-to-source to find the shortest path
@@ -1799,6 +1802,7 @@ where
         channel_stats: &GraphChannelStat,
         allow_mpp: bool,
         last_edge: Option<RouterHop>,
+        route: Option<&[RouterHop]>,
     ) -> Result<Vec<RouterHop>, PathFindError> {
         debug!(
             "begin inner_find_path from {:?} to {:?} amount: {:?}",
@@ -1871,7 +1875,7 @@ where
                 );
             }
         }
-        debug_assert_ne!(source, target);
+        debug_assert!(source != target || route.is_some());
 
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
@@ -1898,7 +1902,8 @@ where
                 break;
             }
 
-            for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
+            for (from, to, channel_info, channel_update) in
+                self.get_inbound_edges_for_node(cur_hop.node_id, source, route)
             {
                 let is_source = from == source;
                 if allow_mpp && !self.is_node_support_mpp(&from) {
@@ -1926,50 +1931,16 @@ where
                 edges_expanded += 1;
 
                 if is_max_capacity_search {
-                    let cur_capacity = cur_hop.weight;
-                    let edge_capacity = channel_info.capacity;
-                    // TODO: check htlc_maximum_msat if available in ChannelUpdateInfo
-                    if !channel_update.enabled {
-                        continue;
-                    }
-
-                    let expiry_delta = if is_source {
-                        0
-                    } else {
-                        channel_update.tlc_expiry_delta
-                    };
-                    let incoming_tlc_expiry =
-                        cur_hop.incoming_tlc_expiry.saturating_add(expiry_delta);
-                    if incoming_tlc_expiry > tlc_expiry_limit {
-                        continue;
-                    }
-
-                    let new_capacity = cur_capacity.min(edge_capacity);
-                    let old_entry = distances.get(&from);
-                    let old_capacity = old_entry.map(|n| n.weight).unwrap_or(0);
-
-                    if new_capacity > old_capacity {
-                        let new_distance = u128::MAX - new_capacity;
-                        let new_node = NodeHeapElement {
-                            node_id: from,
-                            weight: new_capacity,
-                            distance: new_distance,
-                            amount_to_send: new_capacity,
-                            tlc_min_value: 0,
-                            incoming_tlc_expiry,
-                            fee_charged: 0,
-                            probability: 1.0,
-                            pending_count: 0,
-                            next_hop: Some(RouterHop {
-                                target: cur_hop.node_id,
-                                channel_outpoint: channel_info.out_point().clone(),
-                                amount_received: new_capacity,
-                                incoming_tlc_expiry,
-                            }),
-                        };
-                        distances.insert(from, new_node.clone());
-                        nodes_heap.push(new_node);
-                    }
+                    self.process_max_capacity_edge(
+                        &cur_hop,
+                        from,
+                        is_source,
+                        channel_info,
+                        channel_update,
+                        tlc_expiry_limit,
+                        &mut distances,
+                        &mut nodes_heap,
+                    );
                     continue;
                 }
 

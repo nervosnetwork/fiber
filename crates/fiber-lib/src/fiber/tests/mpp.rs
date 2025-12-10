@@ -44,7 +44,6 @@ async fn test_send_mpp_basic_two_channels_one_time() {
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
     let res = node_0.send_mpp_payment(&node_1, 20000000000, Some(2)).await;
 
-    eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     let invoice = node_1.get_invoice_status(&payment_hash).unwrap();
@@ -58,7 +57,7 @@ async fn test_send_mpp_basic_two_channels_one_time() {
         .await
         .unwrap();
     eprintln!("find_path_count: {}", find_path_count);
-    assert_eq!(find_path_count, 5);
+    assert_eq!(find_path_count, 4);
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -3084,12 +3083,12 @@ async fn test_mpp_can_not_find_path_with_max_parts() {
     .await;
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
-    // let res = node_0.send_mpp_payment(&node_1, 50000000000, Some(4)).await;
-    // eprintln!("query res: {:?}", res);
+    let res = node_0.send_mpp_payment(&node_1, 50000000000, Some(4)).await;
+    eprintln!("query res: {:?}", res);
 
-    // assert!(res.is_err());
-    // let error = res.unwrap_err().to_string();
-    // assert!(error.contains("Failed to build enough routes"));
+    assert!(res.is_err());
+    let error = res.unwrap_err().to_string();
+    assert!(error.contains("Failed to build enough routes"));
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
@@ -4065,7 +4064,7 @@ async fn test_send_mpp_find_path_perf() {
     assert!(result.is_ok());
     let payment_hash = result.unwrap().payment_hash;
     let find_path_count = node_0.get_payment_find_path_count(payment_hash).await;
-    assert_eq!(find_path_count, Some(11));
+    assert_eq!(find_path_count, Some(10));
 
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
