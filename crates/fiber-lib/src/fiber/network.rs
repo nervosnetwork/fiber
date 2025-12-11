@@ -26,7 +26,9 @@ use std::sync::Arc;
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr, TransportType};
+#[cfg(not(target_arch = "wasm32"))]
+use tentacle::utils::TransportType;
+use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -5136,7 +5138,7 @@ pub async fn start_network<
     actor
 }
 
-#[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     let mut iter = addr.iter();
 

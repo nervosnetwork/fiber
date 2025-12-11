@@ -7,7 +7,7 @@ use super::{KeyValue, StoreChange, StoreKeyValue};
 use ractor::OutputPort;
 pub use rocksdb::Direction as DbDirection;
 pub use rocksdb::IteratorMode;
-use rocksdb::{prelude::*, DBCompressionType, DBIterator, WriteBatch, DB};
+use rocksdb::{prelude::*, DBCompressionType, WriteBatch, DB};
 use std::{fmt::Debug, path::Path, sync::Arc};
 
 pub trait StoreChangeWatcher: Send + Sync + Debug {
@@ -54,24 +54,6 @@ impl Store {
 
     pub(crate) fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
         self.db.put(key, value).expect("put should be ok");
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn get_range<K: AsRef<[u8]>>(
-        &self,
-        lower_bound: Option<K>,
-        upper_bound: Option<K>,
-    ) -> DBIterator {
-        assert!(lower_bound.is_some() || upper_bound.is_some());
-        let mut read_options = ReadOptions::default();
-        if let Some(lower_bound) = lower_bound {
-            read_options.set_iterate_lower_bound(lower_bound.as_ref());
-        }
-        if let Some(upper_bound) = upper_bound {
-            read_options.set_iterate_upper_bound(upper_bound.as_ref());
-        }
-        let mode = IteratorMode::Start;
-        self.db.get_iter(&read_options, mode)
     }
 
     pub fn batch(&self) -> Batch {
