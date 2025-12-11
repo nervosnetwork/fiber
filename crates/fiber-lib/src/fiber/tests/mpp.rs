@@ -11,8 +11,10 @@ use crate::{
         config::{CKB_SHANNONS, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
         features::FeatureVector,
         hash_algorithm::HashAlgorithm,
-        network::{DebugEvent, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX},
-        payment::{AttemptStatus, PaymentStatus},
+        network::DebugEvent,
+        payment::{
+            AttemptStatus, PaymentStatus, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX,
+        },
         types::{
             BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
         },
