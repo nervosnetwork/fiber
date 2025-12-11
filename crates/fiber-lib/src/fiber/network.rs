@@ -3187,6 +3187,8 @@ where
 
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let payment_hash = payment_data.payment_hash;
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        let start_time = std::time::Instant::now();
 
         if !payment_data.dry_run && state.retry_send_payment_count >= MAX_RETRY_SEND_PAYMENTS {
             return Err(Error::InvalidParameter(
@@ -3209,6 +3211,8 @@ where
             {
                 metrics::gauge!(crate::metrics::SEND_PAYMENT_FIND_PATH_COUNT).set(*count as u32);
             }
+            let duration = start_time.elapsed().as_millis();
+            metrics::histogram!("fiber.send_payment_cost_time").record(duration as u32);
         }
         res
     }

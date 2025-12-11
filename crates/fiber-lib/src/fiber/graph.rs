@@ -1298,7 +1298,7 @@ where
         let max_liquidity = direct_channel_amounts.iter().max().copied().unwrap_or(0);
         high = high.min(max_liquidity);
 
-        const MAX_BINARY_SEARCH_ITERATIONS: usize = 50;
+        const MAX_BINARY_SEARCH_ITERATIONS: usize = 10;
         let mut best_route_found: Option<Vec<RouterHop>> = None;
         let mut amount_for_best_route: u128 = 0;
         let mut iterations = 0;
@@ -1685,37 +1685,6 @@ where
         }
     }
 
-    fn get_inbound_edges_for_node(
-        &self,
-        cur_node: Pubkey,
-        source: Pubkey,
-        route: Option<&[RouterHop]>,
-    ) -> Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
-        if let Some(route) = route {
-            route
-                .iter()
-                .enumerate()
-                .find(|(_, hop)| hop.target == cur_node)
-                .and_then(|(idx, hop)| {
-                    let from = if idx == 0 {
-                        source
-                    } else {
-                        route[idx - 1].target
-                    };
-                    if let (Some(channel_info), Some(update)) =
-                        self.get_outbound_channel_info_and_update(&hop.channel_outpoint, from)
-                    {
-                        Some(vec![(from, cur_node, channel_info, update)])
-                    } else {
-                        Default::default()
-                    }
-                })
-                .unwrap_or_default()
-        } else {
-            self.get_node_inbounds(cur_node).collect()
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn process_max_capacity_edge(
         &self,
@@ -1881,6 +1850,25 @@ where
             pending_count: 0,
         });
 
+        let route_map = route.map(|r| {
+            r.iter()
+                .enumerate()
+                .filter_map(|(idx, hop)| {
+                    let from = if idx == 0 { source } else { r[idx - 1].target };
+                    let (channel_info, channel_update) =
+                        self.get_outbound_channel_info_and_update(&hop.channel_outpoint, from);
+
+                    if let (Some(channel_info), Some(channel_update)) =
+                        (channel_info, channel_update)
+                    {
+                        Some((hop.target, (from, hop.target, channel_info, channel_update)))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<HashMap<_, _>>()
+        });
+
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
 
@@ -1888,9 +1876,14 @@ where
                 break;
             }
 
-            for (from, to, channel_info, channel_update) in
-                self.get_inbound_edges_for_node(cur_hop.node_id, source, route)
-            {
+            let edges = match route_map {
+                Some(ref map) => map
+                    .get(&cur_hop.node_id)
+                    .map(|info| vec![*info])
+                    .unwrap_or_default(),
+                None => self.get_node_inbounds(cur_hop.node_id).collect(),
+            };
+            for (from, to, channel_info, channel_update) in edges {
                 let is_source = from == source;
                 if allow_mpp && !self.is_node_support_mpp(&from) {
                     continue;
@@ -1915,7 +1908,6 @@ where
                 }
 
                 edges_expanded += 1;
-
                 if is_max_capacity_search {
                     self.process_max_capacity_edge(
                         &cur_hop,
@@ -1953,7 +1945,6 @@ where
                 };
 
                 let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry.saturating_add(expiry_delta);
-
                 let send_node = channel_info
                     .get_send_node(from)
                     .expect("send_node should exist");
