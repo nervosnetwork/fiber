@@ -1186,9 +1186,13 @@ where
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
                 if let Some(actor) = state.inflight_payments.get(&payment_hash) {
-                    actor
-                        .send_message(PaymentActorMessage::RetrySendPayment(attempt_id))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    if let Err(err) =
+                        actor.send_message(PaymentActorMessage::RetrySendPayment(attempt_id))
+                    {
+                        debug!(
+                            "RetrySendPayment message dropped because payment actor is likely stopping, error: {err}"
+                        );
+                    }
                 } else {
                     debug!("Can't find inflight payment actor for {payment_hash:?} {attempt_id:?}, start a new payment actor");
 
@@ -2557,9 +2561,12 @@ where
                     // terminate payment actor when status is final
                     if status_is_final {
                         if let Some(actor) = state.inflight_payments.get(&payment_hash) {
-                            actor
-                                .send_message(PaymentActorMessage::CheckPayment)
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                            if let Err(err) = actor.send_message(PaymentActorMessage::CheckPayment)
+                            {
+                                debug!(
+                            "CheckPayment message dropped because payment actor is likely stopping, error: {err}"
+                        );
+                            }
                         }
                     }
                 }
