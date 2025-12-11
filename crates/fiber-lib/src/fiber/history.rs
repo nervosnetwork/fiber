@@ -261,7 +261,8 @@ impl InternalResult {
                 TlcErrorCode::InvalidOnionVersion
                 | TlcErrorCode::InvalidOnionHmac
                 | TlcErrorCode::InvalidOnionKey
-                | TlcErrorCode::InvalidOnionError => {
+                | TlcErrorCode::InvalidOnionError
+                | TlcErrorCode::IncorrectTlcDirection => {
                     self.fail_pair(nodes, index);
                 }
                 TlcErrorCode::InvalidOnionPayload => {

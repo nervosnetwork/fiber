@@ -687,6 +687,7 @@ where
                 TlcErrorCode::FinalIncorrectTlcAmount
             }
             ProcessingChannelError::IncorrectTlcExpiry => TlcErrorCode::IncorrectTlcExpiry,
+            ProcessingChannelError::IncorrectTlcDirection => TlcErrorCode::IncorrectTlcDirection,
             ProcessingChannelError::IncorrectFinalTlcExpiry => {
                 TlcErrorCode::FinalIncorrectExpiryDelta
             }
@@ -1241,6 +1242,9 @@ where
         state: &mut ChannelActorState,
         add_tlc: AddTlc,
     ) -> ProcessingChannelResult {
+        if state.is_one_way && !state.is_acceptor {
+            return Err(ProcessingChannelError::IncorrectTlcDirection);
+        }
         // TODO: here we only check the error which sender didn't follow agreed rules,
         //       if any error happened here we need go to shutdown procedure
 
@@ -2612,11 +2616,14 @@ where
                     channel.local_constraints.max_tlc_number_in_flight,
                 )?;
 
-                let channel_flags = if public {
+                let mut channel_flags = if public {
                     ChannelFlags::PUBLIC
                 } else {
                     ChannelFlags::empty()
                 };
+                if is_one_way {
+                    channel_flags.insert(ChannelFlags::ONE_WAY);
+                }
                 let channel_announcement_nonce = if public {
                     Some(channel.get_channel_announcement_musig2_pubnonce())
                 } else {
@@ -3895,6 +3902,8 @@ pub enum ProcessingChannelError {
     PeelingOnionPacketError(String),
     #[error("Forwarding node has tampered with the intended HTLC values or origin node has an obsolete cltv_expiry_delta")]
     IncorrectTlcExpiry,
+    #[error("One way channel cannot forward tlc in reverse direction")]
+    IncorrectTlcDirection,
     #[error("Upstream node set CLTV to less than the CLTV set by the sender")]
     IncorrectFinalTlcExpiry,
     #[error("The amount in the HTLC is not expected")]

@@ -1581,6 +1581,7 @@ pub enum TlcErrorCode {
     InvalidOnionPayload = PERM | 22,
     HoldTlcTimeout = PERM | 23,
     InvalidOnionError = BADONION | PERM | 25,
+    IncorrectTlcDirection = PERM | 26,
 }
 
 impl TlcErrorCode {
