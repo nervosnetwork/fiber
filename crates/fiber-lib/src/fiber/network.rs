@@ -1096,7 +1096,6 @@ where
                         );
                         self.register_payment_retry(
                             myself.clone(),
-                            state,
                             attempt.payment_hash,
                             Some(attempt.id),
                         );
@@ -1210,7 +1209,6 @@ where
             NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
                 self.on_add_tlc_result_event(
                     myself,
-                    state,
                     payment_hash,
                     attempt_id,
                     error_info,
@@ -1906,7 +1904,6 @@ where
                     Err(err) => {
                         self.on_add_tlc_result_event(
                             myself,
-                            state,
                             command.payment_hash,
                             command.attempt_id,
                             Some((
@@ -2599,7 +2596,7 @@ where
                 );
 
                 if attempt.is_retrying() {
-                    self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
+                    self.register_payment_retry(myself, payment_hash, Some(attempt.id));
                 }
             }
         }
@@ -2661,7 +2658,6 @@ where
     async fn on_add_tlc_result_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         error_info: Option<(ProcessingChannelError, TlcErr)>,
@@ -2729,7 +2725,7 @@ where
                 );
                 // retry the current attempt if it is retryable
                 if attempt.is_retrying() {
-                    self.register_payment_retry(myself, state, payment_hash, Some(attempt.id));
+                    self.register_payment_retry(myself, payment_hash, Some(attempt.id));
                 }
             }
         }
@@ -2762,13 +2758,14 @@ where
     fn register_payment_retry(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        _state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
     ) {
-        let _ = myself.send_message(NetworkActorMessage::new_event(
+        if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id),
-        ));
+        )) {
+            debug!("Failed to register payment retry for {payment_hash:?} {attempt_id:?}: {err:?}");
+        }
     }
 
     async fn start_payment_actor(
