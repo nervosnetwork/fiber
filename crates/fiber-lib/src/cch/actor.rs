@@ -448,6 +448,8 @@ impl CchState {
             {
                 return Err(CchError::WrappedBTCTypescriptMismatch);
             }
+        } else {
+            return Err(CchError::WrappedBTCTypescriptMismatch);
         }
 
         // Validate hash algorithm - must be SHA256 for LND compatibility
