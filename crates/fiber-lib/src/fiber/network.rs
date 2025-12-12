@@ -96,7 +96,7 @@ use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxSignatures,
+    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxAbort, TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{
@@ -2058,7 +2058,12 @@ where
                 partial_witnesses,
             ) => {
                 let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
-                let (msg, funding_tx) = match partial_witnesses {
+
+                // Check if we have partial witnesses before moving them
+                let has_partial_witnesses = partial_witnesses.is_some();
+
+                // Prepare funding transaction with partial witnesses if provided
+                let funding_tx = match partial_witnesses {
                     Some(partial_witnesses) => {
                         debug!(
                             "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
@@ -2068,94 +2073,94 @@ where
                                 .map(hex::encode)
                                 .collect::<Vec<_>>()
                         );
-                        let funding_tx = funding_tx
+                        funding_tx
                             .into_view()
                             .as_advanced_builder()
                             .set_witnesses(
                                 partial_witnesses.into_iter().map(|x| x.pack()).collect(),
                             )
-                            .build();
-
-                        let mut funding_tx = call_t!(
-                            self.chain_actor,
-                            CkbChainMessage::Sign,
-                            DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                            funding_tx.into()
-                        )
-                        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-                        .expect("Signing succeeded");
-                        debug!("Funding transaction signed: {:?}", &funding_tx);
-
-                        // Since we have received a valid tx_signatures message, we're now sure that
-                        // we can broadcast a valid transaction to the network, i.e. we can wait for
-                        // the funding transaction to be confirmed.
-                        let funding_tx = funding_tx.take().expect("take tx");
-                        let witnesses = funding_tx.witnesses();
-                        let outpoint = funding_tx
-                            .output_pts_iter()
-                            .next()
-                            .expect("funding tx output exists");
-
-                        myself
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::FundingTransactionPending(
-                                    funding_tx.data(),
-                                    outpoint,
-                                    *channel_id,
-                                ),
-                            ))
-                            .expect("network actor alive");
-                        debug!("Fully signed funding tx {:?}", &funding_tx);
-
-                        (
-                            FiberMessageWithPeerId {
-                                peer_id: peer_id.clone(),
-                                message: FiberMessage::ChannelNormalOperation(
-                                    FiberChannelMessage::TxSignatures(TxSignatures {
-                                        channel_id: *channel_id,
-                                        witnesses: witnesses
-                                            .into_iter()
-                                            .map(|x| x.unpack())
-                                            .collect(),
-                                    }),
-                                ),
-                            },
-                            funding_tx,
-                        )
+                            .build()
                     }
                     None => {
                         debug!(
-                                "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
-                                &funding_tx,
-                            );
-                        let mut funding_tx = call_t!(
-                            self.chain_actor,
-                            CkbChainMessage::Sign,
-                            DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                            funding_tx.into()
-                        )
-                        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)?;
-                        debug!("Funding transaction signed: {:?}", &funding_tx);
-                        let funding_tx = funding_tx.take().expect("take tx");
-                        let witnesses = funding_tx.witnesses();
-
-                        debug!("Partially signed funding tx {:?}", &funding_tx);
-                        (
-                            FiberMessageWithPeerId {
-                                peer_id: peer_id.clone(),
-                                message: FiberMessage::ChannelNormalOperation(
-                                    FiberChannelMessage::TxSignatures(TxSignatures {
-                                        channel_id: *channel_id,
-                                        witnesses: witnesses
-                                            .into_iter()
-                                            .map(|x| x.unpack())
-                                            .collect(),
-                                    }),
-                                ),
-                            },
-                            funding_tx,
-                        )
+                            "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
+                            &funding_tx,
+                        );
+                        funding_tx.into_view()
                     }
+                };
+
+                // Sign the funding transaction
+                let mut signed_funding_tx = match call_t!(
+                    self.chain_actor,
+                    CkbChainMessage::Sign,
+                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                    funding_tx.into()
+                )
+                .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+                {
+                    Ok(funding_tx) => funding_tx,
+                    Err(err) => {
+                        error!("Failed to sign funding transaction: {}", err);
+                        // Send TxAbort message to peer
+                        let abort_msg = FiberMessageWithPeerId {
+                            peer_id: peer_id.clone(),
+                            message: FiberMessage::ChannelNormalOperation(
+                                FiberChannelMessage::TxAbort(TxAbort {
+                                    channel_id: *channel_id,
+                                    message: format!("Failed to sign funding transaction: {}", err)
+                                        .as_bytes()
+                                        .to_vec(),
+                                }),
+                            ),
+                        };
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::SendFiberMessage(abort_msg),
+                            ))
+                            .expect("network actor alive");
+                        // Abort funding and close the channel
+                        state.abort_funding(Either::Left(*channel_id)).await;
+                        return Ok(());
+                    }
+                };
+                debug!("Funding transaction signed: {:?}", &signed_funding_tx);
+
+                // Extract signed transaction and witnesses
+                let funding_tx = signed_funding_tx.take().expect("take tx");
+                let witnesses = funding_tx.witnesses();
+
+                // If we received partial witnesses, the transaction is fully signed
+                // and we should notify that it's pending confirmation
+                if has_partial_witnesses {
+                    let outpoint = funding_tx
+                        .output_pts_iter()
+                        .next()
+                        .expect("funding tx output exists");
+
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                funding_tx.data(),
+                                outpoint,
+                                *channel_id,
+                            ),
+                        ))
+                        .expect("network actor alive");
+                    debug!("Fully signed funding tx {:?}", &funding_tx);
+                } else {
+                    debug!("Partially signed funding tx {:?}", &funding_tx);
+                }
+
+                // Create the message to send to peer
+                let msg = FiberMessageWithPeerId {
+                    peer_id: peer_id.clone(),
+                    message: FiberMessage::ChannelNormalOperation(
+                        FiberChannelMessage::TxSignatures(TxSignatures {
+                            channel_id: *channel_id,
+                            witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
+                        }),
+                    ),
                 };
 
                 // Before sending the signatures to the peer, start tracing the tx
