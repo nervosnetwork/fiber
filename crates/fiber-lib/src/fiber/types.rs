@@ -1780,7 +1780,7 @@ pub struct ForwardTlcResult {
     pub channel_id: Hash256,
     pub payment_hash: Hash256,
     pub tlc_id: u64,
-    pub error_info: Option<(ProcessingChannelError, TlcErr)>,
+    pub add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]

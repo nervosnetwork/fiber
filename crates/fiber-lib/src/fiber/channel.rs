@@ -868,7 +868,7 @@ where
 
     async fn try_to_relay_remove_tlc(&self, tlc_info: &TlcInfo, remove_reason: RemoveTlcReason) {
         let (previous_channel_id, previous_tlc_id) =
-            tlc_info.forwarding_tlc.expect("expect previous tlc");
+            tlc_info.forwarding_tlc.expect("expect forwarding tlc");
         debug_assert!(tlc_info.is_offered());
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
@@ -1816,10 +1816,9 @@ where
             Ok(_) => {
                 // we successfully sent the forward tlc, we will wait for the result
                 // here we just make sure the forward tlc is sent, we don't need to wait for the result
-                state.waiting_forward_tlc_tasks.insert(
-                    (payment_hash, tlc_id),
-                    ForwardTlc(payment_hash, tlc_id, peeled_onion_packet, forward_fee),
-                );
+                state
+                    .waiting_forward_tlc_tasks
+                    .insert(tlc_id, peeled_onion_packet.shared_secret);
             }
             Err(err) => {
                 error!("Failed to send forward tlc onion packet command: {:?}", err);
@@ -1932,12 +1931,13 @@ where
         state: &mut ChannelActorState,
         result: ForwardTlcResult,
     ) {
-        let key = (result.payment_hash, TLCId::Received(result.tlc_id));
-        let Some(ForwardTlc(_, _, onion_packet, _)) = state.waiting_forward_tlc_tasks.remove(&key)
+        let Some(shared_secret) = state
+            .waiting_forward_tlc_tasks
+            .remove(&TLCId::Received(result.tlc_id))
         else {
             return;
         };
-        if let Some((channel_err, tlc_err)) = result.error_info {
+        if let Err((channel_err, tlc_err)) = result.add_tlc_result {
             match channel_err {
                 ProcessingChannelError::WaitingTlcAck => {
                     // peer already buffered the tlc, we already removed the forward tlc record
@@ -1945,7 +1945,7 @@ where
                 }
                 _ => {
                     let error = ProcessingChannelError::TlcForwardingError(tlc_err)
-                        .with_shared_secret(onion_packet.shared_secret);
+                        .with_shared_secret(shared_secret);
                     self.process_add_tlc_error(
                         myself,
                         state,
@@ -2284,10 +2284,10 @@ where
                 self.register_retryable_tlc_add(myself, state, command);
             }
             _ => {
-                let notify = res
+                let add_tlc_result = res
                     .as_ref()
-                    .err()
-                    .map(|err| (err.clone(), self.get_tlc_error(state, err)));
+                    .map(|tlc_id| (state.get_id(), *tlc_id))
+                    .map_err(|err| (err.clone(), self.get_tlc_error(state, err)));
 
                 // notify the network actor about the add tlc result
                 self.network
@@ -2295,7 +2295,7 @@ where
                         NetworkActorEvent::AddTlcResult(
                             command.payment_hash,
                             command.attempt_id,
-                            notify,
+                            add_tlc_result,
                             command.previous_tlc,
                         ),
                     ))
@@ -3051,7 +3051,7 @@ pub struct TlcInfo {
     pub created_at: CommitmentNumbers,
     pub removed_reason: Option<RemoveTlcReason>,
 
-    /// Note: `previous_tlc` is used to track the tlc chain for a multi-tlc payment,
+    /// Note: `forwarding_tlc` is used to track the tlc chain for a multi-tlc payment,
     ///       we need to know previous when removing tlc backwardly.
     ///
     /// Node A ---------> Node B ------------> Node C ----------> Node D
@@ -3174,12 +3174,6 @@ pub enum RetryableTlcOperation {
     RemoveTlc(TLCId, RemoveTlcReason),
     AddTlc(AddTlcCommand),
 }
-
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
-pub struct RelayRemoveTlc(Hash256, TLCId, RemoveTlcReason);
-
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket, u128);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct PendingTlcs {
@@ -3669,7 +3663,7 @@ pub struct ChannelActorState {
 
     // the retryable tlc operations that are waiting to be processed.
     pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
-    pub waiting_forward_tlc_tasks: HashMap<(Hash256, TLCId), ForwardTlc>,
+    pub waiting_forward_tlc_tasks: HashMap<TLCId, [u8; 32]>,
 
     // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
