@@ -248,20 +248,13 @@ pub enum KeyValue {
 /// are recorded and sent to watchers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StoreChange {
-    PutCkbInvoice {
-        payment_hash: Hash256,
-        invoice: CkbInvoice,
-    },
     PutPreimage {
         payment_hash: Hash256,
         payment_preimage: Hash256,
     },
-    DeletePreimage {
-        payment_hash: Hash256,
-    },
     PutCkbInvoiceStatus {
         payment_hash: Hash256,
-        payment_status: CkbInvoiceStatus,
+        invoice_status: CkbInvoiceStatus,
     },
     PutPaymentSession {
         payment_hash: Hash256,

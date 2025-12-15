@@ -6,6 +6,11 @@ option SignatureOpt (Signature);
 
 option AmountOpt (Uint128);
 
+// deprecated
+struct FinalHtlcTimeout {
+    value: Uint64,
+}
+
 struct FinalHtlcMinimumExpiryDelta {
     value: Uint64,
 }
@@ -47,6 +52,8 @@ struct PaymentSecret {
 union InvoiceAttr {
     ExpiryTime,
     Description,
+    // deprecated
+    FinalHtlcTimeout,
     FinalHtlcMinimumExpiryDelta,
     FallbackAddr,
     Feature,

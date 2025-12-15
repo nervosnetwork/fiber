@@ -2,12 +2,12 @@ use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
-use fnn::cch::{CchArgs, CchMessage};
+use fnn::cch::{CchArgs, CchFiberStoreWatcher};
 use fnn::ckb::contracts::TypeIDResolver;
 #[cfg(debug_assertions)]
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
-use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
+use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash};
 use fnn::rpc::server::start_rpc;
 use fnn::rpc::watchtower::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
@@ -23,7 +23,7 @@ use fnn::watchtower::{
 use fnn::{start_cch, start_network, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
-use ractor::{Actor, ActorRef};
+use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -84,12 +84,17 @@ pub async fn main() -> Result<(), ExitMessage> {
         .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
         .store_path();
 
-    let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let mut store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let cch_fiber_store_event_port = config.cch.is_some().then(|| {
+        let port = Arc::new(OutputPort::default());
+        let store_watcher = CchFiberStoreWatcher::new(store.clone(), port.clone());
+        store.set_watcher(Arc::new(store_watcher));
+        port
+    });
 
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
-    let subscribers = ChannelSubscribers::default();
 
     #[cfg(debug_assertions)]
     let rpc_dev_module_commitment_txs = config.rpc.as_ref().and_then(|rpc_config| {
@@ -168,7 +173,6 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
-                subscribers.clone(),
                 network_graph.clone(),
                 default_shutdown_script,
             )
@@ -347,18 +351,10 @@ pub async fn main() -> Result<(), ExitMessage> {
                     }
                 }
                 Ok(actor) => {
-                    subscribers.pending_received_tlcs_subscribers.subscribe(
-                        actor.clone(),
-                        |tlc_notification| {
-                            Some(CchMessage::PendingReceivedTlcNotification(tlc_notification))
-                        },
-                    );
-                    subscribers.settled_tlcs_subscribers.subscribe(
-                        actor.clone(),
-                        |tlc_notification| {
-                            Some(CchMessage::SettledTlcNotification(tlc_notification))
-                        },
-                    );
+                    if let Some(port) = cch_fiber_store_event_port {
+                        actor.subscribe_to_port(&port);
+                    }
+
                     info!("cch started successfully ...");
                     Some(actor)
                 }
