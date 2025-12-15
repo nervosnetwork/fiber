@@ -535,11 +535,11 @@ impl ChannelActorStateStore for Store {
             })
     }
 
-    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &[u8]) -> bool {
+    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
         let key = [
             &[WATCHTOWER_TLC_SETTLED_PREFIX],
             channel_id.as_ref(),
-            payment_hash,
+            &payment_hash.as_ref()[0..20],
         ]
         .concat();
         self.get(key).is_some()
