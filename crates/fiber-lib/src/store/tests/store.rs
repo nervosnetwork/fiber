@@ -1007,13 +1007,12 @@ fn test_store_change_watcher() {
     store
         .insert_invoice(invoice.clone(), Some(preimage))
         .unwrap();
-    store.remove_preimage(&payment_hash);
 
     let changes = watcher.changes.read().unwrap();
     assert!(changes.iter().any(
-        |e| matches!(e, StoreChange::PutCkbInvoice { payment_hash: h, .. } if h == &payment_hash)
+        |e| matches!(e, StoreChange::PutCkbInvoiceStatus { payment_hash: h, invoice_status: CkbInvoiceStatus::Open } if h == &payment_hash)
     ));
     assert!(changes.iter().any(
-        |e| matches!(e, StoreChange::DeletePreimage { payment_hash: h } if h == &payment_hash)
+        |e| matches!(e, StoreChange::PutPreimage { payment_hash: h, payment_preimage: i } if h == &payment_hash && i == &preimage)
     ));
 }
