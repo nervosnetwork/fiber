@@ -1295,7 +1295,12 @@ where
                     .resume_payment_session(myself, state, payment_hash, attempt_id)
                     .await;
             }
-            NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, add_tlc_result, previous_tlc) => {
+            NetworkActorEvent::AddTlcResult(
+                payment_hash,
+                attempt_id,
+                add_tlc_result,
+                previous_tlc,
+            ) => {
                 self.on_add_tlc_result_event(
                     myself,
                     state,

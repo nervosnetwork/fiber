@@ -867,8 +867,6 @@ where
     async fn try_to_relay_remove_tlc(&self, tlc_info: &TlcInfo, remove_reason: RemoveTlcReason) {
         let (previous_channel_id, previous_tlc_id) =
             tlc_info.forwarding_tlc.expect("expect forwarding tlc");
-        debug_assert!(tlc_info.is_offered());
-
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
 
         let _ = self.register_retryable_relay_tlc_remove(
@@ -1932,23 +1930,29 @@ where
         else {
             return;
         };
-        if let Err((channel_err, tlc_err)) = result.add_tlc_result {
-            match channel_err {
-                ProcessingChannelError::WaitingTlcAck => {
-                    // peer already buffered the tlc, we already removed the forward tlc record
-                    // and just ignore the error here
-                }
-                _ => {
-                    let error = ProcessingChannelError::TlcForwardingError(tlc_err)
-                        .with_shared_secret(shared_secret);
-                    self.process_add_tlc_error(
-                        myself,
-                        state,
-                        result.payment_hash,
-                        TLCId::Received(result.tlc_id),
-                        error,
-                    );
-                }
+
+        match result.add_tlc_result {
+            Ok((channel_id, tlc_id)) => {
+                state
+                    .tlc_state
+                    .get_mut(&TLCId::Received(result.tlc_id))
+                    .expect("tlc should exist")
+                    .forwarding_tlc = Some((channel_id, tlc_id));
+            }
+            Err((ProcessingChannelError::WaitingTlcAck, _)) => {
+                // peer already buffered the tlc, we already removed the forward tlc record
+                // and just ignore the error here
+            }
+            Err((_, tlc_err)) => {
+                let error = ProcessingChannelError::TlcForwardingError(tlc_err)
+                    .with_shared_secret(shared_secret);
+                self.process_add_tlc_error(
+                    myself,
+                    state,
+                    result.payment_hash,
+                    TLCId::Received(result.tlc_id),
+                    error,
+                );
             }
         }
     }
@@ -3033,13 +3037,6 @@ pub struct TlcInfo {
     pub created_at: CommitmentNumbers,
     pub removed_reason: Option<RemoveTlcReason>,
 
-    /// Note: `forwarding_tlc` is used to track the tlc chain for a multi-tlc payment,
-    ///       we need to know previous when removing tlc backwardly.
-    ///
-    /// Node A ---------> Node B ------------> Node C ----------> Node D
-    ///  tlc_1 <---> (tlc_1) (tlc_2) <---> (tlc_2) (tlc_3) <----> tlc_3
-    ///                ^^^^                 ^^^^
-    ///
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
