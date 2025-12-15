@@ -1680,7 +1680,13 @@ where
                             if actor_state
                                 .tlc_state
                                 .get_committed_offered_tlcs()
-                                .any(|tlc| tlc.expiry < expect_expiry)
+                                .any(|tlc| {
+                                    tlc.expiry < expect_expiry
+                                        && !self.store.is_tlc_settled(
+                                            &channel_id,
+                                            &tlc.payment_hash.as_ref()[0..20],
+                                        )
+                                })
                             {
                                 info!(
                                     "Force closing channel {:?} due to expired offered tlc",

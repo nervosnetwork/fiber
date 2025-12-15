@@ -68,6 +68,9 @@ pub trait WatchtowerStore {
 
     /// Search for the stored preimage with the given payment hash prefix, should be the first 20 bytes of the payment hash.
     fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256>;
+
+    /// Mark a tlc as settled on chain
+    fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]);
 }
 
 /// The data of a channel that the watchtower is monitoring

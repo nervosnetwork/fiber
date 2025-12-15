@@ -7622,6 +7622,8 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
+    /// Check if a tlc is settled on chain
+    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &[u8]) -> bool;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
