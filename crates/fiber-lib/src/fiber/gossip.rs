@@ -17,6 +17,7 @@ use ractor::{
     ActorRuntime, MessagingErr, OutputPort, RpcReplyPort, SupervisionEvent,
 };
 use secp256k1::Message;
+use strum::AsRefStr;
 use tentacle::{
     async_trait as tasync_trait,
     builder::MetaBuilder,
@@ -38,7 +39,9 @@ use crate::{
         network::{DEFAULT_CHAIN_ACTOR_TIMEOUT, MAX_SERVICE_PROTOCOAL_DATA_SIZE},
         types::secp256k1_instance,
     },
-    now_timestamp_as_millis_u64, unwrap_or_return, Error,
+    now_timestamp_as_millis_u64, unwrap_or_return,
+    utils::actor::ActorHandleLogGuard,
+    Error,
 };
 
 use super::{
@@ -78,6 +81,7 @@ const MAX_NUM_OF_BROADCAST_MESSAGES: u16 = 1000;
 pub(crate) const DEFAULT_NUM_OF_BROADCAST_MESSAGE: u16 = 100;
 
 const MAX_NUM_OF_ACTIVE_SYNCING_PEERS: usize = 3;
+const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 const MIN_NUM_OF_PASSIVE_SYNCING_PEERS: usize = 3;
 
 const NUM_SIMULTANEOUS_GET_REQUESTS: usize = 1;
@@ -323,6 +327,7 @@ pub trait SubscribableGossipMessageStore {
     async fn unsubscribe(&self, subscription: &Self::Subscription) -> Result<(), Self::Error>;
 }
 
+#[derive(AsRefStr)]
 pub enum GossipActorMessage {
     // The control for the service async control is received.
     ReceivedControl(ServiceAsyncControl),
@@ -570,6 +575,7 @@ impl<S> GossipSyncingActor<S> {
     }
 }
 
+#[derive(AsRefStr)]
 pub(crate) enum GossipSyncingActorMessage {
     // A GetBroadcastMessages request to the syncing peer has timed out.
     RequestTimeout(u64),
@@ -619,6 +625,12 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "GossipStoreActor",
+            message.as_ref().to_string(),
+            "fiber.gossip_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
         match message {
             GossipSyncingActorMessage::RequestTimeout(request_id) => {
                 state.inflight_requests.remove(&request_id);
@@ -1487,6 +1499,12 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "ExtendedGossipMessageStoreActor",
+            message.as_ref().to_string(),
+            "fiber.extended_gossip_message_store_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
         match message {
             ExtendedGossipMessageStoreMessage::NewSubscription(cursor, reply) => {
                 trace!(
@@ -1633,6 +1651,7 @@ pub struct QueryResult {
     is_success: bool,
 }
 
+#[derive(AsRefStr)]
 pub enum ExtendedGossipMessageStoreMessage {
     // A new subscription for gossip message updates. We will send a batch of messages to the subscriber
     // via the returned output port.
@@ -2508,6 +2527,12 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "GossipActor",
+            message.as_ref().to_string(),
+            "fiber.gossip_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
         match message {
             GossipActorMessage::ReceivedControl(control) => {
                 state.control = Some(control);
