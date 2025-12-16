@@ -1917,15 +1917,6 @@ where
                         // remove hold tlc from store
                         self.store
                             .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
-
-                        // reset invoice status to Open if there are no more hold tlc
-                        let invoice_status = self.store.get_invoice_status(&payment_hash);
-                        if invoice_status.is_some_and(|s| s == CkbInvoiceStatus::Received)
-                            && self.store.get_payment_hold_tlcs(payment_hash).is_empty()
-                        {
-                            self.store
-                                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Open)?;
-                        }
                     }
                     Err(err) => {
                         error!(
