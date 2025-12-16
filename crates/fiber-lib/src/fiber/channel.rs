@@ -3041,6 +3041,31 @@ pub struct TlcInfo {
     pub created_at: CommitmentNumbers,
     pub removed_reason: Option<RemoveTlcReason>,
 
+    /// Note: `forwarding_tlc` is used to track the tlc chain for a multi-tlc payment.
+    ///
+    /// For an outbound tlc, this field records the previous (upstream) tlc,
+    /// so we can walk backward when removing tlcs.
+    ///
+    /// For an inbound tlc, this field records the next (downstream) tlc,
+    /// so we can continue tracking the forwarding path.
+    ///
+    /// Example:
+    ///
+    ///   Node A ---------> Node B ------------> Node C ------------> Node D
+    ///   tlc_1  ---------> tlc_1(in) ---------> tlc_2(in) ---------> tlc_3
+    ///                     tlc_2(out)           tlc_3(out)
+    ///                forwarding_tlc        forwarding_tlc
+    ///
+    ///   forwarding_tlc relations:
+    ///
+    ///   - Node B:
+    ///       inbound  tlc_1.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///       outbound tlc_2.forwarding_tlc = Some((channel_AB, tlc1_id))
+    ///
+    ///   - Node C:
+    ///       inbound  tlc_2.forwarding_tlc = Some((channel_CD, tlc3_id))
+    ///       outbound tlc_3.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
