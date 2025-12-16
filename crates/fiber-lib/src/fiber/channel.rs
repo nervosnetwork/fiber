@@ -869,6 +869,8 @@ where
     async fn try_to_relay_remove_tlc(&self, tlc_info: &TlcInfo, remove_reason: RemoveTlcReason) {
         let (previous_channel_id, previous_tlc_id) =
             tlc_info.forwarding_tlc.expect("expect forwarding tlc");
+        debug_assert!(tlc_info.is_offered());
+
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
 
         let _ = self.register_retryable_relay_tlc_remove(
@@ -1383,10 +1385,10 @@ where
                     script: udt_type_script.clone(),
                 });
         }
-        if tlc_info.forwarding_tlc.is_none() {
+        if tlc_info.is_offered() {
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
-            if tlc_info.is_offered() {
+            if tlc_info.forwarding_tlc.is_none() {
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::TlcRemoveReceived(
@@ -1396,10 +1398,10 @@ where
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            } else {
+                // relay RemoveTlc to previous channel if needed
+                self.try_to_relay_remove_tlc(&tlc_info, remove_reason).await;
             }
-        } else {
-            // relay RemoveTlc to previous channel if needed
-            self.try_to_relay_remove_tlc(&tlc_info, remove_reason).await;
         }
         Ok(())
     }
