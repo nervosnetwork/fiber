@@ -11,6 +11,7 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 use crate::fiber::network::DebugEvent;
 use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::TxSignatures;
+use crate::utils::actor::ActorHandleLogGuard;
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 #[cfg(test)]
 use musig2::BinaryEncoding;
@@ -121,6 +122,8 @@ const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000)
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 #[cfg(any(test, feature = "bench"))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
+
+const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -2673,10 +2676,12 @@ where
             message,
         );
 
-        #[cfg(feature = "metrics")]
-        let start = now_timestamp_as_millis_u64();
-        #[cfg(feature = "metrics")]
-        let name = format!("fiber.channel_actor.{}", message);
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "ChannelActor",
+            message.to_string(),
+            "fiber.channel_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
 
         match message {
             ChannelActorMessage::PeerMessage(message) => {
@@ -2758,13 +2763,6 @@ where
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
-
-        #[cfg(feature = "metrics")]
-        {
-            let end = now_timestamp_as_millis_u64();
-            let elapsed = end - start;
-            metrics::histogram!(name).record(elapsed as u32);
         }
 
         Ok(())

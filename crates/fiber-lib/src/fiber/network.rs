@@ -104,7 +104,7 @@ use crate::fiber::types::{
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
-use crate::utils::payment::is_invoice_fulfilled;
+use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -118,6 +118,8 @@ pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 
 pub const DEFAULT_PAYMENT_TRY_LIMIT: u32 = 5;
 pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
+
+const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 // (128 + 2) KB, 2 KB for custom records
 pub const MAX_SERVICE_PROTOCOAL_DATA_SIZE: usize = 1024 * (128 + 2);
@@ -1832,15 +1834,6 @@ where
                         // remove hold tlc from store
                         self.store
                             .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
-
-                        // reset invoice status to Open if there are no more hold tlc
-                        let invoice_status = self.store.get_invoice_status(&payment_hash);
-                        if invoice_status.is_some_and(|s| s == CkbInvoiceStatus::Received)
-                            && self.store.get_payment_hold_tlcs(payment_hash).is_empty()
-                        {
-                            self.store
-                                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Open)?;
-                        }
                     }
                     Err(err) => {
                         error!(
@@ -4434,10 +4427,12 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-        let start = now_timestamp_as_millis_u64();
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-        let name = format!("fiber.network_actor.{}", message);
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "NetworkActor",
+            message.to_string(),
+            "fiber.network_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
         match message {
             NetworkActorMessage::Event(event) => {
                 if let Err(err) = self.handle_event(myself, state, event).await {
@@ -4455,14 +4450,6 @@ where
                 }
             }
         }
-
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-        {
-            let end = now_timestamp_as_millis_u64();
-            let elapsed = end - start;
-            metrics::histogram!(name).record(elapsed as u32);
-        }
-
         Ok(())
     }
 
