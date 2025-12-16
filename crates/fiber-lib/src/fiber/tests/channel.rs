@@ -5585,11 +5585,18 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
     let preimage = gen_rand_sha256_hash();
+    // with a short expiry time for test purpose
+    let expiry_time_in_seconds = 5;
+    let timer_started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("get time now")
+        .as_secs();
+
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .expiry_time(Duration::from_secs(100))
+        .expiry_time(Duration::from_secs(expiry_time_in_seconds))
         .build()
         .expect("build invoice success");
 
@@ -5615,14 +5622,35 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
         .assert_payment_status(payment_hash, PaymentStatus::Failed, Some(1))
         .await;
 
+    let time_elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("get time now")
+        .as_secs()
+        - timer_started;
+
+    assert!(time_elapsed >= expiry_time_in_seconds);
+
     let new_amount = node_3.get_local_balance_from_channel(channels[2]);
     assert_eq!(new_amount, old_amount);
 
-    // we should never update the invoice status if there is an error
+    // the invoice is updated to Received
     assert_eq!(
         node_3.get_invoice_status(ckb_invoice.payment_hash()),
-        Some(CkbInvoiceStatus::Open)
+        Some(CkbInvoiceStatus::Received)
     );
+
+    // send the same payment_hash again will also fail
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(100),
+            invoice: Some(ckb_invoice.to_string()),
+            ..Default::default()
+        })
+        .await;
+
+    let error = res.unwrap_err();
+    assert!(error.contains("invoice is expired"));
 }
 
 #[tokio::test]
