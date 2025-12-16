@@ -1364,7 +1364,7 @@ where
             }
             // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
             // incase watchtower may need preimage to settledown
-            if tlc_info.forwarding_tlc.is_none() {
+            if tlc_info.is_received() || tlc_info.forwarding_tlc.is_none() {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
