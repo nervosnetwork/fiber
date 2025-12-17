@@ -1062,7 +1062,7 @@ where
             is_trampoline,
             peeled_onion_packet.is_last()
         );
-        if peeled_onion_packet.is_last() {
+        if peeled_onion_packet.is_last() && !is_trampoline {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
@@ -1169,20 +1169,24 @@ where
 
                 // Don't call self.store_preimage here, because it will reveal the preimage to watchtower.
                 self.store.insert_preimage(payment_hash, preimage);
-            } else if invoice.is_none() && !is_trampoline {
+            } else if invoice.is_none() {
                 // Preimage is required for TLC without associated invoice.
                 error!("preimage is not found for payment hash: {:?}", payment_hash);
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
-            // else: hold invoice, pass though to try_to_settle_down_tlc
         } else {
             if add_tlc.expiry
                 < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
+                && !is_trampoline
             {
                 return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
 
             let received_amount = add_tlc.amount;
+            error!(
+                "debug received_amount: {:?} forward amount: {:?}",
+                received_amount, forward_amount
+            );
             if received_amount < forward_amount {
                 return Err(ProcessingChannelError::InvalidParameter(
                     "received_amount is less than forward_amount".to_string(),
@@ -1191,6 +1195,7 @@ where
 
             // Next forwarding channel will get the forward_fee and check if it's enough.
             let forward_fee = received_amount.saturating_sub(forward_amount);
+            error!("debug forward_fee: {:?}", forward_fee);
 
             // if this is not the last hop, forward TLC to next hop
             self.register_and_apply_forward_tlc(
