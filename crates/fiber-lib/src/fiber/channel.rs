@@ -1057,7 +1057,12 @@ where
             .expect("expect tlc");
         tlc.applied_flags = AppliedFlags::ADD;
 
-        if peeled_onion_packet.is_last() && !is_trampoline {
+        error!(
+            "debug now is_trampoline: {:?} is_last: {:?}",
+            is_trampoline,
+            peeled_onion_packet.is_last()
+        );
+        if peeled_onion_packet.is_last() {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
@@ -1164,7 +1169,7 @@ where
 
                 // Don't call self.store_preimage here, because it will reveal the preimage to watchtower.
                 self.store.insert_preimage(payment_hash, preimage);
-            } else if invoice.is_none() {
+            } else if invoice.is_none() && !is_trampoline {
                 // Preimage is required for TLC without associated invoice.
                 error!("preimage is not found for payment hash: {:?}", payment_hash);
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);

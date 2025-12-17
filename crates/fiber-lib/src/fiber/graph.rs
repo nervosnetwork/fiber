@@ -1167,6 +1167,10 @@ where
             (payment_data.router.clone(), amount, None)
         } else {
             let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
+            error!(
+                "debug now allow_trampoline_routing: {:?}",
+                payment_data.allow_trampoline_routing()
+            );
             match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
                 Ok(route) => (route, amount, None),
                 Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
@@ -1186,6 +1190,10 @@ where
                 Err(PathFindError::NoPathFound) if payment_data.allow_trampoline_routing() => {
                     let (route, amount_to_trampoline, trampoline_payload) =
                         self.find_trampoline_route(source, amount, max_fee_amount, payment_data)?;
+                    error!(
+                        "debug now found trampoline route: {:?}, amount_to_trampoline: {}",
+                        route, amount_to_trampoline
+                    );
                     (route, amount_to_trampoline, Some(trampoline_payload))
                 }
                 Err(err) => return Err(err),

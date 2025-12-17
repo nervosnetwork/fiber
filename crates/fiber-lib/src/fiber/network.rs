@@ -2541,6 +2541,7 @@ where
             };
 
             let graph = self.network_graph.read().await;
+            error!("debug now sending trampoline bytes: {:?}", trampoline_bytes);
             request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
             let hops = graph
                 .build_route(trampoline.final_amount, None, max_fee_amount, &request)

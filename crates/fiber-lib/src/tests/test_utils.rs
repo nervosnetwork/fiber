@@ -616,7 +616,8 @@ pub(crate) async fn create_n_nodes_network_with_params(
             assert!(matches!(res, TxStatus::Committed(..)));
         }
     }
-    wait_for_network_graph_update(&nodes[0], amounts.len()).await;
+    let expected_graph_channels = amounts.iter().filter(|(_, p)| p.public).count();
+    wait_for_network_graph_update(&nodes[0], expected_graph_channels).await;
     (nodes, channels)
 }
 
@@ -630,6 +631,31 @@ pub async fn create_n_nodes_network(
         .map(|((i, j), (a, b))| ((*i, *j), ChannelParameters::new(*a, *b)))
         .collect::<Vec<_>>();
     create_n_nodes_network_with_params(&amounts, n, None).await
+}
+
+/// Like `create_n_nodes_network`, but allows specifying whether each channel is public.
+///
+/// Each entry is `((i, j), (a_funding, b_funding), public)`.
+#[allow(clippy::type_complexity)]
+pub async fn create_n_nodes_network_with_visibility(
+    channels: &[((usize, usize), (u128, u128), bool)],
+    n: usize,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    let channels = channels
+        .iter()
+        .map(|((i, j), (a, b), public)| {
+            (
+                (*i, *j),
+                ChannelParameters {
+                    public: *public,
+                    node_a_funding_amount: *a,
+                    node_b_funding_amount: *b,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    create_n_nodes_network_with_params(&channels, n, None).await
 }
 
 impl NetworkNode {
@@ -806,6 +832,12 @@ impl NetworkNode {
         let res = res.unwrap();
         self.wait_until_success(res.payment_hash).await;
         res
+    }
+
+    pub async fn assert_send_payment_failure(&self, command: SendPaymentCommand) -> String {
+        let res = self.send_payment(command).await;
+        assert!(res.is_err());
+        res.err().unwrap()
     }
 
     pub async fn send_payment_with_router(

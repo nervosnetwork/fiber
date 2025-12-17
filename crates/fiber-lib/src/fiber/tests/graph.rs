@@ -9,7 +9,9 @@ use crate::{
     fiber::{
         graph::{NetworkGraph, RouterHop},
         network::{get_chain_hash, SendPaymentCommand, SendPaymentData},
-        types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
+        types::{
+            ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement, TrampolineOnionData,
+        },
     },
     store::Store,
 };
@@ -634,6 +636,79 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
     assert_eq!(amounts, vec![1000, 1000]);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
+    init_tracing();
+
+    // Topology:
+    //   sender(A)=node1  --(public channel)-->  trampoline(C)=node2
+    //   final(D)=node3 is unreachable from A (and from the graph) on purpose.
+    // Expectation: with allow_trampoline_routing=true, A only needs to find A->C,
+    // and should NOT pre-check whether C can reach D.
+    let mut network = MockNetworkGraph::new(3);
+
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let trampoline = network.keys[2];
+    let final_recipient = network.keys[3];
+
+    // Only A<->C exists. D is intentionally disconnected.
+    network.add_edge(1, 2, Some(10_000), Some(0));
+
+    let mut payment_data = SendPaymentData {
+        target_pubkey: final_recipient.into(),
+        amount: 1000,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: None,
+        max_fee_amount: Some(500),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        hop_hints: vec![],
+        dry_run: false,
+        custom_records: None,
+        router: vec![],
+        allow_mpp: false,
+        allow_trampoline_routing: false,
+        channel_stats: Default::default(),
+    };
+
+    // Without trampoline: no route to final recipient.
+    assert!(network
+        .graph
+        .build_route(payment_data.amount, None, None, &payment_data)
+        .is_err());
+
+    // With trampoline: should succeed by routing to C only.
+    payment_data.allow_trampoline_routing = true;
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, None, &payment_data)
+        .expect("trampoline route should be built");
+
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].next_hop, Some(trampoline.into()));
+    assert!(route[0].amount >= payment_data.amount);
+
+    let last = route.last().expect("last hop");
+    assert!(last.next_hop.is_none());
+    let trampoline_bytes = last
+        .trampoline_onion
+        .as_deref()
+        .expect("trampoline payload should be present");
+    let payload = TrampolineOnionData::deserialize(trampoline_bytes)
+        .expect("deserialize TrampolineOnionData");
+    assert_eq!(payload.final_recipient, final_recipient.into());
+    assert_eq!(payload.final_amount, payment_data.amount);
+    assert_eq!(last.amount, payment_data.amount);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
