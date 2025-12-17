@@ -917,11 +917,11 @@ pub enum NetworkActorEvent {
     // A payment need to retry
     RetrySendPayment(Hash256, Option<u64>),
 
-    // AddTlc result from peer (payment_hash, attempt_id, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
+    // AddTlc result from peer (payment_hash, attempt_id, add_tlc_result, (previous_channel_id, previous_tlc_id))
     AddTlcResult(
         Hash256,
         Option<u64>,
-        Option<(ProcessingChannelError, TlcErr)>,
+        Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
         Option<PrevTlcInfo>,
     ),
 
@@ -1295,13 +1295,18 @@ where
                     .resume_payment_session(myself, state, payment_hash, attempt_id)
                     .await;
             }
-            NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
+            NetworkActorEvent::AddTlcResult(
+                payment_hash,
+                attempt_id,
+                add_tlc_result,
+                previous_tlc,
+            ) => {
                 self.on_add_tlc_result_event(
                     myself,
                     state,
                     payment_hash,
                     attempt_id,
-                    error_info,
+                    add_tlc_result,
                     previous_tlc,
                 )
                 .await;
@@ -1979,7 +1984,7 @@ where
                         state,
                         command.payment_hash,
                         command.attempt_id,
-                        Some((ProcessingChannelError::TlcForwardingError(err.clone()), err)),
+                        Err((ProcessingChannelError::TlcForwardingError(err.clone()), err)),
                         command.previous_tlc,
                     )
                     .await;
@@ -2901,7 +2906,7 @@ where
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
-        error_info: Option<(ProcessingChannelError, TlcErr)>,
+        add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
         previous_tlc: Option<PrevTlcInfo>,
     ) {
         if let Some(PrevTlcInfo {
@@ -2919,7 +2924,7 @@ where
                                 payment_hash,
                                 channel_id,
                                 tlc_id,
-                                error_info: error_info.clone(),
+                                add_tlc_result: add_tlc_result.clone(),
                             },
                         )),
                     }),
@@ -2934,8 +2939,8 @@ where
             return;
         };
 
-        match error_info {
-            None => {
+        match add_tlc_result {
+            Ok(_) => {
                 // attempt is inflight
                 attempt.set_inflight_status();
                 self.network_graph
@@ -2944,10 +2949,10 @@ where
                     .track_attempt_router(&attempt);
                 self.store.insert_attempt(attempt);
             }
-            Some((ProcessingChannelError::WaitingTlcAck, _)) => {
+            Err((ProcessingChannelError::WaitingTlcAck, _)) => {
                 // do nothing
             }
-            Some((error, tlc_err)) => {
+            Err((error, tlc_err)) => {
                 self.update_graph_with_tlc_fail(&myself, &tlc_err).await;
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,

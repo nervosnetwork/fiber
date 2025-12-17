@@ -293,6 +293,12 @@ pub struct Htlc {
     /// The expiry of the htlc
     #[serde_as(as = "U64Hex")]
     pub expiry: u64,
+    /// If this HTLC is involved in a forwarding operation, this field indicates the forwarding channel.
+    /// For an outbound htlc, it is the inbound channel. For an inbound htlc, it is the outbound channel.
+    pub forwarding_channel_id: Option<Hash256>,
+    /// If this HTLC is involved in a forwarding operation, this field indicates the forwarding tlc id.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub forwarding_tlc_id: Option<u64>,
     /// The status of the htlc
     pub status: TlcStatus,
 }
@@ -548,6 +554,10 @@ where
                                     amount: tlc.amount,
                                     expiry: tlc.expiry,
                                     payment_hash: tlc.payment_hash,
+                                    forwarding_channel_id: tlc
+                                        .forwarding_tlc
+                                        .map(|(channel_id, _)| channel_id),
+                                    forwarding_tlc_id: tlc.forwarding_tlc.map(|(_, id)| id),
                                     status: tlc.status.clone(),
                                 }
                             })
