@@ -158,6 +158,8 @@ pub struct NewInvoiceParams {
     pub hash_algorithm: Option<HashAlgorithm>,
     /// Whether allow payment to use MPP
     pub allow_mpp: Option<bool>,
+    /// Whether allow payment to use trampoline routing
+    pub allow_trampoline_routing: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -409,6 +411,17 @@ where
                 let mut rng = rand::thread_rng();
                 let payment_secret: [u8; 32] = rng.gen();
                 invoice_builder = invoice_builder.payment_secret(payment_secret.into());
+            }
+        };
+        if let Some(allow_trampoline_routing) = params.allow_trampoline_routing {
+            invoice_builder = invoice_builder.allow_trampoline_routing(allow_trampoline_routing);
+            if allow_trampoline_routing
+                && !self
+                    .node_features
+                    .as_ref()
+                    .is_some_and(|f| f.supports_trampoline_routing())
+            {
+                return error("Node does not support trampoline routing, please enable trampoline routing feature");
             }
         };
 

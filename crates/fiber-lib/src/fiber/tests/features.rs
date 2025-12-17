@@ -131,6 +131,8 @@ fn test_feature_default() {
     assert!(vector.supports_gossip_queries());
     assert!(vector.supports_basic_mpp());
     assert!(vector.requires_basic_mpp());
+    assert!(vector.requires_trampoline_routing());
+    assert!(vector.supports_trampoline_routing());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

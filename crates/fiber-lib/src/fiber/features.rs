@@ -74,6 +74,7 @@ pub mod feature_bits {
     declare_feature_bits_and_methods! {
         GOSSIP_QUERIES, 1;
         BASIC_MPP, 3;
+        TRAMPOLINE_ROUTING, 5;
         // more features, please note that base bit must be defined as increasing odd numbers
     }
 }
@@ -88,6 +89,7 @@ impl Default for FeatureVector {
         let mut feature = Self::new();
         feature.set_gossip_queries_required();
         feature.set_basic_mpp_required();
+        feature.set_trampoline_routing_required();
 
         // set other default features here
         // ...
