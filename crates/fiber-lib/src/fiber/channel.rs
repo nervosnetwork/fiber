@@ -1904,6 +1904,14 @@ where
     ) {
         loop {
             if state.is_waiting_tlc_ack() {
+                debug!(
+                    "Channel {:?} is in WaitingTlcAck state, break apply tlc operations: {:?}, state.tlc_state.waiting_tlc: {:?} nonce_for_send: {:?}, nonce_for_verify: {:?}",
+                    state.get_id(),
+                    state.retryable_tlc_operations.len(),
+                    state.tlc_state.waiting_ack,
+                    state.remote_revocation_nonce_for_send.is_none(),
+                    state.remote_revocation_nonce_for_verify.is_none()
+                );
                 break;
             }
 
