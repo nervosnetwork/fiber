@@ -202,6 +202,7 @@ Attempts to open a channel with a peer.
 * `peer_id` - <em>`PeerId`</em>, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
 * `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
 * `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+* `one_way` - <em>`Option<bool>`</em>, Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
 * `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
 * `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.

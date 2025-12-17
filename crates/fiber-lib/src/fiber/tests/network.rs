@@ -1219,6 +1219,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: true,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: funding_amount_a,
                 funding_udt_type_script: None,
