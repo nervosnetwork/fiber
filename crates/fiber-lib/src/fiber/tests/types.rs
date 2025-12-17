@@ -260,11 +260,11 @@ fn test_peeled_large_onion_packet() {
     }
 
     // default PACKET_DATA_LEN is 6500
-    build_onion_packet(40).expect("build onion packet with 40 hops");
-    let res = build_onion_packet(41);
+    build_onion_packet(39).expect("build onion packet with 39 hops");
+    let res = build_onion_packet(40);
     assert!(
         res.is_err(),
-        "should fail to build onion packet with 41 hops"
+        "should fail to build onion packet with 40 hops"
     );
 }
 
@@ -522,13 +522,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "7cd5e05013bd41c8de80fdef75d6ffd1be45408d8e2a8cd54f0994d2bfdb590826583e662e05ca39cdb844f796fc43c4627746a485fc8e54c1859f710122008a",
-            "18564fef8fcea0fcef42a982d4df86a0dd0b7838159e05a12aa4e74498aca4ff",
+            "d5102b528c475e568981c43a8505606333129d4e71142482f59e5bb0a02bc70324d0cdf396eb6dd537c971de34bec77636565f54ded88b9dda53b65570b9ca70",
+            "c63db3aec76b6a62e9d563dc35450de058d37047f80dc6c60abad344dd48beba",
             node1(),
         ),
         (
-            "3a1eea2e372e5c3bc53d1c283d449afbfff029308fe59e111a23ad32163d2a6f58128e21083e128a05d34fb8c0068a1f4fa6e4ae12e370d3051591df151a957a",
-            "db96ac7278d1db7b03eefdc4d21c952e3aee8a4be87a82c8c0e66a87e8897a81",
+            "1fec23d92c9fc9fafd39f477bf1fbb79cfb8f63604a6aeb0712cfd7dbe31e4e21a174f4e6733e78970f4489859aa1ba615fe712d4d212dd7f1c1a6678dff5d00",
+            "3e612fcfa66885352ac18e1fdd602199fb125fa4435ea509f472c0c870b0d307",
             node2(),
         ),
     ] {
@@ -600,7 +600,7 @@ fn test_verify_payment_hop_data() {
     // make sure we don't change PaymentHopData format since it's stored in db with encrypted format
     // do migration with old data version is not workable
     let expected_check_sum =
-        "1ea2a67b30c7d2cedab21c6e5f4a3b860fc8b1ccc525f42dd1bdd4a7d6dfe489".to_string();
+        "7abddd1a352a8191bea7b694973a83d1d21c91ce50b2c657521ac83233103ce4".to_string();
     if check_sum != expected_check_sum {
         panic!(
             "PaymentHopData check sum mismatch, you need compatible with old data version when deserializing, \

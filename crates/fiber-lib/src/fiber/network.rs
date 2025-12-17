@@ -2,6 +2,7 @@ use ckb_hash::blake2b_256;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
+use ckb_types::prelude::Entity;
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
@@ -96,7 +97,8 @@ use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxAbort, TxSignatures,
+    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineOnionData, TxAbort,
+    TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{
@@ -530,6 +532,7 @@ pub struct SendPaymentData {
     pub hop_hints: Vec<HopHint>,
     pub router: Vec<RouterHop>,
     pub allow_mpp: bool,
+    pub allow_trampoline_routing: bool,
     pub dry_run: bool,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
@@ -673,6 +676,9 @@ impl SendPaymentData {
         let hop_hints = command.hop_hints.unwrap_or_default();
 
         let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
+        let allow_trampoline_routing = invoice
+            .as_ref()
+            .is_some_and(|inv| inv.allow_trampoline_routing());
         let payment_secret = invoice
             .as_ref()
             .and_then(|inv| inv.payment_secret().cloned());
@@ -736,6 +742,7 @@ impl SendPaymentData {
             allow_self_payment: command.allow_self_payment,
             hop_hints,
             allow_mpp,
+            allow_trampoline_routing,
             router: vec![],
             dry_run: command.dry_run,
             channel_stats: Default::default(),
@@ -749,6 +756,10 @@ impl SendPaymentData {
     pub fn allow_mpp(&self) -> bool {
         // only allow mpp if max_parts is greater than 1 and not keysend
         self.allow_mpp && self.max_parts() > 1 && !self.keysend
+    }
+
+    pub fn allow_trampoline_routing(&self) -> bool {
+        self.allow_trampoline_routing
     }
 }
 
@@ -2485,11 +2496,73 @@ where
     ) -> Result<(), TlcErr> {
         trace!("Entering handle_send_onion_packet_command");
         let SendOnionPacketCommand {
-            peeled_onion_packet,
+            mut peeled_onion_packet,
             previous_tlc,
             payment_hash,
             attempt_id,
         } = command;
+
+        // Trampoline forwarding: the onion for this node is the last hop, but contains an
+        // encrypted payload telling us the real final recipient and parameters.
+        if let Some(trampoline_bytes) = peeled_onion_packet.current.trampoline_onion.as_deref() {
+            let Some(trampoline) = TrampolineOnionData::deserialize(trampoline_bytes) else {
+                return Err(TlcErr::new_node_fail(
+                    TlcErrorCode::TemporaryNodeFailure,
+                    state.get_public_key(),
+                ));
+            };
+
+            let max_fee_amount = previous_tlc.map(|x| x.forwarding_fee);
+
+            let mut request = SendPaymentData {
+                target_pubkey: trampoline.final_recipient,
+                amount: trampoline.final_amount,
+                payment_hash,
+                invoice: None,
+                final_tlc_expiry_delta: trampoline.final_tlc_expiry_delta,
+                tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+                timeout: None,
+                max_fee_amount,
+                max_parts: Some(1),
+                keysend: false,
+                udt_type_script: trampoline
+                    .udt_type_script
+                    .as_deref()
+                    .and_then(|bytes| Script::from_slice(bytes).ok()),
+                preimage: trampoline.payment_preimage,
+                custom_records: trampoline.custom_records.clone(),
+                allow_self_payment: true,
+                hop_hints: vec![],
+                router: vec![],
+                allow_mpp: false,
+                allow_trampoline_routing: false,
+                dry_run: false,
+                channel_stats: Default::default(),
+            };
+
+            let graph = self.network_graph.read().await;
+            request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+            let hops = graph
+                .build_route(trampoline.final_amount, None, max_fee_amount, &request)
+                .map_err(|_| {
+                    TlcErr::new_node_fail(
+                        TlcErrorCode::TemporaryNodeFailure,
+                        state.get_public_key(),
+                    )
+                })?;
+
+            let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
+            let secp = Secp256k1::new();
+            peeled_onion_packet = PeeledPaymentOnionPacket::create(
+                session_key,
+                hops,
+                Some(payment_hash.as_ref().to_vec()),
+                &secp,
+            )
+            .map_err(|_| {
+                TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
+            })?;
+        }
 
         let info = peeled_onion_packet.current.clone();
         let shared_secret = peeled_onion_packet.shared_secret;

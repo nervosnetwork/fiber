@@ -21,9 +21,11 @@ use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatu
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
+use crate::fiber::types::TrampolineOnionData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use ckb_types::prelude::Entity;
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
@@ -1159,14 +1161,14 @@ where
             ));
         }
 
-        let (route_hops, route_amount) = if !payment_data.router.is_empty() {
+        let (route_hops, route_amount, trampoline_payload) = if !payment_data.router.is_empty() {
             // If a router is explicitly provided, use it.
             // Assume it's valid for the requested `amount`.
-            (payment_data.router.clone(), amount)
+            (payment_data.router.clone(), amount, None)
         } else {
             let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
             match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
-                Ok(route) => (route, amount),
+                Ok(route) => (route, amount, None),
                 Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
                     if payment_data.allow_mpp() && amount_low_bound < amount =>
                 {
@@ -1179,7 +1181,12 @@ where
                     ) else {
                         return Err(PathFindError::NoPathFound);
                     };
-                    res
+                    (res.0, res.1, None)
+                }
+                Err(PathFindError::NoPathFound) if payment_data.allow_trampoline_routing() => {
+                    let (route, amount_to_trampoline, trampoline_payload) =
+                        self.find_trampoline_route(source, amount, max_fee_amount, payment_data)?;
+                    (route, amount_to_trampoline, Some(trampoline_payload))
                 }
                 Err(err) => return Err(err),
             }
@@ -1190,7 +1197,105 @@ where
             "Route hops should not be empty if Ok"
         );
 
-        Ok(self.build_router_from_path(&route_hops, route_amount, payment_data))
+        Ok(
+            self.build_router_from_path(
+                &route_hops,
+                route_amount,
+                payment_data,
+                trampoline_payload,
+            ),
+        )
+    }
+
+    fn is_node_support_trampoline_routing(&self, node: &Pubkey) -> bool {
+        self.nodes
+            .get(node)
+            .map(|node_info| node_info.features.supports_trampoline_routing())
+            .unwrap_or(true)
+    }
+
+    fn find_trampoline_route(
+        &self,
+        source: Pubkey,
+        final_amount: u128,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
+    ) -> Result<(Vec<RouterHop>, u128, TrampolineOnionData), PathFindError> {
+        // Try a small set of fee-split ratios for the trampoline forwarded fee budget.
+        // fee_budget_forward is carried to the trampoline node as (received_amount - forward_amount).
+        const SPLITS: [u128; 5] = [0, 25, 50, 75, 100];
+
+        // Limit candidate count to avoid pathological full-graph scans.
+        const MAX_TRAMPOLINE_CANDIDATES: usize = 32;
+
+        let target = payment_data.target_pubkey;
+        let total_fee_budget = max_fee_amount.unwrap_or(0);
+
+        let invoice = payment_data
+            .invoice
+            .clone()
+            .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
+        let hash_algorithm = invoice
+            .as_ref()
+            .and_then(|x| x.hash_algorithm().copied())
+            .unwrap_or_default();
+
+        let mut trampoline_candidates = self
+            .nodes
+            .keys()
+            .filter(|n| **n != source && **n != target)
+            .filter(|n| self.is_node_support_trampoline_routing(n))
+            .take(MAX_TRAMPOLINE_CANDIDATES)
+            .copied()
+            .collect::<Vec<_>>();
+
+        // Prefer determinism across runs.
+        trampoline_candidates.sort();
+
+        for candidate in trampoline_candidates {
+            for split_percent in SPLITS {
+                let fee_budget_forward = total_fee_budget.saturating_mul(split_percent) / 100;
+                let fee_budget_routing = total_fee_budget.saturating_sub(fee_budget_forward);
+                let amount_to_trampoline = final_amount.saturating_add(fee_budget_forward);
+
+                let Ok(route_to_trampoline) = self.find_path(
+                    source,
+                    candidate,
+                    amount_to_trampoline,
+                    Some(fee_budget_routing),
+                    payment_data.udt_type_script.clone(),
+                    payment_data.final_tlc_expiry_delta,
+                    payment_data.tlc_expiry_limit,
+                    payment_data.allow_self_payment,
+                    &payment_data.hop_hints,
+                    &payment_data.channel_stats,
+                    payment_data.allow_mpp(),
+                ) else {
+                    continue;
+                };
+
+                let trampoline_payload = TrampolineOnionData {
+                    final_recipient: payment_data.target_pubkey,
+                    final_amount,
+                    udt_type_script: payment_data
+                        .udt_type_script
+                        .as_ref()
+                        .map(|s| s.as_bytes().to_vec()),
+                    final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
+                    payment_preimage: payment_data.preimage,
+                    hash_algorithm,
+                    custom_records: payment_data.custom_records.clone(),
+                };
+
+                return Ok((
+                    route_to_trampoline,
+                    amount_to_trampoline,
+                    trampoline_payload,
+                ));
+            }
+        }
+
+        Err(PathFindError::NoPathFound)
     }
 
     fn find_path_with_payment_data(
@@ -1292,6 +1397,7 @@ where
         route: &Vec<RouterHop>,
         max_amount: u128,
         payment_data: &SendPaymentData,
+        trampoline_payload: Option<TrampolineOnionData>,
     ) -> Vec<PaymentHopData> {
         let invoice = payment_data
             .invoice
@@ -1318,12 +1424,24 @@ where
             });
         }
 
+        let (last_amount, payment_preimage, custom_records, trampoline_onion) =
+            match trampoline_payload {
+                Some(payload) => (payload.final_amount, None, None, Some(payload.serialize())),
+                None => (
+                    max_amount,
+                    payment_data.preimage,
+                    payment_data.custom_records.clone(),
+                    None,
+                ),
+            };
+
         hops_data.push(PaymentHopData {
-            amount: max_amount,
+            amount: last_amount,
             hash_algorithm,
             expiry: now + payment_data.final_tlc_expiry_delta + rand_tlc_expiry_delta,
-            payment_preimage: payment_data.preimage,
-            custom_records: payment_data.custom_records.clone(),
+            payment_preimage,
+            custom_records,
+            trampoline_onion,
             ..Default::default()
         });
         // assert there is no duplicate node in the route

@@ -1049,6 +1049,7 @@ where
     ) -> ProcessingChannelResult {
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
+        let is_trampoline = peeled_onion_packet.current.trampoline_onion.is_some();
 
         let tlc = state
             .tlc_state
@@ -1056,7 +1057,7 @@ where
             .expect("expect tlc");
         tlc.applied_flags = AppliedFlags::ADD;
 
-        if peeled_onion_packet.is_last() {
+        if peeled_onion_packet.is_last() && !is_trampoline {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
