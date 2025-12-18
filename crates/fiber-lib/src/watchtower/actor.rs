@@ -31,7 +31,7 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         types::{Hash256, NodeId, Privkey, Pubkey},
     },
-    utils::tx::compute_tx_message,
+    utils::{actor::ActorHandleLogGuard, tx::compute_tx_message},
     watchtower::ChannelData,
 };
 
@@ -44,6 +44,8 @@ pub struct WatchtowerActor<S> {
     // a node_id represent the watchtower itself
     node_id: NodeId,
 }
+
+const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
@@ -101,10 +103,12 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        #[cfg(feature = "metrics")]
-        let start = crate::now_timestamp_as_millis_u64();
-        #[cfg(feature = "metrics")]
-        let name = format!("fiber.watchtower_actor.{}", message.as_ref());
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "WatchtowerActor",
+            message.as_ref().to_string(),
+            "fiber.watchtower_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
         match message {
             WatchtowerMessage::CreateChannel(
                 channel_id,
@@ -163,12 +167,6 @@ where
                 .store
                 .remove_watch_preimage(NodeId::local(), payment_hash),
             WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
-        }
-        #[cfg(feature = "metrics")]
-        {
-            let end = crate::now_timestamp_as_millis_u64();
-            let elapsed = end - start;
-            metrics::histogram!(name).record(elapsed as u32);
         }
         Ok(())
     }

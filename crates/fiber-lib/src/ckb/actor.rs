@@ -13,6 +13,7 @@ use tracing::debug;
 use crate::{
     ckb::contracts::{get_script_by_contract, Contract},
     fiber::{serde_utils::EntityHex, types::Hash256},
+    utils::actor::ActorHandleLogGuard,
 };
 
 use super::{
@@ -25,6 +26,8 @@ use super::{
 };
 
 pub struct CkbChainActor {}
+
+const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 #[derive(Clone, Debug)]
 pub struct CkbChainState {
@@ -207,10 +210,12 @@ impl Actor for CkbChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        #[cfg(feature = "metrics")]
-        let start = crate::now_timestamp_as_millis_u64();
-        #[cfg(feature = "metrics")]
-        let name = format!("fiber.ckb_chain_actor.{}", message.as_ref());
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "CkbChainActor",
+            message.as_ref().to_string(),
+            "fiber.ckb_chain_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
                 let context = state.build_funding_context(request.script.clone());
@@ -336,13 +341,6 @@ impl Actor for CkbChainActor {
             CkbChainMessage::Stop => {
                 myself.stop(Some("stop received".to_string()));
             }
-        }
-
-        #[cfg(feature = "metrics")]
-        {
-            let end = crate::now_timestamp_as_millis_u64();
-            let elapsed = end - start;
-            metrics::histogram!(name).record(elapsed as u32);
         }
 
         Ok(())
