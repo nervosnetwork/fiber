@@ -1597,8 +1597,9 @@ where
                             let expect_expiry = now + epoch_delay_milliseconds;
                             if actor_state
                                 .tlc_state
-                                .get_committed_offered_tlcs()
-                                .any(|tlc| tlc.expiry < expect_expiry)
+                                .get_expired_offered_tlcs(expect_expiry)
+                                .next()
+                                .is_some()
                             {
                                 info!(
                                     "Force closing channel {:?} due to expired offered tlc",
@@ -1642,8 +1643,7 @@ where
                             let expect_expiry = now + epoch_delay_milliseconds;
                             for tlc in actor_state
                                 .tlc_state
-                                .get_committed_offered_tlcs()
-                                .filter(|tlc| tlc.expiry < expect_expiry)
+                                .get_expired_offered_tlcs(expect_expiry)
                             {
                                 if let Some((forwarding_channel_id, forwarding_tlc_id)) =
                                     tlc.forwarding_tlc
