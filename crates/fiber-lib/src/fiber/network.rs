@@ -344,6 +344,8 @@ pub enum NetworkActorCommand {
         BuildRouterCommand,
         RpcReplyPort<Result<PaymentRouter, String>>,
     ),
+    // Get the count of inflight payments
+    GetInflightPaymentCount(RpcReplyPort<Result<u32, String>>),
 
     AddInvoice(
         CkbInvoice,
@@ -1216,6 +1218,7 @@ where
             ) => {
                 self.on_add_tlc_result_event(
                     myself,
+                    state,
                     payment_hash,
                     attempt_id,
                     add_tlc_result,
@@ -1956,6 +1959,7 @@ where
                     Err(err) => {
                         self.on_add_tlc_result_event(
                             myself,
+                            state,
                             command.payment_hash,
                             command.attempt_id,
                             Err((
@@ -2282,6 +2286,9 @@ where
                     udt_cfg_infos: get_udt_whitelist(),
                 };
                 let _ = rpc.send(Ok(response));
+            }
+            NetworkActorCommand::GetInflightPaymentCount(reply) => {
+                let _ = reply.send(Ok(state.inflight_payments.len() as u32));
             }
             NetworkActorCommand::ListPeers(_, rpc) => {
                 let peers = state
@@ -2614,14 +2621,7 @@ where
 
                     // terminate payment actor when status is final
                     if status_is_final {
-                        if let Some(actor) = state.inflight_payments.get(&payment_hash) {
-                            if let Err(err) = actor.send_message(PaymentActorMessage::CheckPayment)
-                            {
-                                debug!(
-                            "CheckPayment message dropped because payment actor is likely stopping, error: {err}"
-                        );
-                            }
-                        }
+                        self.notify_payment_final(state, payment_hash);
                     }
                 }
             }
@@ -2646,6 +2646,8 @@ where
                 );
 
                 self.set_attempt_fail_with_error(
+                    state,
+                    payment_hash,
                     &mut session,
                     &mut attempt,
                     error_detail.error_code.as_ref(),
@@ -2715,6 +2717,7 @@ where
     async fn on_add_tlc_result_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
@@ -2775,6 +2778,8 @@ where
                     true,
                 );
                 self.set_attempt_fail_with_error(
+                    state,
+                    payment_hash,
                     &mut session,
                     &mut attempt,
                     &error.to_string(),
@@ -2788,22 +2793,41 @@ where
         }
     }
 
-    fn set_payment_fail_with_error(&self, session: &mut PaymentSession, error: &str) {
+    fn notify_payment_final(&self, state: &mut NetworkActorState<S>, payment_hash: Hash256) {
+        if let Some(actor) = state.inflight_payments.get(&payment_hash) {
+            if let Err(err) = actor.send_message(PaymentActorMessage::NotifyPaymentFinal) {
+                debug!(
+                    "CheckPayment message dropped because payment actor is likely stopping, error: {err}"
+                );
+            }
+        }
+    }
+
+    fn set_payment_fail_with_error(
+        &self,
+        state: &mut NetworkActorState<S>,
+        payment_hash: Hash256,
+        session: &mut PaymentSession,
+        error: &str,
+    ) {
         session.set_failed_status(error);
         if !session.is_dry_run() {
             self.store.insert_payment_session(session.clone());
+            self.notify_payment_final(state, payment_hash);
         }
     }
 
     fn set_attempt_fail_with_error(
         &self,
+        state: &mut NetworkActorState<S>,
+        payment_hash: Hash256,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
         error: &str,
         retryable: bool,
     ) {
         if !retryable && !session.active_attempts().any(|a| a.id != attempt.id) {
-            self.set_payment_fail_with_error(session, error);
+            self.set_payment_fail_with_error(state, payment_hash, session, error);
         }
 
         attempt.set_failed_status(error, retryable);

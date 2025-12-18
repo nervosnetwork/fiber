@@ -701,7 +701,7 @@ pub enum PaymentActorMessage {
     ),
     RetrySendPayment(Option<u64>),
     // Check payment status, stop actor if payment is end
-    CheckPayment,
+    NotifyPaymentFinal,
 }
 
 pub enum PaymentActorInitCommand {
@@ -903,7 +903,7 @@ where
                     .await;
                 self.check_payment_final(myself, state);
             }
-            PaymentActorMessage::CheckPayment => {
+            PaymentActorMessage::NotifyPaymentFinal => {
                 self.check_payment_final(myself, state);
             }
         };
