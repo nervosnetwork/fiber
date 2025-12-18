@@ -1229,10 +1229,6 @@ where
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> Result<(Vec<RouterHop>, u128, TrampolineOnionData), PathFindError> {
-        // Try a small set of fee-split ratios for the trampoline forwarded fee budget.
-        // fee_budget_forward is carried to the trampoline node as (received_amount - forward_amount).
-        const SPLITS: [u128; 5] = [0, 25, 50, 75, 100];
-
         // Limit candidate count to avoid pathological full-graph scans.
         const MAX_TRAMPOLINE_CANDIDATES: usize = 32;
 
@@ -1261,46 +1257,48 @@ where
         trampoline_candidates.sort();
 
         for candidate in trampoline_candidates {
-            for split_percent in SPLITS {
-                let fee_budget_forward = total_fee_budget.saturating_mul(split_percent) / 100;
-                let fee_budget_routing = total_fee_budget.saturating_sub(fee_budget_forward);
-                let amount_to_trampoline = final_amount.saturating_add(fee_budget_forward);
+            let fee_budget_forward = total_fee_budget.saturating_mul(50) / 100;
+            let fee_budget_routing = total_fee_budget.saturating_sub(fee_budget_forward);
+            let amount_to_trampoline = final_amount.saturating_add(fee_budget_forward);
+            error!(
+                "haha fee_budget_forward: {:?} final_amount: {:?} amount_to_trampoline: {:?}",
+                fee_budget_forward, final_amount, amount_to_trampoline
+            );
 
-                let Ok(route_to_trampoline) = self.find_path(
-                    source,
-                    candidate,
-                    amount_to_trampoline,
-                    Some(fee_budget_routing),
-                    payment_data.udt_type_script.clone(),
-                    payment_data.final_tlc_expiry_delta,
-                    payment_data.tlc_expiry_limit,
-                    payment_data.allow_self_payment,
-                    &payment_data.hop_hints,
-                    &payment_data.channel_stats,
-                    payment_data.allow_mpp(),
-                ) else {
-                    continue;
-                };
+            let Ok(route_to_trampoline) = self.find_path(
+                source,
+                candidate,
+                amount_to_trampoline,
+                Some(fee_budget_routing),
+                payment_data.udt_type_script.clone(),
+                payment_data.final_tlc_expiry_delta,
+                payment_data.tlc_expiry_limit,
+                payment_data.allow_self_payment,
+                &payment_data.hop_hints,
+                &payment_data.channel_stats,
+                payment_data.allow_mpp(),
+            ) else {
+                continue;
+            };
 
-                let trampoline_payload = TrampolineOnionData {
-                    final_recipient: payment_data.target_pubkey,
-                    final_amount,
-                    udt_type_script: payment_data
-                        .udt_type_script
-                        .as_ref()
-                        .map(|s| s.as_bytes().to_vec()),
-                    final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
-                    payment_preimage: payment_data.preimage,
-                    hash_algorithm,
-                    custom_records: payment_data.custom_records.clone(),
-                };
+            let trampoline_payload = TrampolineOnionData {
+                final_recipient: payment_data.target_pubkey,
+                final_amount,
+                udt_type_script: payment_data
+                    .udt_type_script
+                    .as_ref()
+                    .map(|s| s.as_bytes().to_vec()),
+                final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
+                payment_preimage: payment_data.preimage,
+                hash_algorithm,
+                custom_records: payment_data.custom_records.clone(),
+            };
 
-                return Ok((
-                    route_to_trampoline,
-                    amount_to_trampoline,
-                    trampoline_payload,
-                ));
-            }
+            return Ok((
+                route_to_trampoline,
+                amount_to_trampoline,
+                trampoline_payload,
+            ));
         }
 
         Err(PathFindError::NoPathFound)

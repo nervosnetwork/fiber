@@ -50,24 +50,17 @@ async fn test_trampoline_routing_basic() {
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
 
-    let payment_hash = node_a
+    let res = node_a
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
-            max_fee_amount: Some(5_000),
+            max_fee_amount: Some(500),
             ..Default::default()
         })
         .await;
-    assert!(payment_hash.is_ok());
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
 
-    // TODO: assert payment will success
-    // node_a
-    //     .assert_send_payment_success(SendPaymentCommand {
-    //         invoice: Some(invoice.to_string()),
-    //         max_fee_amount: Some(5_000),
-    //         ..Default::default()
-    //     })
-    //     .await;
-    tokio::time::sleep(tokio::time::Duration::from_millis(4000)).await;
+    node_a.wait_until_success(payment_hash).await;
 }
 
 #[tokio::test]
@@ -137,23 +130,13 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
 
-    let payment_hash = node_a
-        .send_payment(SendPaymentCommand {
+    node_a
+        .assert_send_payment_success(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(5_000),
             ..Default::default()
         })
         .await;
-    assert!(payment_hash.is_ok());
-
-    // TODO: assert payment will success
-    // node_a
-    //     .assert_send_payment_success(SendPaymentCommand {
-    //         invoice: Some(invoice.to_string()),
-    //         max_fee_amount: Some(5_000),
-    //         ..Default::default()
-    //     })
-    //     .await;
 
     // ================================================================
     // Create an invoice on C that explicitly allows trampoline routing.
@@ -229,14 +212,14 @@ async fn test_trampoline_routing_with_two_networks() {
         .expect("build invoice");
     node_f.insert_invoice(invoice.clone(), Some(preimage));
 
-    let payment_hash = node_a
+    let res = node_a
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(5_000),
             ..Default::default()
         })
         .await;
-    assert!(payment_hash.is_ok());
+    assert!(res.is_ok());
 
-    // TODO: assert payment will fail
+    node_a.wait_until_failed(res.unwrap().payment_hash).await;
 }
