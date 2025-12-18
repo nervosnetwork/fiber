@@ -896,6 +896,15 @@ impl NetworkNode {
         .await
     }
 
+    pub async fn get_inflight_payment_count(&self) -> u32 {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::GetInflightPaymentCount(rpc_reply))
+        };
+        call!(self.network_actor, message)
+            .expect("source_node alive")
+            .expect("get inflight payment count")
+    }
+
     pub fn set_auth_token(&mut self, token: String) {
         self.auth_token = Some(token);
     }

@@ -342,6 +342,8 @@ pub enum NetworkActorCommand {
         BuildRouterCommand,
         RpcReplyPort<Result<PaymentRouter, String>>,
     ),
+    // Get the count of inflight payments
+    GetInflightPaymentCount(RpcReplyPort<Result<u32, String>>),
 
     AddInvoice(
         CkbInvoice,
@@ -2227,6 +2229,9 @@ where
                     udt_cfg_infos: get_udt_whitelist(),
                 };
                 let _ = rpc.send(Ok(response));
+            }
+            NetworkActorCommand::GetInflightPaymentCount(reply) => {
+                let _ = reply.send(Ok(state.inflight_payments.len() as u32));
             }
             NetworkActorCommand::ListPeers(_, rpc) => {
                 let peers = state
