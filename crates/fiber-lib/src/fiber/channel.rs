@@ -3230,11 +3230,14 @@ impl TlcState {
             matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
         })
     }
-
-    pub fn get_committed_offered_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
-        self.offered_tlcs.tlcs.iter().filter(|tlc| {
-            debug_assert!(tlc.is_offered());
-            matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
+    pub fn get_expired_offered_tlcs(
+        &self,
+        expect_expiry: u64,
+    ) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs.tlcs.iter().filter(move |tlc| {
+            tlc.outbound_status() != OutboundTlcStatus::LocalAnnounced
+                && tlc.removed_confirmed_at.is_none()
+                && tlc.expiry < expect_expiry
         })
     }
 
