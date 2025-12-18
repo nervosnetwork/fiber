@@ -534,6 +534,16 @@ impl ChannelActorStateStore for Store {
                 acc
             })
     }
+
+    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
+        let key = [
+            &[WATCHTOWER_TLC_SETTLED_PREFIX],
+            channel_id.as_ref(),
+            &payment_hash.as_ref()[0..20],
+        ]
+        .concat();
+        self.get(key).is_some()
+    }
 }
 
 impl InvoiceStore for Store {
@@ -923,6 +933,18 @@ impl WatchtowerStore for Store {
         let mut iter = self.prefix_iterator(prefix.as_slice());
         iter.next()
             .map(|(_key, value)| deserialize_from(value.as_ref(), "Preimage"))
+    }
+
+    fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]) {
+        let mut batch = self.batch();
+        let key = [
+            &[WATCHTOWER_TLC_SETTLED_PREFIX],
+            channel_id.as_ref(),
+            payment_hash.as_ref(),
+        ]
+        .concat();
+        batch.put(key, []);
+        batch.commit();
     }
 }
 

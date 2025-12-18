@@ -51,7 +51,7 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelState, ChannelTlcInfo, OpenChannelParameter,
+    ChannelInitializationParameter, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
     PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
     RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
@@ -1711,6 +1711,60 @@ where
                         }
                     } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
                         shuttingdown_channels_count += 1;
+                    } else if matches!(
+                        channel_state,
+                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+                            | ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
+                    ) {
+                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            let delay_epoch = EpochNumberWithFraction::from_full_value(
+                                actor_state.commitment_delay_epoch,
+                            );
+                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
+                            let expect_expiry = now + epoch_delay_milliseconds;
+                            for tlc in actor_state
+                                .tlc_state
+                                .get_committed_offered_tlcs()
+                                .filter(|tlc| tlc.expiry < expect_expiry)
+                            {
+                                if let Some((forwarding_channel_id, forwarding_tlc_id)) =
+                                    tlc.forwarding_tlc
+                                {
+                                    if self
+                                        .store
+                                        .is_tlc_settled(&tlc.channel_id, &tlc.payment_hash)
+                                    {
+                                        let (send, _recv) = oneshot::channel();
+                                        let rpc_reply = RpcReplyPort::from(send);
+                                        if let Err(err) = state
+                                            .send_command_to_channel(
+                                                forwarding_channel_id,
+                                                ChannelCommand::RemoveTlc(
+                                                    RemoveTlcCommand {
+                                                        id: forwarding_tlc_id,
+                                                        reason: RemoveTlcReason::RemoveTlcFail(
+                                                            TlcErrPacket::new(
+                                                                TlcErr::new(
+                                                                    TlcErrorCode::ExpiryTooSoon,
+                                                                ),
+                                                                &tlc.shared_secret,
+                                                            ),
+                                                        ),
+                                                    },
+                                                    rpc_reply,
+                                                ),
+                                            )
+                                            .await
+                                        {
+                                            error!(
+                                                "Failed to remove settled tlc {:?} for channel {:?}: {}",
+                                                forwarding_tlc_id, forwarding_channel_id, err
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
