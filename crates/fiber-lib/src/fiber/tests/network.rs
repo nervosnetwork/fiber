@@ -28,6 +28,7 @@ use crate::{
     now_timestamp_as_millis_u64, ChannelTestContext, NetworkServiceEvent,
 };
 use crate::{gen_rand_fiber_private_key, test_utils::*};
+use anyhow::anyhow;
 use ckb_hash::blake2b_256;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
@@ -1069,6 +1070,37 @@ impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SignFundingTxFailureMockMiddleware;
+#[cfg_attr(target_arch="wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl MockChainActorMiddleware for SignFundingTxFailureMockMiddleware {
+    async fn handle(
+        &mut self,
+        _inner_self: ActorRef<CkbChainMessage>,
+        message: CkbChainMessage,
+        _state: &mut MockChainActorState,
+    ) -> Result<Option<CkbChainMessage>, ActorProcessingErr> {
+        match message {
+            CkbChainMessage::Sign(_tx, reply_port) => {
+                // Return an error to simulate signing failure
+                use crate::ckb::FundingError;
+                use ckb_sdk::unlock::UnlockError;
+                let error = FundingError::CkbTxUnlockError(UnlockError::Other(anyhow!(
+                    "Mock signing failure for testing"
+                )));
+                let _ = reply_port.send(Err(error));
+                Ok(None)
+            }
+            _ => Ok(Some(message)),
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn MockChainActorMiddleware> {
+        Box::new(self.clone())
+    }
+}
+
 #[tokio::test]
 async fn test_abort_funding_on_committing_funding_tx_on_chain() {
     let funding_amount_a = 9_900_000_000u128;
@@ -1149,6 +1181,108 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
         })
         .await;
     node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_abort_funding_on_sign_funding_tx_failure() {
+    let funding_amount_a = 9_900_000_000u128;
+    let funding_amount_b: u128 = funding_amount_a;
+    // Put middleware on both nodes since either one might trigger signing
+    let middleware = Box::new(SignFundingTxFailureMockMiddleware);
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .mock_chain_actor_middleware(middleware.clone())
+            .build(),
+    )
+    .await;
+    let mut node_b = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .mock_chain_actor_middleware(middleware)
+            .build(),
+    )
+    .await;
+    node_a.connect_to(&mut node_b).await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount: funding_amount_a,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: funding_amount_b,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+    let channel_id = accept_channel_result.new_channel_id;
+
+    // Wait for the signing to fail and funding to be aborted
+    // The SignFundingTx command will be triggered during the channel setup process
+    // When signing fails, it should send TxAbort and abort funding
+    // Give some time for the channel setup to progress and trigger signing
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Wait for funding to be aborted on both nodes
+    // The node that attempts to sign (node_a with the middleware) will abort first
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
+
+    // Node B should receive the TxAbort message and also abort funding
+    node_b
         .expect_event(|event| {
             matches!(
                 event,

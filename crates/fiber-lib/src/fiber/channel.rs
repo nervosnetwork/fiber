@@ -82,7 +82,7 @@ use musig2::{
 use ractor::call;
 use ractor::{
     concurrency::{Duration, JoinHandle},
-    Actor, ActorProcessingErr, ActorRef, MessagingErr, OutputPort, RpcReplyPort,
+    Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -365,27 +365,11 @@ pub struct ChannelInitializationParameter {
     pub private_key: Privkey,
 }
 
-#[derive(Clone)]
-pub struct ChannelSubscribers {
-    pub pending_received_tlcs_subscribers: Arc<OutputPort<TlcNotification>>,
-    pub settled_tlcs_subscribers: Arc<OutputPort<TlcNotification>>,
-}
-
-impl Default for ChannelSubscribers {
-    fn default() -> Self {
-        Self {
-            pending_received_tlcs_subscribers: Arc::new(OutputPort::default()),
-            settled_tlcs_subscribers: Arc::new(OutputPort::default()),
-        }
-    }
-}
-
 pub struct ChannelActor<S> {
     local_pubkey: Pubkey,
     remote_pubkey: Pubkey,
     network: ActorRef<NetworkActorMessage>,
     store: S,
-    subscribers: ChannelSubscribers,
 }
 
 impl<S> ChannelActor<S>
@@ -397,14 +381,12 @@ where
         remote_pubkey: Pubkey,
         network: ActorRef<NetworkActorMessage>,
         store: S,
-        subscribers: ChannelSubscribers,
     ) -> Self {
         Self {
             local_pubkey,
             remote_pubkey,
             network,
             store,
-            subscribers,
         }
     }
 
@@ -883,15 +865,13 @@ where
     }
 
     async fn try_to_relay_remove_tlc(&self, tlc_info: &TlcInfo, remove_reason: RemoveTlcReason) {
-        let (previous_channel_id, previous_tlc) =
-            tlc_info.previous_tlc.expect("expect previous tlc");
-        debug_assert!(tlc_info.is_offered());
-        debug_assert!(previous_tlc.is_received());
+        let (previous_channel_id, previous_tlc_id) =
+            tlc_info.forwarding_tlc.expect("expect forwarding tlc");
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
 
         let _ = self.register_retryable_relay_tlc_remove(
-            previous_tlc,
+            TLCId::Received(previous_tlc_id),
             previous_channel_id,
             remove_reason,
         );
@@ -1048,16 +1028,6 @@ where
                     .without_shared_secret());
                 }
             }
-        }
-
-        if let Some(ref udt_type_script) = state.funding_udt_type_script {
-            self.subscribers
-                .pending_received_tlcs_subscribers
-                .send(TlcNotification {
-                    tlc: add_tlc.clone().into(),
-                    channel_id: state.get_id(),
-                    script: udt_type_script.clone(),
-                });
         }
 
         // we don't need to settle down the tlc if it is not the last hop here,
@@ -1376,7 +1346,6 @@ where
         state: &mut ChannelActorState,
         tlc_id: TLCId,
     ) -> ProcessingChannelResult {
-        let channel_id = state.get_id();
         let tlc = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");
         tlc.applied_flags |= AppliedFlags::REMOVE;
 
@@ -1390,30 +1359,15 @@ where
             }
             // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
             // incase watchtower may need preimage to settledown
-            if tlc_info.previous_tlc.is_none() {
+            if tlc_info.is_received() || tlc_info.forwarding_tlc.is_none() {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
 
-        if let (
-            Some(ref udt_type_script),
-            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
-        ) = (state.funding_udt_type_script.clone(), &remove_reason)
-        {
-            let mut tlc_notify_info: TlcNotifyInfo = tlc_info.clone().into();
-            tlc_notify_info.payment_preimage = Some(*payment_preimage);
-            self.subscribers
-                .settled_tlcs_subscribers
-                .send(TlcNotification {
-                    tlc: tlc_notify_info,
-                    channel_id,
-                    script: udt_type_script.clone(),
-                });
-        }
-        if tlc_info.previous_tlc.is_none() {
+        if tlc_info.is_offered() {
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
-            if tlc_info.is_offered() {
+            if tlc_info.forwarding_tlc.is_none() {
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::TlcRemoveReceived(
@@ -1423,10 +1377,10 @@ where
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            } else {
+                // relay RemoveTlc to previous channel if needed
+                self.try_to_relay_remove_tlc(&tlc_info, remove_reason).await;
             }
-        } else {
-            // relay RemoveTlc to previous channel if needed
-            self.try_to_relay_remove_tlc(&tlc_info, remove_reason).await;
         }
         Ok(())
     }
@@ -1841,10 +1795,9 @@ where
             Ok(_) => {
                 // we successfully sent the forward tlc, we will wait for the result
                 // here we just make sure the forward tlc is sent, we don't need to wait for the result
-                state.waiting_forward_tlc_tasks.insert(
-                    (payment_hash, tlc_id),
-                    ForwardTlc(payment_hash, tlc_id, peeled_onion_packet, forward_fee),
-                );
+                state
+                    .waiting_forward_tlc_tasks
+                    .insert(tlc_id, peeled_onion_packet.shared_secret);
             }
             Err(err) => {
                 error!("Failed to send forward tlc onion packet command: {:?}", err);
@@ -1965,28 +1918,35 @@ where
         state: &mut ChannelActorState,
         result: ForwardTlcResult,
     ) {
-        let key = (result.payment_hash, TLCId::Received(result.tlc_id));
-        let Some(ForwardTlc(_, _, onion_packet, _)) = state.waiting_forward_tlc_tasks.remove(&key)
+        let Some(shared_secret) = state
+            .waiting_forward_tlc_tasks
+            .remove(&TLCId::Received(result.tlc_id))
         else {
             return;
         };
-        if let Some((channel_err, tlc_err)) = result.error_info {
-            match channel_err {
-                ProcessingChannelError::WaitingTlcAck => {
-                    // peer already buffered the tlc, we already removed the forward tlc record
-                    // and just ignore the error here
-                }
-                _ => {
-                    let error = ProcessingChannelError::TlcForwardingError(tlc_err)
-                        .with_shared_secret(onion_packet.shared_secret);
-                    self.process_add_tlc_error(
-                        myself,
-                        state,
-                        result.payment_hash,
-                        TLCId::Received(result.tlc_id),
-                        error,
-                    );
-                }
+
+        match result.add_tlc_result {
+            Ok((channel_id, tlc_id)) => {
+                state
+                    .tlc_state
+                    .get_mut(&TLCId::Received(result.tlc_id))
+                    .expect("tlc should exist")
+                    .forwarding_tlc = Some((channel_id, tlc_id));
+            }
+            Err((ProcessingChannelError::WaitingTlcAck, _)) => {
+                // peer already buffered the tlc, we already removed the forward tlc record
+                // and just ignore the error here
+            }
+            Err((_, tlc_err)) => {
+                let error = ProcessingChannelError::TlcForwardingError(tlc_err)
+                    .with_shared_secret(shared_secret);
+                self.process_add_tlc_error(
+                    myself,
+                    state,
+                    result.payment_hash,
+                    TLCId::Received(result.tlc_id),
+                    error,
+                );
             }
         }
     }
@@ -2317,10 +2277,10 @@ where
                 self.register_retryable_tlc_add(myself, state, command);
             }
             _ => {
-                let notify = res
+                let add_tlc_result = res
                     .as_ref()
-                    .err()
-                    .map(|err| (err.clone(), self.get_tlc_error(state, err)));
+                    .map(|tlc_id| (state.get_id(), *tlc_id))
+                    .map_err(|err| (err.clone(), self.get_tlc_error(state, err)));
 
                 // notify the network actor about the add tlc result
                 self.network
@@ -2328,7 +2288,7 @@ where
                         NetworkActorEvent::AddTlcResult(
                             command.payment_hash,
                             command.attempt_id,
-                            notify,
+                            add_tlc_result,
                             command.previous_tlc,
                         ),
                     ))
@@ -3071,14 +3031,32 @@ pub struct TlcInfo {
     pub created_at: CommitmentNumbers,
     pub removed_reason: Option<RemoveTlcReason>,
 
-    /// Note: `previous_tlc` is used to track the tlc chain for a multi-tlc payment,
-    ///       we need to know previous when removing tlc backwardly.
+    /// Note: `forwarding_tlc` is used to track the tlc chain for a multi-tlc payment.
     ///
-    /// Node A ---------> Node B ------------> Node C ----------> Node D
-    ///  tlc_1 <---> (tlc_1) (tlc_2) <---> (tlc_2) (tlc_3) <----> tlc_3
-    ///                ^^^^                 ^^^^
+    /// For an outbound tlc, this field records the previous (upstream) tlc,
+    /// so we can walk backward when removing tlcs.
     ///
-    pub previous_tlc: Option<(Hash256, TLCId)>,
+    /// For an inbound tlc, this field records the next (downstream) tlc,
+    /// so we can continue tracking the forwarding path.
+    ///
+    /// Example:
+    ///
+    ///   Node A ---------> Node B ------------> Node C ------------> Node D
+    ///   tlc_1  ---------> tlc_1(in) ---------> tlc_2(in) ---------> tlc_3
+    ///                     tlc_2(out)           tlc_3(out)
+    ///                forwarding_tlc        forwarding_tlc
+    ///
+    ///   forwarding_tlc relations:
+    ///
+    ///   - Node B:
+    ///       inbound  tlc_1.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///       outbound tlc_2.forwarding_tlc = Some((channel_AB, tlc1_id))
+    ///
+    ///   - Node C:
+    ///       inbound  tlc_2.forwarding_tlc = Some((channel_CD, tlc3_id))
+    ///       outbound tlc_3.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///
+    pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
     /// Whether this tlc is the last hop in a multi-path payment
@@ -3194,12 +3172,6 @@ pub enum RetryableTlcOperation {
     RemoveTlc(TLCId, RemoveTlcReason),
     AddTlc(AddTlcCommand),
 }
-
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
-pub struct RelayRemoveTlc(Hash256, TLCId, RemoveTlcReason);
-
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct ForwardTlc(Hash256, TLCId, PeeledPaymentOnionPacket, u128);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct PendingTlcs {
@@ -3685,7 +3657,7 @@ pub struct ChannelActorState {
 
     // the retryable tlc operations that are waiting to be processed.
     pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
-    pub waiting_forward_tlc_tasks: HashMap<(Hash256, TLCId), ForwardTlc>,
+    pub waiting_forward_tlc_tasks: HashMap<TLCId, [u8; 32]>,
 
     // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
@@ -5914,12 +5886,9 @@ impl ChannelActorState {
             removed_reason: None,
             onion_packet: command.onion_packet.clone(),
             shared_secret: command.shared_secret,
-            previous_tlc: command.previous_tlc.map(|prev_tlc| {
-                (
-                    prev_tlc.prev_channel_id,
-                    TLCId::Received(prev_tlc.prev_tlc_id),
-                )
-            }),
+            forwarding_tlc: command
+                .previous_tlc
+                .map(|prev_tlc| (prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id)),
             removed_confirmed_at: None,
             applied_flags: AppliedFlags::empty(),
             total_amount: None,
@@ -5946,7 +5915,7 @@ impl ChannelActorState {
             shared_secret: NO_SHARED_SECRET,
             created_at: self.get_current_commitment_numbers(),
             removed_reason: None,
-            previous_tlc: None,
+            forwarding_tlc: None,
             removed_confirmed_at: None,
             applied_flags: AppliedFlags::empty(),
             total_amount: None,
@@ -7661,6 +7630,8 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
+    /// Check if a tlc is settled on chain
+    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

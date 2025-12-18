@@ -1083,7 +1083,7 @@ The status of a cross-chain hub order, will update as the order progresses.
 
 #### Enum with values of
 
-* `Pending` - Order is created and has not send out payments yet.
+* `Pending` - Order is created and has not received the incoming payment
 * `IncomingAccepted` - HTLC in the incoming payment is accepted.
 * `OutgoingInFlight` - There's an outgoing payment in flight.
 * `OutgoingSettled` - The outgoing payment is settled.
@@ -1287,6 +1287,9 @@ The htlc data structure
 * `amount` - <em>`u128`</em>, The amount of the htlc
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the htlc
 * `expiry` - <em>`u64`</em>, The expiry of the htlc
+* `forwarding_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, If this HTLC is involved in a forwarding operation, this field indicates the forwarding channel.
+ For an outbound htlc, it is the inbound channel. For an inbound htlc, it is the outbound channel.
+* `forwarding_tlc_id` - <em>`Option<u64>`</em>, If this HTLC is involved in a forwarding operation, this field indicates the forwarding tlc id.
 * `status` - <em>[TlcStatus](#type-tlcstatus)</em>, The status of the htlc
 ---
 
