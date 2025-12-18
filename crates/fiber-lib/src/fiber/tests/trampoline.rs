@@ -1,9 +1,14 @@
 #![cfg(not(target_arch = "wasm32"))]
+use tracing::debug;
+
 use crate::fiber::features::FeatureVector;
 use crate::fiber::network::SendPaymentCommand;
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::tests::test_utils::{create_n_nodes_network_with_visibility, init_tracing};
-use crate::{gen_rand_sha256_hash, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB};
+use crate::{
+    create_channel_with_nodes, gen_rand_sha256_hash, ChannelParameters, HUGE_CKB_AMOUNT,
+    MIN_RESERVED_CKB,
+};
 
 #[tokio::test]
 async fn test_trampoline_routing_basic() {
@@ -187,14 +192,17 @@ async fn test_trampoline_routing_with_two_networks() {
 
     let (nodes, _channels) = create_n_nodes_network_with_visibility(
         &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
-        3,
+        2,
     )
     .await;
 
-    let [node_a, _node_b, _node_c] = nodes.try_into().expect("3 nodes");
+    let [node_a, _node_b] = nodes.try_into().expect("3 nodes");
 
     let (nodes, _channels) = create_n_nodes_network_with_visibility(
-        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
         3,
     )
     .await;
@@ -222,4 +230,127 @@ async fn test_trampoline_routing_with_two_networks() {
     assert!(res.is_ok());
 
     node_a.wait_until_failed(res.unwrap().payment_hash).await;
+
+    // // now create a private channel for node_c and node_d
+    // node_b.connect_to(&mut node_d).await;
+
+    // debug!("debug nodes connected, creating private channel between B and D");
+    // let _res = create_channel_with_nodes(
+    //     &mut node_b,
+    //     &mut node_d,
+    //     ChannelParameters {
+    //         public: true,
+    //         node_a_funding_amount: HUGE_CKB_AMOUNT,
+    //         node_b_funding_amount: HUGE_CKB_AMOUNT,
+    //         ..Default::default()
+    //     },
+    // )
+    // .await;
+
+    // tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    // let payment = node_b
+    //     .send_payment_keysend(&node_f, 1_000, false)
+    //     .await
+    //     .unwrap();
+    // node_b.wait_until_success(payment.payment_hash).await;
+
+    // let amount: u128 = 1000;
+    // let preimage = gen_rand_sha256_hash();
+    // let invoice = InvoiceBuilder::new(Currency::Fibd)
+    //     .amount(Some(amount))
+    //     .payment_preimage(preimage)
+    //     .payee_pub_key(node_f.get_public_key().into())
+    //     .allow_trampoline_routing(true)
+    //     .build()
+    //     .expect("build invoice");
+    // node_f.insert_invoice(invoice.clone(), Some(preimage));
+
+    // let res = node_a
+    //     .send_payment(SendPaymentCommand {
+    //         invoice: Some(invoice.to_string()),
+    //         max_fee_amount: Some(5_000),
+    //         ..Default::default()
+    //     })
+    //     .await;
+    // assert!(res.is_ok());
+
+    // node_a.wait_until_success(res.unwrap().payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_private_channel_basic() {
+    init_tracing();
+
+    // A --(private)--> B --(public)--> C --(public)--> D
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        4,
+    )
+    .await;
+
+    let [node_a, _node_b, _node_c, node_d] = nodes.try_into().expect("3 nodes");
+
+    let res = node_a
+        .send_payment_keysend(&node_d, 1_000, false)
+        .await
+        .unwrap();
+
+    eprintln!("payment sent with hash: {:?}", res.payment_hash);
+    node_a.wait_until_success(res.payment_hash).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+#[ignore]
+// TODO: debug this test failure
+async fn test_trampoline_routing_connect_two_networks() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+
+    let [_node_a, mut node_b] = nodes.try_into().expect("3 nodes");
+
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+    )
+    .await;
+
+    let [mut node_d, _node_e, node_f] = nodes.try_into().expect("3 nodes");
+
+    // now create a private channel for node_b and node_d
+    node_b.connect_to(&mut node_d).await;
+
+    debug!("debug nodes connected, creating private channel between B and D");
+    let _res = create_channel_with_nodes(
+        &mut node_b,
+        &mut node_d,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    let payment = node_b
+        .send_payment_keysend(&node_f, 1_000, false)
+        .await
+        .unwrap();
+    node_b.wait_until_success(payment.payment_hash).await;
 }
