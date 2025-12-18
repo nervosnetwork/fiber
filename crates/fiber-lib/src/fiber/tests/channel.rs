@@ -1321,7 +1321,7 @@ async fn test_network_send_payment_with_dry_run() {
 }
 
 #[tokio::test]
-async fn test_send_payment_with_3_nodes() {
+async fn test_send_payment_with_3_nodes_f() {
     init_tracing();
 
     let (node_a, mut node_b, node_c, channel_1, channel_2) =

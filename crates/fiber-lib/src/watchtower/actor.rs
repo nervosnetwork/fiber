@@ -464,7 +464,13 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         group_by_transaction: Some(true),
     };
 
-    find_preimages(search_key.clone(), &ckb_client, store, self_node_id);
+    find_preimages(
+        search_key.clone(),
+        &channel_data.channel_id,
+        &ckb_client,
+        store,
+        self_node_id,
+    );
 
     let (current_epoch, current_time) = match ckb_client.get_tip_header() {
         Ok(tip_header) => match ckb_client.get_block_median_time(tip_header.hash.clone()) {
@@ -619,6 +625,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
 // find all on-chain transactions with the preimage and store them
 fn find_preimages<S: WatchtowerStore>(
     search_key: SearchKey,
+    channel_id: &Hash256,
     ckb_client: &CkbRpcClient,
     store: &S,
     self_node_id: NodeId,
@@ -657,9 +664,7 @@ fn find_preimages<S: WatchtowerStore>(
                                                         )
                                                     {
                                                         for unlock in settlement_witness.unlocks {
-                                                            if unlock.with_preimage
-                                                                && unlock.unlock_type < 0xFE
-                                                            {
+                                                            if unlock.unlock_type < 0xFE {
                                                                 if let Some(tlc) =
                                                                     settlement_witness
                                                                         .pending_htlcs
@@ -668,25 +673,45 @@ fn find_preimages<S: WatchtowerStore>(
                                                                                 as usize,
                                                                         )
                                                                 {
-                                                                    let preimage =
-                                                                        unlock.preimage.unwrap();
-                                                                    let payment_hash = tlc
-                                                                        .hash_algorithm()
-                                                                        .hash(preimage.as_ref());
-                                                                    if payment_hash.starts_with(
-                                                                        &tlc.payment_hash,
-                                                                    ) {
-                                                                        store
+                                                                    if unlock.with_preimage {
+                                                                        let preimage = unlock
+                                                                            .preimage
+                                                                            .unwrap();
+                                                                        let payment_hash = tlc
+                                                                            .hash_algorithm()
+                                                                            .hash(
+                                                                                preimage.as_ref(),
+                                                                            );
+                                                                        if payment_hash.starts_with(
+                                                                            &tlc.payment_hash,
+                                                                        ) {
+                                                                            store
                                                                             .insert_watch_preimage(
                                                                                 self_node_id
                                                                                     .clone(),
                                                                                 payment_hash.into(),
                                                                                 preimage,
                                                                             );
+                                                                        } else {
+                                                                            warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
+                                                                        }
                                                                     } else {
-                                                                        warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
+                                                                        store.update_tlc_settled(
+                                                                            channel_id,
+                                                                            tlc.payment_hash,
+                                                                        );
                                                                     }
                                                                 }
+                                                            } else {
+                                                                settlement_witness
+                                                                    .pending_htlcs
+                                                                    .iter()
+                                                                    .for_each(|tlc| {
+                                                                        store.update_tlc_settled(
+                                                                            channel_id,
+                                                                            tlc.payment_hash,
+                                                                        );
+                                                                    })
                                                             }
                                                         }
                                                     }

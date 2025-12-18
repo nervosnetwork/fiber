@@ -50,7 +50,7 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelState, ChannelTlcInfo, OpenChannelParameter,
+    ChannelInitializationParameter, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
     PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
     RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
@@ -819,11 +819,11 @@ pub enum NetworkActorEvent {
     // A payment need to retry
     RetrySendPayment(Hash256, Option<u64>),
 
-    // AddTlc result from peer (payment_hash, attempt_id, (process_channel_error, tlc_err), (previous_channel_id, previous_tlc_id))
+    // AddTlc result from peer (payment_hash, attempt_id, add_tlc_result, (previous_channel_id, previous_tlc_id))
     AddTlcResult(
         Hash256,
         Option<u64>,
-        Option<(ProcessingChannelError, TlcErr)>,
+        Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
         Option<PrevTlcInfo>,
     ),
 
@@ -1208,12 +1208,17 @@ where
                     .await;
                 }
             }
-            NetworkActorEvent::AddTlcResult(payment_hash, attempt_id, error_info, previous_tlc) => {
+            NetworkActorEvent::AddTlcResult(
+                payment_hash,
+                attempt_id,
+                add_tlc_result,
+                previous_tlc,
+            ) => {
                 self.on_add_tlc_result_event(
                     myself,
                     payment_hash,
                     attempt_id,
-                    error_info,
+                    add_tlc_result,
                     previous_tlc,
                 )
                 .await;
@@ -1621,6 +1626,60 @@ where
                         }
                     } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
                         shuttingdown_channels_count += 1;
+                    } else if matches!(
+                        channel_state,
+                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+                            | ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
+                    ) {
+                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            let delay_epoch = EpochNumberWithFraction::from_full_value(
+                                actor_state.commitment_delay_epoch,
+                            );
+                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
+                            let expect_expiry = now + epoch_delay_milliseconds;
+                            for tlc in actor_state
+                                .tlc_state
+                                .get_committed_offered_tlcs()
+                                .filter(|tlc| tlc.expiry < expect_expiry)
+                            {
+                                if let Some((forwarding_channel_id, forwarding_tlc_id)) =
+                                    tlc.forwarding_tlc
+                                {
+                                    if self
+                                        .store
+                                        .is_tlc_settled(&tlc.channel_id, &tlc.payment_hash)
+                                    {
+                                        let (send, _recv) = oneshot::channel();
+                                        let rpc_reply = RpcReplyPort::from(send);
+                                        if let Err(err) = state
+                                            .send_command_to_channel(
+                                                forwarding_channel_id,
+                                                ChannelCommand::RemoveTlc(
+                                                    RemoveTlcCommand {
+                                                        id: forwarding_tlc_id,
+                                                        reason: RemoveTlcReason::RemoveTlcFail(
+                                                            TlcErrPacket::new(
+                                                                TlcErr::new(
+                                                                    TlcErrorCode::ExpiryTooSoon,
+                                                                ),
+                                                                &tlc.shared_secret,
+                                                            ),
+                                                        ),
+                                                    },
+                                                    rpc_reply,
+                                                ),
+                                            )
+                                            .await
+                                        {
+                                            error!(
+                                                "Failed to remove settled tlc {:?} for channel {:?}: {}",
+                                                forwarding_tlc_id, forwarding_channel_id, err
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1899,7 +1958,7 @@ where
                             myself,
                             command.payment_hash,
                             command.attempt_id,
-                            Some((
+                            Err((
                                 ProcessingChannelError::TlcForwardingError(err.clone()),
                                 err.clone(),
                             )),
@@ -2658,7 +2717,7 @@ where
         myself: ActorRef<NetworkActorMessage>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
-        error_info: Option<(ProcessingChannelError, TlcErr)>,
+        add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
         previous_tlc: Option<PrevTlcInfo>,
     ) {
         if let Some(PrevTlcInfo {
@@ -2676,7 +2735,7 @@ where
                                 payment_hash,
                                 channel_id,
                                 tlc_id,
-                                error_info: error_info.clone(),
+                                add_tlc_result: add_tlc_result.clone(),
                             },
                         )),
                     }),
@@ -2695,8 +2754,8 @@ where
             return;
         };
 
-        match error_info {
-            None => {
+        match add_tlc_result {
+            Ok(_) => {
                 // attempt is inflight
                 attempt.set_inflight_status();
                 self.network_graph
@@ -2705,10 +2764,10 @@ where
                     .track_attempt_router(&attempt);
                 self.store.insert_attempt(attempt);
             }
-            Some((ProcessingChannelError::WaitingTlcAck, _)) => {
+            Err((ProcessingChannelError::WaitingTlcAck, _)) => {
                 // do nothing
             }
-            Some((error, tlc_err)) => {
+            Err((error, tlc_err)) => {
                 self.update_graph_with_tlc_fail(&myself, &tlc_err).await;
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
