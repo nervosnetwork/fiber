@@ -1732,10 +1732,7 @@ where
                                 if let Some((forwarding_channel_id, forwarding_tlc_id)) =
                                     tlc.forwarding_tlc
                                 {
-                                    if self
-                                        .store
-                                        .is_tlc_settled(&actor_state.get_id(), &tlc.payment_hash)
-                                    {
+                                    if self.store.is_tlc_settled(&channel_id, &tlc.payment_hash) {
                                         let (send, _recv) = oneshot::channel();
                                         let rpc_reply = RpcReplyPort::from(send);
                                         if let Err(err) = state
