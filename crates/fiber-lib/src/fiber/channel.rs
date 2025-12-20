@@ -911,7 +911,7 @@ where
                 let is_mpp = invoice.allow_mpp();
                 let has_preimage = self.store.get_preimage(&tlc.payment_hash).is_some();
 
-                if !is_mpp && !is_invoice_fulfilled(&invoice, std::slice::from_ref(&tlc)) {
+                if !is_mpp && !is_invoice_fulfilled(&invoice, std::iter::once(&tlc)) {
                     // Single path with insufficient amount
                     RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(TlcErrorCode::AmountBelowMinimum),
@@ -1127,7 +1127,7 @@ where
                             payment_hash
                         );
                     }
-                    if !is_invoice_fulfilled(invoice, std::slice::from_ref(tlc)) {
+                    if !is_invoice_fulfilled(invoice, std::iter::once(&*tlc)) {
                         error!("invoice is not fulfilled for payment: {:?}", payment_hash);
                         return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
                     }
@@ -2967,7 +2967,6 @@ bitflags! {
 
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TlcInfo {
-    pub channel_id: Hash256,
     pub status: TlcStatus,
     pub tlc_id: TLCId,
     pub amount: u128,
@@ -3047,7 +3046,6 @@ impl Debug for TlcInfo {
         f.debug_struct("TlcInfo")
             .field("tlc_id", &self.tlc_id)
             .field("status", &self.status)
-            .field("channel_id", &self.channel_id)
             .field("amount", &self.amount)
             .field("total_amount", &self.total_amount)
             .field("removed_reason", &self.removed_reason)
@@ -5836,7 +5834,6 @@ impl ChannelActorState {
         );
 
         TlcInfo {
-            channel_id: self.get_id(),
             status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
             tlc_id,
             attempt_id: command.attempt_id,
@@ -5863,7 +5860,6 @@ impl ChannelActorState {
         let tlc_info = TlcInfo {
             tlc_id: TLCId::Received(message.tlc_id),
             status: TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced),
-            channel_id: self.get_id(),
             amount: message.amount,
             payment_hash: message.payment_hash,
             attempt_id: None,

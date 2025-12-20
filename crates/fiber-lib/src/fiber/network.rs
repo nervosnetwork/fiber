@@ -1571,7 +1571,7 @@ where
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-                                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(tlc)) {
+                                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
                                         continue;
                                     }
                                 }
@@ -1732,10 +1732,7 @@ where
                                 if let Some((forwarding_channel_id, forwarding_tlc_id)) =
                                     tlc.forwarding_tlc
                                 {
-                                    if self
-                                        .store
-                                        .is_tlc_settled(&tlc.channel_id, &tlc.payment_hash)
-                                    {
+                                    if self.store.is_tlc_settled(&channel_id, &tlc.payment_hash) {
                                         let (send, _recv) = oneshot::channel();
                                         let rpc_reply = RpcReplyPort::from(send);
                                         if let Err(err) = state
@@ -1836,11 +1833,13 @@ where
                         .collect()
                 };
                 let tlcs: Vec<_> = tlc_ids
-                    .iter()
+                    .into_iter()
                     .filter_map(|(channel_id, tlc_id)| {
-                        let state = self.store.get_channel_actor_state(channel_id)?;
-                        let tlc_id = TLCId::Received(*tlc_id);
-                        state.get_received_tlc(tlc_id).cloned()
+                        let state = self.store.get_channel_actor_state(&channel_id)?;
+                        let tlc_id = TLCId::Received(tlc_id);
+                        state
+                            .get_received_tlc(tlc_id)
+                            .map(|tlc| (channel_id, tlc.clone()))
                     })
                     .collect();
 
@@ -1851,7 +1850,7 @@ where
                 if tlcs.len() > 1
                     && !tlcs
                         .windows(2)
-                        .all(|w| w[0].total_amount == w[1].total_amount)
+                        .all(|w| w[0].1.total_amount == w[1].1.total_amount)
                 {
                     error!("TLCs have inconsistent total_amount: {:?}", tlcs);
                     tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
@@ -1864,7 +1863,7 @@ where
                     return Ok(());
                 };
 
-                let fulfilled = is_invoice_fulfilled(&invoice, &tlcs);
+                let fulfilled = is_invoice_fulfilled(&invoice, tlcs.iter().map(|(_, tlc)| tlc));
                 if not_mpp {
                     if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open)
                         || !fulfilled
@@ -1887,7 +1886,7 @@ where
                 };
 
                 // remove tlcs
-                for tlc in tlcs {
+                for (channel_id, tlc) in tlcs {
                     let (send, _recv) = oneshot::channel();
                     let rpc_reply = RpcReplyPort::from(send);
                     let remove_reason = match tlc_fail.clone() {
@@ -1902,7 +1901,7 @@ where
 
                     match state
                         .send_command_to_channel(
-                            tlc.channel_id,
+                            channel_id,
                             ChannelCommand::RemoveTlc(
                                 RemoveTlcCommand {
                                     id: tlc.id(),
@@ -1916,7 +1915,7 @@ where
                         Ok(_) => {
                             self.store.remove_payment_hold_tlc(
                                 &payment_hash,
-                                &tlc.channel_id,
+                                &channel_id,
                                 tlc.id(),
                             );
                         }
@@ -1924,7 +1923,7 @@ where
                             error!(
                                 "Failed to remove tlc {:?} for channel {:?}: {}",
                                 tlc.id(),
-                                tlc.channel_id,
+                                channel_id,
                                 err
                             );
                         }
