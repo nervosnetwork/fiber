@@ -6199,6 +6199,7 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: true,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 200 * 100000000, // 200 CKB
                 funding_udt_type_script: None,
