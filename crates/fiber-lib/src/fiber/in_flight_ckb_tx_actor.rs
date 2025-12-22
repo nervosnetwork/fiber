@@ -12,6 +12,7 @@ use crate::{
         GetBlockTimestampRequest,
     },
     fiber::NetworkActorEvent,
+    utils::actor::ActorHandleLogGuard,
 };
 
 use super::{types::Hash256, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE};
@@ -36,6 +37,8 @@ pub struct InFlightCkbTxActor {
     /// Number of blocks to wait to confirm the tx status
     pub confirmations: u64,
 }
+
+const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 pub struct InFlightCkbTxActorArguments {
     pub transaction: Option<TransactionView>,
@@ -96,11 +99,13 @@ impl Actor for InFlightCkbTxActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        #[cfg(feature = "metrics")]
-        let start = crate::now_timestamp_as_millis_u64();
-        #[cfg(feature = "metrics")]
-        let name = format!("fiber.in_flight_ckb_tx_actor.{}", message.as_ref());
-        let res = match message {
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "InFlightCkbTxActor",
+            message.as_ref().to_string(),
+            "fiber.in_flight_ckb_tx_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
+        match message {
             InFlightCkbTxActorMessage::Internal(InternalMessage::Start) => {
                 self.start(myself, state).await
             }
@@ -125,16 +130,7 @@ impl Actor for InFlightCkbTxActor {
                 }
                 Ok(())
             }
-        };
-
-        #[cfg(feature = "metrics")]
-        {
-            let end = crate::now_timestamp_as_millis_u64();
-            let elapsed = end - start;
-            metrics::histogram!(name).record(elapsed as u32);
         }
-
-        res
     }
 }
 

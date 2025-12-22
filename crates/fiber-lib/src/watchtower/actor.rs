@@ -31,7 +31,7 @@ use crate::{
         hash_algorithm::HashAlgorithm,
         types::{Hash256, NodeId, Privkey, Pubkey},
     },
-    utils::tx::compute_tx_message,
+    utils::{actor::ActorHandleLogGuard, tx::compute_tx_message},
     watchtower::ChannelData,
 };
 
@@ -44,6 +44,8 @@ pub struct WatchtowerActor<S> {
     // a node_id represent the watchtower itself
     node_id: NodeId,
 }
+
+const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
@@ -101,10 +103,12 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        #[cfg(feature = "metrics")]
-        let start = crate::now_timestamp_as_millis_u64();
-        #[cfg(feature = "metrics")]
-        let name = format!("fiber.watchtower_actor.{}", message.as_ref());
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "WatchtowerActor",
+            message.as_ref().to_string(),
+            "fiber.watchtower_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
         match message {
             WatchtowerMessage::CreateChannel(
                 channel_id,
@@ -163,12 +167,6 @@ where
                 .store
                 .remove_watch_preimage(NodeId::local(), payment_hash),
             WatchtowerMessage::PeriodicCheck => self.periodic_check(state),
-        }
-        #[cfg(feature = "metrics")]
-        {
-            let end = crate::now_timestamp_as_millis_u64();
-            let elapsed = end - start;
-            metrics::histogram!(name).record(elapsed as u32);
         }
         Ok(())
     }
@@ -466,7 +464,13 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         group_by_transaction: Some(true),
     };
 
-    find_preimages(search_key.clone(), &ckb_client, store, self_node_id);
+    find_preimages(
+        search_key.clone(),
+        &channel_data.channel_id,
+        &ckb_client,
+        store,
+        self_node_id,
+    );
 
     let (current_epoch, current_time) = match ckb_client.get_tip_header() {
         Ok(tip_header) => match ckb_client.get_block_median_time(tip_header.hash.clone()) {
@@ -621,6 +625,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
 // find all on-chain transactions with the preimage and store them
 fn find_preimages<S: WatchtowerStore>(
     search_key: SearchKey,
+    channel_id: &Hash256,
     ckb_client: &CkbRpcClient,
     store: &S,
     self_node_id: NodeId,
@@ -659,9 +664,7 @@ fn find_preimages<S: WatchtowerStore>(
                                                         )
                                                     {
                                                         for unlock in settlement_witness.unlocks {
-                                                            if unlock.with_preimage
-                                                                && unlock.unlock_type < 0xFE
-                                                            {
+                                                            if unlock.unlock_type < 0xFE {
                                                                 if let Some(tlc) =
                                                                     settlement_witness
                                                                         .pending_htlcs
@@ -670,25 +673,45 @@ fn find_preimages<S: WatchtowerStore>(
                                                                                 as usize,
                                                                         )
                                                                 {
-                                                                    let preimage =
-                                                                        unlock.preimage.unwrap();
-                                                                    let payment_hash = tlc
-                                                                        .hash_algorithm()
-                                                                        .hash(preimage.as_ref());
-                                                                    if payment_hash.starts_with(
-                                                                        &tlc.payment_hash,
-                                                                    ) {
-                                                                        store
+                                                                    if unlock.with_preimage {
+                                                                        let preimage = unlock
+                                                                            .preimage
+                                                                            .unwrap();
+                                                                        let payment_hash = tlc
+                                                                            .hash_algorithm()
+                                                                            .hash(
+                                                                                preimage.as_ref(),
+                                                                            );
+                                                                        if payment_hash.starts_with(
+                                                                            &tlc.payment_hash,
+                                                                        ) {
+                                                                            store
                                                                             .insert_watch_preimage(
                                                                                 self_node_id
                                                                                     .clone(),
                                                                                 payment_hash.into(),
                                                                                 preimage,
                                                                             );
+                                                                        } else {
+                                                                            warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
+                                                                        }
                                                                     } else {
-                                                                        warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
+                                                                        store.update_tlc_settled(
+                                                                            channel_id,
+                                                                            tlc.payment_hash,
+                                                                        );
                                                                     }
                                                                 }
+                                                            } else {
+                                                                settlement_witness
+                                                                    .pending_htlcs
+                                                                    .iter()
+                                                                    .for_each(|tlc| {
+                                                                        store.update_tlc_settled(
+                                                                            channel_id,
+                                                                            tlc.payment_hash,
+                                                                        );
+                                                                    })
                                                             }
                                                         }
                                                     }
