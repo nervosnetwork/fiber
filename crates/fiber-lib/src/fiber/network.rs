@@ -1686,7 +1686,9 @@ where
                             let expired_tlcs = actor_state
                                 .tlc_state
                                 .get_committed_received_tlcs()
-                                .filter(|tlc| tlc.is_last && tlc.expiry < expect_expiry)
+                                .filter(|tlc| {
+                                    tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry
+                                })
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
                                 info!(
