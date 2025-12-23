@@ -1,7 +1,8 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelState, CloseFlags, OutboundTlcStatus, TLCId, TlcStatus, UpdateCommand,
-    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus, TLCId,
+    TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
+    XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -6164,4 +6165,156 @@ async fn test_channel_one_peer_check_active_fail() {
     if wait_time >= 50 {
         panic!("node_1 channel did not reach ChannelReady state in time");
     }
+}
+
+/// Test for issue #938: Channel funding is aborted after restart when stuck in NegotiatingFunding
+///
+/// This test verifies that the fix works correctly:
+/// 1. A channel is opened and accepted (entering NegotiatingFunding(INIT_SENT) state)
+/// 2. CKB RPC becomes unavailable (simulated by stopping the chain actor)
+/// 3. The node is restarted
+/// 4. The channel should be aborted (goes to Closed(FUNDING_ABORTED) state) instead of staying stuck
+#[tokio::test]
+async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_funding() {
+    init_tracing();
+
+    // Create two interconnected nodes
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    // Step 1: Open a channel from node_a to node_b
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount: 200 * 100000000, // 200 CKB
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    let temp_channel_id = open_channel_result.channel_id;
+
+    // Wait for node_b to receive the channel pending event
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(*channel_id, temp_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    // Step 2: Stop the CKB chain actor on node_a to simulate CKB RPC being unavailable
+    // This simulates the scenario where CKB is closed before funding completes
+    node_a.send_ckb_chain_message(crate::ckb::CkbChainMessage::Stop);
+
+    // Step 3: Accept the channel on node_b
+    // This will trigger ChannelAccepted event on node_a, which attempts to fund the channel
+    // Since CKB is stopped, the funding will fail with a temporary error
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id,
+                funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+
+    let new_channel_id = accept_channel_result.new_channel_id;
+
+    // Wait a bit for the funding attempt to fail
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Verify that node_a's channel is in NegotiatingFunding(INIT_SENT) state
+    // This state has both OUR_INIT_SENT and THEIR_INIT_SENT flags set
+    let channel_state_before_restart = node_a
+        .get_channel_actor_state_unchecked(new_channel_id)
+        .expect("channel should exist after accept");
+
+    match channel_state_before_restart.state {
+        ChannelState::NegotiatingFunding(flags) => {
+            // Verify both flags are set (INIT_SENT = OUR_INIT_SENT | THEIR_INIT_SENT)
+            assert!(
+                flags.contains(NegotiatingFundingFlags::INIT_SENT),
+                "Channel should be in NegotiatingFunding(INIT_SENT) state, got flags: {:?}",
+                flags
+            );
+        }
+        other => {
+            panic!(
+                "Expected NegotiatingFunding(INIT_SENT) state before restart, got: {:?}",
+                other
+            );
+        }
+    }
+
+    // Step 4: Restart node_a (simulating node restart after CKB was closed)
+    node_a.restart().await;
+
+    // Wait a bit for the node to fully restart
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // Reconnect the peers (channels are reestablished when peers reconnect)
+    node_a.connect_to(&mut node_b).await;
+
+    // Wait a bit for channel reestablishment
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // Step 5: Verify the channel funding is aborted after restart
+    // When a channel in NegotiatingFunding state is reestablished, it should be aborted
+    // Wait for the ChannelFundingAborted event
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelFundingAborted(channel_id) => {
+                assert_eq!(*channel_id, new_channel_id);
+                eprintln!(
+                    "SUCCESS: Channel {:?} funding was aborted after restart (fix working correctly)",
+                    new_channel_id
+                );
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    // Wait a bit for the channel actor to stop and state to be deleted from storage
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Verify the channel has been removed from storage
+    // (channels with FUNDING_ABORTED are deleted from storage)
+    let channel_state_after_restart = node_a.get_channel_actor_state_unchecked(new_channel_id);
+
+    assert!(
+        channel_state_after_restart.is_none(),
+        "Channel should be removed from storage after funding abort, but still exists with state: {:?}",
+        channel_state_after_restart.map(|s| s.state)
+    );
 }

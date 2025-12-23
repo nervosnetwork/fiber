@@ -102,7 +102,7 @@ use crate::fiber::KeyPair;
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
-use crate::utils::payment::is_invoice_fulfilled;
+use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -116,6 +116,8 @@ pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 
 pub const DEFAULT_PAYMENT_TRY_LIMIT: u32 = 5;
 pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
+
+const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 // (128 + 2) KB, 2 KB for custom records
 pub const MAX_SERVICE_PROTOCOAL_DATA_SIZE: usize = 1024 * (128 + 2);
@@ -1569,7 +1571,7 @@ where
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-                                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(tlc)) {
+                                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
                                         continue;
                                     }
                                 }
@@ -1637,7 +1639,9 @@ where
                             let expired_tlcs = actor_state
                                 .tlc_state
                                 .get_committed_received_tlcs()
-                                .filter(|tlc| tlc.is_last && tlc.expiry < expect_expiry)
+                                .filter(|tlc| {
+                                    tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry
+                                })
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
                                 info!(
@@ -1679,8 +1683,9 @@ where
                             let expect_expiry = now + epoch_delay_milliseconds;
                             if actor_state
                                 .tlc_state
-                                .get_committed_offered_tlcs()
-                                .any(|tlc| tlc.expiry < expect_expiry)
+                                .get_expired_offered_tlcs(expect_expiry)
+                                .next()
+                                .is_some()
                             {
                                 info!(
                                     "Force closing channel {:?} due to expired offered tlc",
@@ -1724,16 +1729,12 @@ where
                             let expect_expiry = now + epoch_delay_milliseconds;
                             for tlc in actor_state
                                 .tlc_state
-                                .get_committed_offered_tlcs()
-                                .filter(|tlc| tlc.expiry < expect_expiry)
+                                .get_expired_offered_tlcs(expect_expiry)
                             {
                                 if let Some((forwarding_channel_id, forwarding_tlc_id)) =
                                     tlc.forwarding_tlc
                                 {
-                                    if self
-                                        .store
-                                        .is_tlc_settled(&tlc.channel_id, &tlc.payment_hash)
-                                    {
+                                    if self.store.is_tlc_settled(&channel_id, &tlc.payment_hash) {
                                         let (send, _recv) = oneshot::channel();
                                         let rpc_reply = RpcReplyPort::from(send);
                                         if let Err(err) = state
@@ -1834,11 +1835,13 @@ where
                         .collect()
                 };
                 let tlcs: Vec<_> = tlc_ids
-                    .iter()
+                    .into_iter()
                     .filter_map(|(channel_id, tlc_id)| {
-                        let state = self.store.get_channel_actor_state(channel_id)?;
-                        let tlc_id = TLCId::Received(*tlc_id);
-                        state.get_received_tlc(tlc_id).cloned()
+                        let state = self.store.get_channel_actor_state(&channel_id)?;
+                        let tlc_id = TLCId::Received(tlc_id);
+                        state
+                            .get_received_tlc(tlc_id)
+                            .map(|tlc| (channel_id, tlc.clone()))
                     })
                     .collect();
 
@@ -1849,7 +1852,7 @@ where
                 if tlcs.len() > 1
                     && !tlcs
                         .windows(2)
-                        .all(|w| w[0].total_amount == w[1].total_amount)
+                        .all(|w| w[0].1.total_amount == w[1].1.total_amount)
                 {
                     error!("TLCs have inconsistent total_amount: {:?}", tlcs);
                     tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
@@ -1862,7 +1865,7 @@ where
                     return Ok(());
                 };
 
-                let fulfilled = is_invoice_fulfilled(&invoice, &tlcs);
+                let fulfilled = is_invoice_fulfilled(&invoice, tlcs.iter().map(|(_, tlc)| tlc));
                 if not_mpp {
                     if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open)
                         || !fulfilled
@@ -1885,7 +1888,7 @@ where
                 };
 
                 // remove tlcs
-                for tlc in tlcs {
+                for (channel_id, tlc) in tlcs {
                     let (send, _recv) = oneshot::channel();
                     let rpc_reply = RpcReplyPort::from(send);
                     let remove_reason = match tlc_fail.clone() {
@@ -1900,7 +1903,7 @@ where
 
                     match state
                         .send_command_to_channel(
-                            tlc.channel_id,
+                            channel_id,
                             ChannelCommand::RemoveTlc(
                                 RemoveTlcCommand {
                                     id: tlc.id(),
@@ -1914,7 +1917,7 @@ where
                         Ok(_) => {
                             self.store.remove_payment_hold_tlc(
                                 &payment_hash,
-                                &tlc.channel_id,
+                                &channel_id,
                                 tlc.id(),
                             );
                         }
@@ -1922,7 +1925,7 @@ where
                             error!(
                                 "Failed to remove tlc {:?} for channel {:?}: {}",
                                 tlc.id(),
-                                tlc.channel_id,
+                                channel_id,
                                 err
                             );
                         }
@@ -4974,10 +4977,12 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-        let start = now_timestamp_as_millis_u64();
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-        let name = format!("fiber.network_actor.{}", message);
+        let _handle_log_guard = ActorHandleLogGuard::new(
+            "NetworkActor",
+            message.to_string(),
+            "fiber.network_actor",
+            ACTOR_HANDLE_WARN_THRESHOLD_MS,
+        );
         match message {
             NetworkActorMessage::Event(event) => {
                 if let Err(err) = self.handle_event(myself, state, event).await {
@@ -4995,14 +5000,6 @@ where
                 }
             }
         }
-
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-        {
-            let end = now_timestamp_as_millis_u64();
-            let elapsed = end - start;
-            metrics::histogram!(name).record(elapsed as u32);
-        }
-
         Ok(())
     }
 

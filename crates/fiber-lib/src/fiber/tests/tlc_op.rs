@@ -206,7 +206,6 @@ impl Actor for TlcActor {
                 );
                 let next_offer_id = state.tlc_state.get_next_offering();
                 let add_tlc = TlcInfo {
-                    channel_id: gen_rand_sha256_hash(),
                     tlc_id: TLCId::Offered(next_offer_id),
                     amount: command.amount,
                     payment_hash: command.payment_hash,
@@ -223,7 +222,6 @@ impl Actor for TlcActor {
                     applied_flags: AppliedFlags::empty(),
                     total_amount: None,
                     payment_secret: None,
-                    is_last: false,
                 };
                 state.tlc_state.add_offered_tlc(add_tlc.clone());
                 state.tlc_state.increment_offering();
@@ -477,7 +475,6 @@ fn test_tlc_state_v2() {
     let mut add_tlc1 = TlcInfo {
         amount: 10000,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-        channel_id: gen_rand_sha256_hash(),
         payment_hash: gen_rand_sha256_hash(),
         attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 1000,
@@ -492,12 +489,10 @@ fn test_tlc_state_v2() {
         applied_flags: AppliedFlags::empty(),
         total_amount: None,
         payment_secret: None,
-        is_last: false,
     };
     let mut add_tlc2 = TlcInfo {
         amount: 20000,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-        channel_id: gen_rand_sha256_hash(),
         payment_hash: gen_rand_sha256_hash(),
         attempt_id: None,
         expiry: now_timestamp_as_millis_u64() + 2000,
@@ -512,7 +507,6 @@ fn test_tlc_state_v2() {
         applied_flags: AppliedFlags::empty(),
         total_amount: None,
         payment_secret: None,
-        is_last: false,
     };
     tlc_state.add_offered_tlc(add_tlc1.clone());
     tlc_state.add_offered_tlc(add_tlc2.clone());
