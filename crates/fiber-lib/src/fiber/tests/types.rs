@@ -9,7 +9,7 @@ use crate::{
             pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BasicMppPaymentData,
             BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId, PaymentHopData,
             PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
-            NO_SHARED_SECRET,
+            TrampolineHopPayload, TrampolineOnionPacket, NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
@@ -266,6 +266,73 @@ fn test_peeled_large_onion_packet() {
         res.is_err(),
         "should fail to build onion packet with 40 hops"
     );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_onion_packet_multi_hop_peel() {
+    let secp = Secp256k1::new();
+
+    let t1 = gen_rand_fiber_private_key();
+    let t2 = gen_rand_fiber_private_key();
+    let final_node = gen_rand_fiber_private_key();
+    let session_key = gen_rand_fiber_private_key();
+
+    let payloads = vec![
+        TrampolineHopPayload::Forward {
+            next_node_id: t2.pubkey(),
+            next_is_trampoline: true,
+            amount_to_forward: 50_000,
+            hash_algorithm: HashAlgorithm::Sha256,
+            final_tlc_expiry_delta: 1234,
+            udt_type_script: None,
+        },
+        TrampolineHopPayload::Forward {
+            next_node_id: final_node.pubkey(),
+            next_is_trampoline: false,
+            amount_to_forward: 50_000,
+            hash_algorithm: HashAlgorithm::Sha256,
+            final_tlc_expiry_delta: 1234,
+            udt_type_script: None,
+        },
+        TrampolineHopPayload::Final {
+            final_amount: 50_000,
+            final_tlc_expiry_delta: 1234,
+            udt_type_script: None,
+            payment_preimage: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+            custom_records: None,
+        },
+    ];
+
+    let pkt = TrampolineOnionPacket::create(
+        session_key,
+        vec![t1.pubkey(), t2.pubkey(), final_node.pubkey()],
+        payloads.clone(),
+        None,
+        &secp,
+    )
+    .expect("create trampoline onion");
+
+    let p1 = pkt.peel(&t1, None, &secp).expect("peel at t1");
+    assert_eq!(p1.current, payloads[0]);
+    assert!(p1.next.is_some());
+
+    let p2 = p1
+        .next
+        .expect("next")
+        .peel(&t2, None, &secp)
+        .expect("peel at t2");
+    assert_eq!(p2.current, payloads[1]);
+    assert!(p2.next.is_some());
+
+    let p3 = p2
+        .next
+        .expect("next")
+        .peel(&final_node, None, &secp)
+        .expect("peel at final");
+    assert_eq!(p3.current, payloads[2]);
+    assert!(p3.next.is_none());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

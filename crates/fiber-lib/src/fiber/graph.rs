@@ -16,18 +16,21 @@ use crate::fiber::config::{
 };
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
+use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
-use crate::fiber::types::TrampolineOnionData;
+use crate::fiber::types::Privkey;
+use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
+use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
@@ -1167,8 +1170,8 @@ where
             (payment_data.router.clone(), amount, None)
         } else {
             let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
-            error!(
-                "debug now allow_trampoline_routing: {:?}",
+            debug!(
+                "allow_trampoline_routing: {:?}",
                 payment_data.allow_trampoline_routing()
             );
             match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
@@ -1190,8 +1193,8 @@ where
                 Err(PathFindError::NoPathFound) if payment_data.allow_trampoline_routing() => {
                     let (route, amount_to_trampoline, trampoline_payload) =
                         self.find_trampoline_route(source, amount, max_fee_amount, payment_data)?;
-                    error!(
-                        "debug now found trampoline route: {:?}, amount_to_trampoline: {}",
+                    debug!(
+                        "found trampoline route: {:?}, amount_to_trampoline: {}",
                         route, amount_to_trampoline
                     );
                     (route, amount_to_trampoline, Some(trampoline_payload))
@@ -1228,9 +1231,13 @@ where
         final_amount: u128,
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
-    ) -> Result<(Vec<RouterHop>, u128, TrampolineOnionData), PathFindError> {
+    ) -> Result<(Vec<RouterHop>, u128, Vec<u8>), PathFindError> {
         // Limit candidate count to avoid pathological full-graph scans.
         const MAX_TRAMPOLINE_CANDIDATES: usize = 32;
+
+        // Maximum number of trampoline nodes to encode in the inner trampoline onion.
+        // (Excluding the final recipient hop.)
+        let max_trampoline_hops = payment_data.max_trampoline_hops();
 
         let target = payment_data.target_pubkey;
         let total_fee_budget = max_fee_amount.unwrap_or(0);
@@ -1256,12 +1263,16 @@ where
         // Prefer determinism across runs.
         trampoline_candidates.sort();
 
+        // Precompute source -> trampoline routes so we can prefer closer trampolines.
+        // This keeps the selection stable across runs and reduces the chance of choosing
+        // a distant trampoline that is less likely to be able to complete the payment.
+        let mut reachable_trampolines: Vec<(usize, Pubkey, Vec<RouterHop>, u128, u128)> = vec![];
         for candidate in trampoline_candidates {
             let fee_budget_forward = total_fee_budget.saturating_mul(50) / 100;
             let fee_budget_routing = total_fee_budget.saturating_sub(fee_budget_forward);
             let amount_to_trampoline = final_amount.saturating_add(fee_budget_forward);
-            error!(
-                "haha fee_budget_forward: {:?} final_amount: {:?} amount_to_trampoline: {:?}",
+            debug!(
+                "fee_budget_forward: {:?} final_amount: {:?} amount_to_trampoline: {:?}",
                 fee_budget_forward, final_amount, amount_to_trampoline
             );
 
@@ -1281,24 +1292,134 @@ where
                 continue;
             };
 
-            let trampoline_payload = TrampolineOnionData {
-                final_recipient: payment_data.target_pubkey,
+            reachable_trampolines.push((
+                route_to_trampoline.len(),
+                candidate,
+                route_to_trampoline,
+                amount_to_trampoline,
+                fee_budget_forward,
+            ));
+        }
+
+        reachable_trampolines.sort_by(|(len_a, a, ..), (len_b, b, ..)| len_a.cmp(len_b).then(a.cmp(b)));
+
+        for (route_len, candidate, route_to_trampoline, amount_to_trampoline, fee_budget_forward) in reachable_trampolines {
+
+            let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
+            let secp = Secp256k1::new();
+            let udt_type_script = payment_data
+                .udt_type_script
+                .as_ref()
+                .map(|s| s.as_bytes().to_vec());
+
+            // Double-onion trampoline: embed an *inner* trampoline onion in the *outer* payment onion.
+            // Support multiple trampoline nodes by encoding a chain of trampoline hops.
+            // We keep selection deterministic and reduce failure probability by only attempting
+            // multi-trampoline chains when the first trampoline is directly connected to the payer
+            // (route_len == 1). Each additional trampoline is required to be a direct neighbor
+            // (1 hop) of the previous trampoline.
+            let mut trampoline_nodes: Vec<Pubkey> = vec![candidate];
+
+            if max_trampoline_hops > 1 && route_len == 1 {
+                let mut candidates = self
+                    .nodes
+                    .keys()
+                    .filter(|n| **n != source && **n != target)
+                    .filter(|n| self.is_node_support_trampoline_routing(n))
+                    .take(MAX_TRAMPOLINE_CANDIDATES)
+                    .copied()
+                    .collect::<Vec<_>>();
+                candidates.sort();
+
+                // Try to extend the trampoline chain up to `max_trampoline_hops`.
+                while trampoline_nodes.len() < max_trampoline_hops {
+                    let current = *trampoline_nodes
+                        .last()
+                        .expect("trampoline_nodes is non-empty");
+
+                    let mut direct_neighbors: Vec<Pubkey> = vec![];
+                    for next in candidates.iter().copied() {
+                        if next == current || next == source || next == target {
+                            continue;
+                        }
+                        if trampoline_nodes.contains(&next) {
+                            continue;
+                        }
+
+                        let Ok(route_current_to_next) = self.find_path(
+                            current,
+                            next,
+                            final_amount,
+                            Some(fee_budget_forward),
+                            payment_data.udt_type_script.clone(),
+                            payment_data.final_tlc_expiry_delta,
+                            payment_data.tlc_expiry_limit,
+                            true,
+                            &[],
+                            &payment_data.channel_stats,
+                            false,
+                        ) else {
+                            continue;
+                        };
+
+                        if route_current_to_next.len() == 1 {
+                            direct_neighbors.push(next);
+                        }
+                    }
+
+                    // Deterministic: `candidates` is sorted, and we keep `direct_neighbors` in
+                    // ascending order by selecting in that order.
+                    direct_neighbors.sort();
+                    if let Some(next_trampoline) = direct_neighbors.into_iter().next() {
+                        trampoline_nodes.push(next_trampoline);
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let mut trampoline_path: Vec<Pubkey> = trampoline_nodes.clone();
+            trampoline_path.push(payment_data.target_pubkey);
+
+            let mut payloads: Vec<TrampolineHopPayload> = vec![];
+            for (idx, _node) in trampoline_nodes.iter().copied().enumerate() {
+                let is_last_trampoline = idx + 1 == trampoline_nodes.len();
+                let next_node_id = if is_last_trampoline {
+                    payment_data.target_pubkey
+                } else {
+                    trampoline_nodes[idx + 1]
+                };
+
+                payloads.push(TrampolineHopPayload::Forward {
+                    next_node_id,
+                    next_is_trampoline: !is_last_trampoline,
+                    amount_to_forward: final_amount,
+                    hash_algorithm,
+                    final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
+                    udt_type_script: udt_type_script.clone(),
+                });
+            }
+
+            payloads.push(TrampolineHopPayload::Final {
                 final_amount,
-                udt_type_script: payment_data
-                    .udt_type_script
-                    .as_ref()
-                    .map(|s| s.as_bytes().to_vec()),
                 final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
+                udt_type_script,
                 payment_preimage: payment_data.preimage,
                 hash_algorithm,
                 custom_records: payment_data.custom_records.clone(),
-            };
+            });
 
-            return Ok((
-                route_to_trampoline,
-                amount_to_trampoline,
-                trampoline_payload,
-            ));
+            let trampoline_onion = TrampolineOnionPacket::create(
+                session_key,
+                trampoline_path,
+                payloads,
+                Some(payment_data.payment_hash.as_ref().to_vec()),
+                &secp,
+            )
+            .map_err(|_| PathFindError::NoPathFound)?
+            .into_bytes();
+
+            return Ok((route_to_trampoline, amount_to_trampoline, trampoline_onion));
         }
 
         Err(PathFindError::NoPathFound)
@@ -1403,7 +1524,7 @@ where
         route: &Vec<RouterHop>,
         max_amount: u128,
         payment_data: &SendPaymentData,
-        trampoline_payload: Option<TrampolineOnionData>,
+        trampoline_payload: Option<Vec<u8>>,
     ) -> Vec<PaymentHopData> {
         let invoice = payment_data
             .invoice
@@ -1430,16 +1551,15 @@ where
             });
         }
 
-        let (last_amount, payment_preimage, custom_records, trampoline_onion) =
-            match trampoline_payload {
-                Some(payload) => (payload.final_amount, None, None, Some(payload.serialize())),
-                None => (
-                    max_amount,
-                    payment_data.preimage,
-                    payment_data.custom_records.clone(),
-                    None,
-                ),
-            };
+        let (last_amount, payment_preimage, custom_records, trampoline_onion) = match trampoline_payload {
+            Some(onion) => (payment_data.amount, None, None, Some(onion)),
+            None => (
+                max_amount,
+                payment_data.preimage,
+                payment_data.custom_records.clone(),
+                None,
+            ),
+        };
 
         hops_data.push(PaymentHopData {
             amount: last_amount,

@@ -136,6 +136,9 @@ pub struct SendPaymentCommandParams {
     #[serde_as(as = "Option<U64Hex>")]
     pub max_parts: Option<u64>,
 
+    /// Max number of trampoline nodes to encode in the inner trampoline onion.
+    pub max_trampoline_hops: Option<u8>,
+
     /// keysend payment
     pub keysend: Option<bool>,
 
@@ -385,6 +388,7 @@ where
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,
                     max_parts: params.max_parts,
+                    max_trampoline_hops: params.max_trampoline_hops,
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),

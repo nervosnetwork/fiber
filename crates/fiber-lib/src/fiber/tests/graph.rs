@@ -10,7 +10,7 @@ use crate::{
         graph::{NetworkGraph, RouterHop},
         network::{get_chain_hash, SendPaymentCommand, SendPaymentData},
         types::{
-            ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement, TrampolineOnionData,
+            ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement, TrampolineOnionPacket,
         },
     },
     store::Store,
@@ -42,6 +42,7 @@ fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
 
 struct MockNetworkGraph {
     pub keys: Vec<PublicKey>,
+    pub secret_keys: Vec<SecretKey>,
     pub edges: Vec<(usize, usize, OutPoint)>,
     pub store: Store,
     pub graph: NetworkGraph<Store>,
@@ -75,7 +76,8 @@ impl MockNetworkGraph {
         graph.always_process_gossip_message = true;
 
         Self {
-            keys: keypairs.into_iter().map(|x| x.1).collect(),
+            keys: keypairs.iter().map(|x| x.1).collect(),
+            secret_keys: keypairs.iter().map(|x| x.0).collect(),
             edges: vec![],
             store,
             graph,
@@ -627,6 +629,7 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -678,6 +681,7 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
 
@@ -704,10 +708,13 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
         .trampoline_onion
         .as_deref()
         .expect("trampoline payload should be present");
-    let payload = TrampolineOnionData::deserialize(trampoline_bytes)
-        .expect("deserialize TrampolineOnionData");
-    assert_eq!(payload.final_recipient, final_recipient.into());
-    assert_eq!(payload.final_amount, payment_data.amount);
+    // The payload is now an inner trampoline onion packet.
+    assert!(
+        TrampolineOnionPacket::new(trampoline_bytes.to_vec())
+            .into_sphinx_onion_packet()
+            .is_ok(),
+        "trampoline_onion should be a valid sphinx onion packet"
+    );
     assert_eq!(last.amount, payment_data.amount);
 }
 
@@ -751,6 +758,7 @@ fn test_graph_build_router_fee_rate_optimize() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
 
@@ -761,6 +769,159 @@ fn test_graph_build_router_fee_rate_optimize() {
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
     assert_eq!(amounts, vec![1050, 1000, 1000]);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_routing_max_trampoline_hops_configurable() {
+    init_tracing();
+
+    // Topology:
+    //   sender(A)=node1 --(public)--> t1=node2 --(public)--> t2=node3 --(public)--> t3=node4
+    //   final=node5 is intentionally disconnected from the graph.
+    // Expectation: build_route succeeds by routing to t1, and the inner trampoline onion encodes
+    // a chain t1->t2->t3->final when max_trampoline_hops=3.
+    let mut network = MockNetworkGraph::new(5);
+
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let t1 = network.keys[2];
+    let t2 = network.keys[3];
+    let t3 = network.keys[4];
+    let final_recipient = network.keys[5];
+
+    network.add_edge(1, 2, Some(10_000), Some(0));
+    network.add_edge(2, 3, Some(10_000), Some(0));
+    network.add_edge(3, 4, Some(10_000), Some(0));
+
+    let payment_hash = Hash256::default();
+    let mut payment_data = SendPaymentData {
+        target_pubkey: final_recipient.into(),
+        amount: 1000,
+        payment_hash,
+        invoice: None,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: None,
+        max_fee_amount: Some(500),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        hop_hints: vec![],
+        dry_run: false,
+        custom_records: None,
+        router: vec![],
+        allow_mpp: false,
+        allow_trampoline_routing: true,
+        max_trampoline_hops: 3,
+        channel_stats: Default::default(),
+    };
+
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, None, &payment_data)
+        .expect("trampoline route should be built");
+
+    // outer route should only reach t1
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].next_hop, Some(t1.into()));
+
+    let last = route.last().expect("last hop");
+    let trampoline_bytes = last
+        .trampoline_onion
+        .as_deref()
+        .expect("trampoline payload should be present")
+        .to_vec();
+
+    let secp = secp256k1::Secp256k1::new();
+    let assoc = Some(payment_hash.as_ref());
+
+    // Peel inner trampoline onion hop-by-hop and validate the chain.
+    let peeled1 = TrampolineOnionPacket::new(trampoline_bytes)
+        .peel(
+            &crate::fiber::types::Privkey(network.secret_keys[2]),
+            assoc,
+            &secp,
+        )
+        .expect("peel t1");
+    assert!(matches!(
+        peeled1.current,
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, next_is_trampoline: true, .. }
+            if next_node_id == t2.into()
+    ));
+
+    let peeled2 = peeled1
+        .next
+        .expect("next packet to t2")
+        .peel(
+            &crate::fiber::types::Privkey(network.secret_keys[3]),
+            assoc,
+            &secp,
+        )
+        .expect("peel t2");
+    assert!(matches!(
+        peeled2.current,
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, next_is_trampoline: true, .. }
+            if next_node_id == t3.into()
+    ));
+
+    let peeled3 = peeled2
+        .next
+        .expect("next packet to t3")
+        .peel(
+            &crate::fiber::types::Privkey(network.secret_keys[4]),
+            assoc,
+            &secp,
+        )
+        .expect("peel t3");
+    assert!(matches!(
+        peeled3.current,
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, next_is_trampoline: false, .. }
+            if next_node_id == final_recipient.into()
+    ));
+
+    let peeled_final = peeled3
+        .next
+        .expect("next packet to final")
+        .peel(
+            &crate::fiber::types::Privkey(network.secret_keys[5]),
+            assoc,
+            &secp,
+        )
+        .expect("peel final");
+    assert!(matches!(
+        peeled_final.current,
+        crate::fiber::types::TrampolineHopPayload::Final { .. }
+    ));
+    assert!(peeled_final.next.is_none());
+
+    // sanity: lowering max_trampoline_hops should shorten the chain (t1->final).
+    payment_data.max_trampoline_hops = 1;
+    let route_short = network
+        .graph
+        .build_route(payment_data.amount, None, None, &payment_data)
+        .expect("trampoline route should be built");
+    let trampoline_short = route_short
+        .last()
+        .unwrap()
+        .trampoline_onion
+        .as_deref()
+        .unwrap()
+        .to_vec();
+    let peeled_short_1 = TrampolineOnionPacket::new(trampoline_short)
+        .peel(
+            &crate::fiber::types::Privkey(network.secret_keys[2]),
+            assoc,
+            &secp,
+        )
+        .expect("peel short t1");
+    assert!(matches!(
+        peeled_short_1.current,
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, next_is_trampoline: false, .. }
+            if next_node_id == final_recipient.into()
+    ));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -794,6 +955,7 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -947,6 +1109,7 @@ fn test_graph_build_route_three_nodes_amount() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1007,6 +1170,7 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1098,6 +1262,7 @@ fn test_graph_build_route_below_min_tlc_value() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1136,6 +1301,7 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1182,6 +1348,7 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1247,6 +1414,7 @@ fn test_graph_mark_failed_channel() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1278,6 +1446,7 @@ fn test_graph_mark_failed_channel() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1320,6 +1489,7 @@ fn test_graph_session_router() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1375,6 +1545,7 @@ fn test_graph_mark_failed_node() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1404,6 +1575,7 @@ fn test_graph_mark_failed_node() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1435,6 +1607,7 @@ fn test_graph_mark_failed_node() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1463,6 +1636,7 @@ fn test_graph_mark_failed_node() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
+        max_trampoline_hops: 2,
         channel_stats: Default::default(),
     };
     let route = network

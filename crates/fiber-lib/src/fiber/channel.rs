@@ -48,12 +48,13 @@ use crate::{
         },
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
-            ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned, CommitmentSigned,
-            EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, HoldTlc, OpenChannel,
-            PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey, ReestablishChannel,
-            RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, Shutdown, TlcErr,
-            TlcErrPacket, TlcErrorCode, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
+            AcceptChannel, AddTlc, AnnouncementSignatures, BasicMppPaymentData,
+            BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelReady, ChannelUpdate,
+            ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
+            Hash256, HoldTlc, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey,
+            Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
+            Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
+            TrampolineOnionPacket, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -1064,11 +1065,133 @@ where
             .expect("expect tlc");
         tlc.applied_flags = AppliedFlags::ADD;
 
-        error!(
-            "debug now is_trampoline: {:?} is_last: {:?}",
+        debug!(
+            "is_trampoline: {:?} is_last: {:?}",
             is_trampoline,
             peeled_onion_packet.is_last()
         );
+        // Trampoline-final: outer onion is last hop, but we must peel the inner trampoline onion
+        // to obtain the final recipient payload.
+        if peeled_onion_packet.is_last() && is_trampoline {
+            let trampoline_bytes = peeled_onion_packet
+                .current
+                .trampoline_onion
+                .as_deref()
+                .expect("trampoline_onion present");
+
+            let peeled_trampoline = TrampolineOnionPacket::new(trampoline_bytes.to_vec())
+                .peel(
+                    state.private_key(),
+                    Some(payment_hash.as_ref()),
+                    &Secp256k1::new(),
+                )
+                .map_err(|err| {
+                    ProcessingChannelError::PeelingOnionPacketError(format!(
+                        "Failed to peel trampoline onion packet: {err}"
+                    ))
+                })?;
+
+            if let TrampolineHopPayload::Final {
+                final_amount,
+                final_tlc_expiry_delta: _,
+                udt_type_script: _,
+                payment_preimage,
+                hash_algorithm,
+                custom_records,
+            } = peeled_trampoline.current
+            {
+                if forward_amount != add_tlc.amount || forward_amount != final_amount {
+                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                }
+
+                if add_tlc.expiry < peeled_onion_packet.current.expiry {
+                    return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+                }
+
+                let invoice = self.store.get_invoice(&payment_hash);
+                if let Some(ref invoice) = invoice {
+                    let invoice_status = self.get_invoice_status(invoice);
+                    if !matches!(invoice_status, CkbInvoiceStatus::Open) {
+                        return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
+                    }
+
+                    if invoice.is_tlc_expire_too_soon(add_tlc.expiry) {
+                        return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+                    }
+                }
+
+                let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) else {
+                    return Err(ProcessingChannelError::InternalError(
+                        "TLC not found in state".to_string(),
+                    ));
+                };
+                tlc.is_last = true;
+
+                let mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
+
+                match (&invoice, mpp_record) {
+                    (Some(invoice), Some(record)) => {
+                        if record.total_amount < invoice.amount.unwrap_or_default() {
+                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                "total amount in records is less than invoice amount".to_string(),
+                            ));
+                        }
+
+                        let payment_secret = invoice.payment_secret();
+                        if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+                            return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                                "payment secret mismatch".to_string(),
+                            ));
+                        }
+
+                        tlc.payment_secret = Some(record.payment_secret);
+                        tlc.total_amount = Some(record.total_amount);
+                    }
+                    (Some(invoice), None) => {
+                        if invoice.allow_mpp() {
+                            warn!(
+                                "invoice allows MPP but no MPP records in trampoline onion: {:?}",
+                                payment_hash
+                            );
+                        }
+                        if !is_invoice_fulfilled(invoice, std::iter::once(&*tlc)) {
+                            return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                        }
+                    }
+                    (None, Some(_)) => {
+                        return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                            "invoice not found".to_string(),
+                        ));
+                    }
+                    _ => {
+                        // single path payment with keysend
+                    }
+                }
+
+                let preimage =
+                    payment_preimage.or_else(|| self.store.get_preimage(&add_tlc.payment_hash));
+
+                if let Some(preimage) = preimage {
+                    let filled_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
+                    if add_tlc.payment_hash != filled_payment_hash {
+                        return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                    }
+
+                    if let Some(custom_records) = custom_records {
+                        self.store
+                            .insert_payment_custom_records(&payment_hash, custom_records);
+                    }
+
+                    // Don't call self.store_preimage here, because it will reveal the preimage to watchtower.
+                    self.store.insert_preimage(payment_hash, preimage);
+                } else if invoice.is_none() {
+                    return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+                }
+
+                return Ok(());
+            }
+        }
+
         if peeled_onion_packet.is_last() && !is_trampoline {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
@@ -1190,8 +1313,8 @@ where
             }
 
             let received_amount = add_tlc.amount;
-            error!(
-                "debug received_amount: {:?} forward amount: {:?}",
+            debug!(
+                "received_amount: {:?} forward amount: {:?}",
                 received_amount, forward_amount
             );
             if received_amount < forward_amount {
@@ -1202,7 +1325,7 @@ where
 
             // Next forwarding channel will get the forward_fee and check if it's enough.
             let forward_fee = received_amount.saturating_sub(forward_amount);
-            error!("debug forward_fee: {:?}", forward_fee);
+            debug!("forward_fee: {:?}", forward_fee);
 
             // if this is not the last hop, forward TLC to next hop
             self.register_and_apply_forward_tlc(

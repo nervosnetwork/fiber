@@ -367,25 +367,6 @@ impl From<PaymentSession> for SendPaymentResponse {
             .collect::<Vec<_>>();
         all_attempts.sort_by_key(|a| a.0);
 
-        #[cfg(debug_assertions)]
-        {
-            dbg!(&all_attempts);
-            dbg!(
-                fee,
-                &status,
-                all_attempts.len(),
-                session.try_limit,
-                &session.last_error
-            );
-
-            let active_count = session.active_attempts().count();
-            let active_amount = session
-                .active_attempts()
-                .map(|a| a.route.receiver_amount())
-                .sum::<u128>();
-            dbg!(active_amount, session.request.amount, active_count);
-        }
-
         #[cfg(any(debug_assertions, test, feature = "bench"))]
         let attempts = session
             .attempts()

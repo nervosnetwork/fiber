@@ -3775,6 +3775,175 @@ impl TrampolineOnionData {
     }
 }
 
+/// Trampoline onion hop payload.
+///
+/// This is carried inside the *inner* trampoline onion packet (which is itself embedded in the
+/// `trampoline_onion` field of the *outer* payment onion hop payload).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrampolineHopPayload {
+    /// Payload for a trampoline node.
+    Forward {
+        /// Next node in the trampoline route (could be another trampoline or the final recipient).
+        next_node_id: Pubkey,
+        /// Whether `next_node_id` is itself a trampoline hop (and thus requires a forward-fee budget).
+        ///
+        /// When false, `next_node_id` is treated as the final recipient for the purpose of outer-onion
+        /// fee allocation.
+        #[serde(default)]
+        next_is_trampoline: bool,
+        /// Amount that should be forwarded to `next_node_id` (excluding this node's fee).
+        amount_to_forward: u128,
+        /// Hash algorithm used for the payment hash/preimage relationship.
+        hash_algorithm: HashAlgorithm,
+        /// Final hop expiry delta required by the invoice.
+        final_tlc_expiry_delta: u64,
+        /// Optional UDT type script bytes for the payment (None means CKB).
+        udt_type_script: Option<Vec<u8>>,
+    },
+    /// Payload for the final recipient.
+    Final {
+        /// Amount that the final recipient should receive.
+        final_amount: u128,
+        /// Final hop expiry delta required by the invoice.
+        final_tlc_expiry_delta: u64,
+        /// Optional UDT type script bytes for the payment (None means CKB).
+        udt_type_script: Option<Vec<u8>>,
+        /// Optional payment preimage (keysend).
+        payment_preimage: Option<Hash256>,
+        /// Hash algorithm used for the payment hash/preimage relationship.
+        hash_algorithm: HashAlgorithm,
+        /// Custom records that must reach the final recipient (e.g. MPP records).
+        custom_records: Option<PaymentCustomRecords>,
+    },
+}
+
+impl TrampolineHopPayload {
+    pub fn serialize(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("serialize TrampolineHopPayload")
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        bincode::deserialize(data).ok()
+    }
+}
+
+/// Inner trampoline onion packet bytes.
+///
+/// Uses the same Sphinx construction as the outer payment onion, but is intended to be smaller so
+/// it can be embedded inside the outer onion's hop payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TrampolineOnionPacket {
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeeledTrampolineOnionPacket {
+    pub current: TrampolineHopPayload,
+    pub shared_secret: [u8; 32],
+    pub next: Option<TrampolineOnionPacket>,
+}
+
+const TRAMPOLINE_PACKET_DATA_LEN: usize = 1300;
+
+impl TrampolineOnionPacket {
+    pub fn new(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+
+    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
+        fiber_sphinx::OnionPacket::from_bytes(self.data)
+            .map_err(|err| Error::OnionPacket(err.into()))
+    }
+
+    pub fn peel<C: Verification>(
+        self,
+        peeler: &Privkey,
+        assoc_data: Option<&[u8]>,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<PeeledTrampolineOnionPacket, Error> {
+        let sphinx_packet = self.into_sphinx_onion_packet()?;
+        let shared_secret = sphinx_packet.shared_secret(&peeler.0);
+
+        let (new_current, new_next) = sphinx_packet
+            .peel(&peeler.0, assoc_data, secp_ctx, get_hop_data_len)
+            .map_err(|err| Error::OnionPacket(err.into()))?;
+
+        let current = unpack_trampoline_hop_payload(&new_current)
+            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
+
+        // All zeros hmac indicates the last hop.
+        let next = new_next
+            .hmac
+            .iter()
+            .any(|b| *b != 0)
+            .then(|| TrampolineOnionPacket::new(new_next.into_bytes()));
+
+        Ok(PeeledTrampolineOnionPacket {
+            current,
+            next,
+            shared_secret,
+        })
+    }
+
+    /// Create a trampoline onion destined to `hops_path[0]`.
+    ///
+    /// `hops_path.len()` must equal `payloads.len()` and must not be empty.
+    pub fn create<C: Signing>(
+        session_key: Privkey,
+        hops_path: Vec<Pubkey>,
+        payloads: Vec<TrampolineHopPayload>,
+        assoc_data: Option<Vec<u8>>,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<Self, Error> {
+        if hops_path.is_empty() {
+            return Err(Error::OnionPacket(SphinxError::HopsIsEmpty.into()));
+        }
+
+        if hops_path.len() != payloads.len() {
+            return Err(Error::OnionPacket(OnionPacketError::InvalidHopData));
+        }
+
+        let hops_path: Vec<PublicKey> = hops_path.into_iter().map(Into::into).collect();
+        let hops_data = payloads.iter().map(pack_trampoline_hop_payload).collect();
+
+        Ok(TrampolineOnionPacket::new(
+            fiber_sphinx::OnionPacket::create(
+                session_key.into(),
+                hops_path,
+                hops_data,
+                assoc_data,
+                TRAMPOLINE_PACKET_DATA_LEN,
+                secp_ctx,
+            )
+            .map_err(|err| Error::OnionPacket(err.into()))?
+            .into_bytes(),
+        ))
+    }
+}
+
+pub(crate) fn pack_trampoline_hop_payload(payload: &TrampolineHopPayload) -> Vec<u8> {
+    let mut serialized = payload.serialize();
+    let mut packed = (serialized.len() as u64).to_be_bytes().to_vec();
+    packed.append(&mut serialized);
+    packed
+}
+
+pub(crate) fn unpack_trampoline_hop_payload(buf: &[u8]) -> Option<TrampolineHopPayload> {
+    let len = get_hop_data_len(buf)?;
+    if buf.len() < len {
+        return None;
+    }
+    TrampolineHopPayload::deserialize(&buf[HOP_DATA_HEAD_LEN..len])
+}
+
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PaymentHopData {

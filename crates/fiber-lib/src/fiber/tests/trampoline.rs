@@ -275,6 +275,47 @@ async fn test_trampoline_routing_with_two_networks() {
 }
 
 #[tokio::test]
+async fn test_trampoline_routing_multi_trampoline_hops() {
+    init_tracing();
+
+    // A --(public)--> T1 --(public)--> T2 --(private)--> C
+    // A cannot find a route to C from gossip graph; chained trampolines can forward.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        4,
+    )
+    .await;
+
+    let [node_a, _node_t1, _node_t2, node_c] = nodes.try_into().expect("4 nodes");
+
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .allow_trampoline_routing(true)
+        .build()
+        .expect("build invoice");
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    node_a.wait_until_success(res.unwrap().payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_trampoline_private_channel_basic() {
     init_tracing();
 

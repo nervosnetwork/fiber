@@ -97,8 +97,8 @@ use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineOnionData, TxAbort,
-    TxSignatures,
+    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineHopPayload,
+    TrampolineOnionPacket, TxAbort, TxSignatures,
 };
 use crate::fiber::KeyPair;
 use crate::invoice::{
@@ -108,6 +108,12 @@ use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
+
+// Maximum number of trampoline nodes encoded in the inner trampoline onion.
+// This is a safety guard against excessive route construction work.
+const MAX_TRAMPOLINE_HOPS_LIMIT: u8 = 10;
+// Default trampoline hop count (number of trampoline nodes, excluding the final recipient).
+const DEFAULT_MAX_TRAMPOLINE_HOPS: u8 = 2;
 
 pub const GOSSIP_PROTOCOL_ID: ProtocolId = ProtocolId::new(43);
 
@@ -415,6 +421,12 @@ pub struct SendPaymentCommand {
     pub custom_records: Option<PaymentCustomRecords>,
     // the hop hint which may help the find path algorithm to find the path
     pub hop_hints: Option<Vec<HopHint>>,
+
+    /// Max number of trampoline nodes to encode in the inner trampoline onion.
+    ///
+    /// This is only used when trampoline routing is allowed (typically via invoice feature).
+    /// A value of 1 means a single trampoline hop (trampoline -> final).
+    pub max_trampoline_hops: Option<u8>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
 }
@@ -535,6 +547,11 @@ pub struct SendPaymentData {
     pub router: Vec<RouterHop>,
     pub allow_mpp: bool,
     pub allow_trampoline_routing: bool,
+
+    /// Max number of trampoline nodes to encode in the inner trampoline onion.
+    ///
+    /// This is only used when `allow_trampoline_routing == true`.
+    pub max_trampoline_hops: u8,
     pub dry_run: bool,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
@@ -677,6 +694,16 @@ impl SendPaymentData {
 
         let hop_hints = command.hop_hints.unwrap_or_default();
 
+        let max_trampoline_hops = command
+            .max_trampoline_hops
+            .unwrap_or(DEFAULT_MAX_TRAMPOLINE_HOPS);
+        if max_trampoline_hops == 0 || max_trampoline_hops > MAX_TRAMPOLINE_HOPS_LIMIT {
+            return Err(format!(
+                "invalid max_trampoline_hops, value should be in range [1, {}]",
+                MAX_TRAMPOLINE_HOPS_LIMIT
+            ));
+        }
+
         let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
         let allow_trampoline_routing = invoice
             .as_ref()
@@ -747,6 +774,7 @@ impl SendPaymentData {
             allow_trampoline_routing,
             router: vec![],
             dry_run: command.dry_run,
+            max_trampoline_hops,
             channel_stats: Default::default(),
         })
     }
@@ -762,6 +790,13 @@ impl SendPaymentData {
 
     pub fn allow_trampoline_routing(&self) -> bool {
         self.allow_trampoline_routing
+    }
+
+    pub fn max_trampoline_hops(&self) -> usize {
+        // Clamp for safety in case older serialized data contains weird values.
+        self.max_trampoline_hops
+            .max(1)
+            .min(MAX_TRAMPOLINE_HOPS_LIMIT) as usize
     }
 }
 
@@ -2560,46 +2595,13 @@ where
         // Trampoline forwarding: the onion for this node is the last hop, but contains an
         // encrypted payload telling us the real final recipient and parameters.
         if let Some(trampoline_bytes) = peeled_onion_packet.current.trampoline_onion.as_deref() {
-            let Some(trampoline) = TrampolineOnionData::deserialize(trampoline_bytes) else {
-                return Err(TlcErr::new_node_fail(
-                    TlcErrorCode::TemporaryNodeFailure,
-                    state.get_public_key(),
-                ));
-            };
-
-            let max_fee_amount = previous_tlc.map(|x| x.forwarding_fee);
-
-            let mut request = SendPaymentData {
-                target_pubkey: trampoline.final_recipient,
-                amount: trampoline.final_amount,
-                payment_hash,
-                invoice: None,
-                final_tlc_expiry_delta: trampoline.final_tlc_expiry_delta,
-                tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-                timeout: None,
-                max_fee_amount,
-                max_parts: Some(1),
-                keysend: false,
-                udt_type_script: trampoline
-                    .udt_type_script
-                    .as_deref()
-                    .and_then(|bytes| Script::from_slice(bytes).ok()),
-                preimage: trampoline.payment_preimage,
-                custom_records: trampoline.custom_records.clone(),
-                allow_self_payment: true,
-                hop_hints: vec![],
-                router: vec![],
-                allow_mpp: false,
-                allow_trampoline_routing: false,
-                dry_run: false,
-                channel_stats: Default::default(),
-            };
-
-            let graph = self.network_graph.read().await;
-            error!("debug now sending trampoline bytes: {:?}", trampoline);
-            request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
-            let hops = graph
-                .build_route(trampoline.final_amount, None, max_fee_amount, &request)
+            let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
+            let peeled_trampoline = trampoline_packet
+                .peel(
+                    &state.private_key,
+                    Some(payment_hash.as_ref()),
+                    &Secp256k1::new(),
+                )
                 .map_err(|_| {
                     TlcErr::new_node_fail(
                         TlcErrorCode::TemporaryNodeFailure,
@@ -2607,17 +2609,124 @@ where
                     )
                 })?;
 
-            let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-            let secp = Secp256k1::new();
-            peeled_onion_packet = PeeledPaymentOnionPacket::create(
-                session_key,
-                hops,
-                Some(payment_hash.as_ref().to_vec()),
-                &secp,
-            )
-            .map_err(|_| {
-                TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
-            })?;
+            let max_fee_amount = previous_tlc.map(|x| x.forwarding_fee);
+
+            match peeled_trampoline.current {
+                TrampolineHopPayload::Forward {
+                    next_node_id,
+                    next_is_trampoline,
+                    amount_to_forward,
+                    hash_algorithm,
+                    final_tlc_expiry_delta,
+                    udt_type_script,
+                } => {
+                    let remaining_trampoline_onion = peeled_trampoline.next.map(|p| p.into_bytes());
+
+                    let mut request = SendPaymentData {
+                        target_pubkey: next_node_id,
+                        amount: amount_to_forward,
+                        payment_hash,
+                        invoice: None,
+                        final_tlc_expiry_delta,
+                        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+                        timeout: None,
+                        max_fee_amount,
+                        max_parts: Some(1),
+                        keysend: false,
+                        udt_type_script: udt_type_script
+                            .as_deref()
+                            .and_then(|bytes| Script::from_slice(bytes).ok()),
+                        preimage: None,
+                        custom_records: None,
+                        allow_self_payment: true,
+                        hop_hints: vec![],
+                        router: vec![],
+                        allow_mpp: false,
+                        allow_trampoline_routing: false,
+                        max_trampoline_hops: 1,
+                        dry_run: false,
+                        channel_stats: Default::default(),
+                    };
+
+                    // Trampoline forwarding frequently targets a node reachable via a private
+                    // channel (not in the gossip graph). Add a hop hint for a direct local
+                    // channel to `next_node_id` if we have one.
+                    if let Some(hint) = self.find_direct_hop_hint(
+                        state.get_public_key(),
+                        next_node_id,
+                        request.udt_type_script.as_ref(),
+                    ) {
+                        request.hop_hints.push(hint);
+                    }
+
+                    let graph = self.network_graph.read().await;
+                    request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+
+                    let (build_amount, build_max_fee) = if next_is_trampoline {
+                        let total_fee_budget = max_fee_amount.unwrap_or(0);
+                        let fee_budget_forward = total_fee_budget.saturating_mul(50) / 100;
+                        let fee_budget_routing =
+                            total_fee_budget.saturating_sub(fee_budget_forward);
+                        (
+                            amount_to_forward.saturating_add(fee_budget_forward),
+                            Some(fee_budget_routing),
+                        )
+                    } else {
+                        (amount_to_forward, max_fee_amount)
+                    };
+
+                    let mut hops = graph
+                        .build_route(build_amount, None, build_max_fee, &request)
+                        .map_err(|_| {
+                            TlcErr::new_node_fail(
+                                TlcErrorCode::TemporaryNodeFailure,
+                                state.get_public_key(),
+                            )
+                        })?;
+
+                    // Ensure the hash algorithm remains consistent across trampoline legs.
+                    for hop in &mut hops {
+                        hop.hash_algorithm = hash_algorithm;
+                    }
+
+                    // If we are forwarding to another trampoline hop, make sure that next trampoline
+                    // receives a forward fee (received_amount - forward_amount) so it can forward
+                    // further and satisfy fee checks.
+                    if next_is_trampoline {
+                        if let Some(last) = hops.last_mut() {
+                            last.amount = amount_to_forward;
+                        }
+                    }
+
+                    if let Some(remaining) = remaining_trampoline_onion {
+                        if let Some(last) = hops.last_mut() {
+                            last.trampoline_onion = Some(remaining);
+                        }
+                    }
+
+                    let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
+                    let secp = Secp256k1::new();
+                    peeled_onion_packet = PeeledPaymentOnionPacket::create(
+                        session_key,
+                        hops,
+                        Some(payment_hash.as_ref().to_vec()),
+                        &secp,
+                    )
+                    .map_err(|_| {
+                        TlcErr::new_node_fail(
+                            TlcErrorCode::TemporaryNodeFailure,
+                            state.get_public_key(),
+                        )
+                    })?;
+                }
+                TrampolineHopPayload::Final { .. } => {
+                    // The channel actor should directly settle when this node is the final recipient.
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::TemporaryNodeFailure,
+                        state.get_public_key(),
+                    ));
+                }
+            }
         }
 
         let info = peeled_onion_packet.current.clone();
@@ -2675,6 +2784,54 @@ where
                 return Err(tlc_error);
             }
         }
+    }
+
+    fn find_direct_hop_hint(
+        &self,
+        source_node_id: Pubkey,
+        target_node_id: Pubkey,
+        udt_type_script: Option<&Script>,
+    ) -> Option<HopHint> {
+        // Find any ready local channel directly connected to `target_node_id`, even if private.
+        // Hop hints are primarily used for the last hop and allow routing without public gossip.
+        for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+            if !matches!(channel_state, ChannelState::ChannelReady) {
+                continue;
+            }
+
+            let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) else {
+                continue;
+            };
+
+            if actor_state.local_pubkey != source_node_id {
+                continue;
+            }
+
+            if actor_state.remote_pubkey != target_node_id {
+                continue;
+            }
+
+            if actor_state.funding_udt_type_script.as_ref() != udt_type_script {
+                continue;
+            }
+
+            let Some(funding_tx) = actor_state.funding_tx.as_ref() else {
+                continue;
+            };
+
+            let channel_outpoint = OutPoint::new(funding_tx.calc_tx_hash(), 0);
+
+            return Some(HopHint {
+                // In this codebase, hop hints are interpreted as an extra private edge
+                // from `hint.pubkey` -> target.
+                pubkey: source_node_id,
+                channel_outpoint,
+                fee_rate: actor_state.local_tlc_info.tlc_fee_proportional_millionths as u64,
+                tlc_expiry_delta: actor_state.local_tlc_info.tlc_expiry_delta,
+            });
+        }
+
+        None
     }
 
     fn get_tlc_error(
@@ -2927,12 +3084,12 @@ where
                     );
 
                     let session_route = &attempt.route;
-                    #[cfg(debug_assertions)]
-                    dbg!(
-                        "left amount: {}, minimal_amount: {} target amount: {}",
-                        remain_amount - session_route.receiver_amount(),
+                    trace!(
+                        remaining_after_attempt =
+                            remain_amount.saturating_sub(session_route.receiver_amount()),
                         target_amount,
-                        session_route.receiver_amount()
+                        receiver_amount = session_route.receiver_amount(),
+                        "planned payment attempt route"
                     );
 
                     for (from, channel_outpoint, amount) in session_route.channel_outpoints() {
