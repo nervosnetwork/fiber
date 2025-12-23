@@ -1141,7 +1141,6 @@ where
                         "TLC not found in state".to_string(),
                     ));
                 };
-                tlc.is_last = true;
 
                 let mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
 
