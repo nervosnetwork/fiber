@@ -10,7 +10,7 @@ use crate::fiber::{
     channel::ChannelActorStateStore,
     network::{HopHint as NetworkHopHint, SendPaymentCommand},
     payment::PaymentStatus,
-    serde_utils::{EntityHex, U128Hex, U64Hex},
+    serde_utils::{EntityHex, U128Hex, U16Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -137,7 +137,8 @@ pub struct SendPaymentCommandParams {
     pub max_parts: Option<u64>,
 
     /// Max number of trampoline nodes to encode in the inner trampoline onion.
-    pub max_trampoline_hops: Option<u8>,
+    #[serde_as(as = "Option<U16Hex>")]
+    pub max_trampoline_hops: Option<u16>,
 
     /// keysend payment
     pub keysend: Option<bool>,

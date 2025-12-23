@@ -1301,10 +1301,12 @@ where
             ));
         }
 
-        reachable_trampolines.sort_by(|(len_a, a, ..), (len_b, b, ..)| len_a.cmp(len_b).then(a.cmp(b)));
+        reachable_trampolines
+            .sort_by(|(len_a, a, ..), (len_b, b, ..)| len_a.cmp(len_b).then(a.cmp(b)));
 
-        for (route_len, candidate, route_to_trampoline, amount_to_trampoline, fee_budget_forward) in reachable_trampolines {
-
+        for (route_len, candidate, route_to_trampoline, amount_to_trampoline, fee_budget_forward) in
+            reachable_trampolines
+        {
             let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
             let secp = Secp256k1::new();
             let udt_type_script = payment_data
@@ -1409,15 +1411,19 @@ where
                 custom_records: payment_data.custom_records.clone(),
             });
 
-            let trampoline_onion = TrampolineOnionPacket::create(
+            let trampoline_onion = match TrampolineOnionPacket::create(
                 session_key,
                 trampoline_path,
                 payloads,
                 Some(payment_data.payment_hash.as_ref().to_vec()),
                 &secp,
-            )
-            .map_err(|_| PathFindError::NoPathFound)?
-            .into_bytes();
+            ) {
+                Ok(packet) => packet.into_bytes(),
+                Err(_) => {
+                    // If onion creation fails for this trampoline candidate, try the next one.
+                    continue;
+                }
+            };
 
             return Ok((route_to_trampoline, amount_to_trampoline, trampoline_onion));
         }
@@ -1551,15 +1557,16 @@ where
             });
         }
 
-        let (last_amount, payment_preimage, custom_records, trampoline_onion) = match trampoline_payload {
-            Some(onion) => (payment_data.amount, None, None, Some(onion)),
-            None => (
-                max_amount,
-                payment_data.preimage,
-                payment_data.custom_records.clone(),
-                None,
-            ),
-        };
+        let (last_amount, payment_preimage, custom_records, trampoline_onion) =
+            match trampoline_payload {
+                Some(onion) => (payment_data.amount, None, None, Some(onion)),
+                None => (
+                    max_amount,
+                    payment_data.preimage,
+                    payment_data.custom_records.clone(),
+                    None,
+                ),
+            };
 
         hops_data.push(PaymentHopData {
             amount: last_amount,

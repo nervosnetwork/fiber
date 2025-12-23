@@ -111,9 +111,9 @@ pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 // Maximum number of trampoline nodes encoded in the inner trampoline onion.
 // This is a safety guard against excessive route construction work.
-const MAX_TRAMPOLINE_HOPS_LIMIT: u8 = 10;
+const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 10;
 // Default trampoline hop count (number of trampoline nodes, excluding the final recipient).
-const DEFAULT_MAX_TRAMPOLINE_HOPS: u8 = 2;
+const DEFAULT_MAX_TRAMPOLINE_HOPS: u16 = 2;
 
 pub const GOSSIP_PROTOCOL_ID: ProtocolId = ProtocolId::new(43);
 
@@ -426,7 +426,7 @@ pub struct SendPaymentCommand {
     ///
     /// This is only used when trampoline routing is allowed (typically via invoice feature).
     /// A value of 1 means a single trampoline hop (trampoline -> final).
-    pub max_trampoline_hops: Option<u8>,
+    pub max_trampoline_hops: Option<u16>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
 }
@@ -551,7 +551,7 @@ pub struct SendPaymentData {
     /// Max number of trampoline nodes to encode in the inner trampoline onion.
     ///
     /// This is only used when `allow_trampoline_routing == true`.
-    pub max_trampoline_hops: u8,
+    pub max_trampoline_hops: u16,
     pub dry_run: bool,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
@@ -795,8 +795,8 @@ impl SendPaymentData {
     pub fn max_trampoline_hops(&self) -> usize {
         // Clamp for safety in case older serialized data contains weird values.
         self.max_trampoline_hops
-            .max(1)
-            .min(MAX_TRAMPOLINE_HOPS_LIMIT) as usize
+            .clamp(1, MAX_TRAMPOLINE_HOPS_LIMIT)
+            .into()
     }
 }
 
@@ -2592,9 +2592,15 @@ where
             attempt_id,
         } = command;
 
+        let mut trampoline_outer_shared_secret: Option<[u8; 32]> = None;
+
         // Trampoline forwarding: the onion for this node is the last hop, but contains an
         // encrypted payload telling us the real final recipient and parameters.
         if let Some(trampoline_bytes) = peeled_onion_packet.current.trampoline_onion.as_deref() {
+            // Preserve the shared secret for this hop in the *outer* onion so we can create a
+            // decodable wrapped failure upstream when downstream errors happen.
+            trampoline_outer_shared_secret = Some(peeled_onion_packet.shared_secret);
+
             let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
             let peeled_trampoline = trampoline_packet
                 .peel(
@@ -2730,7 +2736,9 @@ where
         }
 
         let info = peeled_onion_packet.current.clone();
-        let shared_secret = peeled_onion_packet.shared_secret;
+        let shared_secret =
+            trampoline_outer_shared_secret.unwrap_or(peeled_onion_packet.shared_secret);
+        let is_trampoline_hop = trampoline_outer_shared_secret.is_some();
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
         let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
             Some(channel_id) => channel_id,
@@ -2761,6 +2769,7 @@ where
                 hash_algorithm: info.hash_algorithm,
                 onion_packet: peeled_onion_packet.next.clone(),
                 shared_secret,
+                is_trampoline_hop,
                 previous_tlc,
             },
             rpc_reply,
@@ -2917,6 +2926,7 @@ where
                         TlcErr::new(TlcErrorCode::InvalidOnionError)
                     });
                 debug!("on_remove_tlc: {:?}", error_detail.error_code);
+                let error_msg = error_detail.to_string();
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
                     error_detail.clone(),
@@ -2932,7 +2942,7 @@ where
                 self.set_attempt_fail_with_error(
                     &mut session,
                     &mut attempt,
-                    error_detail.error_code.as_ref(),
+                    &error_msg,
                     need_to_retry,
                 );
 

@@ -53,7 +53,7 @@ use crate::{
             ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
             Hash256, HoldTlc, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey,
             Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-            Shutdown, TlcErr, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
+            Shutdown, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
             TrampolineOnionPacket, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
@@ -247,6 +247,8 @@ pub struct AddTlcCommand {
     /// Save it for outbound (offered) TLC to backward errors.
     /// Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
+    #[serde(default)]
+    pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
 }
 
@@ -258,6 +260,7 @@ impl Debug for AddTlcCommand {
             .field("attempt_id", &self.attempt_id)
             .field("expiry", &self.expiry)
             .field("hash_algorithm", &self.hash_algorithm)
+            .field("is_trampoline_hop", &self.is_trampoline_hop)
             .field("previous_tlc", &self.previous_tlc)
             .finish()
     }
@@ -878,7 +881,20 @@ where
         let (previous_channel_id, previous_tlc_id) =
             tlc_info.forwarding_tlc.expect("expect forwarding tlc");
 
-        let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
+        // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
+        // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
+        // into a new error created with the *outer* shared secret (for this hop).
+        let remove_reason = match remove_reason.clone() {
+            RemoveTlcReason::RemoveTlcFail(inner_error_packet) if tlc_info.is_trampoline_hop => {
+                let mut tlc_err = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
+                tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
+                    node_id: self.get_local_pubkey(),
+                    inner_error_packet: inner_error_packet.onion_packet,
+                });
+                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(tlc_err, &tlc_info.shared_secret))
+            }
+            other => other.backward(&tlc_info.shared_secret),
+        };
 
         let _ = self.register_retryable_relay_tlc_remove(
             TLCId::Received(previous_tlc_id),
@@ -3138,6 +3154,8 @@ pub struct TlcInfo {
     ///
     /// Save it to backward errors. Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
+    #[serde(default)]
+    pub is_trampoline_hop: bool,
     pub created_at: CommitmentNumbers,
     pub removed_reason: Option<RemoveTlcReason>,
 
@@ -6008,6 +6026,7 @@ impl ChannelActorState {
             removed_reason: None,
             onion_packet: command.onion_packet.clone(),
             shared_secret: command.shared_secret,
+            is_trampoline_hop: command.is_trampoline_hop,
             forwarding_tlc: command
                 .previous_tlc
                 .map(|prev_tlc| (prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id)),
@@ -6034,6 +6053,7 @@ impl ChannelActorState {
             onion_packet: message.onion_packet,
             // No need to save shared secret for inbound TLC.
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             created_at: self.get_current_commitment_numbers(),
             removed_reason: None,
             forwarding_tlc: None,

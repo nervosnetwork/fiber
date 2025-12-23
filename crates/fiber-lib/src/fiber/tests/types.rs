@@ -8,8 +8,8 @@ use crate::{
         types::{
             pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BasicMppPaymentData,
             BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId, PaymentHopData,
-            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
-            TrampolineHopPayload, TrampolineOnionPacket, NO_SHARED_SECRET,
+            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrData, TlcErrPacket,
+            TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket, NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
@@ -399,6 +399,49 @@ fn test_tlc_err_packet_encryption() {
             .expect("decrypted");
         assert_eq!(decrypted_tlc_fail_detail, tlc_fail_detail);
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
+    // Simulate a trampoline boundary wrapping a downstream error packet:
+    // - The downstream error packet bytes are opaque to the payer.
+    // - The wrapper is encrypted with the *outer* shared secret of the trampoline hop,
+    //   so the payer can decode at least the TrampolineFailed envelope.
+
+    let secp = Secp256k1::new();
+    let hops_path = [
+        "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
+        "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
+    ]
+    .iter()
+    .map(|s| Pubkey(PublicKey::from_str(s).expect("valid public key")))
+    .collect::<Vec<_>>();
+
+    let session_key = SecretKey::from_slice(&[0x42; 32]).expect("32 bytes, within curve order");
+    let hops_ss: Vec<[u8; 32]> =
+        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp).collect();
+
+    // Pretend the downstream error originated beyond the trampoline boundary.
+    let inner_err = TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
+    let inner_err_packet = TlcErrPacket::new(inner_err.clone(), &hops_ss[1]);
+
+    // Trampoline wraps the opaque downstream error bytes.
+    let trampoline_node_id = hops_path[0];
+    let wrapper_err = TlcErr {
+        error_code: inner_err.error_code,
+        extra_data: Some(TlcErrData::TrampolineFailed {
+            node_id: trampoline_node_id,
+            inner_error_packet: inner_err_packet.onion_packet.clone(),
+        }),
+    };
+    let wrapper_packet = TlcErrPacket::new(wrapper_err.clone(), &hops_ss[0]);
+
+    let decoded = wrapper_packet
+        .decode(session_key.as_ref(), hops_path.clone())
+        .expect("payer decodes wrapper");
+
+    assert_eq!(decoded, wrapper_err);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

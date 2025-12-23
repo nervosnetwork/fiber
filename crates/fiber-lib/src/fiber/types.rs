@@ -1259,6 +1259,11 @@ pub enum TlcErrData {
     NodeFailed {
         node_id: Pubkey,
     },
+    TrampolineFailed {
+        node_id: Pubkey,
+        #[serde_as(as = "SliceHex")]
+        inner_error_packet: Vec<u8>,
+    },
 }
 
 #[serde_as]
@@ -1270,7 +1275,19 @@ pub struct TlcErr {
 
 impl Display for TlcErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error_code_as_str())
+        match &self.extra_data {
+            Some(TlcErrData::TrampolineFailed {
+                node_id,
+                inner_error_packet,
+            }) => write!(
+                f,
+                "{} (TrampolineFailed node_id={:?} inner_error_packet_len={})",
+                self.error_code_as_str(),
+                node_id,
+                inner_error_packet.len()
+            ),
+            _ => write!(f, "{}", self.error_code_as_str()),
+        }
     }
 }
 
@@ -1309,6 +1326,7 @@ impl TlcErr {
         match &self.extra_data {
             Some(TlcErrData::NodeFailed { node_id }) => Some(*node_id),
             Some(TlcErrData::ChannelFailed { node_id, .. }) => Some(*node_id),
+            Some(TlcErrData::TrampolineFailed { node_id, .. }) => Some(*node_id),
             _ => None,
         }
     }
@@ -1375,6 +1393,14 @@ impl TryFrom<TlcErrData> for molecule_fiber::TlcErrData {
                 .node_id(node_id.into())
                 .build()
                 .into()),
+            TlcErrData::TrampolineFailed {
+                node_id,
+                inner_error_packet,
+            } => Ok(molecule_fiber::TrampolineFailed::new_builder()
+                .node_id(node_id.into())
+                .inner_error_packet(inner_error_packet.pack())
+                .build()
+                .into()),
         }
     }
 }
@@ -1397,6 +1423,12 @@ impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
             molecule_fiber::TlcErrDataUnion::NodeFailed(node_failed) => {
                 Ok(TlcErrData::NodeFailed {
                     node_id: node_failed.node_id().try_into()?,
+                })
+            }
+            molecule_fiber::TlcErrDataUnion::TrampolineFailed(trampoline_failed) => {
+                Ok(TlcErrData::TrampolineFailed {
+                    node_id: trampoline_failed.node_id().try_into()?,
+                    inner_error_packet: trampoline_failed.inner_error_packet().unpack(),
                 })
             }
         }

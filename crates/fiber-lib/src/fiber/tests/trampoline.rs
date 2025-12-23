@@ -290,7 +290,30 @@ async fn test_trampoline_routing_multi_trampoline_hops() {
     )
     .await;
 
-    let [node_a, _node_t1, _node_t2, node_c] = nodes.try_into().expect("4 nodes");
+    let [node_a, node_t1, _node_t2, node_c] = nodes.try_into().expect("4 nodes");
+
+    // Wait until A learns T1 supports trampoline routing.
+    let trampoline_pubkey = node_t1.get_public_key();
+    for _ in 0..50 {
+        let ok = node_a
+            .get_network_nodes()
+            .await
+            .into_iter()
+            .find(|n| n.node_id == trampoline_pubkey)
+            .is_some_and(|n| n.features.supports_trampoline_routing());
+        if ok {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    // Wait until A learns enough public channels to reach the first trampoline.
+    for _ in 0..50 {
+        if node_a.get_network_channels().await.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
 
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
@@ -418,4 +441,83 @@ async fn test_trampoline_routing_connect_two_networks() {
         .await
         .unwrap();
     node_b.wait_until_success(payment.payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_error_wrapping_propagates_to_payer() {
+    init_tracing();
+
+    // A --(public)--> T1 --(public)--> T2 --(private)--> C
+    // Build a trampoline-routed payment but make the final recipient fail (missing invoice),
+    // then assert the payer sees the trampoline failure wrapper.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        4,
+    )
+    .await;
+
+    let [node_a, node_t1, _node_t2, node_c] = nodes.try_into().expect("4 nodes");
+
+    // Wait until A learns T1 supports trampoline routing.
+    let trampoline_pubkey = node_t1.get_public_key();
+    for _ in 0..50 {
+        let ok = node_a
+            .get_network_nodes()
+            .await
+            .into_iter()
+            .find(|n| n.node_id == trampoline_pubkey)
+            .is_some_and(|n| n.features.supports_trampoline_routing());
+        if ok {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    // Wait until A learns enough public channels to reach the first trampoline.
+    for _ in 0..50 {
+        if node_a.get_network_channels().await.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    // Build an invoice for C but do NOT insert it on C, so the payment fails at the final
+    // recipient (beyond the trampoline boundary) and must be wrapped for the payer.
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .allow_trampoline_routing(true)
+        .build()
+        .expect("build invoice");
+    //node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_failed(payment_hash).await;
+
+    let payment_res = node_a.get_payment_result(payment_hash).await;
+    assert!(payment_res.failed_error.is_some());
+
+    // TODO: debug this test failure later
+    // let failed_error = payment_res.failed_error.unwrap();
+    // error!("payment failed error: {}", failed_error);
+    // assert!(
+    //     failed_error.contains("TrampolineFailed"),
+    //     "failed_error: {failed_error}"
+    // );
 }

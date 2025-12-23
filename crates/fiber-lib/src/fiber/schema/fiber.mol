@@ -262,9 +262,15 @@ table NodeFailed {
     node_id: Pubkey,
 }
 
+table TrampolineFailed {
+    node_id: Pubkey,
+    inner_error_packet: Bytes,
+}
+
 union TlcErrData {
     ChannelFailed,
     NodeFailed,
+    TrampolineFailed,
 }
 
 option TlcErrDataOpt (TlcErrData);

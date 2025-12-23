@@ -1005,6 +1005,7 @@ async fn test_network_send_previous_tlc_error() {
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1100,6 +1101,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1851,6 +1853,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1971,6 +1974,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2024,6 +2028,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2107,6 +2112,7 @@ async fn do_test_channel_remote_commitment_error() {
                             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
+                            is_trampoline_hop: false,
                             previous_tlc: None,
                         },
                         rpc_reply,
@@ -2195,6 +2201,7 @@ async fn do_test_channel_add_tlc_amount_invalid() {
                             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
+                            is_trampoline_hop: false,
                             previous_tlc: None,
                         },
                         rpc_reply,
@@ -2270,6 +2277,7 @@ async fn test_network_add_tlc_amount_overflow_error() {
                             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
+                            is_trampoline_hop: false,
                             previous_tlc: None,
                             attempt_id: None,
                         },
@@ -2317,6 +2325,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2344,6 +2353,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2375,6 +2385,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2509,6 +2520,7 @@ async fn test_remove_tlc_with_expiry_error() {
         expiry: now_timestamp_as_millis_u64() + 10,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
     };
 
@@ -2532,6 +2544,7 @@ async fn test_remove_tlc_with_expiry_error() {
         expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA - 1000,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
         attempt_id: None,
     };
@@ -2556,6 +2569,7 @@ async fn test_remove_tlc_with_expiry_error() {
         expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 200,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
         attempt_id: None,
     };
@@ -2583,6 +2597,7 @@ async fn test_remove_tlc_with_expiry_error() {
         expiry: now_timestamp_as_millis_u64() + MAX_PAYMENT_TLC_EXPIRY_LIMIT + 20 * 1000,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
     };
 
@@ -2657,6 +2672,7 @@ async fn test_remove_expired_tlc_in_background() {
         expiry: a_valid_but_small_expiry,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
         attempt_id: None,
     };
@@ -2715,6 +2731,7 @@ async fn do_test_add_tlc_duplicated() {
             attempt_id: None,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2757,6 +2774,7 @@ async fn do_test_add_tlc_waiting_ack() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2791,6 +2809,7 @@ async fn do_test_add_tlc_waiting_ack() {
             onion_packet: None,
             previous_tlc: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2802,7 +2821,6 @@ async fn do_test_add_tlc_waiting_ack() {
         })
         .expect("node_b alive");
         if i == 2 {
-            // we are sending AddTlc constantly, so we should get a WaitingTlcAck
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result.unwrap_err();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
@@ -2845,6 +2863,7 @@ async fn do_test_add_tlc_with_number_limit() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2877,6 +2896,7 @@ async fn do_test_add_tlc_with_number_limit() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -2926,6 +2946,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -2958,6 +2979,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3008,6 +3030,7 @@ async fn do_test_add_tlc_value_limit() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3041,6 +3064,7 @@ async fn do_test_add_tlc_value_limit() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -3090,6 +3114,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3115,6 +3140,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3140,6 +3166,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3441,6 +3468,7 @@ async fn test_forward_payment_tlc_minimum_value() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3576,6 +3604,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -4255,6 +4284,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -4489,6 +4519,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
