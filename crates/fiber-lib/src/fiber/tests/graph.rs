@@ -629,7 +629,7 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -758,7 +758,7 @@ fn test_graph_build_router_fee_rate_optimize() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
 
@@ -955,7 +955,7 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1109,7 +1109,7 @@ fn test_graph_build_route_three_nodes_amount() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1170,7 +1170,7 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1262,7 +1262,7 @@ fn test_graph_build_route_below_min_tlc_value() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1301,7 +1301,7 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1348,7 +1348,7 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1414,7 +1414,7 @@ fn test_graph_mark_failed_channel() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1446,7 +1446,7 @@ fn test_graph_mark_failed_channel() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1489,7 +1489,7 @@ fn test_graph_session_router() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1545,7 +1545,7 @@ fn test_graph_mark_failed_node() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1575,7 +1575,7 @@ fn test_graph_mark_failed_node() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1607,7 +1607,7 @@ fn test_graph_mark_failed_node() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network
@@ -1636,7 +1636,7 @@ fn test_graph_mark_failed_node() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        max_trampoline_hops: 0,
         channel_stats: Default::default(),
     };
     let route = network

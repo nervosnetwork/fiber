@@ -230,7 +230,18 @@ async fn test_send_payment_with_hold_invoice_workflow() {
     assert!(res.is_ok());
     println!("res: {:?}", res);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    // wait until invoice in received
+    for _ in 0..30 {
+        let status = node_1
+            .store
+            .get_invoice_status(&payment_hash)
+            .expect("invoice status");
+        if status == CkbInvoiceStatus::Received {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    }
+
     node_1
         .settle_invoice(&payment_hash, payment_preimage)
         .await

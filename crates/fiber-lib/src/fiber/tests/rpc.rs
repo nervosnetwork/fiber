@@ -8,6 +8,7 @@ use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
 use crate::rpc::config::RpcConfig;
 use crate::rpc::info::NodeInfoResult;
+use crate::rpc::invoice::Attribute;
 use crate::tests::*;
 use crate::{
     fiber::types::Hash256,
@@ -113,6 +114,13 @@ async fn test_rpc_basic() {
     let invoice_payment_hash = ckb_invoice.data.payment_hash;
     let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
     assert!(internal_ckb_invoice.payment_secret().is_some());
+    assert!(ckb_invoice.data.attrs.iter().any(|attr| {
+        if let Attribute::Feature(fv) = attr {
+            *fv == ["BASIC_MPP_OPTIONAL", "TRAMPOLINE_ROUTING_OPTIONAL"]
+        } else {
+            false
+        }
+    }));
 
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
@@ -164,6 +172,13 @@ async fn test_rpc_basic() {
 
     let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
     assert!(internal_ckb_invoice.payment_secret().is_none());
+    assert!(internal_ckb_invoice.data.attrs.iter().any(|attr| {
+        if let crate::invoice::Attribute::Feature(fv) = attr {
+            fv.is_empty()
+        } else {
+            false
+        }
+    }));
 }
 
 #[tokio::test]

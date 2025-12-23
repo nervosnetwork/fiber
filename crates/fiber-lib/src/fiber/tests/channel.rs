@@ -3723,7 +3723,6 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
                 peer_id: node_b.peer_id.clone(),
                 public: true,
                 one_way: false,
-
                 shutdown_script: None,
                 funding_amount: 0xfffffffffffffffffffffffffffffff,
                 funding_udt_type_script: None,
@@ -3758,7 +3757,6 @@ async fn test_revoke_old_commitment_transaction() {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
                 one_way: false,
-
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -3961,7 +3959,6 @@ async fn test_create_channel() {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
                 one_way: false,
-
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -4092,7 +4089,6 @@ async fn test_reestablish_channel() {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
                 one_way: false,
-
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -4648,7 +4644,6 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
                 one_way: false,
-
                 shutdown_script: Some(Script::new_builder().args([0u8; 40].pack()).build()),
                 funding_amount: (81 + 1 + 90) * 100000000,
                 funding_udt_type_script: None,
@@ -5910,7 +5905,6 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
                 one_way: false,
-
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -5941,7 +5935,6 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
                 one_way: false,
-
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -5972,7 +5965,6 @@ async fn test_abandon_channel_with_peer_accept() {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
                 one_way: false,
-
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -6137,7 +6129,6 @@ async fn test_funding_timeout() {
                 peer_id: nodes[1].peer_id.clone(),
                 public: false,
                 one_way: false,
-
                 shutdown_script: None,
                 funding_amount,
                 funding_udt_type_script: None,
