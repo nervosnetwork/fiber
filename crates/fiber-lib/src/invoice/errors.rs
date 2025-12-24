@@ -66,4 +66,6 @@ pub enum InvoiceError {
     InvoiceNotFound,
     #[error("Invoice already exists")]
     InvoiceAlreadyExists,
+    #[error("Deprecated attribute: {0}")]
+    DeprecatedAttribute(String),
 }
