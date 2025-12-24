@@ -333,6 +333,54 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
         .expect("peel at final");
     assert_eq!(p3.current, payloads[2]);
     assert!(p3.next.is_none());
+
+    // Cover assoc_data != None cases:
+    // - Using the correct assoc_data should succeed.
+    // - Using missing/mismatched assoc_data should fail (MAC mismatch).
+    let assoc_data = b"fiber-trampoline-assoc-data".to_vec();
+    let session_key_with_ad = gen_rand_fiber_private_key();
+    let pkt_with_ad = TrampolineOnionPacket::create(
+        session_key_with_ad,
+        vec![t1.pubkey(), t2.pubkey(), final_node.pubkey()],
+        payloads.clone(),
+        Some(assoc_data.clone()),
+        &secp,
+    )
+    .expect("create trampoline onion with assoc_data");
+
+    assert!(
+        pkt_with_ad.clone().peel(&t1, None, &secp).is_err(),
+        "peel should fail when assoc_data is missing"
+    );
+    assert!(
+        pkt_with_ad
+            .clone()
+            .peel(&t1, Some("wrong".as_bytes()), &secp)
+            .is_err(),
+        "peel should fail when assoc_data mismatches"
+    );
+
+    let p1 = pkt_with_ad
+        .peel(&t1, Some(&assoc_data), &secp)
+        .expect("peel at t1 with assoc_data");
+    assert_eq!(p1.current, payloads[0]);
+    assert!(p1.next.is_some());
+
+    let p2 = p1
+        .next
+        .expect("next")
+        .peel(&t2, Some(&assoc_data), &secp)
+        .expect("peel at t2 with assoc_data");
+    assert_eq!(p2.current, payloads[1]);
+    assert!(p2.next.is_some());
+
+    let p3 = p2
+        .next
+        .expect("next")
+        .peel(&final_node, Some(&assoc_data), &secp)
+        .expect("peel at final with assoc_data");
+    assert_eq!(p3.current, payloads[2]);
+    assert!(p3.next.is_none());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
