@@ -17,6 +17,7 @@ mod fee;
 mod in_flight_ckb_tx_actor;
 mod key;
 mod path;
+mod settle_tlc_set_command;
 
 pub use config::FiberConfig;
 pub use in_flight_ckb_tx_actor::{
@@ -28,6 +29,7 @@ pub use network::{
     NetworkServiceEvent,
 };
 pub use payment::PaymentCustomRecords;
+pub use settle_tlc_set_command::SettleTlcSetCommand;
 
 pub(crate) const ASSUME_NETWORK_ACTOR_ALIVE: &str = "network actor must be alive";
 

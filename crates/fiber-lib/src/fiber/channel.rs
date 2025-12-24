@@ -959,7 +959,6 @@ where
                         .push(PendingNotifySettleTlc {
                             payment_hash: tlc.payment_hash,
                             tlc_id: tlc.id(),
-                            is_mpp,
                             hold_expire_at,
                         });
 
@@ -2860,11 +2859,12 @@ where
 
         self.store.insert_channel_actor_state(state.clone());
 
+        let mut immediate_tlc_sets = HashMap::<Hash256, Vec<(Hash256, u64)>>::new();
+        let mut hold_tlc_sets = HashSet::new();
         // try to settle down tlc set
         for PendingNotifySettleTlc {
             payment_hash,
             tlc_id,
-            is_mpp,
             hold_expire_at,
         } in pending_notify_tlcs
         {
@@ -2872,7 +2872,12 @@ where
             // Hold the tlc
             let expiry_duration =
                 Duration::from_millis(hold_expire_at.saturating_sub(now_timestamp_as_millis_u64()));
-            if !expiry_duration.is_zero() {
+            if expiry_duration.is_zero() {
+                immediate_tlc_sets
+                    .entry(payment_hash)
+                    .or_default()
+                    .push((channel_id, tlc_id));
+            } else {
                 self.store.insert_payment_hold_tlc(
                     payment_hash,
                     HoldTlc {
@@ -2881,25 +2886,30 @@ where
                         hold_expire_at,
                     },
                 );
-                // set timeout for hold tlc
-                self.network.send_after(expiry_duration, move || {
+                let timeout_command = move || {
                     NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
                         payment_hash,
                         channel_id,
                         tlc_id,
                     ))
-                });
+                };
+                // set timeout for hold tlc
+                self.network.send_after(expiry_duration, timeout_command);
+                hold_tlc_sets.insert(payment_hash);
             }
+        }
+
+        for (payment_hash, tlc_ids) in immediate_tlc_sets {
             self.network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SettleTlcSet(
-                        payment_hash,
-                        if !is_mpp {
-                            Some((state.get_id(), tlc_id))
-                        } else {
-                            None
-                        },
-                    ),
+                    NetworkActorCommand::SettleTlcSet(payment_hash, tlc_ids),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        for payment_hash in hold_tlc_sets {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SettleHoldTlcSet(payment_hash),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
@@ -3715,7 +3725,6 @@ type ScheduledChannelUpdateHandle =
 pub struct PendingNotifySettleTlc {
     pub payment_hash: Hash256,
     pub tlc_id: u64,
-    pub is_mpp: bool,
     pub hold_expire_at: u64,
 }
 
