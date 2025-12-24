@@ -6176,7 +6176,7 @@ async fn test_channel_one_peer_check_active_fail() {
     for _ in 0..50 {
         if matches!(
             node_0.get_channel_actor_state(channels[0]).state,
-            ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
         ) {
             break;
         }
