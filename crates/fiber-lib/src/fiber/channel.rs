@@ -3955,6 +3955,8 @@ bitflags! {
         const FUNDING_ABORTED = 1 << 3;
         /// Indicates that channel is closed uncooperatively, initiated by remote forcibly.
         const UNCOOPERATIVE_REMOTE = 1 << 4;
+        /// Indicates on-chain settlement for the channel is still in progress.
+        const WAITING_ONCHAIN_SETTLEMENT = 1 << 5;
     }
 }
 
@@ -7519,9 +7521,13 @@ impl ChannelActorState {
         let closed_state = if force {
             debug!("Channel closed with uncooperative close");
             if close_by_us {
-                ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+                ChannelState::Closed(
+                    CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+                )
             } else {
-                ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
+                ChannelState::Closed(
+                    CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+                )
             }
         } else {
             debug!("Channel closed with cooperative close");
