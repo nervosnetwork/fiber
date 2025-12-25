@@ -3965,10 +3965,10 @@ async fn test_send_payment_shutdown_with_force() {
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let channel_actor_state = node_3.get_channel_actor_state(channels[2]);
-            assert_eq!(
+            assert!(matches!(
                 channel_actor_state.state,
-                ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
-            );
+                ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+            ));
         }
     }
 
@@ -3977,7 +3977,10 @@ async fn test_send_payment_shutdown_with_force() {
     let mut wait_time = 0;
     while wait_time < PEER_CHANNEL_RESPONSE_TIMEOUT + 3 {
         let channel_state = node_2.get_channel_actor_state(channels[2]);
-        if channel_state.state == ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL) {
+        if matches!(
+            channel_state.state,
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+        ) {
             break;
         } else {
             assert_eq!(channel_state.state, ChannelState::ChannelReady);
@@ -4015,10 +4018,10 @@ async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
                 .await;
         }
         let channel_actor_state = nodes[i].get_channel_actor_state(channels[i]);
-        assert_eq!(
+        assert!(matches!(
             channel_actor_state.state,
-            ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
-        );
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+        ));
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;

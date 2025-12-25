@@ -1,5 +1,6 @@
 use anyhow::anyhow;
-use ckb_sdk::{tx_builder::TxBuilderError, RpcError};
+use ckb_jsonrpc_types::JsonBytes;
+use ckb_sdk::{rpc::ckb_indexer::Cell, tx_builder::TxBuilderError, RpcError};
 use ckb_testtool::context::Context;
 use ckb_types::bytes::BufMut;
 use ckb_types::{
@@ -17,7 +18,7 @@ use tokio::sync::RwLock as TokioRwLock;
 
 use crate::{
     ckb::{
-        actor::GetTxResponse,
+        actor::{GetCellsResponse, GetTxResponse},
         config::{UdtArgInfo, UdtCfgInfos, UdtScript},
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
         CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError,
@@ -500,6 +501,12 @@ impl Actor for MockChainActor {
             }
             GetShutdownTx(.., reply) => {
                 let _ = reply.send(Ok(None));
+            }
+            GetCells(.., reply) => {
+                let _ = reply.send(Ok(GetCellsResponse {
+                    objects: Vec::<Cell>::new(),
+                    last_cursor: JsonBytes::default(),
+                }));
             }
             Sign(tx, reply_port) => {
                 // We don't need to sign the funding transaction in mock chain actor,

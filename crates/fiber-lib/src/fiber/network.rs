@@ -2,7 +2,7 @@ use ckb_hash::blake2b_256;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
-use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
+use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
 use getrandom::getrandom;
@@ -56,6 +56,8 @@ use super::channel::{
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::config::AnnouncedNodeName;
+use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
+
 use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
@@ -72,8 +74,8 @@ use super::{
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{
-    CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxRequest,
-    GetShutdownTxResponse,
+    CkbChainMessage, FundingError, FundingRequest, FundingTx, GetCellsRequest,
+    GetShutdownTxRequest, GetShutdownTxResponse,
 };
 use crate::fiber::channel::{
     tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
@@ -1461,6 +1463,14 @@ where
                             )
                             .await;
                         }
+                    } else if matches!(
+                        channel_state,
+                        ChannelState::Closed(flags)
+                            if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                    ) {
+                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                            self.check_channel_shutdown_settlement(actor_state).await;
+                        }
                     }
                 }
             }
@@ -1487,7 +1497,7 @@ where
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-                                    if !is_invoice_fulfilled(&invoice, std::slice::from_ref(tlc)) {
+                                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
                                         continue;
                                     }
                                 }
@@ -1555,7 +1565,9 @@ where
                             let expired_tlcs = actor_state
                                 .tlc_state
                                 .get_committed_received_tlcs()
-                                .filter(|tlc| tlc.is_last && tlc.expiry < expect_expiry)
+                                .filter(|tlc| {
+                                    tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry
+                                })
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
                                 info!(
@@ -1632,8 +1644,10 @@ where
                         shuttingdown_channels_count += 1;
                     } else if matches!(
                         channel_state,
-                        ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
-                            | ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
+                        ChannelState::Closed(flags)
+                            if flags.intersects(
+                                CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE
+                            )
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let delay_epoch = EpochNumberWithFraction::from_full_value(
@@ -1648,10 +1662,7 @@ where
                                 if let Some((forwarding_channel_id, forwarding_tlc_id)) =
                                     tlc.forwarding_tlc
                                 {
-                                    if self
-                                        .store
-                                        .is_tlc_settled(&tlc.channel_id, &tlc.payment_hash)
-                                    {
+                                    if self.store.is_tlc_settled(&channel_id, &tlc.payment_hash) {
                                         let (send, _recv) = oneshot::channel();
                                         let rpc_reply = RpcReplyPort::from(send);
                                         if let Err(err) = state
@@ -1754,11 +1765,13 @@ where
                         .collect()
                 };
                 let tlcs: Vec<_> = tlc_ids
-                    .iter()
+                    .into_iter()
                     .filter_map(|(channel_id, tlc_id)| {
-                        let state = self.store.get_channel_actor_state(channel_id)?;
-                        let tlc_id = TLCId::Received(*tlc_id);
-                        state.get_received_tlc(tlc_id).cloned()
+                        let state = self.store.get_channel_actor_state(&channel_id)?;
+                        let tlc_id = TLCId::Received(tlc_id);
+                        state
+                            .get_received_tlc(tlc_id)
+                            .map(|tlc| (channel_id, tlc.clone()))
                     })
                     .collect();
 
@@ -1769,7 +1782,7 @@ where
                 if tlcs.len() > 1
                     && !tlcs
                         .windows(2)
-                        .all(|w| w[0].total_amount == w[1].total_amount)
+                        .all(|w| w[0].1.total_amount == w[1].1.total_amount)
                 {
                     error!("TLCs have inconsistent total_amount: {:?}", tlcs);
                     tlc_fail = Some(TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails));
@@ -1782,7 +1795,7 @@ where
                     return Ok(());
                 };
 
-                let fulfilled = is_invoice_fulfilled(&invoice, &tlcs);
+                let fulfilled = is_invoice_fulfilled(&invoice, tlcs.iter().map(|(_, tlc)| tlc));
                 if not_mpp {
                     if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open)
                         || !fulfilled
@@ -1805,7 +1818,7 @@ where
                 };
 
                 // remove tlcs
-                for tlc in tlcs {
+                for (channel_id, tlc) in tlcs {
                     let (send, _recv) = oneshot::channel();
                     let rpc_reply = RpcReplyPort::from(send);
                     let remove_reason = match tlc_fail.clone() {
@@ -1820,7 +1833,7 @@ where
 
                     match state
                         .send_command_to_channel(
-                            tlc.channel_id,
+                            channel_id,
                             ChannelCommand::RemoveTlc(
                                 RemoveTlcCommand {
                                     id: tlc.id(),
@@ -1834,7 +1847,7 @@ where
                         Ok(_) => {
                             self.store.remove_payment_hold_tlc(
                                 &payment_hash,
-                                &tlc.channel_id,
+                                &channel_id,
                                 tlc.id(),
                             );
                         }
@@ -1842,7 +1855,7 @@ where
                             error!(
                                 "Failed to remove tlc {:?} for channel {:?}: {}",
                                 tlc.id(),
-                                tlc.channel_id,
+                                channel_id,
                                 err
                             );
                         }
@@ -2360,6 +2373,122 @@ where
                 None,
             ) {
                 tracing::error!("Failed to call_and_forward chain_actor: {err:?}");
+            }
+        }
+    }
+
+    async fn check_channel_shutdown_settlement(&self, mut state: ChannelActorState) {
+        let ChannelState::Closed(mut flags) = state.state else {
+            return;
+        };
+        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+            return;
+        }
+
+        let Some(tx_hash) = state.shutdown_transaction_hash.clone() else {
+            debug!(
+                "stop check channel settlement, {:?} missing shutdown tx hash",
+                state.get_id()
+            );
+            return;
+        };
+
+        let tx_response = match call_t!(
+            self.chain_actor,
+            CkbChainMessage::GetTx,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            tx_hash.clone().into()
+        ) {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => {
+                error!(
+                    "Failed to load commitment tx {:?} during settlement check: {:?}",
+                    tx_hash, err
+                );
+                return;
+            }
+            Err(err) => {
+                error!(
+                    "Timeout while loading commitment tx {:?} during settlement check: {:?}",
+                    tx_hash, err
+                );
+                return;
+            }
+        };
+
+        let Some(tx) = tx_response.transaction else {
+            debug!(
+                "Commitment tx {:?} not available when checking settlement",
+                tx_hash
+            );
+            return;
+        };
+
+        let Some(output) = tx.outputs().get(0) else {
+            warn!(
+                "Commitment tx {:?} has no outputs when checking settlement",
+                tx_hash
+            );
+            return;
+        };
+
+        let lock = output.lock();
+        let lock_args = lock.args().raw_data();
+        if lock_args.len() < 36 {
+            warn!(
+                "Commitment tx {:?} lock args too short: {:?}",
+                tx_hash, lock_args
+            );
+            return;
+        }
+        let prefix_lock = lock
+            .as_builder()
+            .args(lock_args[0..36].to_vec().pack())
+            .build();
+
+        let search_key = SearchKey {
+            script: prefix_lock.into(),
+            script_type: ScriptType::Lock,
+            script_search_mode: Some(SearchMode::Prefix),
+            with_data: Some(false),
+            filter: None,
+            group_by_transaction: None,
+        };
+        let request = GetCellsRequest {
+            search_key,
+            order: Order::Desc,
+            limit: 1,
+            after: None,
+        };
+
+        match call_t!(
+            self.chain_actor,
+            CkbChainMessage::GetCells,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            request
+        ) {
+            Ok(Ok(response)) => {
+                if response.objects.is_empty() {
+                    let channel_id = state.get_id();
+                    flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+                    state.state = ChannelState::Closed(flags);
+                    self.store.insert_channel_actor_state(state);
+                    info!("Channel {channel_id:?} on-chain settlement completed");
+                }
+            }
+            Ok(Err(err)) => {
+                error!(
+                    "Failed to check commitment cells for {:?}: {:?}",
+                    state.get_id(),
+                    err
+                );
+            }
+            Err(err) => {
+                error!(
+                    "GetCells request timed out for {:?}: {:?}",
+                    state.get_id(),
+                    err
+                );
             }
         }
     }

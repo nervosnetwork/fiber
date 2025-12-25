@@ -59,6 +59,7 @@ fn mock_determined_invoice() -> CkbInvoice {
             payment_hash: [3u8; 32].into(),
             timestamp: Duration::from_secs(1024).as_millis(),
             attrs: vec![
+                Attribute::FinalHtlcTimeout(5),
                 Attribute::FinalHtlcMinimumExpiryDelta(12),
                 Attribute::Description("description".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(1024)),
@@ -431,8 +432,8 @@ fn test_invoice_serialize() {
     eprintln!("{:?}", bincode);
     let check_sum = blake2b_256(&bincode);
     let expect_check_sum = [
-        117, 125, 69, 131, 123, 41, 237, 25, 81, 62, 100, 222, 103, 100, 208, 237, 118, 226, 104,
-        254, 26, 114, 26, 48, 168, 187, 53, 212, 225, 134, 104, 174,
+        168, 120, 74, 42, 101, 19, 106, 192, 101, 97, 97, 237, 107, 124, 175, 49, 149, 137, 212,
+        75, 217, 64, 239, 42, 138, 4, 219, 200, 8, 123, 112, 75,
     ];
     assert_eq!(check_sum, &expect_check_sum[..]);
     eprintln!("{:?}", check_sum);

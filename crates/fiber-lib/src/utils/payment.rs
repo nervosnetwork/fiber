@@ -11,9 +11,12 @@ use tracing::debug;
 /// # Returns
 ///
 /// * `true` if the invoice is fulfilled, `false` otherwise
-pub fn is_invoice_fulfilled(invoice: &CkbInvoice, tlc_set: &[TlcInfo]) -> bool {
-    let Some(first_tlc) = tlc_set.first() else {
-        // no tlcs to settle
+pub fn is_invoice_fulfilled<'a, I>(invoice: &CkbInvoice, tlcs: I) -> bool
+where
+    I: IntoIterator<Item = &'a TlcInfo>,
+{
+    let mut it = tlcs.into_iter();
+    let Some(first_tlc) = it.next() else {
         return false;
     };
 
@@ -24,8 +27,11 @@ pub fn is_invoice_fulfilled(invoice: &CkbInvoice, tlc_set: &[TlcInfo]) -> bool {
         return false;
     }
 
-    // check if tlc set are fulfilled
-    let total_tlc_amount = tlc_set.iter().map(|tlc| tlc.amount).sum::<u128>();
+    let mut total_tlc_amount = first_tlc.amount;
+    for tlc in it {
+        total_tlc_amount += tlc.amount;
+    }
+
     debug!(
         "checking total_tlc_amount: {}, total_amount: {}",
         total_tlc_amount, total_amount

@@ -6,7 +6,7 @@ mod tx_tracing_actor;
 
 pub use actor::{
     CkbChainActor, CkbChainMessage, GetBlockTimestampRequest, GetBlockTimestampResponse,
-    GetShutdownTxRequest, GetShutdownTxResponse, GetTxResponse,
+    GetCellsRequest, GetCellsResponse, GetShutdownTxRequest, GetShutdownTxResponse, GetTxResponse,
 };
 pub use config::{CkbConfig, DEFAULT_CKB_BASE_DIR_NAME};
 pub use error::{CkbChainError, FundingError};
