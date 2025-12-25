@@ -247,7 +247,12 @@ pub struct AddTlcCommand {
     /// Save it for outbound (offered) TLC to backward errors.
     /// Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
-    #[serde(default)]
+    /// Whether this outbound TLC is the trampoline-boundary hop.
+    ///
+    /// When a downstream failure happens beyond a trampoline boundary, the error packet is
+    /// encrypted for the inner (trampoline-originated) route and becomes opaque to upstream
+    /// senders. We use this flag to decide whether to wrap downstream failures into
+    /// `TlcErrData::TrampolineFailed` using the *outer* shared secret for this hop.
     pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
 }

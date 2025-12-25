@@ -1236,7 +1236,6 @@ where
         const MAX_TRAMPOLINE_CANDIDATES: usize = 32;
 
         // Maximum number of trampoline nodes to encode in the inner trampoline onion.
-        // (Excluding the final recipient hop.)
         let max_trampoline_hops = payment_data.max_trampoline_hops();
 
         let target = payment_data.target_pubkey;

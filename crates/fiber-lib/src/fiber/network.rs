@@ -550,6 +550,7 @@ pub struct SendPaymentData {
     pub allow_trampoline_routing: bool,
 
     /// Max number of trampoline nodes to encode in the inner trampoline onion.
+    /// (Excluding the final recipient hop.)
     ///
     /// This is only used when `allow_trampoline_routing == true`.
     pub max_trampoline_hops: u16,
