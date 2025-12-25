@@ -16,8 +16,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::payment::PaymentStatus;
+use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{Hash256, Privkey};
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};

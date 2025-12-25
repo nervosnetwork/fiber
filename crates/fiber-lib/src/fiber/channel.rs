@@ -9,7 +9,7 @@ use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
-use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::TxSignatures;
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
@@ -43,9 +43,8 @@ use crate::{
         },
         hash_algorithm::HashAlgorithm,
         key::blake2b_hash_with_salt,
-        network::{
-            get_chain_hash, sign_network_message, FiberMessageWithPeerId, SendOnionPacketCommand,
-        },
+        network::SendOnionPacketCommand,
+        network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
             AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
@@ -1750,18 +1749,23 @@ where
         peeled_onion_packet: PeeledPaymentOnionPacket,
         forward_fee: u128,
     ) {
+        let (send, _recv) = oneshot::channel::<Result<(), TlcErr>>();
+        let port = RpcReplyPort::from(send);
         match self.network.send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
-                peeled_onion_packet: peeled_onion_packet.clone(),
-                previous_tlc: Some(PrevTlcInfo::new(
-                    state.get_id(),
-                    u64::from(tlc_id),
-                    forward_fee,
-                )),
-                payment_hash,
-                // forward tlc always set attempt_id to None
-                attempt_id: None,
-            }),
+            NetworkActorCommand::SendPaymentOnionPacket(
+                SendOnionPacketCommand {
+                    peeled_onion_packet: peeled_onion_packet.clone(),
+                    previous_tlc: Some(PrevTlcInfo::new(
+                        state.get_id(),
+                        u64::from(tlc_id),
+                        forward_fee,
+                    )),
+                    payment_hash,
+                    // forward tlc always set attempt_id to None
+                    attempt_id: None,
+                },
+                port,
+            ),
         )) {
             Ok(_) => {
                 // we successfully sent the forward tlc, we will wait for the result

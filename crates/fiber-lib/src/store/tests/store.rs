@@ -2,7 +2,7 @@ use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::*;
 #[allow(unused)]
 use crate::fiber::{

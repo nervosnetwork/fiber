@@ -10,10 +10,8 @@ use crate::fiber::config::{
 };
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::ChannelInfo;
-use crate::fiber::network::{
-    DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason, SendPaymentCommand,
-};
-use crate::fiber::payment::PaymentStatus;
+use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason};
+use crate::fiber::payment::{PaymentStatus, SendPaymentCommand};
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
     TlcErrorCode, NO_SHARED_SECRET,
