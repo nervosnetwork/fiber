@@ -113,6 +113,9 @@ pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
+    /// This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
+    FinalHtlcTimeout(u64),
+    #[serde(with = "U64Hex")]
     /// The final tlc minimum expiry delta, in milliseconds, default is 160 minutes
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
@@ -522,6 +525,9 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::Description(value) => InvoiceAttrUnion::Description(
                 Description::new_builder().value(value.pack()).build(),
             ),
+            Attribute::FinalHtlcTimeout(value) => InvoiceAttrUnion::FinalHtlcTimeout(
+                FinalHtlcTimeout::new_builder().value(value.pack()).build(),
+            ),
             Attribute::FinalHtlcMinimumExpiryDelta(value) => {
                 InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(
                     FinalHtlcMinimumExpiryDelta::new_builder()
@@ -572,9 +578,9 @@ impl From<InvoiceAttr> for Attribute {
                 Attribute::ExpiryTime(Duration::from_secs(seconds))
             }
 
-            InvoiceAttrUnion::FinalHtlcTimeout(_x) => {
+            InvoiceAttrUnion::FinalHtlcTimeout(x) => {
                 // This attribute is deprecated since v0.6.0, but we still keep it in molecule for consistency
-                panic!("Invoice attribute FinalHtlcTimeout is deprecated in v0.6.0");
+                Attribute::FinalHtlcTimeout(x.value().unpack())
             }
             InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(x) => {
                 Attribute::FinalHtlcMinimumExpiryDelta(x.value().unpack())
@@ -776,6 +782,17 @@ impl InvoiceBuilder {
             _ => None,
         }) {
             return Err(InvoiceError::DescriptionTooLong(len));
+        }
+
+        // check is there any deprecated attribute key set
+        if self
+            .attrs
+            .iter()
+            .any(|attr| matches!(attr, Attribute::FinalHtlcTimeout(..)))
+        {
+            return Err(InvoiceError::DeprecatedAttribute(
+                "FinalHtlcTimeout".to_string(),
+            ));
         }
 
         Ok(())
