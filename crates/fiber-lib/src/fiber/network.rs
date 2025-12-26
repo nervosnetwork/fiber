@@ -78,7 +78,6 @@ use crate::ckb::{
     CkbChainMessage, FundingError, FundingRequest, FundingTx, GetCellsRequest,
     GetShutdownTxRequest, GetShutdownTxResponse,
 };
-use crate::fiber::KeyPair;
 use crate::fiber::channel::{
     tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
@@ -106,6 +105,7 @@ use crate::fiber::types::{
     FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineHopPayload,
     TrampolineOnionPacket, TxAbort, TxSignatures,
 };
+use crate::fiber::KeyPair;
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };

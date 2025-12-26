@@ -624,25 +624,6 @@ pub(crate) async fn create_n_nodes_network_with_params(
     (nodes, channels)
 }
 
-// async fn create_channel_with_two_nodes(
-//     node_a: &mut NetworkNode,
-//     node_b: &mut NetworkNode,
-//     params: ChannelParameters,
-// ) -> (Hash256, Hash256) {
-//     let node_a_channels = node_a.get_network_channels().await;
-//     let node_b_channels = node_b.get_network_channels().await;
-//     let (channel_id, funding_tx_hash) =
-//         establish_channel_between_nodes(node_a, node_b, params.clone()).await;
-//     let funding_tx = node_a
-//         .get_transaction_view_from_hash(funding_tx_hash)
-//         .await
-//         .expect("get funding tx");
-
-//     wait_for_network_graph_update(node_a, node_a_channels.len() + 1).await;
-//     wait_for_network_graph_update(node_b, node_b_channels.len() + 1).await;
-//     (channel_id, funding_tx_hash)
-// }
-
 #[allow(clippy::type_complexity)]
 pub async fn create_n_nodes_network(
     amounts: &[((usize, usize), (u128, u128))],
