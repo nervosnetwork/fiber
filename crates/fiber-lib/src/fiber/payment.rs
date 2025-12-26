@@ -5,7 +5,7 @@ use super::network::{
     SendOnionPacketCommand, SendPaymentData, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE,
 };
 use super::types::{Hash256, Privkey, Pubkey, TlcErrData};
-use crate::fiber::channel::ChannelActorStateStore;
+use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{GraphChannelStat, NetworkGraph, NetworkGraphStateStore, RouterHop};
 use crate::fiber::network::{
@@ -15,15 +15,16 @@ use crate::fiber::network::{
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::types::{
-    BroadcastMessageWithTimestamp, PaymentHopData, PeeledPaymentOnionPacket, TlcErr, TlcErrorCode,
+    BroadcastMessageWithTimestamp, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
+    TlcErr, TlcErrorCode,
 };
 use crate::fiber::{
     KeyPair, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::invoice::{InvoiceStore, PreimageStore};
-use crate::now_timestamp_as_millis_u64;
 use crate::Error;
+use crate::{debug_event, now_timestamp_as_millis_u64};
 use ckb_types::packed::{OutPoint, Script};
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
@@ -31,8 +32,8 @@ use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use strum::AsRefStr;
-use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, error};
+use tokio::sync::RwLock;
+use tracing::{debug, error, warn};
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
@@ -700,19 +701,19 @@ pub enum PaymentActorMessage {
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
     RetrySendPayment(Option<u64>),
-    // Check payment status, stop actor if payment is end
-    NotifyPaymentFinal,
-}
-
-pub enum PaymentActorInitCommand {
-    Send(SendPaymentData),
-    Resume(Hash256, Option<u64>),
+    OnAddTlcResultEvent {
+        attempt_id: Option<u64>,
+        add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
+    },
+    OnRemoveTlcEvent {
+        attempt_id: Option<u64>,
+        reason: RemoveTlcReason,
+    },
 }
 
 pub struct PaymentActorState {
     payment_hash: Hash256,
-    init_command: PaymentActorInitCommand,
-    send_payment_reply: Option<RpcReplyPort<Result<SendPaymentResponse, String>>>,
+    init_command: Option<PaymentActorMessage>,
 
     // the number of pending retrying send payments, we track it for
     // set retry delay dynamically, pending too many payments may have a negative impact
@@ -724,25 +725,20 @@ pub struct PaymentActorState {
 impl PaymentActorState {
     pub fn new(args: PaymentActorArguments) -> Self {
         let PaymentActorArguments {
-            init_command,
-            send_payment_reply,
-        } = args;
-        let payment_hash = match &init_command {
-            PaymentActorInitCommand::Send(payment_request) => payment_request.payment_hash,
-            PaymentActorInitCommand::Resume(payment_hash, _) => *payment_hash,
-        };
-        Self {
             payment_hash,
             init_command,
-            send_payment_reply,
+        } = args;
+        Self {
+            payment_hash,
+            init_command: Some(init_command),
             retry_send_payment_count: 0,
         }
     }
 }
 
 pub struct PaymentActorArguments {
-    pub init_command: PaymentActorInitCommand,
-    pub send_payment_reply: Option<RpcReplyPort<Result<SendPaymentResponse, String>>>,
+    pub payment_hash: Hash256,
+    pub init_command: PaymentActorMessage,
 }
 
 pub struct PaymentActor<S> {
@@ -785,18 +781,10 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let reply = state.send_payment_reply.take().unwrap_or_else(|| {
-            let (send, _recv) = oneshot::channel::<Result<_, _>>();
-            RpcReplyPort::from(send)
-        });
-        let init_msg = match &state.init_command {
-            PaymentActorInitCommand::Send(payment_request) => {
-                PaymentActorMessage::SendPayment(payment_request.clone(), reply)
-            }
-            PaymentActorInitCommand::Resume(_payment_hash, attempt_id) => {
-                PaymentActorMessage::RetrySendPayment(*attempt_id)
-            }
-        };
+        let init_msg = state
+            .init_command
+            .take()
+            .ok_or_else(|| Error::InternalError(anyhow::anyhow!("No init command provided")))?;
         myself.send_message(init_msg).map_err(Into::into)
     }
 
@@ -903,7 +891,17 @@ where
                     .await;
                 self.check_payment_final(myself, state);
             }
-            PaymentActorMessage::NotifyPaymentFinal => {
+            PaymentActorMessage::OnAddTlcResultEvent {
+                attempt_id,
+                add_tlc_result,
+            } => {
+                self.handle_add_tlc_result_event(myself.clone(), state, attempt_id, add_tlc_result)
+                    .await;
+                self.check_payment_final(myself, state);
+            }
+            PaymentActorMessage::OnRemoveTlcEvent { attempt_id, reason } => {
+                self.handle_remove_tlc_event(myself.clone(), state, attempt_id, reason)
+                    .await;
                 self.check_payment_final(myself, state);
             }
         };
@@ -1312,6 +1310,148 @@ where
         }
 
         Ok(())
+    }
+
+    fn get_payment_session_with_attempt(
+        &self,
+        payment_hash: Hash256,
+        attempt_id: Option<u64>,
+    ) -> (Option<PaymentSession>, Option<Attempt>) {
+        let payment_session = self.store.get_payment_session(payment_hash);
+        let attempt =
+            attempt_id.and_then(|attempt_id| self.store.get_attempt(payment_hash, attempt_id));
+
+        (payment_session, attempt)
+    }
+
+    async fn handle_add_tlc_result_event(
+        &self,
+        myself: ActorRef<PaymentActorMessage>,
+        state: &mut PaymentActorState,
+        attempt_id: Option<u64>,
+        add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
+    ) {
+        let payment_hash = state.payment_hash;
+        let (Some(mut session), Some(mut attempt)) =
+            self.get_payment_session_with_attempt(payment_hash, attempt_id)
+        else {
+            warn!(
+                "Payment session not found: {:?} attempt_id: {:?}",
+                payment_hash, attempt_id
+            );
+            return;
+        };
+
+        match add_tlc_result {
+            Ok(_) => {
+                attempt.set_inflight_status();
+                self.network_graph
+                    .write()
+                    .await
+                    .track_attempt_router(&attempt);
+                self.store.insert_attempt(attempt);
+            }
+            Err((ProcessingChannelError::WaitingTlcAck, _)) => {
+                // do nothing
+            }
+            Err((error, tlc_err)) => {
+                self.update_graph_with_tlc_fail(&self.network, &tlc_err)
+                    .await;
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    tlc_err.clone(),
+                    true,
+                );
+                self.set_attempt_fail_with_error(
+                    &mut session,
+                    &mut attempt,
+                    &error.to_string(),
+                    need_to_retry,
+                );
+
+                if attempt.is_retrying() {
+                    self.register_payment_retry(myself.clone(), state, Some(attempt.id));
+                }
+            }
+        }
+    }
+
+    async fn handle_remove_tlc_event(
+        &self,
+        myself: ActorRef<PaymentActorMessage>,
+        state: &mut PaymentActorState,
+        attempt_id: Option<u64>,
+        reason: RemoveTlcReason,
+    ) {
+        let payment_hash = state.payment_hash;
+        let (Some(mut session), Some(mut attempt)) =
+            self.get_payment_session_with_attempt(payment_hash, attempt_id)
+        else {
+            error!(
+                "Payment session or attempt not found for payment hash: {:?}, attempt id: {:?}",
+                payment_hash, attempt_id
+            );
+            return;
+        };
+
+        match reason {
+            RemoveTlcReason::RemoveTlcFulfill(_) => {
+                self.network_graph
+                    .write()
+                    .await
+                    .record_attempt_success(&attempt);
+                attempt.set_success_status();
+                self.store.insert_attempt(attempt.clone());
+
+                session.update_with_attempt(attempt);
+                if !session.is_dry_run() {
+                    self.store.insert_payment_session(session.clone());
+                }
+            }
+            RemoveTlcReason::RemoveTlcFail(reason) => {
+                let error_detail = reason
+                    .decode(&attempt.session_key, attempt.hops_public_keys())
+                    .unwrap_or_else(|| {
+                        debug_event!(self.network, "InvalidOnionError");
+                        TlcErr::new(TlcErrorCode::InvalidOnionError)
+                    });
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    error_detail.clone(),
+                    false,
+                );
+                debug!(
+                    "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
+                    payment_hash,
+                    error_detail.error_code.as_ref(),
+                    need_to_retry
+                );
+
+                self.set_attempt_fail_with_error(
+                    &mut session,
+                    &mut attempt,
+                    error_detail.error_code.as_ref(),
+                    need_to_retry,
+                );
+
+                if attempt.is_retrying() {
+                    self.register_payment_retry(myself.clone(), state, Some(attempt.id));
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            if let Some(payment_session) = self.store.get_payment_session(payment_hash) {
+                debug_event!(
+                    self.network,
+                    format!(
+                        "after on_remove_tlc_event session_status: {:?}",
+                        payment_session.status
+                    )
+                );
+            }
+        }
     }
 
     fn payment_need_more_retry(&self, session: &mut PaymentSession) -> Result<bool, Error> {
