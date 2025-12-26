@@ -1,5 +1,5 @@
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::network::SendPaymentCommand;
+use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::Hash256;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{

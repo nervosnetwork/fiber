@@ -1049,6 +1049,7 @@ The attributes of the invoice
 
 #### Enum with values of
 
+* `FinalHtlcTimeout` - <em>`u64`</em>, This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
 * `FinalHtlcMinimumExpiryDelta` - <em>`u64`</em>, The final tlc minimum expiry delta, in milliseconds, default is 1 day
 * `ExpiryTime` - <em>`Duration`</em>, The expiry time of the invoice, in seconds
 * `Description` - <em>`String`</em>, The description of the invoice

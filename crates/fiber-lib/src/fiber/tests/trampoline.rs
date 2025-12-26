@@ -1,6 +1,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 use crate::fiber::features::FeatureVector;
-use crate::fiber::network::SendPaymentCommand;
+use crate::fiber::payment::SendPaymentCommand;
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::tests::test_utils::{create_n_nodes_network_with_visibility, init_tracing};
 use crate::{

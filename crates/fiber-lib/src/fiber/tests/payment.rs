@@ -79,6 +79,8 @@ async fn test_send_payment_custom_records() {
         .get_payment_custom_records(&payment_hash)
         .expect("custom records");
     assert_eq!(got_custom_records, custom_records);
+
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -132,6 +134,7 @@ async fn test_send_payment_custom_records_with_limit_error() {
         .get_payment_custom_records(&payment_hash)
         .expect("custom records");
     assert_eq!(got_custom_records, custom_records);
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 }
 
 // This test will send two payments from node_0 to node_1, the first payment will run
@@ -174,6 +177,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     // A -> B: 10000000000 use the first channel
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -217,6 +221,7 @@ async fn test_send_payment_prefer_newer_channels() {
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -264,6 +269,7 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     assert_eq!(node_0_balance, 5000000000);
     assert_eq!(node_1_balance, 5000000000);
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -287,6 +293,7 @@ async fn test_send_payment_with_tool_large_fee_and_amount() {
 
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("max_fee_amount"));
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -346,6 +353,7 @@ async fn test_send_payment_fee_rate() {
     assert_eq!(nodes[0].amount, 40_000_000);
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 
     let res = node_2.send_payment_keysend(&node_0, 1_000_000, false).await;
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
@@ -360,6 +368,7 @@ async fn test_send_payment_fee_rate() {
 
     let payment_hash = res.payment_hash;
     node_2.wait_until_success(payment_hash).await;
+    assert_eq!(node_2.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -405,6 +414,7 @@ async fn test_send_payment_over_private_channel() {
         } else {
             assert!(res.is_err());
         }
+        assert_eq!(source_node.get_inflight_payment_count().await, 0);
     }
 
     test(10000000000, true).await;
@@ -483,6 +493,7 @@ async fn test_send_payment_for_pay_self() {
 
     eprintln!("res: {:?}", res);
     assert_eq!(res.unwrap().fee, 0);
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -530,6 +541,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
         - (node_1_channel1_balance - new_node_1_channel1_balance);
     eprintln!("fee: {:?}", res.fee);
     assert_eq!(node1_fee, res.fee);
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -608,6 +620,7 @@ async fn test_send_payment_for_pay_self_with_invoice() {
         node_0_received + fee,
         "node_0 balance should be changed by fee only"
     );
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -655,6 +668,7 @@ async fn test_send_payment_with_normal_invoice_workflow() {
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -751,6 +765,7 @@ async fn test_send_payment_with_more_capacity_for_payself() {
             - (node_2_channel1_balance - node_2_new_channel1_balance)
     };
     assert_eq!(node1_fee + node2_fee, res.fee);
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -808,6 +823,8 @@ async fn test_send_payment_with_private_channel_hints() {
         } else {
             source_node.wait_until_failed(payment_hash).await;
         }
+
+        assert_eq!(source_node.get_inflight_payment_count().await, 0);
     }
 
     test(10000000000, true).await;
@@ -859,6 +876,7 @@ async fn test_send_payment_with_too_large_hop_hint_fee_rate() {
 
     assert!(res.is_err(), "Expect send payment failed: {:?}", res);
     assert!(res.unwrap_err().to_string().contains("no path found"));
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -923,6 +941,7 @@ async fn test_send_payment_hophint_for_middle_channels_does_not_work() {
     let res = node1.get_payment_result(payment_hash).await;
     eprintln!("res: {:?}", res);
     assert!(res.failed_error.unwrap().contains("InvalidOnionPayload"));
+    assert_eq!(node1.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -983,6 +1002,7 @@ async fn test_send_payment_hophint_for_mixed_channels_with_udt() {
         .await;
 
     assert!(res.is_err());
+    assert_eq!(node1.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -1049,6 +1069,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
     source_node
         .assert_payment_status(payment_hash, PaymentStatus::Success, Some(2))
         .await;
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -1088,12 +1109,14 @@ async fn test_send_payment_payself_with_private_channel_cycle() {
         .await;
 
     assert!(res.is_err());
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 
     let res = source_node
         .send_payment_keysend_to_self(10000000000, false)
         .await;
 
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
+    assert_eq!(source_node.get_inflight_payment_count().await, 1);
 }
 
 #[tokio::test]
@@ -1168,6 +1191,7 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
     source_node.wait_until_success(payment_hash).await;
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retry_times(), 2);
+    assert_eq!(source_node.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -1292,6 +1316,7 @@ async fn test_send_payment_build_router_basic() {
         })
         .await;
     assert!(router.is_err());
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -1814,6 +1839,7 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
         .expect("get payment");
     eprintln!("result: {:?}", result.status);
     assert_eq!(result.attempts_count(), 1);
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -1957,6 +1983,7 @@ async fn test_send_payment_with_route_will_not_consider_prob() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -2190,6 +2217,7 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
     assert_eq!(used_channels[1], channel_3_funding_tx);
 
     node_0.wait_until_success(payment_hash).await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 
     let balance = node_0.get_local_balance_from_channel(channels[1]);
     assert_eq!(balance, old_balance - 60000000 - res.fee);
@@ -2286,6 +2314,7 @@ async fn test_send_payment_send_with_wrong_hop() {
         .unwrap();
 
     node_3.wait_until_success(res.payment_hash).await;
+    assert_eq!(node_3.get_inflight_payment_count().await, 0);
 
     // pay the above router with node_1 will failed
     let res = node_1
@@ -2301,6 +2330,7 @@ async fn test_send_payment_send_with_wrong_hop() {
         .unwrap_err()
         .to_string()
         .contains("Failed to send onion packet with error UnknownNextPeer"));
+    assert_eq!(node_1.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -2886,6 +2916,8 @@ async fn test_send_payment_middle_hop_stopped() {
     assert_eq!(res.fee, 3);
 
     node_0.wait_until_success(res.payment_hash).await;
+
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -2960,6 +2992,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     assert_eq!(res.fee, 5);
 
     node_0.wait_until_failed(res.payment_hash).await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -3030,6 +3063,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
     node_0
         .expect_payment_used_channel(payment_hash, channel_id)
         .await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -3338,6 +3372,8 @@ async fn run_complex_network_with_params(
         if let Ok(res) = nodes[i].send_payment_keysend_to_self(500, false).await {
             nodes[i].wait_until_success(res.payment_hash).await;
         }
+
+        assert_eq!(nodes[i].get_inflight_payment_count().await, 0);
     }
 
     result
@@ -3377,6 +3413,7 @@ async fn test_send_payment_self_with_two_nodes() {
         create_n_nodes_network(&[((0, 1), (funding_amount, funding_amount))], 2).await;
     let res = nodes[0].send_payment_keysend_to_self(1000, false).await;
     assert!(res.is_err());
+    assert_eq!(nodes[0].get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -3504,6 +3541,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             ..Default::default()
         })
         .await;
+    assert_eq!(nodes[0].get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -3565,6 +3603,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
         .await;
     assert!(res.is_ok());
     nodes[0].wait_until_success(res.unwrap().payment_hash).await;
+    assert_eq!(nodes[0].get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -3624,6 +3663,7 @@ async fn test_send_payself_with_invalid_tlc_expiry() {
         .await;
 
     assert!(res.unwrap_err().to_string().contains("no path found"));
+    assert_eq!(nodes[0].get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
@@ -3669,6 +3709,7 @@ async fn test_send_payself_with_single_limit_tlc_expiry() {
         })
         .await;
     assert!(res.is_ok());
+    assert_eq!(nodes[0].get_inflight_payment_count().await, 1);
 }
 
 #[tokio::test]
@@ -3716,6 +3757,7 @@ async fn test_send_payself_with_small_min_tlc_value() {
         .await;
 
     assert!(res.unwrap_err().to_string().contains("no path found"));
+    assert_eq!(nodes[0].get_inflight_payment_count().await, 0);
 
     let res = nodes[0]
         .send_payment(SendPaymentCommand {
@@ -3728,6 +3770,7 @@ async fn test_send_payself_with_small_min_tlc_value() {
         .await;
 
     assert!(res.is_ok());
+    assert_eq!(nodes[0].get_inflight_payment_count().await, 1);
 }
 
 #[tokio::test]
@@ -3798,6 +3841,7 @@ async fn test_send_payment_with_middle_hop_with_min_tlc_value() {
         })
         .await;
     assert!(res.is_ok());
+    assert_eq!(nodes[0].get_inflight_payment_count().await, 0);
 }
 
 #[tokio::test]
