@@ -16,6 +16,7 @@ use crate::{
             AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand, SendPaymentData,
         },
         payment::SendPaymentCommand,
+        payment::TrampolineHop,
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
@@ -128,7 +129,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     let base = SendPaymentCommand {
         invoice: None,
         amount: Some(1000),
-        target_pubkey: Some(target.clone()),
+        target_pubkey: Some(target),
         allow_self_payment: false,
         payment_hash: Some(payment_hash),
         final_tlc_expiry_delta: None,
@@ -155,7 +156,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     // Too many hops.
     // MAX_TRAMPOLINE_HOPS_LIMIT is currently 10; 11 should exceed it.
     let too_many = (0..11)
-        .map(|_| gen_rand_fiber_public_key())
+        .map(|_| TrampolineHop::new(gen_rand_fiber_public_key()))
         .collect::<Vec<_>>();
     let err = SendPaymentData::new(SendPaymentCommand {
         trampoline_hops: Some(too_many),
@@ -166,7 +167,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
 
     // Must not contain target.
     let err = SendPaymentData::new(SendPaymentCommand {
-        trampoline_hops: Some(vec![target.clone()]),
+        trampoline_hops: Some(vec![TrampolineHop::new(target)]),
         ..base.clone()
     })
     .unwrap_err();
@@ -175,7 +176,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     // No duplicates.
     let hop = gen_rand_fiber_public_key();
     let err = SendPaymentData::new(SendPaymentCommand {
-        trampoline_hops: Some(vec![hop, hop]),
+        trampoline_hops: Some(vec![TrampolineHop::new(hop), TrampolineHop::new(hop)]),
         ..base
     })
     .unwrap_err();

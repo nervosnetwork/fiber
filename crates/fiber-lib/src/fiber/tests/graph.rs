@@ -695,6 +695,9 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
 
     // With trampoline: should succeed by routing to C only.
     payment_data.allow_trampoline_routing = true;
+    payment_data.trampoline_hops = Some(vec![crate::fiber::payment::TrampolineHop::new(
+        trampoline.into(),
+    )]);
     let route = network
         .graph
         .build_route(payment_data.amount, None, None, &payment_data)
@@ -820,7 +823,11 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: true,
-        trampoline_hops: Some(vec![t1.into(), t2.into(), t3.into()]),
+        trampoline_hops: Some(vec![
+            crate::fiber::payment::TrampolineHop::new(t1.into()),
+            crate::fiber::payment::TrampolineHop::new(t2.into()),
+            crate::fiber::payment::TrampolineHop::new(t3.into()),
+        ]),
         channel_stats: Default::default(),
     };
 
@@ -919,7 +926,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
     assert!(peeled_final.next.is_none());
 
     // sanity: shortening trampoline_hops should shorten the chain (t1->final).
-    payment_data.trampoline_hops = Some(vec![t1.into()]);
+    payment_data.trampoline_hops = Some(vec![crate::fiber::payment::TrampolineHop::new(t1.into())]);
     let route_short = network
         .graph
         .build_route(payment_data.amount, None, None, &payment_data)

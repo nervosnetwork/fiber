@@ -95,6 +95,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `SettlementTlc`](#type-settlementtlc)
     * [Type `TLCId`](#type-tlcid)
     * [Type `TlcStatus`](#type-tlcstatus)
+    * [Type `TrampolineHopParams`](#type-trampolinehopparams)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
@@ -661,7 +662,10 @@ Sends a payment to a peer.
 * `timeout` - <em>`Option<u64>`</em>, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
 * `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
-* `trampoline_hops` - <em>Option<Vec<[Pubkey](#type-pubkey)>></em>, Optional explicit trampoline hops.
+* `trampoline_hops` - <em>Option<Vec<[TrampolineHopParams](#type-trampolinehopparams)>></em>, Optional explicit trampoline hops.
+
+ When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+ payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
@@ -1534,6 +1538,19 @@ The status of a tlc
 
 * `Outbound` - <em>[OutboundTlcStatus](#type-outboundtlcstatus)</em>, Outbound tlc
 * `Inbound` - <em>[InboundTlcStatus](#type-inboundtlcstatus)</em>, Inbound tlc
+---
+
+<a id="#type-trampolinehopparams"></a>
+### Type `TrampolineHopParams`
+
+Trampoline hop parameters for specifying optional trampoline hops in a payment.
+
+
+#### Fields
+
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the trampoline hop
+* `fee_rate` - <em>`Option<u64>`</em>, Optional fee rate (proportional millionths) charged by this trampoline hop.
+* `tlc_expiry_delta` - <em>`Option<u64>`</em>, Optional TLC expiry delta (ms) contributed by this trampoline hop.
 ---
 
 <a id="#type-udtarginfo"></a>

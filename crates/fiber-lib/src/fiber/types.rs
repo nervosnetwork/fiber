@@ -3770,43 +3770,6 @@ impl BasicMppPaymentData {
     }
 }
 
-/// Trampoline routing data embedded in `PaymentHopData.trampoline_onion`.
-///
-/// This payload is only visible to the trampoline node (it is inside the encrypted hop payload).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrampolineOnionData {
-    /// Final recipient (D)
-    pub final_recipient: Pubkey,
-    /// Amount that the final recipient should receive
-    pub final_amount: u128,
-    /// Optional UDT type script bytes for the payment (None means CKB)
-    pub udt_type_script: Option<Vec<u8>>,
-    /// Final hop expiry delta required by the final recipient's invoice
-    pub final_tlc_expiry_delta: u64,
-    /// Optional payment preimage (keysend)
-    pub payment_preimage: Option<Hash256>,
-    /// Hash algorithm used for the payment hash/preimage relationship
-    pub hash_algorithm: HashAlgorithm,
-    /// Custom records that must reach the final recipient (e.g. MPP records)
-    pub custom_records: Option<PaymentCustomRecords>,
-}
-
-impl TrampolineOnionData {
-    pub fn serialize(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("serialize TrampolineOnionData")
-    }
-
-    pub fn deserialize(data: &[u8]) -> Option<Self> {
-        bincode::deserialize(data).ok()
-    }
-
-    pub fn udt_type_script_packed(&self) -> Option<Script> {
-        self.udt_type_script
-            .as_deref()
-            .and_then(|bytes| Script::from_slice(bytes).ok())
-    }
-}
-
 /// Trampoline onion hop payload.
 ///
 /// This is carried inside the *inner* trampoline onion packet (which is itself embedded in the

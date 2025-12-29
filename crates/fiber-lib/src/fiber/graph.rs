@@ -1246,9 +1246,6 @@ where
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
     ) -> Result<TrampolineRouteResult, PathFindError> {
-        // Limit candidate count to avoid pathological full-graph scans.
-        const MAX_TRAMPOLINE_CANDIDATES: usize = 32;
-
         let target = payment_data.target_pubkey;
         let total_fee_budget = max_fee_amount.unwrap_or(0);
 
@@ -1263,7 +1260,6 @@ where
 
         let fee_budget_forward = total_fee_budget.saturating_mul(50) / 100;
         let fee_budget_routing = total_fee_budget.saturating_sub(fee_budget_forward);
-        let amount_to_trampoline = final_amount.saturating_add(fee_budget_forward);
 
         let secp = Secp256k1::new();
         let udt_type_script = payment_data
@@ -1273,16 +1269,19 @@ where
 
         // When forwarding through trampoline hops, each trampoline node needs additional expiry
         // slack (similar to a channel's `tlc_expiry_delta`) so it can safely forward to the next
-        // hop. We approximate this with `DEFAULT_TLC_EXPIRY_DELTA` per remaining trampoline hop.
+        // hop. Use per-hop `tlc_expiry_delta` when provided, else default.
         let trampoline_forward_expiry_delta =
-            |base_final: u64, remaining_trampoline_hops: usize| {
-                base_final.saturating_add(
-                    (remaining_trampoline_hops as u64).saturating_mul(DEFAULT_TLC_EXPIRY_DELTA),
-                )
+            |base_final: u64,
+             remaining_trampoline_hops: &[crate::fiber::payment::TrampolineHop]| {
+                let slack = remaining_trampoline_hops
+                    .iter()
+                    .map(|h| h.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA))
+                    .fold(0u64, |acc, d| acc.saturating_add(d));
+                base_final.saturating_add(slack)
             };
 
         if let Some(hops) = payment_data.trampoline_hops().filter(|h| !h.is_empty()) {
-            let first = hops[0];
+            let first = hops[0].pubkey;
             if first == source || first == target {
                 return Err(PathFindError::FeatureNotEnabled(
                     "invalid trampoline_hops: first hop must not be source/target".to_string(),
@@ -1291,7 +1290,7 @@ where
             if !self.is_node_support_trampoline_routing(&first)
                 || hops
                     .iter()
-                    .any(|n| !self.is_node_support_trampoline_routing(n))
+                    .any(|n| !self.is_node_support_trampoline_routing(&n.pubkey))
             {
                 return Err(PathFindError::FeatureNotEnabled(
                     "invalid trampoline_hops: a hop does not support trampoline routing"
@@ -1299,13 +1298,33 @@ where
                 ));
             }
 
+            // Build the trampoline amount ladder so that each trampoline hop can keep its own
+            // (optional) fee. This compounds from the tail backwards.
+            let mut forward_amounts = vec![0u128; hops.len()];
+            let mut next_amount_to_forward = final_amount;
+            for (idx, hop) in hops.iter().enumerate().rev() {
+                forward_amounts[idx] = next_amount_to_forward;
+                let fee_rate_ppm = hop.fee_rate.unwrap_or(0) as u128;
+                let fee = calculate_tlc_forward_fee(next_amount_to_forward, fee_rate_ppm).map_err(
+                    |e| {
+                        PathFindError::FeatureNotEnabled(format!(
+                            "invalid trampoline_hops fee_rate: {e}"
+                        ))
+                    },
+                )?;
+                next_amount_to_forward = next_amount_to_forward.saturating_add(fee);
+            }
+            let amount_to_first_trampoline_incoming = next_amount_to_forward;
+            let amount_to_trampoline =
+                amount_to_first_trampoline_incoming.saturating_add(fee_budget_forward);
+
             let route_to_trampoline = self.find_path(
                 source,
                 first,
                 amount_to_trampoline,
                 Some(fee_budget_routing),
                 payment_data.udt_type_script.clone(),
-                trampoline_forward_expiry_delta(payment_data.final_tlc_expiry_delta, hops.len()),
+                trampoline_forward_expiry_delta(payment_data.final_tlc_expiry_delta, hops),
                 payment_data.tlc_expiry_limit,
                 payment_data.allow_self_payment,
                 &payment_data.hop_hints,
@@ -1314,26 +1333,25 @@ where
             )?;
 
             let mut payloads: Vec<TrampolineHopPayload> = Vec::with_capacity(hops.len() + 1);
-            for (idx, _node) in hops.iter().copied().enumerate() {
+            for (idx, _node) in hops.iter().enumerate() {
                 let is_last_trampoline = idx + 1 == hops.len();
                 let next_node_id = if is_last_trampoline {
                     target
                 } else {
-                    hops[idx + 1]
+                    hops[idx + 1].pubkey
                 };
 
                 // The next hop (if it is a trampoline) still needs slack for forwarding further.
                 let remaining_trampoline_hops_after_next = if is_last_trampoline {
-                    0
+                    &[][..]
                 } else {
-                    // `next_node_id` is at index `idx + 1`.
-                    hops.len().saturating_sub(idx + 1)
+                    &hops[(idx + 1)..]
                 };
 
                 payloads.push(TrampolineHopPayload::Forward {
                     next_node_id,
                     next_is_trampoline: !is_last_trampoline,
-                    amount_to_forward: final_amount,
+                    amount_to_forward: forward_amounts[idx],
                     hash_algorithm,
                     final_tlc_expiry_delta: trampoline_forward_expiry_delta(
                         payment_data.final_tlc_expiry_delta,
@@ -1353,7 +1371,7 @@ where
             });
 
             let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-            let mut trampoline_path: Vec<Pubkey> = hops.to_vec();
+            let mut trampoline_path: Vec<Pubkey> = hops.iter().map(|h| h.pubkey).collect();
             trampoline_path.push(target);
             let trampoline_onion = TrampolineOnionPacket::create(
                 session_key,
@@ -1371,81 +1389,12 @@ where
                 trampoline_onion,
                 final_hop_expiry_delta_override: trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,
-                    hops.len(),
+                    hops,
                 ),
             });
         }
 
-        // Fallback: pick a single trampoline candidate automatically.
-        let mut trampoline_candidates = self
-            .nodes
-            .keys()
-            .filter(|n| **n != source && **n != target)
-            .filter(|n| self.is_node_support_trampoline_routing(n))
-            .take(MAX_TRAMPOLINE_CANDIDATES)
-            .copied()
-            .collect::<Vec<_>>();
-        trampoline_candidates.sort();
-
-        for candidate in trampoline_candidates {
-            let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-            let Ok(route_to_trampoline) = self.find_path(
-                source,
-                candidate,
-                amount_to_trampoline,
-                Some(fee_budget_routing),
-                payment_data.udt_type_script.clone(),
-                trampoline_forward_expiry_delta(payment_data.final_tlc_expiry_delta, 1),
-                payment_data.tlc_expiry_limit,
-                payment_data.allow_self_payment,
-                &payment_data.hop_hints,
-                &payment_data.channel_stats,
-                payment_data.allow_mpp(),
-            ) else {
-                continue;
-            };
-
-            let trampoline_path = vec![candidate, target];
-            let payloads = vec![
-                TrampolineHopPayload::Forward {
-                    next_node_id: target,
-                    next_is_trampoline: false,
-                    amount_to_forward: final_amount,
-                    hash_algorithm,
-                    final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
-                    udt_type_script: udt_type_script.clone(),
-                },
-                TrampolineHopPayload::Final {
-                    final_amount,
-                    final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
-                    udt_type_script: udt_type_script.clone(),
-                    payment_preimage: payment_data.preimage,
-                    hash_algorithm,
-                    custom_records: payment_data.custom_records.clone(),
-                },
-            ];
-
-            let Ok(packet) = TrampolineOnionPacket::create(
-                session_key,
-                trampoline_path,
-                payloads,
-                Some(payment_data.payment_hash.as_ref().to_vec()),
-                &secp,
-            ) else {
-                continue;
-            };
-
-            return Ok(TrampolineRouteResult {
-                route_to_trampoline,
-                amount_to_trampoline,
-                trampoline_onion: packet.into_bytes(),
-                final_hop_expiry_delta_override: trampoline_forward_expiry_delta(
-                    payment_data.final_tlc_expiry_delta,
-                    1,
-                ),
-            });
-        }
-
+        // Trampoline routing requires an explicit trampoline hop list.
         Err(PathFindError::NoPathFound)
     }
 

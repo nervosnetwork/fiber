@@ -1,6 +1,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 use crate::fiber::features::FeatureVector;
-use crate::fiber::payment::SendPaymentCommand;
+use crate::fiber::payment::{SendPaymentCommand, TrampolineHop};
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::tests::test_utils::{create_n_nodes_network_with_visibility, init_tracing};
 use crate::{
@@ -57,6 +57,7 @@ async fn test_trampoline_routing_basic() {
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(500),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
             ..Default::default()
         })
         .await;
@@ -137,6 +138,7 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
         .assert_send_payment_success(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
             ..Default::default()
         })
         .await;
@@ -176,6 +178,7 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
             ..Default::default()
         })
         .await;
@@ -224,6 +227,7 @@ async fn test_trampoline_routing_with_two_networks() {
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
             ..Default::default()
         })
         .await;
@@ -266,6 +270,7 @@ async fn test_trampoline_routing_with_two_networks() {
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_d.get_public_key())]),
             ..Default::default()
         })
         .await;
@@ -330,7 +335,10 @@ async fn test_trampoline_routing_multi_trampoline_hops() {
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(10_000),
-            trampoline_hops: Some(vec![node_t1.get_public_key(), node_t2.get_public_key()]),
+            trampoline_hops: Some(vec![
+                TrampolineHop::new(node_t1.get_public_key()),
+                TrampolineHop::new(node_t2.get_public_key()),
+            ]),
             ..Default::default()
         })
         .await;
@@ -461,7 +469,7 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
     )
     .await;
 
-    let [node_a, node_t1, _node_t2, node_c] = nodes.try_into().expect("4 nodes");
+    let [node_a, node_t1, node_t2, node_c] = nodes.try_into().expect("4 nodes");
 
     // Wait until A learns T1 supports trampoline routing.
     let trampoline_pubkey = node_t1.get_public_key();
@@ -503,6 +511,10 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(10_000),
+            trampoline_hops: Some(vec![
+                TrampolineHop::new(node_t1.get_public_key()),
+                TrampolineHop::new(node_t2.get_public_key()),
+            ]),
             ..Default::default()
         })
         .await;

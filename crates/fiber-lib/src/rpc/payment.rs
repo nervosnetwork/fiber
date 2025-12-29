@@ -9,7 +9,7 @@ use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
     payment::PaymentStatus,
-    payment::{HopHint as NetworkHopHint, SendPaymentCommand},
+    payment::{HopHint as NetworkHopHint, SendPaymentCommand, TrampolineHop},
     serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
@@ -140,7 +140,7 @@ pub struct SendPaymentCommandParams {
     ///
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
-    pub trampoline_hops: Option<Vec<Pubkey>>,
+    pub trampoline_hops: Option<Vec<TrampolineHopParams>>,
 
     /// keysend payment
     pub keysend: Option<bool>,
@@ -180,6 +180,30 @@ pub struct SendPaymentCommandParams {
     /// it's useful for the sender to double check the payment before sending it to the network,
     /// default is false
     pub dry_run: Option<bool>,
+}
+
+/// Trampoline hop parameters for specifying optional trampoline hops in a payment.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrampolineHopParams {
+    /// The public key of the trampoline hop
+    pub pubkey: Pubkey,
+    /// Optional fee rate (proportional millionths) charged by this trampoline hop.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub fee_rate: Option<u64>,
+    /// Optional TLC expiry delta (ms) contributed by this trampoline hop.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub tlc_expiry_delta: Option<u64>,
+}
+
+impl From<TrampolineHopParams> for TrampolineHop {
+    fn from(h: TrampolineHopParams) -> Self {
+        TrampolineHop {
+            pubkey: h.pubkey,
+            fee_rate: h.fee_rate,
+            tlc_expiry_delta: h.tlc_expiry_delta,
+        }
+    }
 }
 /// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
@@ -391,7 +415,10 @@ where
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,
                     max_parts: params.max_parts,
-                    trampoline_hops: params.trampoline_hops.clone(),
+                    trampoline_hops: params
+                        .trampoline_hops
+                        .clone()
+                        .map(|hops| hops.into_iter().map(|h| h.into()).collect::<Vec<_>>()),
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),

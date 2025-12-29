@@ -98,7 +98,7 @@ use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
     Attempt, AttemptStatus, HopHint, PaymentActor, PaymentActorArguments, PaymentActorInitCommand,
     PaymentActorMessage, PaymentCustomRecords, PaymentSession, PaymentStatus, SendPaymentCommand,
-    SendPaymentWithRouterCommand, USER_CUSTOM_RECORDS_MAX_INDEX,
+    SendPaymentWithRouterCommand, TrampolineHop, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -459,7 +459,7 @@ pub struct SendPaymentData {
     ///
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
-    pub trampoline_hops: Option<Vec<Pubkey>>,
+    pub trampoline_hops: Option<Vec<TrampolineHop>>,
     pub dry_run: bool,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
@@ -613,10 +613,10 @@ impl SendPaymentData {
                     MAX_TRAMPOLINE_HOPS_LIMIT
                 ));
             }
-            if hops.iter().any(|h| *h == target) {
+            if hops.iter().any(|h| h.pubkey == target) {
                 return Err("trampoline_hops must not contain target_pubkey".to_string());
             }
-            let mut uniq = hops.clone();
+            let mut uniq = hops.iter().map(|h| h.pubkey).collect::<Vec<_>>();
             uniq.sort();
             uniq.dedup();
             if uniq.len() != hops.len() {
@@ -716,7 +716,7 @@ impl SendPaymentData {
                 .is_some_and(|hops| !hops.is_empty())
     }
 
-    pub fn trampoline_hops(&self) -> Option<&[Pubkey]> {
+    pub fn trampoline_hops(&self) -> Option<&[TrampolineHop]> {
         self.trampoline_hops.as_deref()
     }
 }

@@ -14,6 +14,7 @@ use crate::fiber::network::{
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
+use crate::fiber::serde_utils::U64Hex;
 use crate::fiber::types::{
     BroadcastMessageWithTimestamp, PaymentHopData, PeeledPaymentOnionPacket, TlcErr, TlcErrorCode,
 };
@@ -543,6 +544,33 @@ pub struct HopHint {
     pub(crate) tlc_expiry_delta: u64,
 }
 
+#[serde_as]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrampolineHop {
+    pub pubkey: Pubkey,
+    /// Optional fee rate (proportional millionths) charged by this trampoline hop.
+    ///
+    /// When provided, the payer uses it to pre-compute the amount ladder across trampoline hops.
+    /// When omitted, it defaults to 0.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub fee_rate: Option<u64>,
+    /// Optional TLC expiry delta (ms) contributed by this trampoline hop.
+    ///
+    /// When omitted, it defaults to `DEFAULT_TLC_EXPIRY_DELTA`.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub tlc_expiry_delta: Option<u64>,
+}
+
+impl TrampolineHop {
+    pub fn new(pubkey: Pubkey) -> Self {
+        Self {
+            pubkey,
+            fee_rate: None,
+            tlc_expiry_delta: None,
+        }
+    }
+}
+
 // 0 ~ 65535 is reserved for endpoint usage, index aboving 65535 is reserved for internal usage
 pub const USER_CUSTOM_RECORDS_MAX_INDEX: u32 = 65535;
 /// The custom records to be included in the payment.
@@ -591,7 +619,7 @@ pub struct SendPaymentCommand {
     ///
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
-    pub trampoline_hops: Option<Vec<Pubkey>>,
+    pub trampoline_hops: Option<Vec<TrampolineHop>>,
 }
 
 impl SendPaymentCommand {
