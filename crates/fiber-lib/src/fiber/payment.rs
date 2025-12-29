@@ -587,11 +587,11 @@ pub struct SendPaymentCommand {
     pub hop_hints: Option<Vec<HopHint>>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
-    /// Max number of trampoline nodes to encode in the inner trampoline onion.
+    /// Optional explicit trampoline hops.
     ///
-    /// This is only used when trampoline routing is allowed (typically via invoice feature).
-    /// A value of 1 means a single trampoline hop (trampoline -> final).
-    pub max_trampoline_hops: Option<u16>,
+    /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+    /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
+    pub trampoline_hops: Option<Vec<Pubkey>>,
 }
 
 impl SendPaymentCommand {

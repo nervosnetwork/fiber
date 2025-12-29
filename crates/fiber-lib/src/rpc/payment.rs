@@ -10,7 +10,7 @@ use crate::fiber::{
     channel::ChannelActorStateStore,
     payment::PaymentStatus,
     payment::{HopHint as NetworkHopHint, SendPaymentCommand},
-    serde_utils::{EntityHex, U128Hex, U16Hex, U64Hex},
+    serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -136,9 +136,11 @@ pub struct SendPaymentCommandParams {
     #[serde_as(as = "Option<U64Hex>")]
     pub max_parts: Option<u64>,
 
-    /// Max number of trampoline nodes to encode in the inner trampoline onion.
-    #[serde_as(as = "Option<U16Hex>")]
-    pub max_trampoline_hops: Option<u16>,
+    /// Optional explicit trampoline hops.
+    ///
+    /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+    /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
+    pub trampoline_hops: Option<Vec<Pubkey>>,
 
     /// keysend payment
     pub keysend: Option<bool>,
@@ -389,7 +391,7 @@ where
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,
                     max_parts: params.max_parts,
-                    max_trampoline_hops: params.max_trampoline_hops,
+                    trampoline_hops: params.trampoline_hops.clone(),
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),

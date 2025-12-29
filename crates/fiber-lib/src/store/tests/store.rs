@@ -717,7 +717,7 @@ fn test_store_payment_session() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        trampoline_hops: None,
         channel_stats: Default::default(),
     };
     let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
@@ -753,7 +753,7 @@ fn test_store_payment_sessions_with_status() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        trampoline_hops: None,
         channel_stats: Default::default(),
     };
     let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
@@ -780,7 +780,7 @@ fn test_store_payment_sessions_with_status() {
         router: vec![],
         allow_mpp: false,
         allow_trampoline_routing: false,
-        max_trampoline_hops: 2,
+        trampoline_hops: None,
         channel_stats: Default::default(),
     };
     let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);

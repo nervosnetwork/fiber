@@ -117,8 +117,6 @@ pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 // Maximum number of trampoline nodes encoded in the inner trampoline onion.
 // This is a safety guard against excessive route construction work.
 const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 10;
-// Default trampoline hop count (number of trampoline nodes, excluding the final recipient).
-const DEFAULT_MAX_TRAMPOLINE_HOPS: u16 = 2;
 
 pub const GOSSIP_PROTOCOL_ID: ProtocolId = ProtocolId::new(43);
 
@@ -457,11 +455,11 @@ pub struct SendPaymentData {
     pub allow_mpp: bool,
     pub allow_trampoline_routing: bool,
 
-    /// Max number of trampoline nodes to encode in the inner trampoline onion.
-    /// (Excluding the final recipient hop.)
+    /// Optional explicit trampoline hops.
     ///
-    /// This is only used when `allow_trampoline_routing == true`.
-    pub max_trampoline_hops: u16,
+    /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+    /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
+    pub trampoline_hops: Option<Vec<Pubkey>>,
     pub dry_run: bool,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
@@ -604,14 +602,26 @@ impl SendPaymentData {
 
         let hop_hints = command.hop_hints.unwrap_or_default();
 
-        let max_trampoline_hops = command
-            .max_trampoline_hops
-            .unwrap_or(DEFAULT_MAX_TRAMPOLINE_HOPS);
-        if max_trampoline_hops == 0 || max_trampoline_hops > MAX_TRAMPOLINE_HOPS_LIMIT {
-            return Err(format!(
-                "invalid max_trampoline_hops, value should be in range [1, {}]",
-                MAX_TRAMPOLINE_HOPS_LIMIT
-            ));
+        let trampoline_hops = command.trampoline_hops;
+        if let Some(hops) = trampoline_hops.as_ref() {
+            if hops.is_empty() {
+                return Err("trampoline_hops must be non-empty when provided".to_string());
+            }
+            if hops.len() > MAX_TRAMPOLINE_HOPS_LIMIT as usize {
+                return Err(format!(
+                    "too many trampoline_hops, at most {}",
+                    MAX_TRAMPOLINE_HOPS_LIMIT
+                ));
+            }
+            if hops.iter().any(|h| *h == target) {
+                return Err("trampoline_hops must not contain target_pubkey".to_string());
+            }
+            let mut uniq = hops.clone();
+            uniq.sort();
+            uniq.dedup();
+            if uniq.len() != hops.len() {
+                return Err("trampoline_hops must not contain duplicates".to_string());
+            }
         }
 
         let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
@@ -684,7 +694,7 @@ impl SendPaymentData {
             allow_trampoline_routing,
             router: vec![],
             dry_run: command.dry_run,
-            max_trampoline_hops,
+            trampoline_hops,
             channel_stats: Default::default(),
         })
     }
@@ -700,13 +710,14 @@ impl SendPaymentData {
 
     pub fn allow_trampoline_routing(&self) -> bool {
         self.allow_trampoline_routing
+            || self
+                .trampoline_hops
+                .as_ref()
+                .is_some_and(|hops| !hops.is_empty())
     }
 
-    pub fn max_trampoline_hops(&self) -> usize {
-        // Clamp for safety in case older serialized data contains weird values.
-        self.max_trampoline_hops
-            .clamp(1, MAX_TRAMPOLINE_HOPS_LIMIT)
-            .into()
+    pub fn trampoline_hops(&self) -> Option<&[Pubkey]> {
+        self.trampoline_hops.as_deref()
     }
 }
 
@@ -2716,7 +2727,7 @@ where
                         router: vec![],
                         allow_mpp: false,
                         allow_trampoline_routing: false,
-                        max_trampoline_hops: 1,
+                        trampoline_hops: None,
                         dry_run: false,
                         channel_stats: Default::default(),
                     };

@@ -290,7 +290,7 @@ async fn test_trampoline_routing_multi_trampoline_hops() {
     )
     .await;
 
-    let [node_a, node_t1, _node_t2, node_c] = nodes.try_into().expect("4 nodes");
+    let [node_a, node_t1, node_t2, node_c] = nodes.try_into().expect("4 nodes");
 
     // Wait until A learns T1 supports trampoline routing.
     let trampoline_pubkey = node_t1.get_public_key();
@@ -330,6 +330,7 @@ async fn test_trampoline_routing_multi_trampoline_hops() {
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(10_000),
+            trampoline_hops: Some(vec![node_t1.get_public_key(), node_t2.get_public_key()]),
             ..Default::default()
         })
         .await;

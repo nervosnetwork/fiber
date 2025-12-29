@@ -119,6 +119,69 @@ fn create_fake_node_announcement_message() -> NodeAnnouncement {
     create_node_announcement_message_with_priv_key(&priv_key)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_send_payment_data_trampoline_hops_validation_errors() {
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+
+    let base = SendPaymentCommand {
+        invoice: None,
+        amount: Some(1000),
+        target_pubkey: Some(target.clone()),
+        allow_self_payment: false,
+        payment_hash: Some(payment_hash),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        trampoline_hops: None,
+        keysend: None,
+        udt_type_script: None,
+        dry_run: false,
+        hop_hints: None,
+        custom_records: None,
+    };
+
+    // Provided but empty.
+    let err = SendPaymentData::new(SendPaymentCommand {
+        trampoline_hops: Some(vec![]),
+        ..base.clone()
+    })
+    .unwrap_err();
+    assert!(err.contains("trampoline_hops must be non-empty"), "{err}");
+
+    // Too many hops.
+    // MAX_TRAMPOLINE_HOPS_LIMIT is currently 10; 11 should exceed it.
+    let too_many = (0..11)
+        .map(|_| gen_rand_fiber_public_key())
+        .collect::<Vec<_>>();
+    let err = SendPaymentData::new(SendPaymentCommand {
+        trampoline_hops: Some(too_many),
+        ..base.clone()
+    })
+    .unwrap_err();
+    assert!(err.contains("too many trampoline_hops"), "{err}");
+
+    // Must not contain target.
+    let err = SendPaymentData::new(SendPaymentCommand {
+        trampoline_hops: Some(vec![target.clone()]),
+        ..base.clone()
+    })
+    .unwrap_err();
+    assert!(err.contains("must not contain target_pubkey"), "{err}");
+
+    // No duplicates.
+    let hop = gen_rand_fiber_public_key();
+    let err = SendPaymentData::new(SendPaymentCommand {
+        trampoline_hops: Some(vec![hop, hop]),
+        ..base
+    })
+    .unwrap_err();
+    assert!(err.contains("must not contain duplicates"), "{err}");
+}
+
 #[tokio::test]
 async fn test_save_our_own_node_announcement_to_graph() {
     let mut node = NetworkNode::new().await;
