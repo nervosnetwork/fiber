@@ -1,12 +1,21 @@
-use crate::{cch::CchOrderStatus, time::SystemTimeError};
+use crate::{cch::CchOrderStatus, fiber::types::Hash256, time::SystemTimeError};
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+pub enum CchStoreError {
+    #[error("Inserting duplicated key: {0}")]
+    Duplicated(Hash256),
+
+    #[error("Key not found: {0}")]
+    NotFound(Hash256),
+}
+
+#[derive(Error, Debug)]
 pub enum CchError {
-    #[error("Database error: {0}")]
-    DbError(#[from] super::order::CchDbError),
+    #[error("Store error: {0}")]
+    StoreError(#[from] CchStoreError),
     #[error("Outgoing invoice expiry time is too short")]
     OutgoingInvoiceExpiryTooShort,
     #[error("BTC invoice parse error: {0}")]

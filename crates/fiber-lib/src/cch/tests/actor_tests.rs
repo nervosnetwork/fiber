@@ -12,9 +12,9 @@
 
 use crate::cch::{
     actor::{CchActor, CchArgs, CchMessage},
-    order::{CchInvoice, CchOrder, CchOrderStatus},
+    order::{CchInvoice, CchOrder, CchOrderStatus, CchOrderStore},
     trackers::CchTrackingEvent,
-    CchConfig, CchError,
+    CchConfig, CchError, CchStoreError,
 };
 use crate::fiber::{
     network::SendPaymentResponse,
@@ -26,9 +26,56 @@ use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceD
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use ractor::{call, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort};
 use secp256k1::{Secp256k1, SecretKey};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+/// Mock order store using an in-memory HashMap for testing
+#[derive(Clone, Default)]
+pub struct MockCchOrderStore {
+    orders: Arc<Mutex<HashMap<Hash256, CchOrder>>>,
+}
+
+impl MockCchOrderStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl CchOrderStore for MockCchOrderStore {
+    fn get_cch_order(&self, payment_hash: &Hash256) -> Result<CchOrder, CchStoreError> {
+        self.orders
+            .lock()
+            .unwrap()
+            .get(payment_hash)
+            .ok_or(CchStoreError::NotFound(*payment_hash))
+            .cloned()
+    }
+
+    fn insert_cch_order(&self, order: CchOrder) -> Result<(), CchStoreError> {
+        let mut orders = self.orders.lock().unwrap();
+        let payment_hash = order.payment_hash;
+        match orders.insert(payment_hash, order) {
+            Some(_) => Err(CchStoreError::Duplicated(payment_hash)),
+            None => Ok(()),
+        }
+    }
+
+    fn update_cch_order(&self, order: CchOrder) {
+        let mut orders = self.orders.lock().unwrap();
+        orders.insert(order.payment_hash, order);
+    }
+
+    fn get_cch_order_keys_iter(&self) -> impl IntoIterator<Item = Hash256> {
+        self.orders
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+    }
+}
 
 /// Helper function to create a test payment hash
 fn test_payment_hash(value: u8) -> Hash256 {
@@ -325,16 +372,20 @@ async fn setup_test_harness() -> TestHarness {
         ..Default::default()
     };
 
+    // Create a mock order store for testing
+    let store = MockCchOrderStore::new();
+
     let args = CchArgs {
         config,
         tracker: TaskTracker::new(),
         token: CancellationToken::new(),
         network_actor,
         node_keypair: crate::fiber::KeyPair::try_from([42u8; 32].as_slice()).unwrap(),
+        store,
     };
 
     // Spawn the CchActor
-    let (actor_ref, _handle) = Actor::spawn(None, CchActor, args)
+    let (actor_ref, _handle) = Actor::spawn(None, CchActor::default(), args)
         .await
         .expect("spawn cch actor");
 

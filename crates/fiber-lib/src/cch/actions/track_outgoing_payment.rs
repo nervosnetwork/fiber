@@ -1,12 +1,12 @@
 use ractor::ActorRef;
 
-use crate::cch::{actions::ActionExecutor, actor::CchState, CchMessage, CchOrder};
+use crate::cch::{actions::ActionExecutor, actor::CchState, CchMessage, CchOrder, CchOrderStore};
 
 pub struct TrackOutgoingPaymentDispatcher;
 
 impl TrackOutgoingPaymentDispatcher {
-    pub fn dispatch(
-        _state: &mut CchState,
+    pub fn dispatch<S: CchOrderStore>(
+        _state: &CchState<S>,
         _cch_actor_ref: &ActorRef<CchMessage>,
         _order: &CchOrder,
     ) -> Option<Box<dyn ActionExecutor>> {

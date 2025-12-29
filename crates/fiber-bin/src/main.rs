@@ -332,13 +332,14 @@ pub async fn main() -> Result<(), ExitMessage> {
                 .map_err(|err| ExitMessage(format!("failed to read secret key: {}", err)))?;
             match Actor::spawn_linked(
                 Some("cch actor".to_string()),
-                CchActor,
+                CchActor::default(),
                 CchArgs {
                     config: cch_config,
                     tracker: new_tokio_task_tracker(),
                     token: new_tokio_cancellation_token(),
                     network_actor: network_actor.clone(),
                     node_keypair,
+                    store: store.clone(),
                 },
                 root_actor.get_cell(),
             )

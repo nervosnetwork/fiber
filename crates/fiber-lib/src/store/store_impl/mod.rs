@@ -19,6 +19,8 @@ use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 use super::schema::*;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cch::{CchOrder, CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::payment::{
     Attempt, AttemptStatus, PaymentCustomRecords, PaymentSession, PaymentStatus,
@@ -169,6 +171,10 @@ impl Store {
                         &mut errors,
                     );
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                CCH_ORDER_PREFIX => {
+                    check_deserialization::<CchOrder>(&value, "CCH_ORDER_PREFIX", &mut errors);
+                }
                 #[cfg(feature = "watchtower")]
                 WATCHTOWER_CHANNEL_PREFIX => {
                     check_deserialization::<ChannelData>(
@@ -240,6 +246,8 @@ pub enum KeyValue {
     NetworkActorState(PeerId, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
     HoldTlc((Hash256, Hash256, u64), u64),
+    #[cfg(not(target_arch = "wasm32"))]
+    CchOrder(Hash256, CchOrder),
 }
 
 /// Recorded store changes.
@@ -345,6 +353,10 @@ impl StoreKeyValue for KeyValue {
                 &tlc_id.to_le_bytes(),
             ]
             .concat(),
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyValue::CchOrder(payment_hash, _data) => {
+                [&[CCH_ORDER_PREFIX], payment_hash.as_ref()].concat()
+            }
         }
     }
 
@@ -383,6 +395,8 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(custom_records, "PaymentCustomRecord")
             }
             KeyValue::HoldTlc(_, expired_at) => serialize_to_vec(expired_at, "HoldTlc"),
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
         }
     }
 }
@@ -1209,6 +1223,42 @@ impl GossipMessageStore for Store {
         let mut batch = self.batch();
         batch.delete([&[BROADCAST_MESSAGE_TIMESTAMP_PREFIX], key.as_slice()].concat());
         batch.commit();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CchOrderStore for Store {
+    fn get_cch_order(&self, payment_hash: &Hash256) -> Result<CchOrder, CchStoreError> {
+        let key = [&[CCH_ORDER_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(&v, "CchOrder"))
+            .ok_or(CchStoreError::NotFound(*payment_hash))
+    }
+
+    fn insert_cch_order(&self, order: CchOrder) -> Result<(), CchStoreError> {
+        let mut batch = self.batch();
+        let key = [&[CCH_ORDER_PREFIX], order.payment_hash.as_ref()].concat();
+        if batch.get(key).is_none() {
+            batch.put_kv(KeyValue::CchOrder(order.payment_hash, order));
+            batch.commit();
+            Ok(())
+        } else {
+            Err(CchStoreError::Duplicated(order.payment_hash))
+        }
+    }
+
+    fn update_cch_order(&self, order: CchOrder) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::CchOrder(order.payment_hash, order));
+        batch.commit();
+    }
+
+    fn get_cch_order_keys_iter(&self) -> impl IntoIterator<Item = Hash256> {
+        const PREFIX_LEN: usize = 1;
+        const PREFIX: [u8; PREFIX_LEN] = [CCH_ORDER_PREFIX];
+        self.prefix_iterator(&PREFIX).map(|(key, _)| {
+            Hash256::try_from(&key[PREFIX_LEN..]).expect("CchOrder key must be Hash256")
+        })
     }
 }
 

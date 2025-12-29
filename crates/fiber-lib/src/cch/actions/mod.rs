@@ -11,7 +11,7 @@ use track_outgoing_payment::TrackOutgoingPaymentDispatcher;
 use anyhow::Result;
 use ractor::ActorRef;
 
-use crate::cch::{actor::CchState, CchMessage, CchOrder, CchOrderStatus};
+use crate::cch::{actor::CchState, CchMessage, CchOrder, CchOrderStatus, CchOrderStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CchOrderAction {
@@ -29,8 +29,8 @@ pub trait ActionExecutor: Send + Sync {
 pub struct ActionDispatcher;
 
 impl ActionDispatcher {
-    fn dispatch(
-        state: &mut CchState,
+    fn dispatch<S: CchOrderStore>(
+        state: &CchState<S>,
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
         action: CchOrderAction,
@@ -69,8 +69,8 @@ impl ActionDispatcher {
     /// Execute an action.
     ///
     /// Executor cannot modify the order directly, but can send events to the actor.
-    pub async fn execute(
-        state: &mut CchState,
+    pub async fn execute<S: CchOrderStore>(
+        state: &CchState<S>,
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
         action: CchOrderAction,
