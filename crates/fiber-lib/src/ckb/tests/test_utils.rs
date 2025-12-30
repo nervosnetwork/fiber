@@ -1,6 +1,6 @@
 use anyhow::anyhow;
-use ckb_jsonrpc_types::JsonBytes;
-use ckb_sdk::{rpc::ckb_indexer::Cell, tx_builder::TxBuilderError, RpcError};
+
+use ckb_sdk::tx_builder::TxBuilderError;
 use ckb_testtool::context::Context;
 use ckb_types::bytes::BufMut;
 use ckb_types::{
@@ -13,15 +13,15 @@ use ckb_types::{
 use molecule::bytes::BytesMut;
 use once_cell::sync::{Lazy, OnceCell};
 
+use crate::ckb::client::CkbChainClient;
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
 use crate::{
     ckb::{
-        actor::{GetCellsResponse, GetTxResponse},
         config::{UdtArgInfo, UdtCfgInfos, UdtScript},
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
-        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError,
+        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError, GetTxResponse,
     },
     fiber::types::Hash256,
     now_timestamp_as_millis_u64,
@@ -276,45 +276,54 @@ pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     fn clone_box(&self) -> Box<dyn MockChainActorMiddleware>;
 }
 
-impl Clone for Box<dyn MockChainActorMiddleware> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
+#[derive(Clone, Debug)]
+pub struct MockChainState {
+    pub txs: HashMap<Hash256, GetTxResponse>,
+    pub tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
+    pub tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
+    pub cell_status: HashMap<OutPoint, CellStatus>,
 }
 
-pub struct MockChainActorState {
-    txs: HashMap<Hash256, GetTxResponse>,
-    tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
-    tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
-    cell_status: HashMap<OutPoint, CellStatus>,
-    middleware: Option<Box<dyn MockChainActorMiddleware>>,
-}
-
-impl Default for MockChainActorState {
+impl Default for MockChainState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MockChainActorState {
+impl MockChainState {
     pub fn new() -> Self {
         Self {
             txs: HashMap::new(),
             tx_tracing_tasks: HashMap::new(),
             tx_notifications: Arc::new(OutputPort::default()),
             cell_status: HashMap::new(),
-            middleware: None,
         }
     }
+}
 
-    pub fn with_optional_middleware(middleware: Option<Box<dyn MockChainActorMiddleware>>) -> Self {
-        Self {
-            txs: HashMap::new(),
-            tx_tracing_tasks: HashMap::new(),
-            tx_notifications: Arc::new(OutputPort::default()),
-            cell_status: HashMap::new(),
-            middleware,
-        }
+pub struct MockChainActorState {
+    pub shared: Arc<RwLock<MockChainState>>,
+    pub middleware: Option<Box<dyn MockChainActorMiddleware>>,
+}
+
+impl Clone for Box<dyn MockChainActorMiddleware> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+impl Default for MockChainActorState {
+    fn default() -> Self {
+        Self::new(Arc::new(RwLock::new(MockChainState::new())), None)
+    }
+}
+
+impl MockChainActorState {
+    pub fn new(
+        shared: Arc<RwLock<MockChainState>>,
+        middleware: Option<Box<dyn MockChainActorMiddleware>>,
+    ) -> Self {
+        Self { shared, middleware }
     }
 }
 
@@ -354,13 +363,16 @@ impl MockChainActor {
 impl Actor for MockChainActor {
     type Msg = CkbChainMessage;
     type State = MockChainActorState;
-    type Arguments = Option<Box<dyn MockChainActorMiddleware>>;
+    type Arguments = (
+        Option<Box<dyn MockChainActorMiddleware>>,
+        Arc<RwLock<MockChainState>>,
+    );
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        args: Self::Arguments,
+        (middleware, state): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(Self::State::with_optional_middleware(args))
+        Ok(Self::State::new(state, middleware))
     }
 
     async fn handle(
@@ -499,15 +511,7 @@ impl Actor for MockChainActor {
             AddFundingTx(_) | RemoveFundingTx(_) | CommitFundingTx(..) => {
                 // ignore
             }
-            GetShutdownTx(.., reply) => {
-                let _ = reply.send(Ok(None));
-            }
-            GetCells(.., reply) => {
-                let _ = reply.send(Ok(GetCellsResponse {
-                    objects: Vec::<Cell>::new(),
-                    last_cursor: JsonBytes::default(),
-                }));
-            }
+
             Sign(tx, reply_port) => {
                 // We don't need to sign the funding transaction in mock chain actor,
                 // as any funding transaction is considered correct if we can successfully
@@ -528,10 +532,11 @@ impl Actor for MockChainActor {
             }
             SendTx(tx, reply_port) => {
                 const MAX_CYCLES: u64 = 100_000_000;
-                let mut f = || {
+                let f = || {
                     // Mark the inputs as consumed
                     for input in tx.input_pts_iter() {
-                        match state.cell_status.entry(input.clone()) {
+                        let mut state_guard = state.shared.write().unwrap();
+                        match state_guard.cell_status.entry(input.clone()) {
                             std::collections::hash_map::Entry::Occupied(mut entry) => {
                                 if *entry.get() == CellStatus::Consumed {
                                     return (
@@ -586,11 +591,12 @@ impl Actor for MockChainActor {
                     &tx, &tx_status
                 );
                 let tx_hash = tx.hash().into();
-                state.tx_notifications.send(CkbTxTracingResult {
+                let mut state_guard = state.shared.write().unwrap();
+                state_guard.tx_notifications.send(CkbTxTracingResult {
                     tx_hash,
                     tx_status: tx_status.clone(),
                 });
-                state.txs.insert(
+                state_guard.txs.insert(
                     tx_hash,
                     GetTxResponse {
                         transaction: Some(tx),
@@ -605,16 +611,18 @@ impl Actor for MockChainActor {
                     );
                 }
             }
-            GetTx(tx_hash, reply_port) => {
-                let result = Ok(state.txs.get(&tx_hash).cloned().unwrap_or(GetTxResponse {
-                    transaction: None,
-                    tx_status: TxStatus::Unknown,
-                }));
-                let _ = reply_port.send(result);
-            }
+
             CreateTxTracer(tracer) => {
                 debug!("Tracing transaction: {:?}", &tracer);
-                match state.txs.get(&tracer.tx_hash) {
+                let (maybe_tx, notifications) = {
+                    let guard = state.shared.read().unwrap();
+                    (
+                        guard.txs.get(&tracer.tx_hash).cloned(),
+                        guard.tx_notifications.clone(),
+                    )
+                };
+
+                match maybe_tx {
                     Some(tx) => {
                         let _ = tracer.callback.send(CkbTxTracingResult {
                             tx_hash: tracer.tx_hash,
@@ -627,7 +635,7 @@ impl Actor for MockChainActor {
                         self.start_trace_tx_replier(
                             myself,
                             tracer.tx_hash,
-                            state.tx_notifications.clone(),
+                            notifications,
                             Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS),
                             tracer.callback,
                         )
@@ -636,7 +644,8 @@ impl Actor for MockChainActor {
                 };
             }
             RemoveTxTracers(tx_hash) => {
-                for task in state
+                let mut state_guard = state.shared.write().unwrap();
+                for task in state_guard
                     .tx_tracing_tasks
                     .remove(&tx_hash)
                     .unwrap_or_default()
@@ -645,10 +654,7 @@ impl Actor for MockChainActor {
                     task.stop(Some(format!("remove tracers for tx {}", tx_hash)));
                 }
             }
-            GetBlockTimestamp(request, rpc_reply_port) => {
-                let timestamp = get_block_timestamp(request.block_hash().into()).await;
-                let _ = rpc_reply_port.send(Ok(Some(timestamp)));
-            }
+
             Stop => {
                 myself.stop(Some("stop received".to_string()));
             }
@@ -693,14 +699,6 @@ pub async fn trace_tx(mock_actor: ActorRef<CkbChainMessage>, tx_hash: Hash256) -
         .tx_status
 }
 
-pub async fn get_tx_from_hash(
-    mock_actor: ActorRef<CkbChainMessage>,
-    tx_hash: Hash256,
-) -> Result<GetTxResponse, RpcError> {
-    pub const TIMEOUT: u64 = 1000;
-    call_t!(mock_actor, CkbChainMessage::GetTx, TIMEOUT, tx_hash).expect("chain actor alive")
-}
-
 pub fn complete_commitment_tx(commitment_tx: &TransactionView) -> TransactionView {
     let cell_deps = futures::executor::block_on(get_cell_deps(
         vec![Contract::FundingLock],
@@ -720,4 +718,83 @@ async fn test_set_and_get_block_timestamp() {
     set_next_block_timestamp(now).await;
     let timestamp = get_block_timestamp(H256::default()).await;
     assert_eq!(timestamp, now);
+}
+
+#[derive(Clone, Debug)]
+pub struct MockCkbChainClient {
+    pub state: Arc<RwLock<MockChainState>>,
+}
+
+impl MockCkbChainClient {
+    pub fn new(state: Arc<RwLock<MockChainState>>) -> Self {
+        Self { state }
+    }
+}
+
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl CkbChainClient for MockCkbChainClient {
+    async fn get_transaction(&self, hash: ckb_types::H256) -> Result<GetTxResponse, anyhow::Error> {
+        let hash: Hash256 = hash.into();
+        let state = self.state.read().unwrap();
+        Ok(state
+            .txs
+            .get(&hash)
+            .map(|response| {
+                let tx_status = match &response.tx_status {
+                    TxStatus::Pending => ckb_jsonrpc_types::TxStatus::pending(),
+                    TxStatus::Proposed => ckb_jsonrpc_types::TxStatus::proposed(),
+                    TxStatus::Committed(number, hash, index) => {
+                        ckb_jsonrpc_types::TxStatus::committed(
+                            (*number).into(),
+                            hash.clone(),
+                            (*index).into(),
+                        )
+                    }
+                    TxStatus::Rejected(reason) => {
+                        ckb_jsonrpc_types::TxStatus::rejected(reason.clone())
+                    }
+                    TxStatus::Unknown => ckb_jsonrpc_types::TxStatus::unknown(),
+                };
+                ckb_jsonrpc_types::TransactionWithStatusResponse {
+                    transaction: response
+                        .transaction
+                        .clone()
+                        .map(ckb_jsonrpc_types::TransactionView::from)
+                        .map(ckb_jsonrpc_types::ResponseFormat::json),
+                    tx_status,
+                    cycles: None,
+                    time_added_to_pool: None,
+                    min_replace_fee: None,
+                    fee: None,
+                }
+            })
+            .into())
+    }
+
+    async fn get_cells(
+        &self,
+        _search_key: ckb_sdk::rpc::ckb_indexer::SearchKey,
+        _order: ckb_sdk::rpc::ckb_indexer::Order,
+        _limit: u32,
+        _after: Option<ckb_jsonrpc_types::JsonBytes>,
+    ) -> Result<ckb_sdk::rpc::ckb_indexer::Pagination<ckb_sdk::rpc::ckb_indexer::Cell>, anyhow::Error>
+    {
+        Ok(ckb_sdk::rpc::ckb_indexer::Pagination {
+            objects: vec![],
+            last_cursor: ckb_jsonrpc_types::JsonBytes::default(),
+        })
+    }
+
+    async fn get_block_timestamp(&self, block_hash: Hash256) -> Result<Option<u64>, anyhow::Error> {
+        let timestamp = get_block_timestamp(block_hash.into()).await;
+        Ok(Some(timestamp))
+    }
+
+    async fn get_shutdown_tx(
+        &self,
+        _funding_lock_script: ckb_types::packed::Script,
+    ) -> Result<Option<crate::ckb::client::GetShutdownTxResponse>, anyhow::Error> {
+        Ok(None)
+    }
 }

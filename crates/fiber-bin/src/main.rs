@@ -3,11 +3,12 @@ use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::{CchArgs, CchFiberStoreWatcher};
+use fnn::ckb::client::CkbRpcClient;
 use fnn::ckb::contracts::TypeIDResolver;
 #[cfg(debug_assertions)]
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
-use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash};
+use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
 use fnn::rpc::server::start_rpc;
 use fnn::rpc::watchtower::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
@@ -166,8 +167,10 @@ pub async fn main() -> Result<(), ExitMessage> {
 
             info!("Starting fiber");
 
-            let network_actor = start_network(
+            let chain_client = CkbRpcClient::new(&ckb_config);
+            let network_actor: ActorRef<NetworkActorMessage> = start_network(
                 fiber_config.clone(),
+                chain_client,
                 ckb_chain_actor.clone(),
                 event_sender,
                 new_tokio_task_tracker(),
