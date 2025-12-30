@@ -51,6 +51,21 @@ impl ActionDispatcher {
         }
     }
 
+    /// The actions to be taken when the state machine is started for the order.
+    pub fn on_starting(order: &CchOrder) -> Vec<CchOrderAction> {
+        let mut actions = Self::on_entering(order);
+        match order.status {
+            CchOrderStatus::IncomingAccepted
+            | CchOrderStatus::OutgoingInFlight
+            | CchOrderStatus::OutgoingSucceeded => {
+                // Ensure start incoming invoice tracking.
+                actions.push(CchOrderAction::TrackIncomingInvoice);
+            }
+            _ => {}
+        }
+        actions
+    }
+
     /// The actions to be taken when the order enters a new status.
     pub fn on_entering(order: &CchOrder) -> Vec<CchOrderAction> {
         match order.status {

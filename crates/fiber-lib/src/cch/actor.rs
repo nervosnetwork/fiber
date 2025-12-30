@@ -166,6 +166,52 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
         Ok(state)
     }
 
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time should always be after UNIX_EPOCH")
+            .as_secs();
+
+        // Load all orders from the database
+        for mut order in state
+            .store
+            .get_cch_order_keys_iter()
+            .into_iter()
+            .filter_map(|payment_hash| state.store.get_cch_order(&payment_hash).ok())
+        {
+            // Only process active (non-final) orders
+            if order.is_final() {
+                continue;
+            }
+
+            // Check if order is expired and mark as Failed if so
+            if order.update_if_expired(current_time) {
+                let payment_hash = order.payment_hash;
+                state.store.update_cch_order(order);
+                tracing::info!("Marked expired order {:x} as Failed", payment_hash);
+                continue;
+            }
+
+            // Resume tracking for non-expired active orders
+            let actions = ActionDispatcher::on_starting(&order);
+            if let Err(err) = append_actions(myself.clone(), order.payment_hash, actions) {
+                tracing::error!(
+                    "Failed to schedule resume actions for order {:x}: {}",
+                    order.payment_hash,
+                    err
+                );
+            } else {
+                tracing::debug!("Resumed tracking for active order {:x}", order.payment_hash);
+            }
+        }
+
+        Ok(())
+    }
+
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -176,7 +222,7 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
             CchMessage::SendBTC(send_btc, port) => {
                 let result = state.send_btc(send_btc).await;
                 if let Ok(order) = &result {
-                    let actions = ActionDispatcher::on_entering(order);
+                    let actions = ActionDispatcher::on_starting(order);
                     append_actions(myself, order.payment_hash, actions)?;
                 }
                 if !port.is_closed() {
@@ -188,7 +234,7 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
             CchMessage::ReceiveBTC(receive_btc, port) => {
                 let result = state.receive_btc(receive_btc).await;
                 if let Ok(order) = &result {
-                    let actions = ActionDispatcher::on_entering(order);
+                    let actions = ActionDispatcher::on_starting(order);
                     append_actions(myself, order.payment_hash, actions)?;
                 }
                 if !port.is_closed() {

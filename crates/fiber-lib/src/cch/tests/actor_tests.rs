@@ -350,7 +350,10 @@ impl TestHarness {
 
 /// Set up a test harness with mocked dependencies
 async fn setup_test_harness() -> TestHarness {
-    // Create shared event port for injecting events
+    setup_test_harness_with_store(MockCchOrderStore::new()).await
+}
+
+async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 
     let mock_state = MockNetworkState {
@@ -363,17 +366,12 @@ async fn setup_test_harness() -> TestHarness {
         .await
         .expect("spawn mock network actor");
 
-    // Create minimal config
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
         wrapped_btc_type_script_args: "0x".to_string(),
-        // Use a low minimum expiry for testing (test invoices have 1-hour expiry)
         min_outgoing_invoice_expiry_delta_seconds: 60,
         ..Default::default()
     };
-
-    // Create a mock order store for testing
-    let store = MockCchOrderStore::new();
 
     let args = CchArgs {
         config,
@@ -384,15 +382,11 @@ async fn setup_test_harness() -> TestHarness {
         store,
     };
 
-    // Spawn the CchActor
     let (actor_ref, _handle) = Actor::spawn(None, CchActor::default(), args)
         .await
         .expect("spawn cch actor");
 
-    // Subscribe CchActor to the event port
     actor_ref.subscribe_to_port(&event_port);
-
-    // Store CchActor reference in mock state for callbacks
     *mock_state.cch_actor.lock().unwrap() = Some(actor_ref.clone());
 
     TestHarness {
@@ -600,4 +594,138 @@ async fn test_receive_btc_happy_path() {
     assert!(order.is_final());
     assert_eq!(order.payment_preimage, Some(preimage));
     assert!(order.failure_reason.is_none());
+}
+
+/// Tests that expired orders are marked as Failed when resuming from the store.
+#[tokio::test]
+async fn test_resume_expired_order_marked_as_failed() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(150);
+    let store = MockCchOrderStore::new();
+
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expired_order = CchOrder {
+        created_at: current_time - 7200,
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(expired_order.clone()).unwrap();
+
+    let harness = setup_test_harness_with_store(store).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::Failed);
+    assert!(order.failure_reason.is_some());
+    assert!(order
+        .failure_reason
+        .unwrap()
+        .contains("Order expired on startup"));
+}
+
+/// Tests that non-expired active orders have tracking resumed on startup.
+#[tokio::test]
+async fn test_resume_active_order_tracking_resumed() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(151);
+    let store = MockCchOrderStore::new();
+
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let active_order = CchOrder {
+        created_at: current_time - 100,
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(active_order.clone()).unwrap();
+
+    let harness = setup_test_harness_with_store(store).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::Pending);
+    assert!(order.failure_reason.is_none());
+
+    harness.simulate_incoming_invoice_received(payment_hash);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::IncomingAccepted, 1000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
+}
+
+/// Tests that final orders (Succeeded/Failed) are skipped when resuming.
+#[tokio::test]
+async fn test_resume_skips_final_orders() {
+    let (preimage1, payment_hash1) = create_valid_preimage_pair(152);
+    let (_preimage2, payment_hash2) = create_valid_preimage_pair(153);
+    let store = MockCchOrderStore::new();
+
+    let succeeded_order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash1)),
+        payment_hash: payment_hash1,
+        payment_preimage: Some(preimage1),
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::Succeeded,
+        failure_reason: None,
+    };
+
+    let failed_order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash2)),
+        payment_hash: payment_hash2,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::Failed,
+        failure_reason: Some("Test failure".to_string()),
+    };
+
+    store.insert_cch_order(succeeded_order.clone()).unwrap();
+    store.insert_cch_order(failed_order.clone()).unwrap();
+
+    let harness = setup_test_harness_with_store(store).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order1 = harness.get_order(payment_hash1).await.unwrap();
+    assert_eq!(order1.status, CchOrderStatus::Succeeded);
+    assert_eq!(order1.payment_preimage, Some(preimage1));
+
+    let order2 = harness.get_order(payment_hash2).await.unwrap();
+    assert_eq!(order2.status, CchOrderStatus::Failed);
+    assert_eq!(order2.failure_reason, Some("Test failure".to_string()));
 }
