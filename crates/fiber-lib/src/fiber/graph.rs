@@ -1353,7 +1353,7 @@ where
                     next_is_trampoline: !is_last_trampoline,
                     amount_to_forward: forward_amounts[idx],
                     hash_algorithm,
-                    final_tlc_expiry_delta: trampoline_forward_expiry_delta(
+                    tlc_expiry_delta: trampoline_forward_expiry_delta(
                         payment_data.final_tlc_expiry_delta,
                         remaining_trampoline_hops_after_next,
                     ),

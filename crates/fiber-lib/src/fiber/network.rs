@@ -2701,7 +2701,7 @@ where
                     next_is_trampoline,
                     amount_to_forward,
                     hash_algorithm,
-                    final_tlc_expiry_delta,
+                    tlc_expiry_delta,
                     udt_type_script,
                 } => {
                     let remaining_trampoline_onion = peeled_trampoline.next.map(|p| p.into_bytes());
@@ -2711,7 +2711,7 @@ where
                         amount: amount_to_forward,
                         payment_hash,
                         invoice: None,
-                        final_tlc_expiry_delta,
+                        final_tlc_expiry_delta: tlc_expiry_delta,
                         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
                         timeout: None,
                         max_fee_amount,

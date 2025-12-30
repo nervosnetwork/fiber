@@ -284,7 +284,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
             next_is_trampoline: true,
             amount_to_forward: 50_000,
             hash_algorithm: HashAlgorithm::Sha256,
-            final_tlc_expiry_delta: 1234,
+            tlc_expiry_delta: 1234,
             udt_type_script: None,
         },
         TrampolineHopPayload::Forward {
@@ -292,7 +292,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
             next_is_trampoline: false,
             amount_to_forward: 50_000,
             hash_algorithm: HashAlgorithm::Sha256,
-            final_tlc_expiry_delta: 1234,
+            tlc_expiry_delta: 1234,
             udt_type_script: None,
         },
         TrampolineHopPayload::Final {
