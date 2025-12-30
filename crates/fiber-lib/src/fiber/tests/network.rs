@@ -12,11 +12,8 @@ use crate::{
         channel::ShutdownInfo,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
-        network::{
-            AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand, SendPaymentData,
-        },
-        payment::SendPaymentCommand,
-        payment::TrampolineHop,
+        network::{AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand},
+        payment::{SendPaymentCommand, SendPaymentData},
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
@@ -123,6 +120,8 @@ fn create_fake_node_announcement_message() -> NodeAnnouncement {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_send_payment_data_trampoline_hops_validation_errors() {
+    use crate::fiber::payment::TrampolineHop;
+
     let target = gen_rand_fiber_public_key();
     let payment_hash = gen_rand_sha256_hash();
 

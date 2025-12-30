@@ -10,8 +10,7 @@ use crate::fiber::{
     graph::*,
     history::Direction,
     history::TimedResult,
-    network::SendPaymentData,
-    payment::{PaymentSession, PaymentStatus},
+    payment::{PaymentSession, PaymentStatus, SendPaymentData},
     types::{Privkey, Pubkey},
 };
 use crate::gen_rand_fiber_private_key;

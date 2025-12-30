@@ -1,39 +1,48 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::network::{
-    SendOnionPacketCommand, SendPaymentData, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE,
-};
+use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
 use super::types::{Hash256, Privkey, Pubkey, TlcErrData};
-use crate::fiber::channel::ChannelActorStateStore;
+use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
+use crate::fiber::config::{
+    DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+    MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{GraphChannelStat, NetworkGraph, NetworkGraphStateStore, RouterHop};
 use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT,
-    DEFAULT_PAYMENT_TRY_LIMIT,
+    DEFAULT_PAYMENT_TRY_LIMIT, MAX_CUSTOM_RECORDS_SIZE,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::serde_utils::U64Hex;
 use crate::fiber::types::{
-    BroadcastMessageWithTimestamp, PaymentHopData, PeeledPaymentOnionPacket, TlcErr, TlcErrorCode,
+    BasicMppPaymentData, BroadcastMessageWithTimestamp, PaymentHopData, PeeledPaymentOnionPacket,
+    RemoveTlcReason, TlcErr, TlcErrorCode,
 };
 use crate::fiber::{
     KeyPair, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
-use crate::invoice::{InvoiceStore, PreimageStore};
-use crate::now_timestamp_as_millis_u64;
+use crate::invoice::{CkbInvoice, InvoiceStore, PreimageStore};
 use crate::Error;
+use crate::{debug_event, now_timestamp_as_millis_u64};
+use ckb_hash::blake2b_256;
 use ckb_types::packed::{OutPoint, Script};
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
+use rand::Rng;
 use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use strum::AsRefStr;
-use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, error};
+use tokio::sync::RwLock;
+use tracing::{debug, error, warn};
+
+// Maximum number of trampoline nodes encoded in the inner trampoline onion.
+// This is a safety guard against excessive route construction work.
+const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 10;
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
@@ -127,6 +136,297 @@ impl SessionRoute {
         self.nodes
             .iter()
             .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
+    }
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendPaymentData {
+    pub target_pubkey: Pubkey,
+    pub amount: u128,
+    pub payment_hash: Hash256,
+    pub invoice: Option<String>,
+    pub final_tlc_expiry_delta: u64,
+    pub tlc_expiry_limit: u64,
+    pub timeout: Option<u64>,
+    pub max_fee_amount: Option<u128>,
+    /// The number of parts for the payment, only used for multi-part payment
+    pub max_parts: Option<u64>,
+    pub keysend: bool,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
+    pub preimage: Option<Hash256>,
+    pub custom_records: Option<PaymentCustomRecords>,
+    pub allow_self_payment: bool,
+    pub hop_hints: Vec<HopHint>,
+    pub router: Vec<RouterHop>,
+    pub allow_mpp: bool,
+    pub dry_run: bool,
+    pub allow_trampoline_routing: bool,
+
+    /// Optional explicit trampoline hops.
+    ///
+    /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+    /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
+    pub trampoline_hops: Option<Vec<TrampolineHop>>,
+    #[serde(skip)]
+    pub channel_stats: GraphChannelStat,
+}
+
+impl SendPaymentData {
+    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
+        let invoice = command
+            .invoice
+            .as_ref()
+            .map(|invoice| invoice.parse::<CkbInvoice>())
+            .transpose()
+            .map_err(|_| "invoice is invalid".to_string())?;
+
+        if let Some(invoice) = invoice.clone() {
+            if invoice.is_expired() {
+                return Err("invoice is expired".to_string());
+            }
+        }
+
+        fn validate_field<T: PartialEq + Clone>(
+            field: Option<T>,
+            invoice_field: Option<T>,
+            field_name: &str,
+        ) -> Result<T, String> {
+            match (field, invoice_field) {
+                (Some(f), Some(i)) => {
+                    if f != i {
+                        return Err(format!("{} does not match the invoice", field_name));
+                    }
+                    Ok(f)
+                }
+                (Some(f), None) => Ok(f),
+                (None, Some(i)) => Ok(i),
+                (None, None) => Err(format!("{} is missing", field_name)),
+            }
+        }
+
+        let target = validate_field(
+            command.target_pubkey,
+            invoice
+                .as_ref()
+                .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
+            "target_pubkey",
+        )?;
+
+        let amount = validate_field(
+            command.amount,
+            invoice.as_ref().and_then(|i| i.amount()),
+            "amount",
+        )?;
+
+        let udt_type_script = match validate_field(
+            command.udt_type_script.clone(),
+            invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
+            "udt_type_script",
+        ) {
+            Ok(script) => Some(script),
+            Err(e) if e == "udt_type_script is missing" => None,
+            Err(e) => return Err(e),
+        };
+
+        // check htlc expiry delta and limit are both valid if it is set
+        let final_tlc_expiry_delta = invoice
+            .as_ref()
+            .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
+            .or(command.final_tlc_expiry_delta)
+            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
+        if !(MIN_TLC_EXPIRY_DELTA..=MAX_PAYMENT_TLC_EXPIRY_LIMIT).contains(&final_tlc_expiry_delta)
+        {
+            return Err(format!(
+                "invalid final_tlc_expiry_delta, expect between {} and {}",
+                MIN_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
+
+        let tlc_expiry_limit = command
+            .tlc_expiry_limit
+            .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
+
+        if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
+            return Err(format!(
+                "tlc_expiry_limit is too small, final_tlc_expiry_delta: {}, tlc_expiry_limit: {}",
+                final_tlc_expiry_delta, tlc_expiry_limit
+            ));
+        }
+        if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+            return Err(format!(
+                "tlc_expiry_limit is too large, expect it to less than {}",
+                MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
+
+        let keysend = command.keysend.unwrap_or(false);
+        let (payment_hash, preimage) = if !keysend {
+            (
+                validate_field(
+                    command.payment_hash,
+                    invoice.as_ref().map(|i| *i.payment_hash()),
+                    "payment_hash",
+                )?,
+                None,
+            )
+        } else {
+            if invoice.is_some() {
+                return Err("keysend payment should not have invoice".to_string());
+            }
+            if command.payment_hash.is_some() {
+                return Err("keysend payment should not have payment_hash".to_string());
+            }
+            // generate a random preimage for keysend payment
+            let mut rng = rand::thread_rng();
+            let mut result = [0u8; 32];
+            rng.fill(&mut result[..]);
+            let preimage: Hash256 = result.into();
+            // use the default payment hash algorithm here for keysend payment
+            let payment_hash: Hash256 = blake2b_256(preimage).into();
+            (payment_hash, Some(preimage))
+        };
+
+        if udt_type_script.is_none() && amount >= u64::MAX as u128 {
+            return Err(format!(
+                "The payment amount ({}) should be less than {}",
+                amount,
+                u64::MAX
+            ));
+        }
+
+        if amount == 0 {
+            return Err("amount must be greater than 0".to_string());
+        }
+
+        let max_fee_amount = command.max_fee_amount.unwrap_or(0);
+        if amount.checked_add(max_fee_amount).is_none() {
+            return Err(format!(
+                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
+                amount, max_fee_amount
+            ));
+        }
+
+        let hop_hints = command.hop_hints.unwrap_or_default();
+
+        let trampoline_hops = command.trampoline_hops;
+        if let Some(hops) = trampoline_hops.as_ref() {
+            if hops.is_empty() {
+                return Err("trampoline_hops must be non-empty when provided".to_string());
+            }
+            if hops.len() > MAX_TRAMPOLINE_HOPS_LIMIT as usize {
+                return Err(format!(
+                    "too many trampoline_hops, at most {}",
+                    MAX_TRAMPOLINE_HOPS_LIMIT
+                ));
+            }
+            if hops.iter().any(|h| h.pubkey == target) {
+                return Err("trampoline_hops must not contain target_pubkey".to_string());
+            }
+            let mut uniq = hops.iter().map(|h| h.pubkey).collect::<Vec<_>>();
+            uniq.sort();
+            uniq.dedup();
+            if uniq.len() != hops.len() {
+                return Err("trampoline_hops must not contain duplicates".to_string());
+            }
+        }
+
+        let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
+        let allow_trampoline_routing = invoice
+            .as_ref()
+            .is_some_and(|inv| inv.allow_trampoline_routing());
+
+        let payment_secret = invoice
+            .as_ref()
+            .and_then(|inv| inv.payment_secret().cloned());
+        if allow_mpp && payment_secret.is_none() {
+            return Err("payment secret is required for multi-path payment".to_string());
+        }
+        if allow_mpp
+            && command
+                .max_parts
+                .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAX_PARTS_LIMIT)
+        {
+            return Err(format!(
+                "invalid max_parts, value should be in range [1, {}]",
+                PAYMENT_MAX_PARTS_LIMIT
+            ));
+        }
+
+        if let Some(custom_records) = &command.custom_records {
+            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
+                > MAX_CUSTOM_RECORDS_SIZE
+            {
+                return Err(format!(
+                    "the sum size of custom_records's value can not more than {} bytes",
+                    MAX_CUSTOM_RECORDS_SIZE
+                ));
+            }
+
+            if custom_records
+                .data
+                .keys()
+                .any(|k| *k > USER_CUSTOM_RECORDS_MAX_INDEX)
+            {
+                return Err(format!(
+                    "custom_records key should in range 0 ~ {:?}",
+                    USER_CUSTOM_RECORDS_MAX_INDEX
+                ));
+            }
+        }
+
+        let mut custom_records = command.custom_records;
+        // bolt04 write payment data record to custom records if payment secret is set
+        if let Some(payment_secret) = payment_secret {
+            let records = custom_records.get_or_insert_with(PaymentCustomRecords::default);
+            BasicMppPaymentData::new(payment_secret, amount).write(records);
+        }
+
+        Ok(SendPaymentData {
+            target_pubkey: target,
+            amount,
+            payment_hash,
+            invoice: command.invoice,
+            final_tlc_expiry_delta,
+            tlc_expiry_limit,
+            timeout: command.timeout,
+            max_fee_amount: command.max_fee_amount,
+            max_parts: command.max_parts,
+            keysend,
+            udt_type_script,
+            preimage,
+            custom_records,
+            allow_self_payment: command.allow_self_payment,
+            hop_hints,
+            allow_mpp,
+            allow_trampoline_routing,
+            router: vec![],
+            dry_run: command.dry_run,
+            trampoline_hops,
+            channel_stats: Default::default(),
+        })
+    }
+
+    pub fn max_parts(&self) -> usize {
+        self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) as usize
+    }
+
+    pub fn allow_mpp(&self) -> bool {
+        // only allow mpp if max_parts is greater than 1 and not keysend
+        self.allow_mpp && self.max_parts() > 1 && !self.keysend
+    }
+
+    pub fn allow_trampoline_routing(&self) -> bool {
+        self.allow_trampoline_routing
+            || self
+                .trampoline_hops
+                .as_ref()
+                .is_some_and(|hops| !hops.is_empty())
+    }
+
+    pub fn trampoline_hops(&self) -> Option<&[TrampolineHop]> {
+        self.trampoline_hops.as_deref()
     }
 }
 
@@ -714,19 +1014,19 @@ pub enum PaymentActorMessage {
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
     RetrySendPayment(Option<u64>),
-    // Check payment status, stop actor if payment is end
-    NotifyPaymentFinal,
-}
-
-pub enum PaymentActorInitCommand {
-    Send(SendPaymentData),
-    Resume(Hash256, Option<u64>),
+    OnAddTlcResultEvent {
+        attempt_id: Option<u64>,
+        add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
+    },
+    OnRemoveTlcEvent {
+        attempt_id: Option<u64>,
+        reason: RemoveTlcReason,
+    },
 }
 
 pub struct PaymentActorState {
     payment_hash: Hash256,
-    init_command: PaymentActorInitCommand,
-    send_payment_reply: Option<RpcReplyPort<Result<SendPaymentResponse, String>>>,
+    init_command: Option<PaymentActorMessage>,
 
     // the number of pending retrying send payments, we track it for
     // set retry delay dynamically, pending too many payments may have a negative impact
@@ -738,25 +1038,20 @@ pub struct PaymentActorState {
 impl PaymentActorState {
     pub fn new(args: PaymentActorArguments) -> Self {
         let PaymentActorArguments {
-            init_command,
-            send_payment_reply,
-        } = args;
-        let payment_hash = match &init_command {
-            PaymentActorInitCommand::Send(payment_request) => payment_request.payment_hash,
-            PaymentActorInitCommand::Resume(payment_hash, _) => *payment_hash,
-        };
-        Self {
             payment_hash,
             init_command,
-            send_payment_reply,
+        } = args;
+        Self {
+            payment_hash,
+            init_command: Some(init_command),
             retry_send_payment_count: 0,
         }
     }
 }
 
 pub struct PaymentActorArguments {
-    pub init_command: PaymentActorInitCommand,
-    pub send_payment_reply: Option<RpcReplyPort<Result<SendPaymentResponse, String>>>,
+    pub payment_hash: Hash256,
+    pub init_command: PaymentActorMessage,
 }
 
 pub struct PaymentActor<S> {
@@ -799,18 +1094,10 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let reply = state.send_payment_reply.take().unwrap_or_else(|| {
-            let (send, _recv) = oneshot::channel::<Result<_, _>>();
-            RpcReplyPort::from(send)
-        });
-        let init_msg = match &state.init_command {
-            PaymentActorInitCommand::Send(payment_request) => {
-                PaymentActorMessage::SendPayment(payment_request.clone(), reply)
-            }
-            PaymentActorInitCommand::Resume(_payment_hash, attempt_id) => {
-                PaymentActorMessage::RetrySendPayment(*attempt_id)
-            }
-        };
+        let init_msg = state
+            .init_command
+            .take()
+            .ok_or_else(|| Error::InternalError(anyhow::anyhow!("No init command provided")))?;
         myself.send_message(init_msg).map_err(Into::into)
     }
 
@@ -917,7 +1204,17 @@ where
                     .await;
                 self.check_payment_final(myself, state);
             }
-            PaymentActorMessage::NotifyPaymentFinal => {
+            PaymentActorMessage::OnAddTlcResultEvent {
+                attempt_id,
+                add_tlc_result,
+            } => {
+                self.handle_add_tlc_result_event(myself.clone(), state, attempt_id, add_tlc_result)
+                    .await;
+                self.check_payment_final(myself, state);
+            }
+            PaymentActorMessage::OnRemoveTlcEvent { attempt_id, reason } => {
+                self.handle_remove_tlc_event(myself.clone(), state, attempt_id, reason)
+                    .await;
                 self.check_payment_final(myself, state);
             }
         };
@@ -1326,6 +1623,148 @@ where
         }
 
         Ok(())
+    }
+
+    fn get_payment_session_with_attempt(
+        &self,
+        payment_hash: Hash256,
+        attempt_id: Option<u64>,
+    ) -> (Option<PaymentSession>, Option<Attempt>) {
+        let payment_session = self.store.get_payment_session(payment_hash);
+        let attempt =
+            attempt_id.and_then(|attempt_id| self.store.get_attempt(payment_hash, attempt_id));
+
+        (payment_session, attempt)
+    }
+
+    async fn handle_add_tlc_result_event(
+        &self,
+        myself: ActorRef<PaymentActorMessage>,
+        state: &mut PaymentActorState,
+        attempt_id: Option<u64>,
+        add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
+    ) {
+        let payment_hash = state.payment_hash;
+        let (Some(mut session), Some(mut attempt)) =
+            self.get_payment_session_with_attempt(payment_hash, attempt_id)
+        else {
+            warn!(
+                "Payment session not found: {:?} attempt_id: {:?}",
+                payment_hash, attempt_id
+            );
+            return;
+        };
+
+        match add_tlc_result {
+            Ok(_) => {
+                attempt.set_inflight_status();
+                self.network_graph
+                    .write()
+                    .await
+                    .track_attempt_router(&attempt);
+                self.store.insert_attempt(attempt);
+            }
+            Err((ProcessingChannelError::WaitingTlcAck, _)) => {
+                // do nothing
+            }
+            Err((error, tlc_err)) => {
+                self.update_graph_with_tlc_fail(&self.network, &tlc_err)
+                    .await;
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    tlc_err.clone(),
+                    true,
+                );
+                self.set_attempt_fail_with_error(
+                    &mut session,
+                    &mut attempt,
+                    &error.to_string(),
+                    need_to_retry,
+                );
+
+                if attempt.is_retrying() {
+                    self.register_payment_retry(myself.clone(), state, Some(attempt.id));
+                }
+            }
+        }
+    }
+
+    async fn handle_remove_tlc_event(
+        &self,
+        myself: ActorRef<PaymentActorMessage>,
+        state: &mut PaymentActorState,
+        attempt_id: Option<u64>,
+        reason: RemoveTlcReason,
+    ) {
+        let payment_hash = state.payment_hash;
+        let (Some(mut session), Some(mut attempt)) =
+            self.get_payment_session_with_attempt(payment_hash, attempt_id)
+        else {
+            error!(
+                "Payment session or attempt not found for payment hash: {:?}, attempt id: {:?}",
+                payment_hash, attempt_id
+            );
+            return;
+        };
+
+        match reason {
+            RemoveTlcReason::RemoveTlcFulfill(_) => {
+                self.network_graph
+                    .write()
+                    .await
+                    .record_attempt_success(&attempt);
+                attempt.set_success_status();
+                self.store.insert_attempt(attempt.clone());
+
+                session.update_with_attempt(attempt);
+                if !session.is_dry_run() {
+                    self.store.insert_payment_session(session.clone());
+                }
+            }
+            RemoveTlcReason::RemoveTlcFail(reason) => {
+                let error_detail = reason
+                    .decode(&attempt.session_key, attempt.hops_public_keys())
+                    .unwrap_or_else(|| {
+                        debug_event!(self.network, "InvalidOnionError");
+                        TlcErr::new(TlcErrorCode::InvalidOnionError)
+                    });
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    error_detail.clone(),
+                    false,
+                );
+                debug!(
+                    "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
+                    payment_hash,
+                    error_detail.error_code.as_ref(),
+                    need_to_retry
+                );
+
+                self.set_attempt_fail_with_error(
+                    &mut session,
+                    &mut attempt,
+                    error_detail.error_code.as_ref(),
+                    need_to_retry,
+                );
+
+                if attempt.is_retrying() {
+                    self.register_payment_retry(myself.clone(), state, Some(attempt.id));
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            if let Some(payment_session) = self.store.get_payment_session(payment_hash) {
+                debug_event!(
+                    self.network,
+                    format!(
+                        "after on_remove_tlc_event session_status: {:?}",
+                        payment_session.status
+                    )
+                );
+            }
+        }
     }
 
     fn payment_need_more_retry(&self, session: &mut PaymentSession) -> Result<bool, Error> {

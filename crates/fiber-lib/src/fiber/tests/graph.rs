@@ -3,17 +3,17 @@ use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMI
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::PathFindError;
-use crate::fiber::network::SendPaymentData;
+use crate::fiber::payment::SendPaymentData;
 use crate::fiber::payment::SessionRoute;
-use crate::fiber::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey};
+use crate::fiber::types::{
+    ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey, TrampolineOnionPacket,
+};
 use crate::{
     fiber::{
         graph::{NetworkGraph, RouterHop},
         network::get_chain_hash,
         payment::SendPaymentCommand,
-        types::{
-            ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement, TrampolineOnionPacket,
-        },
+        types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
     },
     store::Store,
 };
