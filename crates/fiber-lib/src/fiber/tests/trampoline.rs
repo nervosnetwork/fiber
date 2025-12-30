@@ -348,6 +348,210 @@ async fn test_trampoline_routing_multi_trampoline_hops() {
 }
 
 #[tokio::test]
+async fn test_trampoline_routing_four_private_trampoline_hops_payment_success() {
+    init_tracing();
+
+    // A --(public)--> T1 --(private)--> T2 --(private)--> T3 --(private)--> T4 --(private)--> C
+    // A only needs a route to the first trampoline. The remaining hops are forwarded via private
+    // channels using the trampoline onion.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+            ((3, 4), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+            ((4, 5), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        6,
+    )
+    .await;
+
+    let [node_a, node_t1, node_t2, node_t3, node_t4, node_c] = nodes.try_into().expect("6 nodes");
+
+    // Wait until A learns T1 supports trampoline routing.
+    let trampoline_pubkey = node_t1.get_public_key();
+    for _ in 0..50 {
+        let ok = node_a
+            .get_network_nodes()
+            .await
+            .into_iter()
+            .find(|n| n.node_id == trampoline_pubkey)
+            .is_some_and(|n| n.features.supports_trampoline_routing());
+        if ok {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    // Wait until A learns enough public channels to reach the first trampoline.
+    for _ in 0..50 {
+        if !node_a.get_network_channels().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .allow_trampoline_routing(true)
+        .build()
+        .expect("build invoice");
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(100_000),
+            trampoline_hops: Some(vec![
+                TrampolineHop::new(node_t1.get_public_key()),
+                TrampolineHop::new(node_t2.get_public_key()),
+                TrampolineHop::new(node_t3.get_public_key()),
+                TrampolineHop::new(node_t4.get_public_key()),
+            ]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    node_a.wait_until_success(res.unwrap().payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines() {
+    init_tracing();
+
+    // A --(public)--> T1 --(public)--> X --(public)--> T2 --(private)--> T3 --(public)--> Y --(public)--> T4 --(private)--> C
+    // The forward hops between trampolines can be routed over public multi-hop paths (T1->T2 and T3->T4).
+    // The last hop to the recipient is private, so A cannot build a direct route from the gossip graph.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((3, 4), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+            ((4, 5), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((5, 6), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((6, 7), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        8,
+    )
+    .await;
+
+    let [node_a, node_t1, _node_x, node_t2, node_t3, _node_y, node_t4, node_c] =
+        nodes.try_into().expect("8 nodes");
+
+    // Wait until A learns T1 supports trampoline routing.
+    let trampoline_pubkey = node_t1.get_public_key();
+    for _ in 0..50 {
+        let ok = node_a
+            .get_network_nodes()
+            .await
+            .into_iter()
+            .find(|n| n.node_id == trampoline_pubkey)
+            .is_some_and(|n| n.features.supports_trampoline_routing());
+        if ok {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    // Wait until A has the public channel update to reach the first trampoline.
+    // (Channel announcements alone are not sufficient for path finding.)
+    let node_a_pubkey = node_a.get_public_key();
+    let node_t1_pubkey = node_t1.get_public_key();
+    for _ in 0..80 {
+        let chans = node_a.get_network_graph_channels().await;
+        let ok = chans.iter().any(|c| {
+            let is_a_t1 = (c.node1 == node_a_pubkey && c.node2 == node_t1_pubkey)
+                || (c.node1 == node_t1_pubkey && c.node2 == node_a_pubkey);
+            is_a_t1 && (c.update_of_node1.is_some() || c.update_of_node2.is_some())
+        });
+        if ok {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    // Wait until T1 has the public graph needed to route to T2 via X.
+    for _ in 0..50 {
+        if node_t1.get_network_channels().await.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    // Wait until T3 has the public graph needed to route to T4 via Y.
+    for _ in 0..50 {
+        if node_t3.get_network_channels().await.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .allow_trampoline_routing(true)
+        .build()
+        .expect("build invoice");
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(1000),
+            trampoline_hops: Some(vec![
+                TrampolineHop::new(node_t2.get_public_key()),
+                TrampolineHop::new(node_t4.get_public_key()),
+            ]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    node_a.wait_until_success(res.unwrap().payment_hash).await;
+
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .allow_trampoline_routing(true)
+        .build()
+        .expect("build invoice");
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    // first try without specifying right trampoline hops
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(1000),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_t4.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_err());
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(1000),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_t2.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+    node_a.wait_until_failed(res.unwrap().payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_trampoline_private_channel_basic() {
     init_tracing();
 
