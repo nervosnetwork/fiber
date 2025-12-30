@@ -12,10 +12,8 @@ use crate::{
         channel::ShutdownInfo,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
-        network::{
-            AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand, SendPaymentData,
-        },
-        payment::SendPaymentCommand,
+        network::{AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand},
+        payment::{SendPaymentCommand, SendPaymentData},
         types::{
             BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
             ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,

@@ -12,7 +12,6 @@ use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
 use rand::seq::{IteratorRandom, SliceRandom};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
@@ -63,9 +62,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BasicMppPaymentData, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
-    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
-    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrorCode,
+    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
+    Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey, RemoveTlcFulfill,
+    RemoveTlcReason, TlcErr, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
@@ -85,19 +84,14 @@ use crate::fiber::channel::{
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use crate::fiber::config::{
-    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS,
-    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
-};
+use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-use crate::fiber::graph::GraphChannelStat;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
-    AttemptStatus, HopHint, PaymentActor, PaymentActorArguments, PaymentActorMessage,
-    PaymentCustomRecords, PaymentStatus, SendPaymentCommand, SendPaymentWithRouterCommand,
-    USER_CUSTOM_RECORDS_MAX_INDEX,
+    AttemptStatus, PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords,
+    PaymentStatus, SendPaymentCommand, SendPaymentWithRouterCommand,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -421,250 +415,6 @@ pub struct BuildRouterCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentRouter {
     pub router_hops: Vec<RouterHop>,
-}
-
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendPaymentData {
-    pub target_pubkey: Pubkey,
-    pub amount: u128,
-    pub payment_hash: Hash256,
-    pub invoice: Option<String>,
-    pub final_tlc_expiry_delta: u64,
-    pub tlc_expiry_limit: u64,
-    pub timeout: Option<u64>,
-    pub max_fee_amount: Option<u128>,
-    /// The number of parts for the payment, only used for multi-part payment
-    pub max_parts: Option<u64>,
-    pub keysend: bool,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub udt_type_script: Option<Script>,
-    pub preimage: Option<Hash256>,
-    pub custom_records: Option<PaymentCustomRecords>,
-    pub allow_self_payment: bool,
-    pub hop_hints: Vec<HopHint>,
-    pub router: Vec<RouterHop>,
-    pub allow_mpp: bool,
-    pub dry_run: bool,
-    #[serde(skip)]
-    pub channel_stats: GraphChannelStat,
-}
-
-impl SendPaymentData {
-    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
-        let invoice = command
-            .invoice
-            .as_ref()
-            .map(|invoice| invoice.parse::<CkbInvoice>())
-            .transpose()
-            .map_err(|_| "invoice is invalid".to_string())?;
-
-        if let Some(invoice) = invoice.clone() {
-            if invoice.is_expired() {
-                return Err("invoice is expired".to_string());
-            }
-        }
-
-        fn validate_field<T: PartialEq + Clone>(
-            field: Option<T>,
-            invoice_field: Option<T>,
-            field_name: &str,
-        ) -> Result<T, String> {
-            match (field, invoice_field) {
-                (Some(f), Some(i)) => {
-                    if f != i {
-                        return Err(format!("{} does not match the invoice", field_name));
-                    }
-                    Ok(f)
-                }
-                (Some(f), None) => Ok(f),
-                (None, Some(i)) => Ok(i),
-                (None, None) => Err(format!("{} is missing", field_name)),
-            }
-        }
-
-        let target = validate_field(
-            command.target_pubkey,
-            invoice
-                .as_ref()
-                .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
-            "target_pubkey",
-        )?;
-
-        let amount = validate_field(
-            command.amount,
-            invoice.as_ref().and_then(|i| i.amount()),
-            "amount",
-        )?;
-
-        let udt_type_script = match validate_field(
-            command.udt_type_script.clone(),
-            invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
-            "udt_type_script",
-        ) {
-            Ok(script) => Some(script),
-            Err(e) if e == "udt_type_script is missing" => None,
-            Err(e) => return Err(e),
-        };
-
-        // check htlc expiry delta and limit are both valid if it is set
-        let final_tlc_expiry_delta = invoice
-            .as_ref()
-            .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
-            .or(command.final_tlc_expiry_delta)
-            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
-        if !(MIN_TLC_EXPIRY_DELTA..=MAX_PAYMENT_TLC_EXPIRY_LIMIT).contains(&final_tlc_expiry_delta)
-        {
-            return Err(format!(
-                "invalid final_tlc_expiry_delta, expect between {} and {}",
-                MIN_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT
-            ));
-        }
-
-        let tlc_expiry_limit = command
-            .tlc_expiry_limit
-            .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
-
-        if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
-            return Err(format!(
-                "tlc_expiry_limit is too small, final_tlc_expiry_delta: {}, tlc_expiry_limit: {}",
-                final_tlc_expiry_delta, tlc_expiry_limit
-            ));
-        }
-        if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
-            return Err(format!(
-                "tlc_expiry_limit is too large, expect it to less than {}",
-                MAX_PAYMENT_TLC_EXPIRY_LIMIT
-            ));
-        }
-
-        let keysend = command.keysend.unwrap_or(false);
-        let (payment_hash, preimage) = if !keysend {
-            (
-                validate_field(
-                    command.payment_hash,
-                    invoice.as_ref().map(|i| *i.payment_hash()),
-                    "payment_hash",
-                )?,
-                None,
-            )
-        } else {
-            if invoice.is_some() {
-                return Err("keysend payment should not have invoice".to_string());
-            }
-            if command.payment_hash.is_some() {
-                return Err("keysend payment should not have payment_hash".to_string());
-            }
-            // generate a random preimage for keysend payment
-            let mut rng = rand::thread_rng();
-            let mut result = [0u8; 32];
-            rng.fill(&mut result[..]);
-            let preimage: Hash256 = result.into();
-            // use the default payment hash algorithm here for keysend payment
-            let payment_hash: Hash256 = blake2b_256(preimage).into();
-            (payment_hash, Some(preimage))
-        };
-
-        if udt_type_script.is_none() && amount >= u64::MAX as u128 {
-            return Err(format!(
-                "The payment amount ({}) should be less than {}",
-                amount,
-                u64::MAX
-            ));
-        }
-
-        if amount == 0 {
-            return Err("amount must be greater than 0".to_string());
-        }
-
-        let max_fee_amount = command.max_fee_amount.unwrap_or(0);
-        if amount.checked_add(max_fee_amount).is_none() {
-            return Err(format!(
-                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
-                amount, max_fee_amount
-            ));
-        }
-
-        let hop_hints = command.hop_hints.unwrap_or_default();
-
-        let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
-        let payment_secret = invoice
-            .as_ref()
-            .and_then(|inv| inv.payment_secret().cloned());
-        if allow_mpp && payment_secret.is_none() {
-            return Err("payment secret is required for multi-path payment".to_string());
-        }
-        if allow_mpp
-            && command
-                .max_parts
-                .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAX_PARTS_LIMIT)
-        {
-            return Err(format!(
-                "invalid max_parts, value should be in range [1, {}]",
-                PAYMENT_MAX_PARTS_LIMIT
-            ));
-        }
-
-        if let Some(custom_records) = &command.custom_records {
-            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
-                > MAX_CUSTOM_RECORDS_SIZE
-            {
-                return Err(format!(
-                    "the sum size of custom_records's value can not more than {} bytes",
-                    MAX_CUSTOM_RECORDS_SIZE
-                ));
-            }
-
-            if custom_records
-                .data
-                .keys()
-                .any(|k| *k > USER_CUSTOM_RECORDS_MAX_INDEX)
-            {
-                return Err(format!(
-                    "custom_records key should in range 0 ~ {:?}",
-                    USER_CUSTOM_RECORDS_MAX_INDEX
-                ));
-            }
-        }
-
-        let mut custom_records = command.custom_records;
-        // bolt04 write payment data record to custom records if payment secret is set
-        if let Some(payment_secret) = payment_secret {
-            let records = custom_records.get_or_insert_with(PaymentCustomRecords::default);
-            BasicMppPaymentData::new(payment_secret, amount).write(records);
-        }
-
-        Ok(SendPaymentData {
-            target_pubkey: target,
-            amount,
-            payment_hash,
-            invoice: command.invoice,
-            final_tlc_expiry_delta,
-            tlc_expiry_limit,
-            timeout: command.timeout,
-            max_fee_amount: command.max_fee_amount,
-            max_parts: command.max_parts,
-            keysend,
-            udt_type_script,
-            preimage,
-            custom_records,
-            allow_self_payment: command.allow_self_payment,
-            hop_hints,
-            allow_mpp,
-            router: vec![],
-            dry_run: command.dry_run,
-            channel_stats: Default::default(),
-        })
-    }
-
-    pub fn max_parts(&self) -> usize {
-        self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) as usize
-    }
-
-    pub fn allow_mpp(&self) -> bool {
-        // only allow mpp if max_parts is greater than 1 and not keysend
-        self.allow_mpp && self.max_parts() > 1 && !self.keysend
-    }
 }
 
 #[derive(Debug)]
@@ -1192,7 +942,7 @@ where
                 }
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
-                self.ensure_payment_command(
+                self.resume_payment_actor_and_send_command(
                     myself,
                     state,
                     payment_hash,
@@ -2699,7 +2449,7 @@ where
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
     ) {
-        self.ensure_payment_command(
+        self.resume_payment_actor_and_send_command(
             myself,
             state,
             payment_hash,
@@ -2751,7 +2501,7 @@ where
             return;
         }
 
-        self.ensure_payment_command(
+        self.resume_payment_actor_and_send_command(
             myself,
             state,
             payment_hash,
@@ -2776,7 +2526,7 @@ where
         }
     }
 
-    async fn ensure_payment_command(
+    async fn resume_payment_actor_and_send_command(
         &self,
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
