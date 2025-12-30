@@ -3,9 +3,9 @@ use super::config::AnnouncedNodeName;
 use super::features::FeatureVector;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
-use super::network::{get_chain_hash, BuildRouterCommand, SendPaymentData};
+use super::network::{get_chain_hash, BuildRouterCommand};
 use super::path::NodeHeap;
-use super::payment::HopHint;
+use super::payment::{HopHint, SendPaymentData};
 use super::types::{
     BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
     NodeAnnouncement,
