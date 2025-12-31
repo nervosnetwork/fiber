@@ -1,3 +1,4 @@
+use ckb_jsonrpc_types::JsonBytes;
 use ckb_sdk::{rpc::ckb_indexer::*, CkbRpcAsyncClient, RpcError};
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
@@ -126,6 +127,29 @@ impl From<Option<ckb_jsonrpc_types::TransactionWithStatusResponse>> for GetShutd
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GetCellsRequest {
+    pub search_key: SearchKey,
+    pub order: Order,
+    pub limit: u32,
+    pub after: Option<JsonBytes>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GetCellsResponse {
+    pub objects: Vec<Cell>,
+    pub last_cursor: JsonBytes,
+}
+
+impl From<Pagination<Cell>> for GetCellsResponse {
+    fn from(value: Pagination<Cell>) -> Self {
+        Self {
+            objects: value.objects,
+            last_cursor: value.last_cursor,
+        }
+    }
+}
+
 #[derive(Debug, AsRefStr)]
 pub enum CkbChainMessage {
     Fund(
@@ -160,6 +184,10 @@ pub enum CkbChainMessage {
     GetShutdownTx(
         GetShutdownTxRequest,
         RpcReplyPort<Result<Option<GetShutdownTxResponse>, RpcError>>,
+    ),
+    GetCells(
+        GetCellsRequest,
+        RpcReplyPort<Result<GetCellsResponse, RpcError>>,
     ),
     Stop,
 }
@@ -338,6 +366,11 @@ impl Actor for CkbChainActor {
                 let response = get_shutdown_tx(&client, request).await;
                 let _ = reply_port.send(response);
             }
+            CkbChainMessage::GetCells(request, reply_port) => {
+                let client = state.config.ckb_rpc_client();
+                let response = get_cells(&client, request).await;
+                let _ = reply_port.send(response);
+            }
             CkbChainMessage::Stop => {
                 myself.stop(Some("stop received".to_string()));
             }
@@ -455,4 +488,19 @@ async fn get_shutdown_tx(
     let shutdown_tx_hash: Hash256 = tx.tx_hash.clone().into();
     let tx_with_status = client.get_transaction(shutdown_tx_hash.into()).await?;
     Ok(Some(tx_with_status.into()))
+}
+
+async fn get_cells(
+    client: &CkbRpcAsyncClient,
+    GetCellsRequest {
+        search_key,
+        order,
+        limit,
+        after,
+    }: GetCellsRequest,
+) -> Result<GetCellsResponse, RpcError> {
+    client
+        .get_cells(search_key, order, limit.into(), after)
+        .await
+        .map(GetCellsResponse::from)
 }

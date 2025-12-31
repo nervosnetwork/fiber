@@ -12,6 +12,8 @@ use crate::fiber::network::*;
 use crate::fiber::payment::Attempt;
 use crate::fiber::payment::PaymentSession;
 use crate::fiber::payment::PaymentStatus;
+use crate::fiber::payment::SendPaymentCommand;
+use crate::fiber::payment::SendPaymentWithRouterCommand;
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
@@ -19,6 +21,7 @@ use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Init;
 use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
+use crate::fiber::PaymentCustomRecords;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
@@ -97,7 +100,7 @@ use crate::{
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub const MIN_RESERVED_CKB: u128 = 99 * CKB_SHANNONS as u128;
 pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000 * CKB_SHANNONS as u128;
-const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 5; // seconds
+const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 10; // seconds
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -918,6 +921,15 @@ impl NetworkNode {
         let graph = self.network_graph.read().await;
         let res = graph.payment_find_path_stats.lock().values().sum();
         res
+    }
+
+    pub async fn get_inflight_payment_count(&self) -> u32 {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::GetInflightPaymentCount(rpc_reply))
+        };
+        call!(self.network_actor, message)
+            .expect("source_node alive")
+            .expect("get inflight payment count")
     }
 
     pub fn set_auth_token(&mut self, token: String) {

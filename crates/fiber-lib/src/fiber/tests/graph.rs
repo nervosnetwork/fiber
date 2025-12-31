@@ -8,7 +8,8 @@ use crate::fiber::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, 
 use crate::{
     fiber::{
         graph::{NetworkGraph, RouterHop},
-        network::{get_chain_hash, SendPaymentCommand, SendPaymentData},
+        network::get_chain_hash,
+        payment::{SendPaymentCommand, SendPaymentData},
         types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
     },
     store::Store,

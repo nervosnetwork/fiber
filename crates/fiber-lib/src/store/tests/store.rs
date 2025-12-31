@@ -2,7 +2,7 @@ use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::*;
 #[allow(unused)]
 use crate::fiber::{
@@ -10,8 +10,7 @@ use crate::fiber::{
     graph::*,
     history::Direction,
     history::TimedResult,
-    network::SendPaymentData,
-    payment::{PaymentSession, PaymentStatus},
+    payment::{PaymentSession, PaymentStatus, SendPaymentData},
     types::{Privkey, Pubkey},
 };
 use crate::gen_rand_fiber_private_key;

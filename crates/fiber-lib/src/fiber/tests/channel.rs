@@ -10,10 +10,8 @@ use crate::fiber::config::{
 };
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::ChannelInfo;
-use crate::fiber::network::{
-    DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason, SendPaymentCommand,
-};
-use crate::fiber::payment::PaymentStatus;
+use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason};
+use crate::fiber::payment::{PaymentStatus, SendPaymentCommand};
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
     TlcErrorCode, NO_SHARED_SECRET,
@@ -6142,7 +6140,7 @@ async fn test_channel_one_peer_check_active_fail() {
     for _ in 0..50 {
         if matches!(
             node_0.get_channel_actor_state(channels[0]).state,
-            ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
         ) {
             break;
         }

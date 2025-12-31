@@ -9,7 +9,7 @@ use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 #[cfg(any(debug_assertions, feature = "bench"))]
 use crate::fiber::network::DebugEvent;
-use crate::fiber::network::PaymentCustomRecords;
+use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::TxSignatures;
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
@@ -43,9 +43,8 @@ use crate::{
         },
         hash_algorithm::HashAlgorithm,
         key::blake2b_hash_with_salt,
-        network::{
-            get_chain_hash, sign_network_message, FiberMessageWithPeerId, SendOnionPacketCommand,
-        },
+        network::SendOnionPacketCommand,
+        network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
             AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
@@ -1750,18 +1749,23 @@ where
         peeled_onion_packet: PeeledPaymentOnionPacket,
         forward_fee: u128,
     ) {
+        let (send, _recv) = oneshot::channel::<Result<(), TlcErr>>();
+        let port = RpcReplyPort::from(send);
         match self.network.send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendPaymentOnionPacket(SendOnionPacketCommand {
-                peeled_onion_packet: peeled_onion_packet.clone(),
-                previous_tlc: Some(PrevTlcInfo::new(
-                    state.get_id(),
-                    u64::from(tlc_id),
-                    forward_fee,
-                )),
-                payment_hash,
-                // forward tlc always set attempt_id to None
-                attempt_id: None,
-            }),
+            NetworkActorCommand::SendPaymentOnionPacket(
+                SendOnionPacketCommand {
+                    peeled_onion_packet: peeled_onion_packet.clone(),
+                    previous_tlc: Some(PrevTlcInfo::new(
+                        state.get_id(),
+                        u64::from(tlc_id),
+                        forward_fee,
+                    )),
+                    payment_hash,
+                    // forward tlc always set attempt_id to None
+                    attempt_id: None,
+                },
+                port,
+            ),
         )) {
             Ok(_) => {
                 // we successfully sent the forward tlc, we will wait for the result
@@ -1826,20 +1830,25 @@ where
         state: &mut ChannelActorState,
         trigger_next: bool,
     ) {
+        debug!(
+            "apply_retryable_tlc_operations start: remained_ops={} waiting_tlc_ack={} reestablishing={}",
+            state.retryable_tlc_operations.len(),
+            state.is_waiting_tlc_ack(),
+            state.reestablishing
+        );
+        state.log_ack_state("[ack] retryable_ops_start");
         loop {
             if state.is_waiting_tlc_ack() {
+                state.log_ack_state("[ack] retryable_ops_blocked");
                 debug!(
-                    "Channel {:?} is in WaitingTlcAck state, break apply tlc operations: {:?}, state.tlc_state.waiting_tlc: {:?} nonce_for_send: {:?}, nonce_for_verify: {:?}",
-                    state.get_id(),
-                    state.retryable_tlc_operations.len(),
-                    state.tlc_state.waiting_ack,
-                    state.remote_revocation_nonce_for_send.is_none(),
-                    state.remote_revocation_nonce_for_verify.is_none()
+                    "apply_retryable_tlc_operations blocked remained_ops={}",
+                    state.retryable_tlc_operations.len()
                 );
                 break;
             }
 
             let Some(operation) = state.retryable_tlc_operations.pop_front() else {
+                debug!("apply_retryable_tlc_operations empty queue, exiting",);
                 return;
             };
 
@@ -1881,6 +1890,12 @@ where
         if trigger_next {
             state.schedule_next_retry_task(myself);
         }
+        debug!(
+            "apply_retryable_tlc_operations finished: remained_ops={} trigger_next={} waiting_tlc_ack={}",
+            state.retryable_tlc_operations.len(),
+            trigger_next,
+            state.is_waiting_tlc_ack()
+        );
     }
 
     fn handle_forward_tlc_result(
@@ -3963,6 +3978,8 @@ bitflags! {
         const FUNDING_ABORTED = 1 << 3;
         /// Indicates that channel is closed uncooperatively, initiated by remote forcibly.
         const UNCOOPERATIVE_REMOTE = 1 << 4;
+        /// Indicates on-chain settlement for the channel is still in progress.
+        const WAITING_ONCHAIN_SETTLEMENT = 1 << 5;
     }
 }
 
@@ -4182,6 +4199,11 @@ impl ChannelActorState {
 
     pub fn set_waiting_ack(&mut self, myself: &ActorRef<ChannelActorMessage>, waiting_ack: bool) {
         self.tlc_state.set_waiting_ack(waiting_ack);
+        self.log_ack_state(if waiting_ack {
+            "[ack] set_waiting_ack(true)"
+        } else {
+            "[ack] set_waiting_ack(false)"
+        });
         if waiting_ack {
             self.set_waiting_peer_response();
             myself.send_after(Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT), || {
@@ -4190,6 +4212,18 @@ impl ChannelActorState {
         } else {
             self.clear_waiting_peer_response();
         }
+    }
+
+    fn log_ack_state(&self, context: &str) {
+        debug!(
+            channel = ?self.get_id(),
+            "{} waiting_ack={} send_present={} verify_present={} next_present={}",
+            context,
+            self.tlc_state.waiting_ack,
+            self.remote_revocation_nonce_for_send.is_some(),
+            self.remote_revocation_nonce_for_verify.is_some(),
+            self.remote_revocation_nonce_for_next.is_some()
+        );
     }
 
     pub fn try_create_channel_messages(&mut self) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
@@ -4603,6 +4637,7 @@ impl ChannelActorState {
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
         }
+        state.log_ack_state("[ack] new_inbound_channel");
         state
     }
 
@@ -4628,7 +4663,7 @@ impl ChannelActorState {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
         let temp_channel_id = derive_temp_channel_id_from_tlc_key(&local_pubkeys.tlc_base_key);
-        Self {
+        let state = Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             public_channel_info,
             local_tlc_info,
@@ -4680,7 +4715,9 @@ impl ChannelActorState {
             pending_notify_settle_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
-        }
+        };
+        state.log_ack_state("[ack] new_outbound_channel");
+        state
     }
 
     fn check_accept_channel_parameters(&self) -> ProcessingChannelResult {
@@ -4967,6 +5004,7 @@ impl ChannelActorState {
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    self.log_ack_state("[ack] send_revoke_and_ack_message(resend_cached)");
                     return Ok(());
                 }
                 None => {
@@ -5054,6 +5092,7 @@ impl ChannelActorState {
         } else {
             self.remote_revocation_nonce_for_send = None;
         }
+        self.log_ack_state("[ack] send_revoke_and_ack_message");
 
         self.network()
             .send_message(NetworkActorMessage::new_command(
@@ -6024,6 +6063,7 @@ impl ChannelActorState {
         self.remote_revocation_nonce_for_send = Some(accept_channel.next_revocation_nonce.clone());
         self.remote_revocation_nonce_for_verify =
             Some(accept_channel.next_revocation_nonce.clone());
+        self.log_ack_state("[ack] handle_accept_channel_message");
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_public_keys = Some(remote_pubkeys);
         self.remote_commitment_points = vec![
@@ -6683,6 +6723,7 @@ impl ChannelActorState {
         } else {
             self.remote_revocation_nonce_for_verify = None;
         }
+        self.log_ack_state("[ack] handle_revoke_and_ack_peer_message");
 
         self.network()
             .send_message(NetworkActorMessage::new_notification(
@@ -7527,9 +7568,13 @@ impl ChannelActorState {
         let closed_state = if force {
             debug!("Channel closed with uncooperative close");
             if close_by_us {
-                ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL)
+                ChannelState::Closed(
+                    CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+                )
             } else {
-                ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE)
+                ChannelState::Closed(
+                    CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+                )
             }
         } else {
             debug!("Channel closed with cooperative close");

@@ -49,7 +49,7 @@ impl Store {
         self.db.delete(key).expect("Unexpected error from get");
     }
 
-    pub(crate) fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
+    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
         self.db.put(key, value).expect("put should be ok");
     }
 
