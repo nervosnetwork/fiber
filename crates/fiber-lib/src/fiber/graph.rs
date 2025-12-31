@@ -36,7 +36,6 @@ use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
-use ckb_types::prelude::Entity;
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use secp256k1::Secp256k1;
@@ -1264,24 +1263,10 @@ where
         let target = payment_data.target_pubkey;
         let total_fee_budget = max_fee_amount.unwrap_or(0);
 
-        let invoice = payment_data
-            .invoice
-            .clone()
-            .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
-        let hash_algorithm = invoice
-            .as_ref()
-            .and_then(|x| x.hash_algorithm().copied())
-            .unwrap_or_default();
-
         let fee_budget_forward = total_fee_budget.saturating_mul(50) / 100;
         let fee_budget_routing = total_fee_budget.saturating_sub(fee_budget_forward);
 
         let secp = Secp256k1::new();
-        let udt_type_script = payment_data
-            .udt_type_script
-            .as_ref()
-            .map(|s| s.as_bytes().to_vec());
-
         // When forwarding through trampoline hops, each trampoline node needs additional expiry
         // slack (similar to a channel's `tlc_expiry_delta`) so it can safely forward to the next
         // hop. Use per-hop `tlc_expiry_delta` when provided, else default.
@@ -1367,21 +1352,17 @@ where
                     next_node_id,
                     next_is_trampoline: !is_last_trampoline,
                     amount_to_forward: forward_amounts[idx],
-                    hash_algorithm,
                     tlc_expiry_delta: trampoline_forward_expiry_delta(
                         payment_data.final_tlc_expiry_delta,
                         remaining_trampoline_hops_after_next,
                     ),
-                    udt_type_script: udt_type_script.clone(),
                 });
             }
 
             payloads.push(TrampolineHopPayload::Final {
                 final_amount,
                 final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
-                udt_type_script,
                 payment_preimage: payment_data.preimage,
-                hash_algorithm,
                 custom_records: payment_data.custom_records.clone(),
             });
 

@@ -1183,17 +1183,12 @@ where
         if let Some(TrampolineHopPayload::Final {
             final_amount,
             final_tlc_expiry_delta: _,
-            udt_type_script: _,
             payment_preimage,
-            hash_algorithm,
             custom_records,
         }) = last_hop_inner_onion
         {
             if forward_amount != add_tlc.amount || forward_amount != final_amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
-            }
-            if hash_algorithm != add_tlc.hash_algorithm {
-                return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
 
             final_payment_preimage = payment_preimage;

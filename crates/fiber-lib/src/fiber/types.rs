@@ -3788,15 +3788,11 @@ pub enum TrampolineHopPayload {
         next_is_trampoline: bool,
         /// Amount that should be forwarded to `next_node_id` (excluding this node's fee).
         amount_to_forward: u128,
-        /// Hash algorithm used for the payment hash/preimage relationship.
-        hash_algorithm: HashAlgorithm,
         /// TLC expiry delta required at `next_node_id` to complete the remaining payment.
         ///
         /// For the final recipient this is the invoice's `final_tlc_expiry_delta`. For trampoline
         /// hops it also includes additional slack so the trampoline can forward further.
         tlc_expiry_delta: u64,
-        /// Optional UDT type script bytes for the payment (None means CKB).
-        udt_type_script: Option<Vec<u8>>,
     },
     /// Payload for the final recipient.
     Final {
@@ -3804,12 +3800,8 @@ pub enum TrampolineHopPayload {
         final_amount: u128,
         /// Final hop expiry delta required by the invoice.
         final_tlc_expiry_delta: u64,
-        /// Optional UDT type script bytes for the payment (None means CKB).
-        udt_type_script: Option<Vec<u8>>,
         /// Optional payment preimage (keysend).
         payment_preimage: Option<Hash256>,
-        /// Hash algorithm used for the payment hash/preimage relationship.
-        hash_algorithm: HashAlgorithm,
         /// Custom records that must reach the final recipient (e.g. MPP records).
         custom_records: Option<PaymentCustomRecords>,
     },

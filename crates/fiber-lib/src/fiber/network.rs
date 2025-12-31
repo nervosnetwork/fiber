@@ -2371,6 +2371,16 @@ where
             trampoline_outer_shared_secret = Some(peeled_onion_packet.shared_secret);
 
             let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
+            let prev_channel_state = self
+                .store
+                .get_channel_actor_state(&previous_tlc.expect("got previous tlc").prev_channel_id)
+                .ok_or_else(|| {
+                    TlcErr::new_node_fail(
+                        TlcErrorCode::TemporaryNodeFailure,
+                        state.get_public_key(),
+                    )
+                })?;
+            let udt_type_script = prev_channel_state.funding_udt_type_script.clone();
             let peeled_trampoline = trampoline_packet
                 .peel(
                     &state.private_key,
@@ -2391,9 +2401,7 @@ where
                     next_node_id,
                     next_is_trampoline,
                     amount_to_forward,
-                    hash_algorithm,
                     tlc_expiry_delta,
-                    udt_type_script,
                 } => {
                     let remaining_trampoline_onion = peeled_trampoline.next.map(|p| p.into_bytes());
 
@@ -2408,9 +2416,7 @@ where
                         max_fee_amount,
                         max_parts: Some(1),
                         keysend: false,
-                        udt_type_script: udt_type_script
-                            .as_deref()
-                            .and_then(|bytes| Script::from_slice(bytes).ok()),
+                        udt_type_script,
                         preimage: None,
                         custom_records: None,
                         allow_self_payment: true,
@@ -2447,11 +2453,6 @@ where
                                 state.get_public_key(),
                             )
                         })?;
-
-                    // Ensure the hash algorithm remains consistent across trampoline legs.
-                    for hop in &mut hops {
-                        hop.hash_algorithm = hash_algorithm;
-                    }
 
                     // If we are forwarding to another trampoline hop, make sure that next trampoline
                     // receives a forward fee (received_amount - forward_amount) so it can forward
