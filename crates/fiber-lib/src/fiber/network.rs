@@ -94,9 +94,8 @@ use crate::fiber::graph::GraphChannelStat;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
-    AttemptStatus, HopHint, PaymentActor, PaymentActorArguments, PaymentActorMessage,
-    PaymentCustomRecords, PaymentStatus, SendPaymentCommand, SendPaymentData,
-    SendPaymentWithRouterCommand,
+    AttemptStatus, PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords,
+    PaymentStatus, SendPaymentCommand, SendPaymentData, SendPaymentWithRouterCommand,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -2424,17 +2423,6 @@ where
                         channel_stats: Default::default(),
                     };
 
-                    // Trampoline forwarding frequently targets a node reachable via a private
-                    // channel (not in the gossip graph). Add a hop hint for a direct local
-                    // channel to `next_node_id` if we have one.
-                    if let Some(hint) = self.find_direct_hop_hint(
-                        state.get_public_key(),
-                        next_node_id,
-                        request.udt_type_script.as_ref(),
-                    ) {
-                        request.hop_hints.push(hint);
-                    }
-
                     let graph = self.network_graph.read().await;
                     request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
 
@@ -2563,54 +2551,6 @@ where
                 return Err(tlc_error);
             }
         }
-    }
-
-    fn find_direct_hop_hint(
-        &self,
-        source_node_id: Pubkey,
-        target_node_id: Pubkey,
-        udt_type_script: Option<&Script>,
-    ) -> Option<HopHint> {
-        // Find any ready local channel directly connected to `target_node_id`, even if private.
-        // Hop hints are primarily used for the last hop and allow routing without public gossip.
-        for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
-            if !matches!(channel_state, ChannelState::ChannelReady) {
-                continue;
-            }
-
-            let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) else {
-                continue;
-            };
-
-            if actor_state.local_pubkey != source_node_id {
-                continue;
-            }
-
-            if actor_state.remote_pubkey != target_node_id {
-                continue;
-            }
-
-            if actor_state.funding_udt_type_script.as_ref() != udt_type_script {
-                continue;
-            }
-
-            let Some(funding_tx) = actor_state.funding_tx.as_ref() else {
-                continue;
-            };
-
-            let channel_outpoint = OutPoint::new(funding_tx.calc_tx_hash(), 0);
-
-            return Some(HopHint {
-                // In this codebase, hop hints are interpreted as an extra private edge
-                // from `hint.pubkey` -> target.
-                pubkey: source_node_id,
-                channel_outpoint,
-                fee_rate: actor_state.local_tlc_info.tlc_fee_proportional_millionths as u64,
-                tlc_expiry_delta: actor_state.local_tlc_info.tlc_expiry_delta,
-            });
-        }
-
-        None
     }
 
     fn get_tlc_error(

@@ -1925,6 +1925,128 @@ pub async fn wait_until<F: Fn() -> bool>(f: F) {
     wait_until_timeout(MAX_WAIT_TIME, f).await;
 }
 
+pub async fn wait_until_async_timeout<F, Fut>(mut f: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = tokio::time::Instant::now();
+    let interval = Duration::from_millis(200);
+    let max_wait_time = Duration::from_secs(10);
+    loop {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(interval).await;
+        if start.elapsed() > max_wait_time {
+            panic!(
+                "Wait timeout after {:?} (interval {:?})",
+                max_wait_time, interval
+            );
+        }
+    }
+}
+
+pub async fn wait_until_node_supports_trampoline_routing(node: &NetworkNode, target: &NetworkNode) {
+    let target = target.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_nodes()
+            .await
+            .into_iter()
+            .find(|n| n.node_id == target)
+            .is_some_and(|n| n.features.supports_trampoline_routing())
+    })
+    .await;
+}
+
+pub async fn wait_until_graph_channel_has_update(
+    node: &NetworkNode,
+    node1: &NetworkNode,
+    node2: &NetworkNode,
+) {
+    let node1 = node1.get_public_key();
+    let node2 = node2.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_graph_channels()
+            .await
+            .into_iter()
+            .any(|c| {
+                let is_pair = (c.node1 == node1 && c.node2 == node2)
+                    || (c.node1 == node2 && c.node2 == node1);
+                is_pair && (c.update_of_node1.is_some() || c.update_of_node2.is_some())
+            })
+    })
+    .await;
+}
+
+pub async fn wait_until_graph_channel_has_update_for_direction(
+    node: &NetworkNode,
+    from: &NetworkNode,
+    to: &NetworkNode,
+) {
+    let from = from.get_public_key();
+    let to = to.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_graph_channels()
+            .await
+            .into_iter()
+            .any(|c| {
+                if c.node1 == from && c.node2 == to {
+                    c.update_of_node1.is_some()
+                } else if c.node2 == from && c.node1 == to {
+                    c.update_of_node2.is_some()
+                } else {
+                    false
+                }
+            })
+    })
+    .await;
+}
+
+pub async fn wait_until_graph_channel_has_updates(
+    node: &NetworkNode,
+    edges: &[(&NetworkNode, &NetworkNode)],
+) {
+    for (node1, node2) in edges {
+        wait_until_graph_channel_has_update(node, node1, node2).await;
+    }
+}
+
+pub async fn wait_until_graph_channel_updates_along_path(
+    node: &NetworkNode,
+    path: &[&NetworkNode],
+) {
+    assert!(
+        path.len() >= 2,
+        "path must include at least 2 nodes (got {})",
+        path.len()
+    );
+
+    for window in path.windows(2) {
+        wait_until_graph_channel_has_update(node, window[0], window[1]).await;
+    }
+}
+
+pub async fn wait_until_graph_channel_updates_along_directed_path(
+    node: &NetworkNode,
+    path: &[&NetworkNode],
+) {
+    assert!(
+        path.len() >= 2,
+        "path must include at least 2 nodes (got {})",
+        path.len()
+    );
+
+    for window in path.windows(2) {
+        wait_until_graph_channel_has_update_for_direction(node, window[0], window[1]).await;
+    }
+}
+
+pub async fn wait_until_node_has_public_channels_at_least(node: &NetworkNode, channels: usize) {
+    wait_until_async_timeout(|| async { node.get_network_channels().await.len() >= channels })
+        .await;
+}
+
 #[tokio::test]
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;

@@ -43,6 +43,8 @@ use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
@@ -51,6 +53,19 @@ use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, trace, warn};
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
+
+#[cfg(test)]
+static FIND_PATH_CALL_COUNT_FOR_TESTS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_find_path_call_count_for_tests() {
+    FIND_PATH_CALL_COUNT_FOR_TESTS.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn find_path_call_count_for_tests() -> u64 {
+    FIND_PATH_CALL_COUNT_FOR_TESTS.load(Ordering::SeqCst)
+}
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1702,6 +1717,9 @@ where
         channel_stats: &GraphChannelStat,
         allow_mpp: bool,
     ) -> Result<Vec<RouterHop>, PathFindError> {
+        #[cfg(test)]
+        FIND_PATH_CALL_COUNT_FOR_TESTS.fetch_add(1, Ordering::SeqCst);
+
         debug!(
             "begin find_path from {:?} to {:?} amount: {:?}",
             source, target, amount

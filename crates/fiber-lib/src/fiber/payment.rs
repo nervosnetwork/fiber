@@ -42,7 +42,7 @@ use tracing::{debug, error, warn};
 
 // Maximum number of trampoline nodes encoded in the inner trampoline onion.
 // This is a safety guard against excessive route construction work.
-const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 10;
+const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
