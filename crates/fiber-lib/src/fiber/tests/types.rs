@@ -281,14 +281,16 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
     let payloads = vec![
         TrampolineHopPayload::Forward {
             next_node_id: t2.pubkey(),
-            next_is_trampoline: true,
             amount_to_forward: 50_000,
+            build_amount: 50_000,
+            build_max_fee_amount: None,
             tlc_expiry_delta: 1234,
         },
         TrampolineHopPayload::Forward {
             next_node_id: final_node.pubkey(),
-            next_is_trampoline: false,
             amount_to_forward: 50_000,
+            build_amount: 50_000,
+            build_max_fee_amount: None,
             tlc_expiry_delta: 1234,
         },
         TrampolineHopPayload::Final {

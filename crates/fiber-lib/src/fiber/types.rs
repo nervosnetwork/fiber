@@ -3780,14 +3780,18 @@ pub enum TrampolineHopPayload {
     Forward {
         /// Next node in the trampoline route (could be another trampoline or the final recipient).
         next_node_id: Pubkey,
-        /// Whether `next_node_id` is itself a trampoline hop (and thus requires a forward-fee budget).
-        ///
-        /// When false, `next_node_id` is treated as the final recipient for the purpose of outer-onion
-        /// fee allocation.
-        #[serde(default)]
-        next_is_trampoline: bool,
         /// Amount that should be forwarded to `next_node_id` (excluding this node's fee).
         amount_to_forward: u128,
+        /// Amount used when building the *outer* route from this trampoline node to `next_node_id`.
+        ///
+        /// This is computed during the initial router build (trampoline onion construction), so
+        /// trampoline forwarding does not need to re-derive fee allocation.
+        build_amount: u128,
+        /// Fee budget used when building the *outer* route from this trampoline node to `next_node_id`.
+        ///
+        /// This is computed during the initial router build (trampoline onion construction), so
+        /// trampoline forwarding does not need to re-derive fee allocation.
+        build_max_fee_amount: Option<u128>,
         /// TLC expiry delta required at `next_node_id` to complete the remaining payment.
         ///
         /// For the final recipient this is the invoice's `final_tlc_expiry_delta`. For trampoline

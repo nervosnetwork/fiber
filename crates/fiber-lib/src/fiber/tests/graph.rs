@@ -876,7 +876,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("peel t1");
     assert!(matches!(
         peeled1.current,
-        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, next_is_trampoline: true, .. }
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, .. }
             if next_node_id == t2.into()
     ));
 
@@ -891,7 +891,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("peel t2");
     assert!(matches!(
         peeled2.current,
-        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, next_is_trampoline: true, .. }
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, .. }
             if next_node_id == t3.into()
     ));
 
@@ -906,7 +906,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("peel t3");
     assert!(matches!(
         peeled3.current,
-        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, next_is_trampoline: false, .. }
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, .. }
             if next_node_id == final_recipient.into()
     ));
 
@@ -947,9 +947,324 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("peel short t1");
     assert!(matches!(
         peeled_short_1.current,
-        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, next_is_trampoline: false, .. }
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, .. }
             if next_node_id == final_recipient.into()
     ));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
+    init_tracing();
+
+    // Topology: sender(A)=node1 -> t1=node2 (public). final=node3 disconnected.
+    // With an explicit trampoline hop fee_rate, if max_fee_amount is too low to cover
+    // trampoline service fees, building the trampoline route should fail.
+    let mut network = MockNetworkGraph::new(3);
+    network.graph.set_add_rand_expiry_delta(false);
+
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let t1 = network.keys[2];
+    let final_recipient = network.keys[3];
+
+    network.add_edge(1, 2, Some(10_000), Some(0));
+
+    let mut hop = crate::fiber::payment::TrampolineHop::new(t1.into());
+    hop.fee_rate = Some(1_000); // 1000 ppm => should charge at least 1 for amount=1000
+
+    let payment_data = SendPaymentData {
+        target_pubkey: final_recipient.into(),
+        amount: 1000,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: None,
+        max_fee_amount: Some(0),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        hop_hints: vec![],
+        dry_run: false,
+        custom_records: None,
+        router: vec![],
+        allow_mpp: false,
+        allow_trampoline_routing: true,
+        trampoline_hops: Some(vec![hop]),
+        channel_stats: Default::default(),
+    };
+
+    let err = network
+        .graph
+        .build_route(payment_data.amount, None, None, &payment_data)
+        .expect_err("should fail due to insufficient max_fee_amount for service fees");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("max_fee_amount too low for trampoline service fees"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_routing_fee_rate_default_zero_allows_zero_fee_budget() {
+    init_tracing();
+
+    // If trampoline hop fee_rate is omitted, it defaults to 0. With max_fee_amount=0,
+    // building a trampoline route should still succeed (route only needs to reach the first trampoline).
+    let mut network = MockNetworkGraph::new(3);
+    network.graph.set_add_rand_expiry_delta(false);
+
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let t1 = network.keys[2];
+    let final_recipient = network.keys[3];
+
+    network.add_edge(1, 2, Some(10_000), Some(0));
+
+    let payment_data = SendPaymentData {
+        target_pubkey: final_recipient.into(),
+        amount: 1000,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: None,
+        max_fee_amount: Some(0),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        hop_hints: vec![],
+        dry_run: false,
+        custom_records: None,
+        router: vec![],
+        allow_mpp: false,
+        allow_trampoline_routing: true,
+        trampoline_hops: Some(vec![crate::fiber::payment::TrampolineHop::new(t1.into())]),
+        channel_stats: Default::default(),
+    };
+
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, None, &payment_data)
+        .expect("trampoline route should be built with zero fee budget when fee_rate is omitted");
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].next_hop, Some(t1.into()));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_routing_fee_fields_match_precompute() {
+    init_tracing();
+
+    // Topology:
+    //   sender(A)=node1 --(public)--> t1=node2 --(public)--> t2=node3 --(public)--> t3=node4
+    //   final=node5 disconnected.
+    // We validate that the inner trampoline onion encodes:
+    // - amount_to_forward ladder derived from per-hop fee_rate
+    // - build_amount / build_max_fee_amount derived from remaining fee budget allocation.
+    let mut network = MockNetworkGraph::new(5);
+    network.graph.set_add_rand_expiry_delta(false);
+
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let t1 = network.keys[2];
+    let t2 = network.keys[3];
+    let t3 = network.keys[4];
+    let final_recipient = network.keys[5];
+
+    network.add_edge(1, 2, Some(10_000), Some(0));
+    network.add_edge(2, 3, Some(10_000), Some(0));
+    network.add_edge(3, 4, Some(10_000), Some(0));
+
+    let payment_hash = Hash256::default();
+    let final_amount: u128 = 1000;
+    let max_fee_amount: u128 = 10;
+
+    let mut h1 = crate::fiber::payment::TrampolineHop::new(t1.into());
+    h1.fee_rate = Some(1_000);
+    let mut h2 = crate::fiber::payment::TrampolineHop::new(t2.into());
+    h2.fee_rate = Some(2_000);
+    let mut h3 = crate::fiber::payment::TrampolineHop::new(t3.into());
+    h3.fee_rate = Some(3_000);
+
+    let payment_data = SendPaymentData {
+        target_pubkey: final_recipient.into(),
+        amount: final_amount,
+        payment_hash,
+        invoice: None,
+        final_tlc_expiry_delta: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: None,
+        max_fee_amount: Some(max_fee_amount),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        hop_hints: vec![],
+        dry_run: false,
+        custom_records: None,
+        router: vec![],
+        allow_mpp: false,
+        allow_trampoline_routing: true,
+        trampoline_hops: Some(vec![h1.clone(), h2.clone(), h3.clone()]),
+        channel_stats: Default::default(),
+    };
+
+    let route = network
+        .graph
+        .build_route(payment_data.amount, None, None, &payment_data)
+        .expect("trampoline route should be built");
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].next_hop, Some(t1.into()));
+
+    // Compute expected values following `NetworkGraph::find_trampoline_route` logic.
+    let hops = vec![h1, h2, h3];
+    let mut forward_amounts = vec![0u128; hops.len()];
+    let mut min_incoming_for_service = vec![0u128; hops.len()];
+    let mut next_amount_to_forward = final_amount;
+    for (idx, hop) in hops.iter().enumerate().rev() {
+        forward_amounts[idx] = next_amount_to_forward;
+        let fee = crate::fiber::fee::calculate_tlc_forward_fee(
+            next_amount_to_forward,
+            hop.fee_rate.unwrap_or(0) as u128,
+        )
+        .expect("fee calc");
+        next_amount_to_forward = next_amount_to_forward.saturating_add(fee);
+        min_incoming_for_service[idx] = next_amount_to_forward;
+    }
+    let amount_to_first_trampoline = next_amount_to_forward;
+    let service_fee_total = amount_to_first_trampoline.saturating_sub(final_amount);
+    assert!(
+        service_fee_total <= max_fee_amount,
+        "test setup: budget too low"
+    );
+    let remaining_budget = max_fee_amount.saturating_sub(service_fee_total);
+
+    let mut weights = Vec::with_capacity(hops.len() + 1);
+    weights.push(amount_to_first_trampoline);
+    for a in forward_amounts.iter().copied() {
+        weights.push(a);
+    }
+    let weight_sum: u128 = weights.iter().copied().sum();
+    let mut budgets = vec![0u128; weights.len()];
+    if remaining_budget > 0 && weight_sum > 0 {
+        let mut allocated = 0u128;
+        for (i, w) in weights.iter().copied().enumerate() {
+            let b = remaining_budget.saturating_mul(w) / weight_sum;
+            budgets[i] = b;
+            allocated = allocated.saturating_add(b);
+        }
+        let mut remainder = remaining_budget.saturating_sub(allocated);
+        let mut i = 0usize;
+        while remainder > 0 {
+            budgets[i] = budgets[i].saturating_add(1);
+            remainder -= 1;
+            i = (i + 1) % budgets.len();
+        }
+    }
+
+    let t_budgets = &budgets[1..];
+    let mut exp_build_amounts = vec![0u128; hops.len()];
+    let mut exp_build_max_fee_amounts = vec![0u128; hops.len()];
+    for idx in 0..hops.len() {
+        exp_build_max_fee_amounts[idx] = t_budgets.get(idx).copied().unwrap_or(0);
+        if idx + 1 == hops.len() {
+            exp_build_amounts[idx] = final_amount;
+        } else {
+            exp_build_amounts[idx] = min_incoming_for_service[idx + 1]
+                .saturating_add(t_budgets.get(idx + 1).copied().unwrap_or(0));
+        }
+    }
+
+    let secp = secp256k1::Secp256k1::new();
+    let assoc = Some(payment_hash.as_ref());
+    let trampoline_bytes = route
+        .last()
+        .unwrap()
+        .trampoline_onion
+        .as_deref()
+        .unwrap()
+        .to_vec();
+
+    let peeled1 = TrampolineOnionPacket::new(trampoline_bytes)
+        .peel(
+            &crate::fiber::types::Privkey(network.secret_keys[2]),
+            assoc,
+            &secp,
+        )
+        .expect("peel t1");
+    match peeled1.current {
+        crate::fiber::types::TrampolineHopPayload::Forward {
+            next_node_id,
+            amount_to_forward,
+            build_amount,
+            build_max_fee_amount,
+            ..
+        } => {
+            assert_eq!(next_node_id, t2.into());
+            assert_eq!(amount_to_forward, forward_amounts[0]);
+            assert_eq!(build_amount, exp_build_amounts[0]);
+            assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[0]));
+        }
+        other => panic!("unexpected payload at t1: {other:?}"),
+    }
+
+    let peeled2 = peeled1
+        .next
+        .unwrap()
+        .peel(
+            &crate::fiber::types::Privkey(network.secret_keys[3]),
+            assoc,
+            &secp,
+        )
+        .expect("peel t2");
+    match peeled2.current {
+        crate::fiber::types::TrampolineHopPayload::Forward {
+            next_node_id,
+            amount_to_forward,
+            build_amount,
+            build_max_fee_amount,
+            ..
+        } => {
+            assert_eq!(next_node_id, t3.into());
+            assert_eq!(amount_to_forward, forward_amounts[1]);
+            assert_eq!(build_amount, exp_build_amounts[1]);
+            assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[1]));
+        }
+        other => panic!("unexpected payload at t2: {other:?}"),
+    }
+
+    let peeled3 = peeled2
+        .next
+        .unwrap()
+        .peel(
+            &crate::fiber::types::Privkey(network.secret_keys[4]),
+            assoc,
+            &secp,
+        )
+        .expect("peel t3");
+    match peeled3.current {
+        crate::fiber::types::TrampolineHopPayload::Forward {
+            next_node_id,
+            amount_to_forward,
+            build_amount,
+            build_max_fee_amount,
+            ..
+        } => {
+            assert_eq!(next_node_id, final_recipient.into());
+            assert_eq!(amount_to_forward, forward_amounts[2]);
+            assert_eq!(build_amount, exp_build_amounts[2]);
+            assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[2]));
+        }
+        other => panic!("unexpected payload at t3: {other:?}"),
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

@@ -2394,15 +2394,15 @@ where
                     )
                 })?;
 
-            let max_fee_amount = previous_tlc.map(|x| x.forwarding_fee);
-
             match peeled_trampoline.current {
                 TrampolineHopPayload::Forward {
                     next_node_id,
-                    next_is_trampoline,
                     amount_to_forward,
+                    build_amount,
+                    build_max_fee_amount,
                     tlc_expiry_delta,
                 } => {
+                    let has_next_trampoline = peeled_trampoline.next.is_some();
                     let remaining_trampoline_onion = peeled_trampoline.next.map(|p| p.into_bytes());
 
                     let mut request = SendPaymentData {
@@ -2413,7 +2413,7 @@ where
                         final_tlc_expiry_delta: tlc_expiry_delta,
                         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
                         timeout: None,
-                        max_fee_amount,
+                        max_fee_amount: build_max_fee_amount,
                         max_parts: Some(1),
                         keysend: false,
                         udt_type_script,
@@ -2432,21 +2432,8 @@ where
                     let graph = self.network_graph.read().await;
                     request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
 
-                    let (build_amount, build_max_fee) = if next_is_trampoline {
-                        let total_fee_budget = max_fee_amount.unwrap_or(0);
-                        let fee_budget_forward = total_fee_budget.saturating_mul(50) / 100;
-                        let fee_budget_routing =
-                            total_fee_budget.saturating_sub(fee_budget_forward);
-                        (
-                            amount_to_forward.saturating_add(fee_budget_forward),
-                            Some(fee_budget_routing),
-                        )
-                    } else {
-                        (amount_to_forward, max_fee_amount)
-                    };
-
                     let mut hops = graph
-                        .build_route(build_amount, None, build_max_fee, &request)
+                        .build_route(build_amount, None, build_max_fee_amount, &request)
                         .map_err(|_| {
                             TlcErr::new_node_fail(
                                 TlcErrorCode::TemporaryNodeFailure,
@@ -2454,10 +2441,11 @@ where
                             )
                         })?;
 
-                    // If we are forwarding to another trampoline hop, make sure that next trampoline
-                    // receives a forward fee (received_amount - forward_amount) so it can forward
-                    // further and satisfy fee checks.
-                    if next_is_trampoline {
+                    // If we are forwarding to another trampoline hop, make sure that the *receiving*
+                    // trampoline sees `forward_amount = amount_to_forward`, so its inbound
+                    // `forward_fee = received_amount - forward_amount` equals the pre-budgeted
+                    // forwarding fee (i.e. `build_amount - amount_to_forward`) and passes fee checks.
+                    if has_next_trampoline {
                         if let Some(last) = hops.last_mut() {
                             last.amount = amount_to_forward;
                         }
