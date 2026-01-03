@@ -95,7 +95,7 @@ use crate::fiber::graph::GraphChannelStat;
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
     AttemptStatus, PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords,
-    PaymentStatus, SendPaymentCommand, SendPaymentData, SendPaymentWithRouterCommand,
+    PaymentStatus, SendPaymentCommand, SendPaymentDataBuilder, SendPaymentWithRouterCommand,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -2405,29 +2405,21 @@ where
                     let has_next_trampoline = peeled_trampoline.next.is_some();
                     let remaining_trampoline_onion = peeled_trampoline.next.map(|p| p.into_bytes());
 
-                    let mut request = SendPaymentData {
-                        target_pubkey: next_node_id,
-                        amount: amount_to_forward,
-                        payment_hash,
-                        invoice: None,
-                        final_tlc_expiry_delta: tlc_expiry_delta,
-                        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-                        timeout: None,
-                        max_fee_amount: build_max_fee_amount,
-                        max_parts: Some(1),
-                        keysend: false,
-                        udt_type_script,
-                        preimage: None,
-                        custom_records: None,
-                        allow_self_payment: true,
-                        hop_hints: vec![],
-                        router: vec![],
-                        allow_mpp: false,
-                        allow_trampoline_routing: false,
-                        trampoline_hops: None,
-                        dry_run: false,
-                        channel_stats: Default::default(),
-                    };
+                    let mut request =
+                        SendPaymentDataBuilder::new(next_node_id, amount_to_forward, payment_hash)
+                            .final_tlc_expiry_delta(tlc_expiry_delta)
+                            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+                            .max_fee_amount(build_max_fee_amount)
+                            .max_parts(Some(1))
+                            .udt_type_script(udt_type_script)
+                            .allow_self_payment(true)
+                            .build()
+                            .map_err(|_| {
+                                TlcErr::new_node_fail(
+                                    TlcErrorCode::TemporaryNodeFailure,
+                                    state.get_public_key(),
+                                )
+                            })?;
 
                     let graph = self.network_graph.read().await;
                     request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
