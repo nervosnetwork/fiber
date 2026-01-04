@@ -285,6 +285,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
             build_amount: 50_000,
             build_max_fee_amount: None,
             tlc_expiry_delta: 1234,
+            tlc_expiry_limit: crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         },
         TrampolineHopPayload::Forward {
             next_node_id: final_node.pubkey(),
@@ -292,6 +293,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
             build_amount: 50_000,
             build_max_fee_amount: None,
             tlc_expiry_delta: 1234,
+            tlc_expiry_limit: crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         },
         TrampolineHopPayload::Final {
             final_amount: 50_000,

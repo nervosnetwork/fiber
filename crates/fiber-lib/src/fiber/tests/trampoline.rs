@@ -1,4 +1,5 @@
 #![cfg(not(target_arch = "wasm32"))]
+use crate::fiber::config::{DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA};
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::*;
 use crate::fiber::payment::{SendPaymentCommand, TrampolineHop};
@@ -824,6 +825,61 @@ async fn test_trampoline_routing_connect_two_networks() {
 }
 
 #[tokio::test]
+async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
+    init_tracing();
+
+    // A --(public)--> T1 --(private)--> X --(private)--> C
+    // A can only route to T1; T1 must forward over 2 private hops.
+    // Set a tight `tlc_expiry_limit` that is sufficient for A->T1, but insufficient for T1->X->C.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        4,
+    )
+    .await;
+
+    let [node_a, node_t1, _node_x, node_c] = nodes.try_into().expect("4 nodes");
+
+    // Ensure payer can route to the first trampoline.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+    wait_until_graph_channel_has_update(&node_a, &node_a, &node_t1).await;
+
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .allow_trampoline_routing(true)
+        .build()
+        .expect("build invoice");
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    // Tight limit: large enough for payer's trampoline slack (final + 1*DEFAULT), but too small
+    // for T1 to reach C over 2 hops (final + 2*DEFAULT).
+    let tight_limit = DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA + 1;
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(100_000),
+            tlc_expiry_limit: Some(tight_limit),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_t1.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_failed(payment_hash).await;
+    let payment_res = node_a.get_payment_result(payment_hash).await;
+    assert!(payment_res.failed_error.is_some());
+}
+
+#[tokio::test]
 async fn test_trampoline_error_wrapping_propagates_to_payer() {
     init_tracing();
 
@@ -859,7 +915,8 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
         .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
-    //node_c.insert_invoice(invoice.clone(), Some(preimage));
+    // don't insert invoice on node_c
+    // node_c.insert_invoice(invoice.clone(), Some(preimage));
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -879,12 +936,4 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
 
     let payment_res = node_a.get_payment_result(payment_hash).await;
     assert!(payment_res.failed_error.is_some());
-
-    // TODO(yukang): debug this test failure later
-    // let failed_error = payment_res.failed_error.unwrap();
-    // error!("payment failed error: {}", failed_error);
-    // assert!(
-    //     failed_error.contains("TrampolineFailed"),
-    //     "failed_error: {failed_error}"
-    // );
 }

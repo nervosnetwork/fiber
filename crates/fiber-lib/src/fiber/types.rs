@@ -3797,6 +3797,12 @@ pub enum TrampolineHopPayload {
         /// For the final recipient this is the invoice's `final_tlc_expiry_delta`. For trampoline
         /// hops it also includes additional slack so the trampoline can forward further.
         tlc_expiry_delta: u64,
+
+        /// Upper bound on the TLC expiry delta used when the next trampoline hop builds its outer
+        /// route.
+        ///
+        /// This allows propagating the payer's expiry budget constraints across trampoline hops.
+        tlc_expiry_limit: u64,
     },
     /// Payload for the final recipient.
     Final {

@@ -811,8 +811,8 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("peel t1");
     assert!(matches!(
         peeled1.current,
-        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, .. }
-            if next_node_id == t2.into()
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, tlc_expiry_limit, .. }
+            if next_node_id == t2.into() && tlc_expiry_limit == payment_data.tlc_expiry_limit
     ));
 
     let peeled2 = peeled1
@@ -826,8 +826,8 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("peel t2");
     assert!(matches!(
         peeled2.current,
-        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, .. }
-            if next_node_id == t3.into()
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, tlc_expiry_limit, .. }
+            if next_node_id == t3.into() && tlc_expiry_limit == payment_data.tlc_expiry_limit
     ));
 
     let peeled3 = peeled2
@@ -841,8 +841,8 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("peel t3");
     assert!(matches!(
         peeled3.current,
-        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, .. }
-            if next_node_id == final_recipient.into()
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, tlc_expiry_limit, .. }
+            if next_node_id == final_recipient.into() && tlc_expiry_limit == payment_data.tlc_expiry_limit
     ));
 
     let peeled_final = peeled3
@@ -882,9 +882,59 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("peel short t1");
     assert!(matches!(
         peeled_short_1.current,
-        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, .. }
-            if next_node_id == final_recipient.into()
+        crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, tlc_expiry_limit, .. }
+            if next_node_id == final_recipient.into() && tlc_expiry_limit == payment_data.tlc_expiry_limit
     ));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_routing_tlc_expiry_limit_too_small_fails() {
+    init_tracing();
+
+    // Topology: sender(A)=node1 --(public)--> t1=node2 --(public)--> t2=node3 --(public)--> t3=node4
+    // final=node5 disconnected. We set tlc_expiry_limit too small for the required trampoline slack.
+    let mut network = MockNetworkGraph::new(5);
+    network.graph.set_add_rand_expiry_delta(false);
+
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let t1 = network.keys[2];
+    let t2 = network.keys[3];
+    let t3 = network.keys[4];
+    let final_recipient = network.keys[5];
+
+    network.add_edge(1, 2, Some(10_000), Some(0));
+    network.add_edge(2, 3, Some(10_000), Some(0));
+    network.add_edge(3, 4, Some(10_000), Some(0));
+
+    // Required delta is FINAL + 3*DEFAULT (since we have 3 trampoline hops).
+    // Set a limit that is smaller than that.
+    let too_small_limit = FINAL_TLC_EXPIRY_DELTA_IN_TESTS + 2 * DEFAULT_TLC_EXPIRY_DELTA;
+
+    let payment_data =
+        SendPaymentDataBuilder::new(final_recipient.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(too_small_limit)
+            .max_fee_amount(Some(500))
+            .allow_trampoline_routing(true)
+            .trampoline_hops(Some(vec![
+                crate::fiber::payment::TrampolineHop::new(t1.into()),
+                crate::fiber::payment::TrampolineHop::new(t2.into()),
+                crate::fiber::payment::TrampolineHop::new(t3.into()),
+            ]))
+            .build()
+            .expect("valid payment_data");
+
+    let err = network
+        .graph
+        .build_route(payment_data.amount, None, None, &payment_data)
+        .expect_err("should fail due to tlc_expiry_limit too small for trampoline slack");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("trampoline tlc_expiry_delta exceeds tlc_expiry_limit"),
+        "unexpected error: {msg}"
+    );
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

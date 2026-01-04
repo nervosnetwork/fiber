@@ -85,9 +85,7 @@ use crate::fiber::channel::{
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use crate::fiber::config::{
-    DEFAULT_COMMITMENT_DELAY_EPOCHS, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
-};
+use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::GraphChannelStat;
@@ -2401,6 +2399,7 @@ where
                     build_amount,
                     build_max_fee_amount,
                     tlc_expiry_delta,
+                    tlc_expiry_limit,
                 } => {
                     let has_next_trampoline = peeled_trampoline.next.is_some();
                     let remaining_trampoline_onion = peeled_trampoline.next.map(|p| p.into_bytes());
@@ -2408,7 +2407,7 @@ where
                     let mut request =
                         SendPaymentDataBuilder::new(next_node_id, amount_to_forward, payment_hash)
                             .final_tlc_expiry_delta(tlc_expiry_delta)
-                            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+                            .tlc_expiry_limit(tlc_expiry_limit)
                             .max_fee_amount(build_max_fee_amount)
                             .max_parts(Some(1))
                             .udt_type_script(udt_type_script)

@@ -153,8 +153,8 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     assert!(err.contains("trampoline_hops must be non-empty"), "{err}");
 
     // Too many hops.
-    // MAX_TRAMPOLINE_HOPS_LIMIT is currently 10; 11 should exceed it.
-    let too_many = (0..11)
+    // MAX_TRAMPOLINE_HOPS_LIMIT is currently 5; 6 should exceed it.
+    let too_many = (0..6)
         .map(|_| TrampolineHop::new(gen_rand_fiber_public_key()))
         .collect::<Vec<_>>();
     let err = SendPaymentData::new(SendPaymentCommand {

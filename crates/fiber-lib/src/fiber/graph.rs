@@ -1267,17 +1267,32 @@ where
         let total_fee_budget = max_fee_amount.unwrap_or(0);
 
         let secp = Secp256k1::new();
-        // When forwarding through trampoline hops, each trampoline node needs additional expiry
-        // slack (similar to a channel's `tlc_expiry_delta`) so it can safely forward to the next
-        // hop. Use per-hop `tlc_expiry_delta` when provided, else default.
         let trampoline_forward_expiry_delta =
             |base_final: u64,
-             remaining_trampoline_hops: &[crate::fiber::payment::TrampolineHop]| {
+             remaining_trampoline_hops: &[crate::fiber::payment::TrampolineHop],
+             tlc_expiry_limit: u64|
+             -> Result<u64, PathFindError> {
                 let slack = remaining_trampoline_hops
                     .iter()
                     .map(|h| h.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA))
-                    .fold(0u64, |acc, d| acc.saturating_add(d));
-                base_final.saturating_add(slack)
+                    .try_fold(0u64, |acc, d| {
+                        acc.checked_add(d).ok_or_else(|| {
+                            PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
+                        })
+                    })?;
+
+                let total = base_final.checked_add(slack).ok_or_else(|| {
+                    PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
+                })?;
+
+                if total > tlc_expiry_limit {
+                    return Err(PathFindError::Other(format!(
+                        "trampoline tlc_expiry_delta exceeds tlc_expiry_limit: {} > {}",
+                        total, tlc_expiry_limit
+                    )));
+                }
+
+                Ok(total)
             };
 
         if let Some(hops) = payment_data.trampoline_hops().filter(|h| !h.is_empty()) {
@@ -1389,7 +1404,11 @@ where
                 amount_to_trampoline,
                 Some(payer_routing_budget),
                 payment_data.udt_type_script.clone(),
-                trampoline_forward_expiry_delta(payment_data.final_tlc_expiry_delta, hops),
+                trampoline_forward_expiry_delta(
+                    payment_data.final_tlc_expiry_delta,
+                    hops,
+                    payment_data.tlc_expiry_limit,
+                )?,
                 payment_data.tlc_expiry_limit,
                 payment_data.allow_self_payment,
                 &payment_data.hop_hints,
@@ -1454,7 +1473,9 @@ where
                     tlc_expiry_delta: trampoline_forward_expiry_delta(
                         payment_data.final_tlc_expiry_delta,
                         remaining_trampoline_hops,
-                    ),
+                        payment_data.tlc_expiry_limit,
+                    )?,
+                    tlc_expiry_limit: payment_data.tlc_expiry_limit,
                 });
             }
 
@@ -1485,7 +1506,8 @@ where
                 final_hop_expiry_delta_override: trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,
                     hops,
-                ),
+                    payment_data.tlc_expiry_limit,
+                )?,
             });
         }
 
