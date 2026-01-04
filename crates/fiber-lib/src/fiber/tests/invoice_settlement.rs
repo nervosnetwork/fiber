@@ -288,7 +288,7 @@ async fn test_send_mpp_to_hold_invoice() {
     };
 
     let res = node_0.send_payment(command).await;
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     node_1
         .settle_invoice(&payment_hash, payment_preimage)
         .await

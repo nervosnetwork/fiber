@@ -831,6 +831,38 @@ async fn test_send_payment_with_private_channel_hints() {
     test(30000000000, false).await;
 }
 
+#[test]
+fn test_send_payment_data_rejects_hop_hints_when_invoice_disallows_trampoline_routing() {
+    let payee_pubkey = gen_rand_fiber_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .payee_pub_key(payee_pubkey.into())
+        .allow_trampoline_routing(false)
+        .build()
+        .expect("build invoice");
+
+    let hop_hint = HopHint {
+        pubkey: gen_rand_fiber_public_key(),
+        channel_outpoint: OutPoint::default(),
+        fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
+        tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+    };
+
+    let err = SendPaymentData::new(SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        hop_hints: Some(vec![hop_hint]),
+        ..Default::default()
+    })
+    .unwrap_err();
+
+    assert!(
+        err.contains("invoice does not support hop hints"),
+        "unexpected error: {err}"
+    );
+}
+
 #[tokio::test]
 async fn test_send_payment_with_too_large_hop_hint_fee_rate() {
     init_tracing();

@@ -162,7 +162,6 @@ pub struct SendPaymentData {
     pub router: Vec<RouterHop>,
     pub allow_mpp: bool,
     pub dry_run: bool,
-    pub allow_trampoline_routing: bool,
 
     /// Optional explicit trampoline hops.
     ///
@@ -193,7 +192,6 @@ pub struct SendPaymentDataBuilder {
     router: Vec<RouterHop>,
     allow_mpp: bool,
     dry_run: bool,
-    allow_trampoline_routing: bool,
     trampoline_hops: Option<Vec<TrampolineHop>>,
     channel_stats: GraphChannelStat,
 }
@@ -298,11 +296,6 @@ impl SendPaymentDataBuilder {
 
     pub fn dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
-        self
-    }
-
-    pub fn allow_trampoline_routing(mut self, allow_trampoline_routing: bool) -> Self {
-        self.allow_trampoline_routing = allow_trampoline_routing;
         self
     }
 
@@ -450,7 +443,6 @@ impl SendPaymentDataBuilder {
             router: self.router,
             allow_mpp: self.allow_mpp,
             dry_run: self.dry_run,
-            allow_trampoline_routing: self.allow_trampoline_routing,
             trampoline_hops: self.trampoline_hops,
             channel_stats: self.channel_stats,
         })
@@ -553,13 +545,15 @@ impl SendPaymentData {
         };
 
         let hop_hints = command.hop_hints.unwrap_or_default();
-
-        let trampoline_hops = command.trampoline_hops;
+        if !hop_hints.is_empty()
+            && invoice
+                .as_ref()
+                .is_some_and(|inv| !inv.allow_trampoline_routing())
+        {
+            return Err("invoice does not support hop hints".to_string());
+        }
 
         let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
-        let allow_trampoline_routing = invoice
-            .as_ref()
-            .is_some_and(|inv| inv.allow_trampoline_routing());
 
         let payment_secret = invoice
             .as_ref()
@@ -604,8 +598,7 @@ impl SendPaymentData {
             .router(vec![])
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
-            .allow_trampoline_routing(allow_trampoline_routing)
-            .trampoline_hops(trampoline_hops)
+            .trampoline_hops(command.trampoline_hops)
             .channel_stats(Default::default())
             .build()
     }
@@ -620,11 +613,9 @@ impl SendPaymentData {
     }
 
     pub fn allow_trampoline_routing(&self) -> bool {
-        self.allow_trampoline_routing
-            || self
-                .trampoline_hops
-                .as_ref()
-                .is_some_and(|hops| !hops.is_empty())
+        self.trampoline_hops
+            .as_ref()
+            .is_some_and(|hops| !hops.is_empty())
     }
 
     pub fn trampoline_hops(&self) -> Option<&[TrampolineHop]> {

@@ -634,7 +634,7 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
     // Topology:
     //   sender(A)=node1  --(public channel)-->  trampoline(C)=node2
     //   final(D)=node3 is unreachable from A (and from the graph) on purpose.
-    // Expectation: with allow_trampoline_routing=true, A only needs to find A->C,
+    // Expectation: with explicit trampoline_hops, A only needs to find A->C,
     // and should NOT pre-check whether C can reach D.
     let mut network = MockNetworkGraph::new(3);
 
@@ -661,7 +661,6 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
         .is_err());
 
     // With trampoline: should succeed by routing to C only.
-    payment_data.allow_trampoline_routing = true;
     payment_data.trampoline_hops = Some(vec![crate::fiber::payment::TrampolineHop::new(
         trampoline.into(),
     )]);
@@ -757,7 +756,6 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
         .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
         .max_fee_amount(Some(500))
-        .allow_trampoline_routing(true)
         .trampoline_hops(Some(vec![
             crate::fiber::payment::TrampolineHop::new(t1.into()),
             crate::fiber::payment::TrampolineHop::new(t2.into()),
@@ -917,7 +915,6 @@ fn test_graph_trampoline_routing_tlc_expiry_limit_too_small_fails() {
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(too_small_limit)
             .max_fee_amount(Some(500))
-            .allow_trampoline_routing(true)
             .trampoline_hops(Some(vec![
                 crate::fiber::payment::TrampolineHop::new(t1.into()),
                 crate::fiber::payment::TrampolineHop::new(t2.into()),
@@ -963,7 +960,6 @@ fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(0))
-            .allow_trampoline_routing(true)
             .trampoline_hops(Some(vec![hop]))
             .build()
             .expect("valid payment_data");
@@ -1001,7 +997,6 @@ fn test_graph_trampoline_routing_fee_rate_default_zero_allows_zero_fee_budget() 
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(0))
-            .allow_trampoline_routing(true)
             .trampoline_hops(Some(vec![crate::fiber::payment::TrampolineHop::new(
                 t1.into(),
             )]))
@@ -1057,7 +1052,6 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(max_fee_amount))
-            .allow_trampoline_routing(true)
             .trampoline_hops(Some(vec![h1.clone(), h2.clone(), h3.clone()]))
             .build()
             .expect("valid payment_data");

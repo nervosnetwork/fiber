@@ -31,14 +31,13 @@ async fn test_trampoline_routing_basic() {
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
 
     // ================================================================
-    // Create an invoice on C that explicitly allows trampoline routing.
+    // Create an invoice on C.
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -55,6 +54,85 @@ async fn test_trampoline_routing_basic() {
     let payment_hash = res.unwrap().payment_hash;
 
     node_a.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_keysend_success() {
+    init_tracing();
+
+    // A --(public)--> B --(private)--> C
+    // A cannot find a route to C from gossip graph; B can forward to C using its direct channel.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        3,
+    )
+    .await;
+
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+
+    // Wait until A learns B supports trampoline routing.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    let amount: u128 = 1000;
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_c.pubkey),
+            amount: Some(amount),
+            keysend: Some(true),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    node_a.wait_until_success(res.unwrap().payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_multi_trampoline_hops_keysend_success() {
+    init_tracing();
+
+    // A --(public)--> T1 --(public)--> T2 --(private)--> C
+    // A cannot find a route to C from gossip graph; chained trampolines can forward.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        4,
+    )
+    .await;
+
+    let [node_a, node_t1, node_t2, node_c] = nodes.try_into().expect("4 nodes");
+
+    // Ensure A knows the first trampoline supports trampoline routing.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+
+    // Ensure A learns enough public channels to reach the first trampoline.
+    wait_until_node_has_public_channels_at_least(&node_a, 2).await;
+
+    let amount: u128 = 1000;
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_c.pubkey),
+            amount: Some(amount),
+            keysend: Some(true),
+            max_fee_amount: Some(10_000),
+            trampoline_hops: Some(vec![
+                TrampolineHop::new(node_t1.get_public_key()),
+                TrampolineHop::new(node_t2.get_public_key()),
+            ]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    node_a.wait_until_success(res.unwrap().payment_hash).await;
 }
 
 #[tokio::test]
@@ -77,18 +155,18 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
 
-    // Create an invoice on C that explicitly NOT allows trampoline routing.
+    // Create an invoice on C.
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(false)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
 
+    // Without explicit trampoline hops, routing should fail.
     let res = node_a
         .assert_send_payment_failure(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
@@ -100,14 +178,13 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
     assert!(res.contains("Failed to build route"));
 
     // ================================================================
-    // Create an invoice on C that explicitly allows trampoline routing.
+    // With explicit trampoline hops, routing should succeed.
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -122,14 +199,13 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
         .await;
 
     // ================================================================
-    // Create an invoice on C that explicitly allows trampoline routing.
+    // Disable trampoline capability on B, then routing should fail.
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -196,7 +272,6 @@ async fn test_trampoline_routing_with_two_networks() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_f.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_f.insert_invoice(invoice.clone(), Some(preimage));
@@ -239,7 +314,6 @@ async fn test_trampoline_routing_with_two_networks() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_f.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_f.insert_invoice(invoice.clone(), Some(preimage));
@@ -287,7 +361,6 @@ async fn test_trampoline_routing_multi_trampoline_hops() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -341,7 +414,6 @@ async fn test_trampoline_routing_four_private_trampoline_hops_payment_success() 
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -415,7 +487,6 @@ async fn test_trampoline_routing_max_trampoline_hops_success_and_each_hop_pathfi
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -497,7 +568,6 @@ async fn test_trampoline_routing_single_trampoline_hop_succeeds_with_long_public
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -557,7 +627,6 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -582,7 +651,6 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -677,7 +745,6 @@ async fn test_trampoline_forwarding_prefers_better_channel_private_vs_public() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -853,7 +920,6 @@ async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     node_c.insert_invoice(invoice.clone(), Some(preimage));
@@ -912,7 +978,6 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .allow_trampoline_routing(true)
         .build()
         .expect("build invoice");
     // don't insert invoice on node_c
