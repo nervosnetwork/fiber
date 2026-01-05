@@ -12,6 +12,7 @@ use fnn::{
     actors::RootActor,
     ckb::{
         CkbChainActor,
+        client::CkbRpcClient,
         contracts::{TypeIDResolver, try_init_contracts_context},
     },
     fiber::{KeyPair, graph::NetworkGraph, network::init_chain_hash},
@@ -188,6 +189,7 @@ pub async fn fiber(
             .await
             .map_err(|err| ExitMessage(format!("failed to start ckb actor: {}", err)))?
             .0;
+            let chain_client = CkbRpcClient::new(&ckb_config);
 
             const CHANNEL_SIZE: usize = 4000;
             let (event_sender, mut event_receiver) = mpsc::channel(CHANNEL_SIZE);
@@ -206,6 +208,7 @@ pub async fn fiber(
             info!("Starting fiber");
             let network_actor = start_network(
                 fiber_config.clone(),
+                chain_client,
                 ckb_chain_actor.clone(),
                 event_sender,
                 new_tokio_task_tracker(),

@@ -1,4 +1,4 @@
-use crate::ckb::tests::test_utils::get_tx_from_hash;
+use crate::ckb::client::CkbChainClient;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;
 use crate::ckb::CkbConfig;
 use crate::ckb::GetTxResponse;
@@ -86,7 +86,9 @@ use crate::fiber::types::Privkey;
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::tests::test_utils::{submit_tx, trace_tx, MockChainActor},
+    ckb::tests::test_utils::{
+        submit_tx, trace_tx, MockChainActor, MockChainState, MockCkbChainClient,
+    },
     ckb::CkbChainMessage,
     fiber::graph::NetworkGraph,
     fiber::network::{
@@ -249,9 +251,9 @@ pub struct NetworkNode {
     pub ckb_config: Option<CkbConfig>,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
-    pub ckb_chain_actor: ActorRef<CkbChainMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub chain_client: MockCkbChainClient,
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
     pub gossip_actor: ActorRef<GossipActorMessage>,
     pub private_key: Privkey,
@@ -1388,8 +1390,8 @@ impl NetworkNode {
             node_name,
             store,
             fiber_config,
-            ckb_config,
             rpc_config,
+            ckb_config,
             mock_chain_actor_middleware,
         } = config;
 
@@ -1398,15 +1400,18 @@ impl NetworkNode {
         let root = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
+        let shared_state = Arc::new(std::sync::RwLock::new(MockChainState::new()));
         let chain_actor = Actor::spawn_linked(
             None,
             MockChainActor::new(),
-            mock_chain_actor_middleware.clone(),
+            (mock_chain_actor_middleware.clone(), shared_state.clone()),
             root.get_cell(),
         )
         .await
         .expect("start mock chain actor")
         .0;
+
+        let chain_client = MockCkbChainClient::new(shared_state);
 
         let private_key: Privkey = fiber_config
             .read_or_generate_secret_key()
@@ -1427,6 +1432,7 @@ impl NetworkNode {
                 chain_actor.clone(),
                 store.clone(),
                 network_graph.clone(),
+                chain_client.clone(),
             ),
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
@@ -1531,7 +1537,7 @@ impl NetworkNode {
             channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
             network_actor,
-            ckb_chain_actor: chain_actor.clone(),
+            chain_client,
             mock_chain_actor_middleware,
             network_graph,
             chain_actor,
@@ -1561,7 +1567,7 @@ impl NetworkNode {
     }
 
     pub fn send_ckb_chain_message(&self, message: CkbChainMessage) {
-        self.ckb_chain_actor
+        self.chain_actor
             .send_message(message)
             .expect("send ckb chain message");
     }
@@ -1794,9 +1800,7 @@ impl NetworkNode {
         &mut self,
         tx_hash: Hash256,
     ) -> Result<GetTxResponse, anyhow::Error> {
-        get_tx_from_hash(self.chain_actor.clone(), tx_hash)
-            .await
-            .map_err(Into::into)
+        self.chain_client.get_transaction(tx_hash.into()).await
     }
 
     pub async fn get_transaction_view_from_hash(
@@ -1875,7 +1879,8 @@ impl NetworkNode {
 }
 
 pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
-    Actor::spawn(None, MockChainActor::new(), None)
+    let shared_state = Arc::new(std::sync::RwLock::new(MockChainState::new()));
+    Actor::spawn(None, MockChainActor::new(), (None, shared_state))
         .await
         .expect("start mock chain actor")
         .0
