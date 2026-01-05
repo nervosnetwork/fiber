@@ -8,8 +8,7 @@ use tentacle::secio::PeerId;
 
 use crate::{
     ckb::{
-        CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
-        GetBlockTimestampRequest,
+        client::CkbChainClient, CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
     },
     fiber::NetworkActorEvent,
     utils::actor::ActorHandleLogGuard,
@@ -29,8 +28,9 @@ pub enum InFlightCkbTxKind {
     Closing(PeerId, Hash256, bool),
 }
 
-pub struct InFlightCkbTxActor {
+pub struct InFlightCkbTxActor<C> {
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub chain_client: C,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub tx_hash: Hash256,
     pub tx_kind: InFlightCkbTxKind,
@@ -67,7 +67,10 @@ pub enum InFlightCkbTxActorMessage {
 
 #[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl Actor for InFlightCkbTxActor {
+impl<C> Actor for InFlightCkbTxActor<C>
+where
+    C: CkbChainClient + Send + Sync + 'static,
+{
     type Msg = InFlightCkbTxActorMessage;
     type State = InFlightCkbTxActorState;
     type Arguments = InFlightCkbTxActorArguments;
@@ -134,7 +137,10 @@ impl Actor for InFlightCkbTxActor {
     }
 }
 
-impl InFlightCkbTxActor {
+impl<C> InFlightCkbTxActor<C>
+where
+    C: CkbChainClient,
+{
     /// Computes interval to send tx based on the confirmation
     fn interval(&self) -> Duration {
         Duration::from_secs(self.confirmations.max(1) * 2 * 8)
@@ -248,14 +254,11 @@ impl InFlightCkbTxActor {
                 let _ = self
                     .chain_actor
                     .send_message(CkbChainMessage::CommitFundingTx(self.tx_hash, block_number));
-                if let Ok(Ok(Some(timestamp))) = ractor::call_t!(
-                    self.chain_actor,
-                    |tx| CkbChainMessage::GetBlockTimestamp(
-                        GetBlockTimestampRequest::from_block_hash(block_hash.clone().into()),
-                        tx
-                    ),
-                    self.timeout_ms()
-                ) {
+                if let Ok(Some(timestamp)) = self
+                    .chain_client
+                    .get_block_timestamp(block_hash.clone().into())
+                    .await
+                {
                     NetworkActorEvent::FundingTransactionConfirmed(
                         OutPoint::new(self.tx_hash.into(), DUMMY_FUNDING_TX_INDEX),
                         block_hash.clone(),
