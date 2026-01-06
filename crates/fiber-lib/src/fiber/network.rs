@@ -591,6 +591,9 @@ pub enum NetworkActorEvent {
 
     // A payment actor stopped event.
     PaymentActorStopped(Hash256),
+
+    // Channel settlement check completed - channel is fully settled on-chain.
+    ChannelSettlementCompleted(Hash256),
 }
 
 #[derive(Debug)]
@@ -994,6 +997,17 @@ where
             NetworkActorEvent::PaymentActorStopped(payment_hash) => {
                 state.on_payment_actor_stopped(payment_hash).await;
             }
+            NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
+                // Update channel state to remove WAITING_ONCHAIN_SETTLEMENT flag
+                if let Some(mut actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                    if let ChannelState::Closed(mut flags) = actor_state.state {
+                        flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+                        actor_state.state = ChannelState::Closed(flags);
+                        self.store.insert_channel_actor_state(actor_state);
+                        info!("Channel {channel_id:?} on-chain settlement completed");
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1197,13 +1211,18 @@ where
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let funding_lock_script = state
                                 .get_cached_channel_funding_lock_script(channel_id, &actor_state);
-                            // Check channel shutdown
-                            self.check_channel_shutdown(
-                                myself.clone(),
-                                &actor_state,
-                                funding_lock_script,
-                            )
-                            .await;
+                            // Spawn async task for concurrent RPC call
+                            let chain_client = self.chain_client.clone();
+                            let myself_clone = myself.clone();
+                            crate::tasks::spawn(async move {
+                                Self::check_channel_shutdown(
+                                    chain_client,
+                                    myself_clone,
+                                    channel_id,
+                                    funding_lock_script,
+                                )
+                                .await;
+                            });
                         }
                     } else if matches!(
                         channel_state,
@@ -1211,7 +1230,17 @@ where
                             if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                            self.check_channel_shutdown_settlement(actor_state).await;
+                            // Spawn async task for concurrent RPC call
+                            let chain_client = self.chain_client.clone();
+                            let myself_clone = myself.clone();
+                            crate::tasks::spawn(async move {
+                                Self::check_channel_shutdown_settlement(
+                                    chain_client,
+                                    myself_clone,
+                                    actor_state,
+                                )
+                                .await;
+                            });
                         }
                     }
                 }
@@ -1927,13 +1956,18 @@ where
                 if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
                     let funding_lock_script =
                         state.get_cached_channel_funding_lock_script(channel_id, &channel_state);
-                    // Check channel shutdown
-                    self.check_channel_shutdown(
-                        myself.clone(),
-                        &channel_state,
-                        funding_lock_script,
-                    )
-                    .await;
+                    // Spawn async task for concurrent RPC call
+                    let chain_client = self.chain_client.clone();
+                    let myself_clone = myself.clone();
+                    crate::tasks::spawn(async move {
+                        Self::check_channel_shutdown(
+                            chain_client,
+                            myself_clone,
+                            channel_id,
+                            funding_lock_script,
+                        )
+                        .await;
+                    });
                 } else {
                     tracing::debug!(
                         "stop check channel shutdown, can't find {channel_id:?} actor state"
@@ -2079,41 +2113,35 @@ where
         Ok(())
     }
 
+    /// Async version of check_channel_shutdown that runs in spawned task.
+    /// Checks if the channel funding cell has been spent (indicating remote force close).
     async fn check_channel_shutdown(
-        &self,
+        chain_client: C,
         myself: ActorRef<NetworkActorMessage>,
-        state: &ChannelActorState,
+        channel_id: Hash256,
         funding_lock_script: Script,
     ) {
-        // stop check if channel closed
-        if matches!(state.state, ChannelState::Closed(..)) {
-            tracing::debug!(
-                "stop check channel shutdown, {:?} is closed",
-                state.get_id()
-            );
-            return;
-        }
-        // check channel ready state
-        if matches!(
-            state.state,
-            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
-        ) {
-            let channel_id = state.get_id();
-            match self.chain_client.get_shutdown_tx(funding_lock_script).await {
-                Ok(shutdown_tx) => {
-                    let _ = myself.send_message(NetworkActorMessage::Command(
-                        NetworkActorCommand::RemoteForceShutdownChannel(channel_id, shutdown_tx),
-                    ));
-                }
-                Err(err) => {
-                    tracing::error!("Failed to check shutdown tx: {err:?}");
-                }
+        match chain_client.get_shutdown_tx(funding_lock_script).await {
+            Ok(shutdown_tx) => {
+                let _ = myself.send_message(NetworkActorMessage::Command(
+                    NetworkActorCommand::RemoteForceShutdownChannel(channel_id, shutdown_tx),
+                ));
+            }
+            Err(err) => {
+                tracing::error!("Failed to check shutdown tx for channel {channel_id:?}: {err:?}");
             }
         }
     }
 
-    async fn check_channel_shutdown_settlement(&self, mut state: ChannelActorState) {
-        let ChannelState::Closed(mut flags) = state.state else {
+    /// Async version of check_channel_shutdown_settlement that runs in spawned task.
+    /// Checks if the commitment transaction outputs have been spent (indicating settlement complete).
+    async fn check_channel_shutdown_settlement(
+        chain_client: C,
+        myself: ActorRef<NetworkActorMessage>,
+        state: ChannelActorState,
+    ) {
+        let channel_id = state.get_id();
+        let ChannelState::Closed(flags) = state.state else {
             return;
         };
         if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
@@ -2123,12 +2151,12 @@ where
         let Some(tx_hash) = state.shutdown_transaction_hash.clone() else {
             debug!(
                 "stop check channel settlement, {:?} missing shutdown tx hash",
-                state.get_id()
+                channel_id
             );
             return;
         };
 
-        let tx_response = match self.chain_client.get_transaction(tx_hash.clone()).await {
+        let tx_response = match chain_client.get_transaction(tx_hash.clone()).await {
             Ok(response) => response,
             Err(err) => {
                 error!(
@@ -2178,26 +2206,23 @@ where
             group_by_transaction: None,
         };
 
-        match self
-            .chain_client
+        match chain_client
             .get_cells(search_key, Order::Desc, 1, None)
             .await
         {
             Ok(response) => {
                 let response = crate::ckb::GetCellsResponse::from(response);
                 if response.objects.is_empty() {
-                    let channel_id = state.get_id();
-                    flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
-                    state.state = ChannelState::Closed(flags);
-                    self.store.insert_channel_actor_state(state);
-                    info!("Channel {channel_id:?} on-chain settlement completed");
+                    // Notify actor that settlement is complete
+                    let _ = myself.send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+                    ));
                 }
             }
             Err(err) => {
                 error!(
                     "Failed to check commitment cells for {:?}: {:?}",
-                    state.get_id(),
-                    err
+                    channel_id, err
                 );
             }
         }

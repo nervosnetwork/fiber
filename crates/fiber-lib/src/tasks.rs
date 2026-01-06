@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Debug, Clone)]
@@ -43,4 +45,26 @@ pub fn new_tokio_task_tracker() -> TaskTracker {
 /// Shutdown all tasks, and wait for their completion.
 pub async fn cancel_tasks_and_wait_for_completion() {
     TOKIO_TASK_TRACKER_WITH_CANCELLATION.close().await;
+}
+
+/// Spawn a task on non-wasm32 platform
+#[cfg(not(target_arch = "wasm32"))]
+pub fn spawn<F>(fut: F)
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    TOKIO_TASK_TRACKER_WITH_CANCELLATION.tracker.spawn(fut);
+}
+
+/// Spawn a task on wasm32
+#[cfg(target_arch = "wasm32")]
+pub fn spawn<F>(fut: F)
+where
+    F: Future + 'static,
+    F::Output: 'static,
+{
+    TOKIO_TASK_TRACKER_WITH_CANCELLATION
+        .tracker
+        .spawn_local(fut);
 }
