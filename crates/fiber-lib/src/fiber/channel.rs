@@ -988,14 +988,20 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
-    ) {
+    ) -> Result<(), ProcessingChannelError> {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
         match self.store.get_invoice(&tlc_info.payment_hash) {
             Some(invoice) => {
-                self.try_to_settle_down_tlc_with_invoice(myself, state, tlc_info, invoice)
+                if state.funding_udt_type_script.as_ref() != invoice.udt_type_script() {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "UDT type script not match".to_string(),
+                    ));
+                }
+                self.try_to_settle_down_tlc_with_invoice(myself, state, tlc_info, invoice);
             }
             None => self.try_to_settle_down_tlc_without_invoice(myself, state, tlc_info),
         }
+        return Ok(());
     }
 
     fn apply_add_tlc_operation(
@@ -1039,7 +1045,8 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id);
+        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
+            .map_err(|err| err.without_shared_secret())?;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
@@ -1071,6 +1078,11 @@ where
 
             let invoice = self.store.get_invoice(&payment_hash);
             if let Some(ref invoice) = invoice {
+                if invoice.udt_type_script() != state.funding_udt_type_script.as_ref() {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "UDT type script not match".to_string(),
+                    ));
+                }
                 let invoice_status = self.get_invoice_status(invoice);
                 if !matches!(invoice_status, CkbInvoiceStatus::Open) {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
