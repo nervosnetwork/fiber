@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tentacle::secio::SecioKeyPair;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::cch::actions::ActionDispatcher;
-use crate::cch::order::{CchOrderAction, CchOrderStateMachine, CchOrderTransition};
+use crate::cch::actions::{ActionDispatcher, CchOrderAction};
+use crate::cch::order::CchOrderStateMachine;
 use crate::cch::trackers::{
     CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
 };
@@ -171,7 +171,7 @@ impl Actor for CchActor {
             CchMessage::SendBTC(send_btc, port) => {
                 let result = state.send_btc(send_btc).await;
                 if let Ok(order) = &result {
-                    let actions = CchOrderStateMachine::on_entering(order);
+                    let actions = ActionDispatcher::on_entering(order);
                     append_actions(myself, order.payment_hash, actions)?;
                 }
                 if !port.is_closed() {
@@ -183,7 +183,7 @@ impl Actor for CchActor {
             CchMessage::ReceiveBTC(receive_btc, port) => {
                 let result = state.receive_btc(receive_btc).await;
                 if let Ok(order) = &result {
-                    let actions = CchOrderStateMachine::on_entering(order);
+                    let actions = ActionDispatcher::on_entering(order);
                     append_actions(myself, order.payment_hash, actions)?;
                 }
                 if !port.is_closed() {
@@ -432,20 +432,17 @@ impl CchState {
         &mut self,
         event: CchTrackingEvent,
     ) -> Result<Vec<CchOrderAction>> {
-        let order = match self.get_active_order_or_none(event.payment_hash())? {
+        let mut order = match self.get_active_order_or_none(event.payment_hash())? {
             None => return Ok(vec![]),
             Some(order) => order,
         };
 
-        let CchOrderTransition {
-            order,
-            dirty,
-            actions,
-        } = CchOrderStateMachine::apply(order, event.into())?;
-        if dirty {
+        if CchOrderStateMachine::apply(&mut order, event.into())?.is_some() {
             self.orders_db.update_cch_order(order.clone())?;
+            Ok(ActionDispatcher::on_entering(&order))
+        } else {
+            Ok(vec![])
         }
-        Ok(actions)
     }
 }
 

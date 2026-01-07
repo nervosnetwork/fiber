@@ -1,11 +1,14 @@
 //! Unit tests for backend dispatchers
 
-use crate::cch::actions::backend_dispatchers::{
-    dispatch_invoice_handler, dispatch_payment_handler, InvoiceHandlerType, PaymentHandlerType,
+use crate::cch::actions::{
+    backend_dispatchers::{
+        dispatch_invoice_handler, dispatch_payment_handler, InvoiceHandlerType, PaymentHandlerType,
+    },
+    send_outgoing_payment::SendOutgoingPaymentDispatcher,
+    settle_incoming_invoice::SettleIncomingInvoiceDispatcher,
+    track_incoming_invoice::TrackIncomingInvoiceDispatcher,
+    ActionDispatcher, CchOrderAction,
 };
-use crate::cch::actions::send_outgoing_payment::SendOutgoingPaymentDispatcher;
-use crate::cch::actions::settle_incoming_invoice::SettleIncomingInvoiceDispatcher;
-use crate::cch::actions::track_incoming_invoice::TrackIncomingInvoiceDispatcher;
 use crate::cch::order::{CchInvoice, CchOrder, CchOrderStatus};
 use crate::fiber::types::Hash256;
 
@@ -101,6 +104,58 @@ fn create_order_with_fiber_invoice(status: CchOrderStatus) -> CchOrder {
         status,
         failure_reason: None,
     }
+}
+
+// =============================================================================
+// on_entering tests
+// =============================================================================
+
+#[test]
+fn test_on_entering_pending_returns_track_incoming_invoice() {
+    let order = create_order_with_fiber_invoice(CchOrderStatus::Pending);
+    let actions = ActionDispatcher::on_entering(&order);
+    assert_eq!(actions, vec![CchOrderAction::TrackIncomingInvoice]);
+}
+
+#[test]
+fn test_on_entering_incoming_accepted_returns_send_and_track_payment() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    let actions = ActionDispatcher::on_entering(&order);
+    assert_eq!(
+        actions,
+        vec![
+            CchOrderAction::SendOutgoingPayment,
+            CchOrderAction::TrackOutgoingPayment,
+        ]
+    );
+}
+
+#[test]
+fn test_on_entering_outgoing_in_flight_returns_track_payment() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingInFlight);
+    let actions = ActionDispatcher::on_entering(&order);
+    assert_eq!(actions, vec![CchOrderAction::TrackOutgoingPayment]);
+}
+
+#[test]
+fn test_on_entering_outgoing_succeeded_returns_settle_invoice() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingSucceeded);
+    let actions = ActionDispatcher::on_entering(&order);
+    assert_eq!(actions, vec![CchOrderAction::SettleIncomingInvoice]);
+}
+
+#[test]
+fn test_on_entering_succeeded_returns_empty() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::Succeeded);
+    let actions = ActionDispatcher::on_entering(&order);
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn test_on_entering_failed_returns_empty() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::Failed);
+    let actions = ActionDispatcher::on_entering(&order);
+    assert!(actions.is_empty());
 }
 
 // =============================================================================

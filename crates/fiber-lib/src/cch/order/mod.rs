@@ -3,7 +3,7 @@ pub(crate) mod state_machine;
 mod status;
 
 pub use db::{CchDbError, CchOrdersDb};
-pub use state_machine::{CchOrderAction, CchOrderStateMachine, CchOrderTransition};
+pub use state_machine::CchOrderStateMachine;
 pub use status::CchOrderStatus;
 
 use lightning_invoice::Bolt11Invoice;
