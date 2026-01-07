@@ -9,7 +9,9 @@ use crate::fiber::config::{
     MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::{GraphChannelStat, NetworkGraph, NetworkGraphStateStore, RouterHop};
+use crate::fiber::graph::{
+    GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
+};
 use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT,
     DEFAULT_PAYMENT_TRY_LIMIT, MAX_CUSTOM_RECORDS_SIZE,
@@ -1108,6 +1110,24 @@ where
         graph.load_from_store();
     }
 
+    /// Spawn a blocking task to build route
+    /// NOTE: build route is a CPU intensive task
+    async fn build_route_in_spawn_task(
+        &self,
+        amount: u128,
+        amount_low_bound: Option<u128>,
+        max_fee_amount: Option<u128>,
+        request: SendPaymentData,
+    ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        let network_graph = self.network_graph.clone();
+        tokio::task::spawn_blocking(move || {
+            let graph = network_graph.blocking_read();
+            graph.build_route(amount, amount_low_bound, max_fee_amount, &request)
+        })
+        .await
+        .map_err(|err| PathFindError::Other(format!("blocking task failed: {}", err)))?
+    }
+
     pub async fn handle_command(
         &self,
         myself: ActorRef<PaymentActorMessage>,
@@ -1232,12 +1252,16 @@ where
             // attempts to send the payment.
             let amount = session.remain_amount() + attempt.route.receiver_amount();
             let max_fee = session.remain_fee_amount();
-            let graph = self.network_graph.read().await;
+            let channel_stats = {
+                let graph = self.network_graph.read().await;
+                graph.channel_stats()
+            };
 
-            session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+            session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
 
-            let hops = graph
-                .build_route(amount, None, max_fee, &session.request)
+            let hops = self
+                .build_route_in_spawn_task(amount, None, max_fee, session.request.clone())
+                .await
                 .map_err(|e| {
                     Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
                 })?;
@@ -1253,8 +1277,10 @@ where
         &self,
         session: &mut PaymentSession,
     ) -> Result<Vec<Attempt>, Error> {
-        let graph = self.network_graph.read().await;
-        let source = graph.get_source_pubkey();
+        let (source, channel_stats) = {
+            let graph = self.network_graph.read().await;
+            (graph.get_source_pubkey(), graph.channel_stats())
+        };
         let active_parts = session.attempts().filter(|a| a.is_active()).count();
         let mut remain_amount = session.remain_amount();
         let mut max_fee = session.remain_fee_amount();
@@ -1266,7 +1292,7 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
-        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+        session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
         let mut attempt_id = session.attempts_count() as u64;
         let mut target_amount = remain_amount;
         let amount_low_bound = Some(1);
@@ -1282,7 +1308,15 @@ where
                 amount_low_bound,
                 remain_amount,
             );
-            match graph.build_route(target_amount, amount_low_bound, max_fee, &session.request) {
+            match self
+                .build_route_in_spawn_task(
+                    target_amount,
+                    amount_low_bound,
+                    max_fee,
+                    session.request.clone(),
+                )
+                .await
+            {
                 Err(e) => {
                     let error = format!("Failed to build route, {}", e);
                     self.set_payment_fail_with_error(session, &error);
@@ -1313,14 +1347,25 @@ where
                         session_route.receiver_amount()
                     );
 
-                    for (from, channel_outpoint, amount) in session_route.channel_outpoints() {
-                        if let Some(sent_node) = graph.get_channel_sent_node(channel_outpoint, from)
-                        {
-                            session.request.channel_stats.add_channel(
-                                channel_outpoint,
-                                sent_node,
-                                amount,
-                            );
+                    let route_channels: Vec<_> = session_route
+                        .channel_outpoints()
+                        .map(|(from, channel_outpoint, amount)| {
+                            (from, channel_outpoint.clone(), amount)
+                        })
+                        .collect();
+
+                    {
+                        let graph = self.network_graph.read().await;
+                        for (from, channel_outpoint, amount) in &route_channels {
+                            if let Some(sent_node) =
+                                graph.get_channel_sent_node(channel_outpoint, *from)
+                            {
+                                session.request.channel_stats.add_channel(
+                                    channel_outpoint,
+                                    sent_node,
+                                    *amount,
+                                );
+                            }
                         }
                     }
                     remain_amount -= session_route.receiver_amount();
