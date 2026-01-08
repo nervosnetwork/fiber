@@ -943,6 +943,9 @@ impl SendPaymentWithRouterCommand {
     }
 }
 
+/// The interval at which to check payment status for timeout detection
+const PAYMENT_STATUS_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
 #[derive(Debug, AsRefStr)]
 pub enum PaymentActorMessage {
     // SendPayment
@@ -959,6 +962,8 @@ pub enum PaymentActorMessage {
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
     },
+    /// Periodic check to detect stuck payments and log status
+    CheckPaymentStatus,
 }
 
 pub struct PaymentActorState {
@@ -1031,6 +1036,11 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // Set up periodic status check for timeout detection
+        myself.send_interval(PAYMENT_STATUS_CHECK_INTERVAL, || {
+            PaymentActorMessage::CheckPaymentStatus
+        });
+
         let init_msg = state
             .init_command
             .take()
@@ -1172,8 +1182,55 @@ where
                     .await;
                 self.check_payment_final(myself, state);
             }
+            PaymentActorMessage::CheckPaymentStatus => {
+                self.handle_check_payment_status(myself, state);
+            }
         };
         Ok(())
+    }
+
+    /// Handle periodic status check to detect stuck payments
+    fn handle_check_payment_status(
+        &self,
+        myself: ActorRef<PaymentActorMessage>,
+        state: &mut PaymentActorState,
+    ) {
+        let payment_hash = state.payment_hash;
+        if let Some(session) = self.store.get_payment_session(payment_hash) {
+            if session.status.is_final() {
+                // Payment has reached final status, stop the actor
+                myself.stop(Some(format!(
+                    "Payment complete with status {:?}",
+                    session.status
+                )));
+            } else {
+                // Payment is still not final, log the current status for debugging
+                let active_attempts = session.active_attempts().count();
+                let inflight_attempts = session.attempts().filter(|a| a.is_inflight()).count();
+                let failed_attempts = session.attempts().filter(|a| a.is_failed()).count();
+                let total_attempts = session.attempts_count();
+
+                warn!(
+                    "Payment {:?} is still not final after periodic check. \
+                    Status: {:?}, Active attempts: {}, Inflight: {}, Failed: {}, Total: {}, \
+                    Retry count: {}, Last error: {:?}",
+                    payment_hash,
+                    session.status,
+                    active_attempts,
+                    inflight_attempts,
+                    failed_attempts,
+                    total_attempts,
+                    state.retry_send_payment_count,
+                    session.last_error
+                );
+            }
+        } else {
+            error!(
+                "Payment session not found during periodic check: {:?}",
+                payment_hash
+            );
+            myself.stop(Some("Payment session not found".to_string()));
+        }
     }
 
     fn check_payment_final(
