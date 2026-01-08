@@ -935,15 +935,15 @@ where
                         // Not a hold invoice.
                         if is_mpp {
                             // Use the default expiry for mpp
-                            now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT
+                            Some(now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT)
                         } else {
                             // Use 0 to indicate to not create HoldTLC for single path payment
                             // with preimage.
-                            0
+                            None
                         }
                     } else {
                         // A hold invoice. Ensure the expiry is large enough for manual settlement via RPC.
-                        match invoice.expiry_time() {
+                        Some(match invoice.expiry_time() {
                             Some(invoice_expiry) => u64::try_from(
                                 invoice_expiry
                                     .as_millis()
@@ -952,7 +952,7 @@ where
                             )
                             .unwrap_or(u64::MAX),
                             None => tlc.expiry,
-                        }
+                        })
                     };
                     state
                         .pending_notify_settle_tlcs
@@ -2859,43 +2859,38 @@ where
 
         self.store.insert_channel_actor_state(state.clone());
 
+        let channel_id = state.get_id();
         let mut immediate_tlc_sets = HashMap::<Hash256, Vec<(Hash256, u64)>>::new();
         let mut hold_tlc_sets = HashSet::new();
         // try to settle down tlc set
-        for PendingNotifySettleTlc {
-            payment_hash,
-            tlc_id,
-            hold_expire_at,
-        } in pending_notify_tlcs
-        {
-            let channel_id = state.get_id();
+        for pending_notify_tlc in pending_notify_tlcs {
             // Hold the tlc
-            let expiry_duration =
-                Duration::from_millis(hold_expire_at.saturating_sub(now_timestamp_as_millis_u64()));
-            if expiry_duration.is_zero() {
-                immediate_tlc_sets
-                    .entry(payment_hash)
-                    .or_default()
-                    .push((channel_id, tlc_id));
-            } else {
+            if pending_notify_tlc.should_hold() {
+                let expiry_duration =
+                    pending_notify_tlc.hold_expiry_duration(now_timestamp_as_millis_u64());
                 self.store.insert_payment_hold_tlc(
-                    payment_hash,
+                    pending_notify_tlc.payment_hash,
                     HoldTlc {
                         channel_id,
-                        tlc_id,
-                        hold_expire_at,
+                        tlc_id: pending_notify_tlc.tlc_id,
+                        hold_expire_at: pending_notify_tlc.hold_expire_at.unwrap_or_default(),
                     },
                 );
                 let timeout_command = move || {
                     NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
-                        payment_hash,
+                        pending_notify_tlc.payment_hash,
                         channel_id,
-                        tlc_id,
+                        pending_notify_tlc.tlc_id,
                     ))
                 };
                 // set timeout for hold tlc
                 self.network.send_after(expiry_duration, timeout_command);
-                hold_tlc_sets.insert(payment_hash);
+                hold_tlc_sets.insert(pending_notify_tlc.payment_hash);
+            } else {
+                immediate_tlc_sets
+                    .entry(pending_notify_tlc.payment_hash)
+                    .or_default()
+                    .push((channel_id, pending_notify_tlc.tlc_id));
             }
         }
 
@@ -3725,7 +3720,22 @@ type ScheduledChannelUpdateHandle =
 pub struct PendingNotifySettleTlc {
     pub payment_hash: Hash256,
     pub tlc_id: u64,
-    pub hold_expire_at: u64,
+    /// The expire time if the TLC should be held.
+    pub hold_expire_at: Option<u64>,
+}
+
+impl PendingNotifySettleTlc {
+    fn should_hold(&self) -> bool {
+        self.hold_expire_at.is_some()
+    }
+
+    fn hold_expiry_duration(&self, now_millis_since_unix_epoch: u64) -> Duration {
+        Duration::from_millis(
+            self.hold_expire_at
+                .unwrap_or_default()
+                .saturating_sub(now_millis_since_unix_epoch),
+        )
+    }
 }
 
 #[serde_as]
