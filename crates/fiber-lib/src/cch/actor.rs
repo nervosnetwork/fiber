@@ -14,6 +14,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::cch::actions::{ActionDispatcher, CchOrderAction};
 use crate::cch::order::CchOrderStateMachine;
+use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
     CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
 };
@@ -97,11 +98,12 @@ pub struct CchState<S> {
     pub(super) node_keypair: (PublicKey, SecretKey),
     pub(super) lnd_connection: LndConnectionInfo,
     pub(super) lnd_tracker: ActorRef<LndTrackerMessage>,
+    pub(super) scheduler: ActorRef<SchedulerMessage>,
     pub(super) store: S,
 }
 
 #[async_trait::async_trait]
-impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
+impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
     type Msg = CchMessage;
     type State = CchState<S>;
     type Arguments = CchArgs<S>;
@@ -154,6 +156,16 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
         .await?;
         myself.subscribe_to_port(&lnd_port);
 
+        // Start scheduler actor
+        let scheduler = CchOrderSchedulerActor::start(
+            SchedulerArgs {
+                store: args.store.clone(),
+                lnd_tracker: lnd_tracker.clone(),
+            },
+            myself.get_cell(),
+        )
+        .await?;
+
         let state = CchState {
             config: args.config,
             network_actor: args.network_actor,
@@ -161,6 +173,7 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
             node_keypair,
             lnd_connection,
             lnd_tracker,
+            scheduler,
         };
 
         Ok(state)
@@ -185,16 +198,21 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
         {
             // Only process active (non-final) orders
             if order.is_final() {
+                state.schedule_job_for_final_order(&order);
                 continue;
             }
 
             // Check if order is expired and mark as Failed if so
             if order.update_if_expired(current_time) {
                 let payment_hash = order.payment_hash;
-                state.store.update_cch_order(order);
+                state.store.update_cch_order(order.clone());
+                state.schedule_job_for_final_order(&order);
                 tracing::info!("Marked expired order {:x} as Failed", payment_hash);
                 continue;
             }
+
+            // Schedule expiry job for non-final orders
+            state.schedule_job_for_non_final_order(&order);
 
             // Resume tracking for non-expired active orders
             let actions = ActionDispatcher::on_starting(&order);
@@ -222,6 +240,8 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
             CchMessage::SendBTC(send_btc, port) => {
                 let result = state.send_btc(send_btc).await;
                 if let Ok(order) = &result {
+                    // Schedule jobs for new order
+                    state.schedule_job_for_non_final_order(order);
                     let actions = ActionDispatcher::on_starting(order);
                     append_actions(myself, order.payment_hash, actions)?;
                 }
@@ -234,6 +254,8 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchActor<S> {
             CchMessage::ReceiveBTC(receive_btc, port) => {
                 let result = state.receive_btc(receive_btc).await;
                 if let Ok(order) = &result {
+                    // Schedule jobs for new order
+                    state.schedule_job_for_non_final_order(order);
                     let actions = ActionDispatcher::on_starting(order);
                     append_actions(myself, order.payment_hash, actions)?;
                 }
@@ -330,6 +352,49 @@ impl<S: CchOrderStore> CchState<S> {
         Ok(self
             .get_order_or_none(payment_hash)?
             .filter(|order| !order.is_final()))
+    }
+
+    fn schedule_job_for_non_final_order(&self, order: &CchOrder) {
+        if let Err(err) = self
+            .scheduler
+            .send_message(SchedulerMessage::ScheduleExpiry {
+                payment_hash: order.payment_hash,
+                created_at: order.created_at,
+                expiry_delta_seconds: order.expiry_delta_seconds,
+            })
+        {
+            tracing::error!(
+                "Failed to schedule expiry job for order {:x}: {}",
+                order.payment_hash,
+                err
+            );
+        }
+    }
+
+    fn schedule_job_for_final_order(&self, order: &CchOrder) {
+        let payment_hash = order.payment_hash;
+        if let Err(err) = self
+            .scheduler
+            .send_message(SchedulerMessage::SchedulePrune {
+                payment_hash,
+                created_at: order.created_at,
+                expiry_delta_seconds: order.expiry_delta_seconds,
+            })
+        {
+            tracing::error!(
+                "Failed to schedule prune job for final order {:x}: {}",
+                payment_hash,
+                err
+            );
+        }
+    }
+
+    fn schedule_job_on_entering(&self, order: &CchOrder) {
+        if order.is_final() {
+            self.schedule_job_for_final_order(order);
+        } else {
+            self.schedule_job_for_non_final_order(order);
+        }
     }
 
     async fn send_btc(&self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
@@ -548,6 +613,7 @@ impl<S: CchOrderStore> CchState<S> {
 
         if CchOrderStateMachine::apply(&mut order, event.into())?.is_some() {
             self.store.update_cch_order(order.clone());
+            self.schedule_job_on_entering(&order);
             Ok(ActionDispatcher::on_entering(&order))
         } else {
             Ok(vec![])

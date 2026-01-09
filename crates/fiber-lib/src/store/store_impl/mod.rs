@@ -1260,6 +1260,13 @@ impl CchOrderStore for Store {
             Hash256::try_from(&key[PREFIX_LEN..]).expect("CchOrder key must be Hash256")
         })
     }
+
+    fn delete_cch_order(&self, payment_hash: &Hash256) {
+        let key = [&[CCH_ORDER_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+        batch.delete(key);
+        batch.commit();
+    }
 }
 
 // All timestamps are saved in a 24-byte array, with BroadcastMessageID::ChannelAnnouncement(outpoint) as the key.

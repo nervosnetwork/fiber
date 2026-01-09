@@ -18,4 +18,7 @@ pub trait CchOrderStore {
 
     /// Get an iterator to list keys of all orders.
     fn get_cch_order_keys_iter(&self) -> impl IntoIterator<Item = Hash256>;
+
+    /// Deletes an order from the store.
+    fn delete_cch_order(&self, payment_hash: &Hash256);
 }

@@ -75,6 +75,11 @@ impl CchOrderStore for MockCchOrderStore {
             .copied()
             .collect::<Vec<_>>()
     }
+
+    fn delete_cch_order(&self, payment_hash: &Hash256) {
+        let mut orders = self.orders.lock().unwrap();
+        orders.remove(payment_hash);
+    }
 }
 
 /// Helper function to create a test payment hash

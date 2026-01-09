@@ -3,7 +3,7 @@ use crate::{cch::CchOrderStatus, fiber::types::Hash256, time::SystemTimeError};
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Eq, PartialEq)]
 pub enum CchStoreError {
     #[error("Inserting duplicated key: {0}")]
     Duplicated(Hash256),

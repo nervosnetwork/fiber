@@ -15,5 +15,8 @@ pub use order::{CchInvoice, CchOrder, CchOrderStatus, CchOrderStore};
 
 mod actions;
 
+mod scheduler;
+pub use scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
+
 #[cfg(test)]
 pub mod tests;
