@@ -6811,10 +6811,26 @@ impl ChannelActorState {
                 if my_local_commitment_number == peer_remote_commitment_number
                     && my_remote_commitment_number == peer_local_commitment_number
                 {
-                    // commitments are the same, sync up the tlcs
+                    error!(
+                        "DEBUG: Reestablish MATCH. send={:?}, verify={:?}",
+                        self.remote_revocation_nonce_for_send.is_some(),
+                        self.remote_revocation_nonce_for_verify.is_some()
+                    );
+                    // // commitments are the same, sync up the tlcs
+                    // if self.remote_revocation_nonce_for_send.is_none()
+                    //     && self.remote_revocation_nonce_for_verify.is_some()
+                    // {
+                    //     error!("DEBUG: Restoring send nonce from verify nonce");
+                    //     self.remote_revocation_nonce_for_send =
+                    //         self.remote_revocation_nonce_for_verify.clone();
+                    // }
                     self.set_waiting_ack(myself, false);
                     self.resend_tlcs_on_reestablish(true)?;
                 } else if my_remote_commitment_number == peer_local_commitment_number + 1 {
+                    error!("DEBUG: Reestablish Peer Needs ACK. MyLocal={} PeerRemote={} MyRemote={} PeerLocal={}",
+                        my_local_commitment_number, peer_remote_commitment_number,
+                        my_remote_commitment_number, peer_local_commitment_number
+                    );
                     // peer need ACK, I need to send my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
