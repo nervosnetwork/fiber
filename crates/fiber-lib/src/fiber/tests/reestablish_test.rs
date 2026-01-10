@@ -1,5 +1,4 @@
 use crate::fiber::channel::ChannelState;
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::tests::test_utils::*;
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -35,29 +34,31 @@ async fn test_reestablish_restores_send_nonce() {
         "Failed to reach target state where send nonce is None"
     );
 
+    assert_eq!(node_a.get_inflight_payment_count().await, 1);
+
     // Now restart node B to simulate disconnect/reconnect
     node_b.restart().await;
     node_b.connect_to(&mut node_a).await;
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    node_a
+        .expect_debug_event("Reestablished channel in ChannelReady")
+        .await;
+    node_b
+        .expect_debug_event("Reestablished channel in ChannelReady")
+        .await;
 
-    // Wait for channel reestablishment and nonce restoration.
-    // Since channel state might be persisted as ChannelReady, we need to wait for the nonce to be fixed.
-    let mut caught = false;
-    for _ in 0..100 {
-        let state = node_b.get_channel_actor_state(channel_id);
-        if state.remote_revocation_nonce_for_verify.is_some()
-            && state.remote_revocation_nonce_for_send.is_none()
-        {
-            caught = true;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    // check inflight until 5s
+    let now = Instant::now();
+    loop {
+        if node_a.get_inflight_payment_count().await == 0 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(now.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(
-        caught,
-        "Failed to reach target state where send nonce is None"
-    );
+    assert_eq!(node_a.get_inflight_payment_count().await, 0);
 
     let state = node_b.get_channel_actor_state(channel_id);
     println!("Node B State after wait:");

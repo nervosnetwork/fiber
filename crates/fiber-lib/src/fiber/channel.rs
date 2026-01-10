@@ -5003,9 +5003,13 @@ impl ChannelActorState {
 
     // Send RevokeAndAck message to the counterparty, and update the
     // channel state accordingly.
-    fn send_revoke_and_ack_message(&mut self) -> ProcessingChannelResult {
-        // special case for reestablishing channel state
-        if self.remote_revocation_nonce_for_send.is_none() {
+    // If `resend` is true, we MUST use the cached message (for reestablish scenarios).
+    fn send_revoke_and_ack_message(&mut self, resend: bool) -> ProcessingChannelResult {
+        // When resending during reestablish, we MUST use the cached message because:
+        // 1. The cached message was signed with the correct nonces at the time
+        // 2. The nonce state may have already advanced since then
+        // 3. The peer expects to verify with the original nonces
+        if resend || self.remote_revocation_nonce_for_send.is_none() {
             match self.last_revoke_ack_msg {
                 Some(ref revoke_and_ack) => {
                     self.network()
@@ -5020,7 +5024,7 @@ impl ChannelActorState {
                     return Ok(());
                 }
                 None => {
-                    let error = "Error reestablishing channel state, RevokeAndAck message not sent, but remote_revocation_nonce_for_send is None";
+                    let error = "Error reestablishing channel state, RevokeAndAck message not sent, but last_revoke_ack_msg is None";
                     warn!(error);
                     return Err(ProcessingChannelError::InvalidState(error.to_string()));
                 }
@@ -6327,7 +6331,7 @@ impl ChannelActorState {
                 self.maybe_transfer_to_tx_signatures(flags)?;
             }
             CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
-                self.send_revoke_and_ack_message()?;
+                self.send_revoke_and_ack_message(false)?;
             }
         }
         self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
@@ -6811,30 +6815,14 @@ impl ChannelActorState {
                 if my_local_commitment_number == peer_remote_commitment_number
                     && my_remote_commitment_number == peer_local_commitment_number
                 {
-                    error!(
-                        "DEBUG: Reestablish MATCH. send={:?}, verify={:?}",
-                        self.remote_revocation_nonce_for_send.is_some(),
-                        self.remote_revocation_nonce_for_verify.is_some()
-                    );
-                    // // commitments are the same, sync up the tlcs
-                    // if self.remote_revocation_nonce_for_send.is_none()
-                    //     && self.remote_revocation_nonce_for_verify.is_some()
-                    // {
-                    //     error!("DEBUG: Restoring send nonce from verify nonce");
-                    //     self.remote_revocation_nonce_for_send =
-                    //         self.remote_revocation_nonce_for_verify.clone();
-                    // }
+                    // commitments are the same, sync up the tlcs
                     self.set_waiting_ack(myself, false);
                     self.resend_tlcs_on_reestablish(true)?;
                 } else if my_remote_commitment_number == peer_local_commitment_number + 1 {
-                    error!("DEBUG: Reestablish Peer Needs ACK. MyLocal={} PeerRemote={} MyRemote={} PeerLocal={}",
-                        my_local_commitment_number, peer_remote_commitment_number,
-                        my_remote_commitment_number, peer_local_commitment_number
-                    );
-                    // peer need ACK, I need to send my revoke_and_ack message
+                    // peer need ACK, I need to resend my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
-                    self.send_revoke_and_ack_message()?;
+                    self.send_revoke_and_ack_message(true)?;
                     if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
                         self.set_waiting_ack(myself, false);
