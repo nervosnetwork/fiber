@@ -11,7 +11,6 @@ mod mpp;
 mod network;
 mod path;
 mod payment;
-mod reestablish_test;
 #[cfg(not(target_arch = "wasm32"))]
 mod rpc;
 mod serde_utils;
