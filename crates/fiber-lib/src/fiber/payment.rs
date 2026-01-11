@@ -1211,7 +1211,7 @@ where
                 let total_attempts = session.attempts_count();
 
                 warn!(
-                    "Payment {:?} is still not final after periodic check. \
+                    "Payment {:?} is still not final after periodic check, maybe the channel is down. \
                     Status: {:?}, Active attempts: {}, Inflight: {}, Failed: {}, Total: {}, \
                     Retry count: {}, Last error: {:?}",
                     payment_hash,
@@ -1223,6 +1223,13 @@ where
                     state.retry_send_payment_count,
                     session.last_error
                 );
+
+                // The tlc may stuck due to the channel is down
+                // we stop the actor, the actor will be resumed once tlc is processed
+                myself.stop(Some(
+                    "Payment is still not final, the tlc may stuck due to the channel is down"
+                        .to_string(),
+                ));
             }
         } else {
             error!(
