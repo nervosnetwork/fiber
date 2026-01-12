@@ -1138,6 +1138,19 @@ where
         .map_err(|err| PathFindError::Other(format!("blocking task failed: {}", err)))?
     }
 
+    /// NOTE: `spawn_blocking` is not supported on wasm, so this original implementation of `build_route` will be used on wasm
+    async fn build_route(
+        &self,
+        amount: u128,
+        amount_low_bound: Option<u128>,
+        max_fee_amount: Option<u128>,
+        request: SendPaymentData,
+    ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        let network_graph = self.network_graph.clone();
+        let graph = network_graph.read().await;
+        graph.build_route(amount, amount_low_bound, max_fee_amount, &request)
+    }
+
     pub async fn handle_command(
         &self,
         myself: ActorRef<PaymentActorMessage>,
@@ -1322,9 +1335,17 @@ where
             };
 
             session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
-
+            #[cfg(not(target_arch = "wasm32"))]
             let hops = self
                 .build_route_in_spawn_task(amount, None, max_fee, session.request.clone())
+                .await
+                .map_err(|e| {
+                    Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
+                })?;
+
+            #[cfg(target_arch = "wasm32")]
+            let hops = self
+                .build_route(amount, None, max_fee, session.request.clone())
                 .await
                 .map_err(|e| {
                     Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
@@ -1372,15 +1393,26 @@ where
                 amount_low_bound,
                 remain_amount,
             );
-            match self
+            #[cfg(not(target_arch = "wasm32"))]
+            let build_route_result = self
                 .build_route_in_spawn_task(
                     target_amount,
                     amount_low_bound,
                     max_fee,
                     session.request.clone(),
                 )
-                .await
-            {
+                .await;
+            #[cfg(target_arch = "wasm32")]
+            let build_route_result = self
+                .build_route(
+                    target_amount,
+                    amount_low_bound,
+                    max_fee,
+                    session.request.clone(),
+                )
+                .await;
+
+            match build_route_result {
                 Err(e) => {
                     let error = format!("Failed to build route, {}", e);
                     self.set_payment_fail_with_error(session, &error);
