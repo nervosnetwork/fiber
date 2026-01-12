@@ -2322,6 +2322,8 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
     assert_eq!(payment_res.routers.len(), 3);
 }
 
+// TODO(yukang): this test case used more attempts than expectedf, it's related to the current path finding strategy,
+//  we need to optimize this in the future.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_send_mpp_will_fail_with_disable_single_path() {
     init_tracing();
