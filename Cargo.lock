@@ -3177,13 +3177,14 @@ dependencies = [
 
 [[package]]
 name = "idb"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3afe8830d5802f769dc0be20a87f9f116798c896650cb6266eb5c19a3c109eed"
+checksum = "6554f394e990a1af530a528a7fdcad6e01b29cb1b990f89df3ffd62cf15f7828"
 dependencies = [
+ "indexmap 2.10.0",
  "js-sys",
  "num-traits",
- "thiserror 1.0.69",
+ "thiserror 2.0.12",
  "tokio",
  "wasm-bindgen",
  "web-sys",
