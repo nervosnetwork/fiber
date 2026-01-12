@@ -909,6 +909,7 @@ impl NetworkNode {
         .await
     }
 
+    #[cfg(any(feature = "metrics", test))]
     pub async fn get_payment_find_path_count(&self, payment_hash: Hash256) -> Option<u128> {
         let graph = self.network_graph.read().await;
         let res = graph
@@ -919,10 +920,21 @@ impl NetworkNode {
         res
     }
 
+    #[cfg(not(any(feature = "metrics", test)))]
+    pub async fn get_payment_find_path_count(&self, _payment_hash: Hash256) -> Option<u128> {
+        None
+    }
+
+    #[cfg(any(feature = "metrics", test))]
     pub async fn get_payment_path_count_sum(&self) -> u128 {
         let graph = self.network_graph.read().await;
         let res = graph.payment_find_path_stats.lock().values().sum();
         res
+    }
+
+    #[cfg(not(any(feature = "metrics", test)))]
+    pub async fn get_payment_path_count_sum(&self) -> u128 {
+        0
     }
 
     pub async fn get_inflight_payment_count(&self) -> u32 {
