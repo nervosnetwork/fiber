@@ -6332,6 +6332,11 @@ async fn test_reestablish_restores_send_nonce() {
         .await
         .unwrap()
         .payment_hash;
+    let payment_hash2 = node_b
+        .send_payment_keysend(&node_a, 1000, false)
+        .await
+        .unwrap()
+        .payment_hash;
 
     // Wait for B to reach the target state where send is None but verify is Some.
     // This confirms we are in the potential deadlock state if persistent.
@@ -6353,6 +6358,7 @@ async fn test_reestablish_restores_send_nonce() {
     );
 
     assert_eq!(node_a.get_inflight_payment_count().await, 1);
+    assert_eq!(node_b.get_inflight_payment_count().await, 1);
 
     // Now restart node B to simulate disconnect/reconnect
     node_b.restart().await;
@@ -6370,16 +6376,23 @@ async fn test_reestablish_restores_send_nonce() {
     // check inflight until 5s
     let now = std::time::Instant::now();
     loop {
-        if node_a.get_inflight_payment_count().await == 0 {
+        if node_a.get_inflight_payment_count().await == 0
+            && node_b.get_inflight_payment_count().await == 0
+        {
             break;
         }
         assert!(now.elapsed() < Duration::from_secs(5));
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(node_a.get_inflight_payment_count().await, 0);
+    assert_eq!(node_b.get_inflight_payment_count().await, 0);
 
     assert_eq!(
         node_a.get_payment_status(payment_hash).await,
+        PaymentStatus::Success
+    );
+    assert_eq!(
+        node_b.get_payment_status(payment_hash2).await,
         PaymentStatus::Success
     );
 
@@ -6430,4 +6443,71 @@ async fn test_reestablish_restores_send_nonce() {
     assert!(err_string.contains(
         "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
     ));
+}
+
+#[tokio::test]
+async fn test_node_restart() {
+    init_tracing();
+    let (mut node_a, mut node_b, _channel_id) = create_nodes_with_established_channel(1000 * 100000000, 1000 * 100000000, true).await;
+
+    for i in 0..10 {
+        debug!("Restart cycle {}", i);
+        for j in 0..100 {
+            debug!("Payment cycle {}", j);
+            // node_a -> node_b keysend
+            node_a.assert_send_payment_success(SendPaymentCommand {
+                target_pubkey: Some(node_b.pubkey),
+                amount: Some(1),
+                keysend: Some(true),
+                ..Default::default()
+            }).await;
+
+            // node_a -> node_b invoice
+            let preimage = gen_rand_sha256_hash();
+            let invoice = InvoiceBuilder::new(Currency::Fibd)
+                .amount(Some(1))
+                .payment_preimage(preimage)
+                .payee_pub_key(node_b.pubkey.into())
+                .expiry_time(Duration::from_secs(100))
+                .build()
+                .expect("build invoice success");
+            node_b.insert_invoice(invoice.clone(), Some(preimage));
+            node_a.assert_send_payment_success(SendPaymentCommand {
+                target_pubkey: Some(node_b.pubkey),
+                amount: Some(1),
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            }).await;
+
+            // node_b -> node_a keysend
+            node_b.assert_send_payment_success(SendPaymentCommand {
+                target_pubkey: Some(node_a.pubkey),
+                amount: Some(1),
+                keysend: Some(true),
+                ..Default::default()
+            }).await;
+
+            // node_b -> node_a invoice
+            let preimage = gen_rand_sha256_hash();
+            let invoice = InvoiceBuilder::new(Currency::Fibd)
+                .amount(Some(1))
+                .payment_preimage(preimage)
+                .payee_pub_key(node_a.pubkey.into())
+                .expiry_time(Duration::from_secs(100))
+                .build()
+                .expect("build invoice success");
+            node_a.insert_invoice(invoice.clone(), Some(preimage));
+            node_b.assert_send_payment_success(SendPaymentCommand {
+                target_pubkey: Some(node_a.pubkey),
+                amount: Some(1),
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            }).await;
+        }
+
+        node_a.stop().await;
+        node_a.start().await;
+        node_a.connect_to(&mut node_b).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
 }
