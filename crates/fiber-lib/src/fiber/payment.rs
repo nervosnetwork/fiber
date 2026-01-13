@@ -1122,6 +1122,7 @@ where
 
     /// Spawn a blocking task to build route
     /// NOTE: build route is a CPU intensive task
+    #[cfg(not(target_arch = "wasm32"))]
     async fn build_route_in_spawn_task(
         &self,
         amount: u128,
@@ -1139,6 +1140,7 @@ where
     }
 
     /// NOTE: `spawn_blocking` is not supported on wasm, so this original implementation of `build_route` will be used on wasm
+    #[cfg(target_arch = "wasm32")]
     async fn build_route(
         &self,
         amount: u128,
