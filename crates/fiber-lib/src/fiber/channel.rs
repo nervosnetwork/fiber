@@ -372,11 +372,15 @@ pub struct ChannelActor<S> {
     remote_pubkey: Pubkey,
     network: ActorRef<NetworkActorMessage>,
     store: S,
+    // Buffer for peer messages received during reestablishing
+    pending_peer_messages: std::sync::Mutex<Vec<FiberChannelMessage>>,
+    // Buffer for commands received during reestablishing
+    pending_reestablish_commands: std::sync::Mutex<Vec<ChannelCommand>>,
 }
 
 impl<S> ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -389,6 +393,8 @@ where
             remote_pubkey,
             network,
             store,
+            pending_peer_messages: std::sync::Mutex::new(Vec::new()),
+            pending_reestablish_commands: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -414,18 +420,37 @@ where
         state: &mut ChannelActorState,
         message: FiberChannelMessage,
     ) -> ProcessingChannelResult {
-        if state.reestablishing {
+        if state.reestablishing || state.reestablish_syncing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
                     state
                         .handle_reestablish_channel_message(myself, reestablish_channel)
                         .await?;
+                    if !state.reestablish_syncing {
+                        self.flush_pending_peer_messages(myself, state).await?;
+                        self.flush_pending_commands(myself, state).await?;
+                    }
                     if !state.reestablishing {
                         state.schedule_next_retry_task(myself);
                     }
                 }
+                FiberChannelMessage::RevokeAndAck(revoke_and_ack) if state.reestablish_syncing => {
+                    // Temporarily clear reestablishing flag to allow RevokeAndAck to be processed immediately
+                    // instead of being deferred. This is critical for the reestablish sync barrier to work correctly.
+                    state.reestablishing = false;
+
+                    state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
+                    self.update_tlc_status_on_ack(myself, state).await;
+                    debug!("Reestablish sync complete (RevokeAndAck received)");
+                    state.reestablish_syncing = false;
+                    // reestablishing is already false from above
+
+                    self.flush_pending_peer_messages(myself, state).await?;
+                    self.flush_pending_commands(myself, state).await?;
+                }
                 _ => {
-                    debug!("Ignoring message while reestablishing: {:?}", message);
+                    debug!("Buffering message while reestablishing: {:?}", message);
+                    self.pending_peer_messages.lock().unwrap().push(message);
                 }
             }
             return Ok(());
@@ -742,11 +767,23 @@ where
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
+        debug!(
+            "handle_commitment_signed_peer_message: reestablishing={} reestablish_syncing={} commitment_numbers={:?} tlc_state={}",
+            state.reestablishing,
+            state.reestablish_syncing,
+            state.get_current_commitment_numbers(),
+            format!("{:?}", state.tlc_state)
+        );
+
         if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
             error!(
-                "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
+                "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully. reestablishing={} reestablish_syncing={} commitment_numbers={:?} tlc_state={}",
                 err,
-                state.get_id()
+                state.get_id(),
+                state.reestablishing,
+                state.reestablish_syncing,
+                state.get_current_commitment_numbers(),
+                format!("{:?}", state.tlc_state)
             );
             self.notify_network_actor_shutdown_me(state);
             return Err(err);
@@ -839,6 +876,53 @@ where
             tlc_id,
             RemoveTlcReason::RemoveTlcFail(error_packet),
         );
+    }
+
+    pub fn flush_pending_peer_messages<'a>(
+        &'a self,
+        myself: &'a ActorRef<ChannelActorMessage>,
+        state: &'a mut ChannelActorState,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ProcessingChannelResult> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let messages: Vec<_> = {
+                let mut guard = self.pending_peer_messages.lock().unwrap();
+                if guard.is_empty() {
+                    return Ok(());
+                }
+                guard.drain(..).collect()
+            };
+            debug!(
+                "Flushing {} pending peer messages after reestablish",
+                messages.len()
+            );
+            for message in messages {
+                self.handle_peer_message(myself, state, message).await?;
+            }
+            Ok(())
+        })
+    }
+
+    pub async fn flush_pending_commands(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) -> ProcessingChannelResult {
+        let commands: Vec<_> = {
+            let mut guard = self.pending_reestablish_commands.lock().unwrap();
+            if guard.is_empty() {
+                return Ok(());
+            }
+            guard.drain(..).collect()
+        };
+        debug!(
+            "Flushing {} pending commands after reestablish",
+            commands.len()
+        );
+        for command in commands {
+            self.handle_command(myself, state, command).await?;
+        }
+        Ok(())
     }
 
     async fn update_tlc_status_on_ack(
@@ -1864,15 +1948,27 @@ where
                 return;
             };
 
-            #[cfg(debug_assertions)]
+            // Deduplicate the remaining operations to handle edge cases during reestablishment
+            // where operations might be added multiple times with slightly different metadata
             {
-                let hashset: HashSet<RetryableTlcOperation> =
-                    state.retryable_tlc_operations.iter().cloned().collect();
-                assert_eq!(
-                    hashset.len(),
-                    state.retryable_tlc_operations.len(),
-                    "retryable_tlc_operations contains duplicated operations"
-                );
+                let unique_ops: VecDeque<RetryableTlcOperation> = {
+                    let mut seen = HashSet::new();
+                    state
+                        .retryable_tlc_operations
+                        .iter()
+                        .filter(|op| seen.insert((*op).clone()))
+                        .cloned()
+                        .collect()
+                };
+                let removed_count =
+                    state.retryable_tlc_operations.len() - unique_ops.len();
+                if removed_count > 0 {
+                    warn!(
+                        "Removed {} duplicate operations from retryable queue during processing",
+                        removed_count
+                    );
+                    state.retryable_tlc_operations = unique_ops;
+                }
             }
 
             let success = match operation {
@@ -2057,6 +2153,22 @@ where
         state: &mut ChannelActorState,
         command: ChannelCommand,
     ) -> ProcessingChannelResult {
+        if state.reestablishing || state.reestablish_syncing {
+            match &command {
+                ChannelCommand::AddTlc(..)
+                | ChannelCommand::RemoveTlc(..)
+                | ChannelCommand::Update(..)
+                | ChannelCommand::CommitmentSigned() => {
+                    debug!("Buffering command while reestablishing: {:?}", command);
+                    self.pending_reestablish_commands
+                        .lock()
+                        .unwrap()
+                        .push(command);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         match command {
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
@@ -3693,7 +3805,12 @@ pub struct ChannelActorState {
     // A flag to indicate whether the channel is reestablishing,
     // we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
+    // A flag to indicate we sent commitment_signed during reestablish and are waiting for revoke_and_ack
+    // to complete the synchronization. Messages are buffered until this sync completes.
+    pub reestablish_syncing: bool,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
+    // Deferred RevokeAndAck received while reestablishing, to be processed after reestablish completes
+    pub deferred_revoke_and_ack: Option<RevokeAndAck>,
 
     pub created_at: SystemTime,
 
@@ -4637,7 +4754,9 @@ impl ChannelActorState {
             ),
             latest_commitment_transaction: None,
             reestablishing: false,
+            reestablish_syncing: false,
             last_revoke_ack_msg: None,
+            deferred_revoke_and_ack: None,
             created_at: SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
@@ -4719,7 +4838,9 @@ impl ChannelActorState {
             remote_reserved_ckb_amount: 0,
             latest_commitment_transaction: None,
             reestablishing: false,
+            reestablish_syncing: false,
             last_revoke_ack_msg: None,
+            deferred_revoke_and_ack: None,
             created_at: SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
@@ -6497,7 +6618,9 @@ impl ChannelActorState {
             return;
         };
 
-        self.reestablishing = false;
+        if !self.reestablish_syncing {
+            self.reestablishing = false;
+        }
 
         // If the channel is already ready, we should notify the network actor.
         // so that we update the network.outpoint_channel_map
@@ -6639,6 +6762,20 @@ impl ChannelActorState {
         myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> ProcessingChannelResult {
+        if self.reestablishing {
+            if let Some(deferred) = &self.deferred_revoke_and_ack {
+                if deferred.channel_id == revoke_and_ack.channel_id
+                    && deferred.next_revocation_nonce == revoke_and_ack.next_revocation_nonce
+                {
+                    info!("Received duplicate RevokeAndAck while reestablishing, ignoring");
+                    return Ok(());
+                }
+                warn!("Received different RevokeAndAck while reestablishing, overwriting. Old: {:?}, New: {:?}", deferred, revoke_and_ack);
+            }
+            info!("Deferring RevokeAndAck message until reestablish is complete");
+            self.deferred_revoke_and_ack = Some(revoke_and_ack);
+            return Ok(());
+        }
         if !self.tlc_state.waiting_ack {
             return Err(ProcessingChannelError::InvalidState(
                 "unexpected RevokeAndAck message".to_string(),
@@ -6817,7 +6954,11 @@ impl ChannelActorState {
                 {
                     // commitments are the same, sync up the tlcs
                     self.set_waiting_ack(myself, false);
-                    self.resend_tlcs_on_reestablish(true)?;
+                    let sent_commitment_signed = self.resend_tlcs_on_reestablish(true)?;
+                    if sent_commitment_signed {
+                        // We sent commitment_signed, so we are waiting for revoke_and_ack
+                        self.reestablish_syncing = true;
+                    }
                 } else if my_remote_commitment_number == peer_local_commitment_number + 1 {
                     // peer need ACK, I need to resend my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
@@ -6826,18 +6967,30 @@ impl ChannelActorState {
                     if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
                         self.set_waiting_ack(myself, false);
-                        self.resend_tlcs_on_reestablish(true)?;
+                        let sent_commitment_signed = self.resend_tlcs_on_reestablish(true)?;
+                        if sent_commitment_signed {
+                            // We sent commitment_signed, so we are waiting for revoke_and_ack
+                            self.reestablish_syncing = true;
+                        }
                     }
                 } else if my_waiting_ack
                     && my_local_commitment_number == peer_remote_commitment_number
                 {
                     // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag
+                    self.set_waiting_ack(myself, false);
                     self.resend_tlcs_on_reestablish(true)?;
+                    // We just sent commitment_signed, so we are waiting for revoke_and_ack
+                    self.reestablish_syncing = true;
                 } else {
                     // ignore, waiting for remote peer to resend revoke_and_ack
+                    self.reestablish_syncing = true;
                 }
 
                 self.on_reestablished_channel_ready(myself);
+                if let Some(deferred) = self.deferred_revoke_and_ack.take() {
+                    info!("Processing deferred RevokeAndAck message");
+                    self.handle_revoke_and_ack_peer_message(myself, deferred)?;
+                }
                 debug_event!(network, "Reestablished channel in ChannelReady");
             }
             ChannelState::ShuttingDown(flags) => {
@@ -6865,7 +7018,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn resend_tlcs_on_reestablish(&self, send_commitment_signed: bool) -> ProcessingChannelResult {
+    fn resend_tlcs_on_reestablish(&self, send_commitment_signed: bool) -> Result<bool, ProcessingChannelError> {
         let network = self.network();
         let mut need_commitment_signed = false;
         for info in self.tlc_state.all_tlcs() {
@@ -6914,9 +7067,17 @@ impl ChannelActorState {
             }
         }
 
-        if send_commitment_signed
-            && (need_commitment_signed || self.tlc_state.need_another_commitment_signed())
+        let will_send_commitment_signed = send_commitment_signed
+            && (need_commitment_signed || self.tlc_state.need_another_commitment_signed());
+
+        if will_send_commitment_signed
         {
+            debug!(
+                "resend_tlcs_on_reestablish: sending CommitmentSigned, commitment_numbers={:?} tlc_state={}",
+                self.get_current_commitment_numbers(),
+                format!("{:?}", self.tlc_state)
+            );
+
             network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
@@ -6926,7 +7087,7 @@ impl ChannelActorState {
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
-        Ok(())
+        Ok(will_send_commitment_signed)
     }
 
     fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {

@@ -54,6 +54,61 @@ jobs:
         env:
           RUST_TEST_THREADS: 2
 
+  test-reestablishment:
+    name: Test Reestablishment (Stress)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-reestablishment-${{ runner.os }}
+      - name: Run reestablishment stress test 5 times
+        run: |
+          echo "Running test_node_restart 5 times to verify stability..."
+          for i in {1..5}; do
+            echo ""
+            echo "=========================================="
+            echo "Run $i/5: Starting test_node_restart"
+            echo "=========================================="
+
+            # Run the test and capture output
+            TEST_OUTPUT=$(cargo test --lib --package fnn fiber::tests::channel::test_node_restart -- --ignored --nocapture 2>&1)
+            TEST_EXIT_CODE=$?
+
+            # Print the output
+            echo "$TEST_OUTPUT"
+
+            # Check if test failed (non-zero exit code)
+            if [ $TEST_EXIT_CODE -ne 0 ]; then
+              echo "❌ Run $i/5 FAILED: Test exited with code $TEST_EXIT_CODE"
+              exit 1
+            fi
+
+            # Check for BadSignature in output
+            if echo "$TEST_OUTPUT" | grep -i "BadSignature" > /dev/null; then
+              echo "❌ Run $i/5 FAILED: BadSignature detected in output"
+              exit 1
+            fi
+
+            # Check for panic in output
+            if echo "$TEST_OUTPUT" | grep -i "panic" > /dev/null; then
+              echo "❌ Run $i/5 FAILED: panic detected in output"
+              exit 1
+            fi
+
+            echo "✅ Run $i/5 PASSED: No BadSignature or panic detected"
+          done
+
+          echo ""
+          echo "=========================================="
+          echo "✅ All 5 runs completed successfully!"
+          echo "=========================================="
+        env:
+          RUST_BACKTRACE: 1
+          RUST_LOG: info
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
