@@ -2157,8 +2157,19 @@ where
             match &command {
                 ChannelCommand::AddTlc(..)
                 | ChannelCommand::RemoveTlc(..)
-                | ChannelCommand::Update(..)
-                | ChannelCommand::CommitmentSigned() => {
+                | ChannelCommand::Update(..) => {
+                    debug!("Buffering command while reestablishing: {:?}", command);
+                    self.pending_reestablish_commands
+                        .lock()
+                        .unwrap()
+                        .push(command);
+                    return Ok(());
+                }
+                // Only buffer CommitmentSigned when actively reestablishing (reestablishing=true).
+                // When reestablish_syncing=true, we need to allow our own CommitmentSigned command
+                // (sent by resend_tlcs_on_reestablish) to be processed and sent to the peer,
+                // otherwise the peer will never receive it and never send RevokeAndAck, causing deadlock.
+                ChannelCommand::CommitmentSigned() if state.reestablishing => {
                     debug!("Buffering command while reestablishing: {:?}", command);
                     self.pending_reestablish_commands
                         .lock()
@@ -6618,9 +6629,12 @@ impl ChannelActorState {
             return;
         };
 
-        if !self.reestablish_syncing {
-            self.reestablishing = false;
-        }
+        // Always clear reestablishing flag here, as we are done with the reestablishment logic.
+        // Even if we are waiting for RevokeAndAck (reestablish_syncing=true), we need to clear
+        // this flag to allow the CommitmentSigned command (sent by resend_tlcs_on_reestablish)
+        // to be processed instead of being buffered.
+        // The reestablish_syncing flag will ensure subsequent messages are still properly buffered.
+        self.reestablishing = false;
 
         // If the channel is already ready, we should notify the network actor.
         // so that we update the network.outpoint_channel_map
@@ -6983,7 +6997,6 @@ impl ChannelActorState {
                     self.reestablish_syncing = true;
                 } else {
                     // ignore, waiting for remote peer to resend revoke_and_ack
-                    self.reestablish_syncing = true;
                 }
 
                 self.on_reestablished_channel_ready(myself);
