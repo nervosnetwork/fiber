@@ -3174,6 +3174,7 @@ pub struct PrevTlcInfo {
     // The TLC is always a received TLC because we are forwarding it.
     pub(crate) prev_tlc_id: u64,
     pub(crate) forwarding_fee: u128,
+    pub(crate) shared_secret: Option<[u8; 32]>,
 }
 
 impl PrevTlcInfo {
@@ -3182,6 +3183,21 @@ impl PrevTlcInfo {
             prev_channel_id,
             prev_tlc_id,
             forwarding_fee,
+            shared_secret: None,
+        }
+    }
+
+    pub fn new_with_shared_secret(
+        prev_channel_id: Hash256,
+        prev_tlc_id: u64,
+        forwarding_fee: u128,
+        shared_secret: [u8; 32],
+    ) -> Self {
+        Self {
+            prev_channel_id,
+            prev_tlc_id,
+            forwarding_fee,
+            shared_secret: Some(shared_secret),
         }
     }
 }

@@ -142,6 +142,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
         dry_run: false,
         hop_hints: None,
         custom_records: None,
+        final_trampoline_onion: None,
     };
 
     // Provided but empty.

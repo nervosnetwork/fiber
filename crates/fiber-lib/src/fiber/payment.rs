@@ -170,6 +170,7 @@ pub struct SendPaymentData {
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
     pub trampoline_hops: Option<Vec<TrampolineHop>>,
+    pub final_trampoline_onion: Option<Vec<u8>>,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
 }
@@ -195,6 +196,7 @@ pub struct SendPaymentDataBuilder {
     allow_mpp: bool,
     dry_run: bool,
     trampoline_hops: Option<Vec<TrampolineHop>>,
+    final_trampoline_onion: Option<Vec<u8>>,
     channel_stats: GraphChannelStat,
 }
 
@@ -303,6 +305,11 @@ impl SendPaymentDataBuilder {
 
     pub fn trampoline_hops(mut self, trampoline_hops: Option<Vec<TrampolineHop>>) -> Self {
         self.trampoline_hops = trampoline_hops;
+        self
+    }
+
+    pub fn final_trampoline_onion(mut self, final_trampoline_onion: Option<Vec<u8>>) -> Self {
+        self.final_trampoline_onion = final_trampoline_onion;
         self
     }
 
@@ -446,6 +453,7 @@ impl SendPaymentDataBuilder {
             allow_mpp: self.allow_mpp,
             dry_run: self.dry_run,
             trampoline_hops: self.trampoline_hops,
+            final_trampoline_onion: self.final_trampoline_onion,
             channel_stats: self.channel_stats,
         })
     }
@@ -601,6 +609,7 @@ impl SendPaymentData {
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
             .trampoline_hops(command.trampoline_hops)
+            .final_trampoline_onion(command.final_trampoline_onion)
             .channel_stats(Default::default())
             .build()
     }
@@ -1115,6 +1124,12 @@ pub struct SendPaymentCommand {
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
     pub trampoline_hops: Option<Vec<TrampolineHop>>,
+    /// Optional final trampoline onion packet.
+    ///
+    /// When provided, this onion packet will be attached to the payload of the final hop
+    /// (which in this context is the next trampoline node).
+    #[serde(skip)]
+    pub final_trampoline_onion: Option<Vec<u8>>,
 }
 
 impl SendPaymentCommand {
@@ -1690,8 +1705,15 @@ where
                     let error = format!("Failed to build route, {}", e);
                     return Err(Error::SendPaymentError(error));
                 }
-                Ok(hops) => {
+                Ok(mut hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
+
+                    if let Some(trampoline_onion) = &session.request.final_trampoline_onion {
+                        if let Some(last_hop) = hops.last_mut() {
+                            last_hop.trampoline_onion = Some(trampoline_onion.clone());
+                        }
+                    }
+
                     let new_attempt_id = if session.is_dry_run() {
                         0
                     } else {
@@ -2066,12 +2088,13 @@ where
         };
 
         match reason {
-            RemoveTlcReason::RemoveTlcFulfill(_) => {
+            RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
                 self.network_graph
                     .write()
                     .await
                     .record_attempt_success(&attempt);
                 attempt.set_success_status();
+                attempt.preimage = Some(fulfill.payment_preimage);
                 self.store.insert_attempt(attempt.clone());
 
                 session.update_with_attempt(attempt);

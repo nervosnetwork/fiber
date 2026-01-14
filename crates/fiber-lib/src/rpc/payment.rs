@@ -419,6 +419,7 @@ where
                         .trampoline_hops
                         .clone()
                         .map(|hops| hops.into_iter().map(|h| h.into()).collect::<Vec<_>>()),
+                    final_trampoline_onion: None,
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),

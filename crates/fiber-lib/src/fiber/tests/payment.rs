@@ -5257,6 +5257,7 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
                 dry_run: false,
                 hop_hints: None,
                 custom_records: None,
+                final_trampoline_onion: None,
             })
             .await
             .unwrap();
