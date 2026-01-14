@@ -9,9 +9,10 @@ use crate::fiber::network::{
     NetworkActorMessage, // Fixed import
     SendOnionPacketCommand,
 };
-use crate::fiber::payment::{SendPaymentCommand, TrampolineHop};
+use crate::fiber::payment::{PaymentStatus, SendPaymentCommand, TrampolineHop};
 use crate::fiber::types::{
     CurrentPaymentHopData,
+    Hash256,
     PeeledPaymentOnionPacket,
     Privkey,
     Pubkey,
@@ -28,6 +29,7 @@ use crate::{
 use ractor::RpcReplyPort;
 use secp256k1::Secp256k1;
 use tokio::sync::oneshot;
+use tracing::debug;
 
 #[tokio::test]
 async fn test_trampoline_routing_basic() {
@@ -1175,4 +1177,874 @@ async fn test_trampoline_routing_loop_failure_insufficient_fee() {
     let err_msg = res.err().unwrap().to_string();
     assert!(err_msg.contains("max_fee_amount too low") || err_msg.contains("fee"));
     // Match graph.rs error
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_retry_with_intermediate_failure() {
+    init_tracing();
+
+    // Node indices:
+    // A: 0
+    // B: 1 (Trampoline)
+    // C: 2 (Receiver)
+    // P1: 3 (Path 1 - Cheap but Broken)
+    // P2: 4 (Path 2 - Expensive but Working)
+
+    let usable_cap = 20_000_000;
+    let common_funding = MIN_RESERVED_CKB + usable_cap;
+
+    let channels_params = vec![
+        // A -> B
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                ..Default::default()
+            },
+        ),
+        // B -> P1 (Low Fee)
+        (
+            (1, 3),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // P1 -> C (Low Fee)
+        (
+            (3, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // B -> P2 (High Fee)
+        (
+            (1, 4),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(10000),
+                ..Default::default()
+            },
+        ),
+        // P2 -> C (Low Fee)
+        (
+            (4, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, _channels_map) =
+        create_n_nodes_network_with_params(&channels_params, 5, None).await;
+    let [node_a, node_b, node_c, node_p1, _node_p2] = nodes.try_into().expect("5 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+    wait_until_node_has_public_channels_at_least(&node_b, 5).await;
+
+    // Drain P1 -> C
+    let drain_amount = usable_cap - 1000;
+
+    let preimage_drain = gen_rand_sha256_hash();
+    let invoice_drain = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(drain_amount))
+        .payment_preimage(preimage_drain)
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .expect("drain invoice");
+    node_c.insert_invoice(invoice_drain.clone(), Some(preimage_drain));
+
+    let res = node_p1
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_drain.to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+    node_p1.wait_until_success(res.unwrap().payment_hash).await;
+
+    // Trampoline Payment A -> B -> C
+    // Amount 2000 (Greater than 1000 left on P1->C)
+    // B should try B->P1->C first (cost 0), fail, then retry B->P2->C.
+
+    let amount_expr = 2000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount_expr))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .expect("expr invoice");
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
+            max_fee_amount: Some(1000000),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+    node_a.wait_until_success(res.unwrap().payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_two_hops_both_retry_success() {
+    init_tracing();
+    // Topology: A -> T1 -> T2 -> C
+    // T1 -> T2 has 2 paths: via P1 (drained/fail), via P2 (ok)
+    // T2 -> C has 2 paths: via Q1 (drained/fail), via Q2 (ok)
+
+    // Indices:
+    // A: 0
+    // T1: 1
+    // T2: 2
+    // C: 3
+    // P1: 4
+    // P2: 5
+    // Q1: 6
+    // Q2: 7
+
+    let usable_cap = 20_000_000;
+    let common_funding = MIN_RESERVED_CKB + usable_cap;
+
+    let channels_params = vec![
+        // A -> T1
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                ..Default::default()
+            },
+        ),
+        // T1 -> P1 (Cheap, to be drained)
+        (
+            (1, 4),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // P1 -> T2
+        (
+            (4, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // T1 -> P2 (Expensive, working)
+        (
+            (1, 5),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(10000), // Expensive
+                ..Default::default()
+            },
+        ),
+        // P2 -> T2
+        (
+            (5, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // T2 -> Q1 (Cheap, to be drained)
+        (
+            (2, 6),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // Q1 -> C
+        (
+            (6, 3),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // T2 -> Q2 (Expensive, working)
+        (
+            (2, 7),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(10000), // Expensive
+                ..Default::default()
+            },
+        ),
+        // Q2 -> C
+        (
+            (7, 3),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 8, None).await;
+    let [node_a, node_t1, node_t2, node_c, node_p1, _node_p2, node_q1, _node_q2] =
+        nodes.try_into().expect("8 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t2).await;
+
+    // We need to wait for public channel updates. With 8 nodes, propagation might take a moment.
+    wait_until_node_has_public_channels_at_least(&node_t1, 9).await; // 9 total channels in network
+    wait_until_node_has_public_channels_at_least(&node_t2, 9).await;
+
+    // Drain P1 (T1 -> P1 -> T2 path)
+    let drain_amount = usable_cap - 1000;
+
+    // Drain P1->T2
+    {
+        let preimage = gen_rand_sha256_hash();
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(drain_amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(node_t2.get_public_key().into())
+            .build()
+            .unwrap();
+        node_t2.insert_invoice(invoice.clone(), Some(preimage));
+        let res = node_p1
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(res.is_ok());
+        node_p1.wait_until_success(res.unwrap().payment_hash).await;
+    }
+
+    // Drain Q1->C (T2 -> Q1 -> C path)
+    {
+        let preimage = gen_rand_sha256_hash();
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(drain_amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(node_c.get_public_key().into())
+            .build()
+            .unwrap();
+        node_c.insert_invoice(invoice.clone(), Some(preimage));
+        let res = node_q1
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(res.is_ok());
+        node_q1.wait_until_success(res.unwrap().payment_hash).await;
+    }
+
+    // Now send actual payment A -> T1 -> T2 -> C.
+    // Amount 2000.
+    // T1 will try T1->P1->T2. P1->T2 has 1000 < 2000. Fail.
+    // T1 should retry T1->P2->T2. works.
+    // T2 receives via P2.
+    // T2 will try T2->Q1->C. Q1->C has 1000 < 2000. Fail.
+    // T2 should retry T2->Q2->C. works.
+
+    let amount = 2000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .unwrap();
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![
+                TrampolineHop::new(node_t1.get_public_key()),
+                TrampolineHop::new(node_t2.get_public_key()),
+            ]),
+            max_fee_amount: Some(10_000_000), // Enough for expensive paths
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    node_a.wait_until_success(res.unwrap().payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_mid_failure_propagates_back() {
+    init_tracing();
+    // Topology: A -> T1 -> T2 -> C
+    // T1->T2: 1 path (Direct or indirect, doesn't matter, assume working)
+    // T2->C: 2 paths (Q1, Q2), both drained.
+
+    // Indices:
+    // A: 0
+    // T1: 1
+    // T2: 2
+    // C: 3
+    // Q1: 4
+    // Q2: 5
+
+    let usable_cap = 20_000_000;
+    let common_funding = MIN_RESERVED_CKB + usable_cap;
+
+    let channels_params = vec![
+        // A -> T1
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                ..Default::default()
+            },
+        ),
+        // T1 -> T2 (Direct for simplicity here)
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                ..Default::default()
+            },
+        ),
+        // T2 -> Q1
+        (
+            (2, 4),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // Q1 -> C
+        (
+            (4, 3),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                ..Default::default()
+            },
+        ),
+        // T2 -> Q2
+        (
+            (2, 5),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        // Q2 -> C
+        (
+            (5, 3),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 6, None).await;
+    let [node_a, node_t1, node_t2, node_c, node_q1, node_q2] = nodes.try_into().expect("6 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t2).await;
+    wait_until_node_has_public_channels_at_least(&node_t2, 6).await;
+
+    // Drain Q1->C
+    {
+        let drain_amount = usable_cap - 1000;
+        let preimage = gen_rand_sha256_hash();
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(drain_amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(node_c.get_public_key().into())
+            .build()
+            .unwrap();
+        node_c.insert_invoice(invoice.clone(), Some(preimage));
+        let res = node_q1
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(res.is_ok());
+        node_q1.wait_until_success(res.unwrap().payment_hash).await;
+    }
+
+    // Drain Q2->C
+    {
+        let drain_amount = usable_cap - 1000;
+        let preimage = gen_rand_sha256_hash();
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(drain_amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(node_c.get_public_key().into())
+            .build()
+            .unwrap();
+        node_c.insert_invoice(invoice.clone(), Some(preimage));
+        let res = node_q2
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(res.is_ok());
+        node_q2.wait_until_success(res.unwrap().payment_hash).await;
+    }
+
+    // Payment A -> T1 -> T2 -> C. Amount 2000.
+    // T2 fails to find path to C (or finds it but fails at runtime).
+    // T2 should report error back to T1, T1 back to A.
+
+    let amount = 2000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .unwrap();
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![
+                TrampolineHop::new(node_t1.get_public_key()),
+                TrampolineHop::new(node_t2.get_public_key()),
+            ]),
+            max_fee_amount: Some(10_000_000),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+
+    // Wait for failure
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_failed(payment_hash).await;
+    let payment_res = node_a.get_payment_result(payment_hash).await;
+    assert!(payment_res.failed_error.is_some());
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_concurrent_payments() {
+    init_tracing();
+    // Topology:
+    // A -> T -> B
+    // C -> T -> D
+    // Four distinct payments passing through T concurrently.
+
+    let channels_params = vec![
+        // A -> T
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        // T -> B
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        // C -> T
+        (
+            (3, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        // T -> D
+        (
+            (1, 4),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 5, None).await;
+    let [node_a, node_t, node_b, node_c, node_d] = nodes.try_into().expect("5 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    wait_until_node_supports_trampoline_routing(&node_c, &node_t).await;
+    wait_until_node_has_public_channels_at_least(&node_t, 4).await;
+    wait_until_node_has_public_channels_at_least(&node_a, 4).await;
+    wait_until_node_has_public_channels_at_least(&node_c, 4).await;
+
+    // Prepare Payment 1: A -> T -> B
+    let amount1 = 1000;
+    let preimage1 = gen_rand_sha256_hash();
+    let invoice1 = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount1))
+        .payment_preimage(preimage1)
+        .payee_pub_key(node_b.get_public_key().into())
+        .build()
+        .unwrap();
+    node_b.insert_invoice(invoice1.clone(), Some(preimage1));
+
+    // Prepare Payment 2: C -> T -> D
+    let amount2 = 2000;
+    let preimage2 = gen_rand_sha256_hash();
+    let invoice2 = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount2))
+        .payment_preimage(preimage2)
+        .payee_pub_key(node_d.get_public_key().into())
+        .build()
+        .unwrap();
+    node_d.insert_invoice(invoice2.clone(), Some(preimage2));
+
+    // Execute concurrently
+    let pay1_fut = node_a.send_payment(SendPaymentCommand {
+        invoice: Some(invoice1.to_string()),
+        trampoline_hops: Some(vec![TrampolineHop::new(node_t.get_public_key())]),
+        ..Default::default()
+    });
+
+    let pay2_fut = node_c.send_payment(SendPaymentCommand {
+        invoice: Some(invoice2.to_string()),
+        trampoline_hops: Some(vec![TrampolineHop::new(node_t.get_public_key())]),
+        ..Default::default()
+    });
+
+    let (res1, res2) = tokio::join!(pay1_fut, pay2_fut);
+
+    assert!(res1.is_ok());
+    assert!(res2.is_ok());
+
+    let hash1 = res1.unwrap().payment_hash;
+    let hash2 = res2.unwrap().payment_hash;
+
+    // Wait for both
+    let wait1 = node_a.wait_until_success(hash1);
+    let wait2 = node_c.wait_until_success(hash2);
+
+    tokio::join!(wait1, wait2);
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_no_path_found() {
+    init_tracing();
+    // A -> T.
+    // B exists but is disconnected from T.
+    // A -> T -> B.
+
+    let channels_params = vec![
+        // A -> T
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+    ];
+
+    // 3 nodes: A, T, B. B is isolated.
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 3, None).await;
+    let [node_a, node_t, node_b] = nodes.try_into().expect("3 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+
+    let amount = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_b.get_public_key().into())
+        .build()
+        .unwrap();
+    // Don't insert invoice on B? Actually B doesn't need to be online for T to fail pathfinding.
+    // But if we want to be correct, B can have it.
+    node_b.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_t.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    node_a.wait_until_failed(payment_hash).await;
+    let result = node_a.get_payment_result(payment_hash).await;
+    let err = result.failed_error.unwrap();
+    // Likely "RouteNotFound" or similar wrapping.
+    debug!("Payment failed as expected with: {:?}", err);
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_race_same_invoice() {
+    init_tracing();
+
+    let channels_params = vec![
+        (
+            (0, 1), // A -> T
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (2, 1), // B -> T
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 3), // T -> C
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+    ];
+
+    // 4 nodes: A(0), T(1), B(2), C(3)
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 4, None).await;
+    let [node_a, node_t, node_b, node_c] = nodes.try_into().expect("4 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    wait_until_node_supports_trampoline_routing(&node_b, &node_t).await;
+
+    // C creates invoice
+    let amount = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .unwrap();
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let invoice_str = invoice.to_string();
+
+    debug!("Invoice created: {}", invoice_str);
+
+    // Helper to wait for outcome
+    async fn get_outcome(node: &NetworkNode, payment_hash: Hash256) -> String {
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed().as_secs() > 10 {
+                return "timeout".to_string();
+            }
+            let res = node.get_payment_result(payment_hash).await;
+            match res.status {
+                PaymentStatus::Success => return "success".to_string(),
+                PaymentStatus::Failed => return "failure".to_string(),
+                _ => {}
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    let t_pk = node_t.get_public_key();
+
+    // A pays
+    let invoice_a = invoice_str.clone();
+    let future_a = async {
+        let res = node_a
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice_a),
+                trampoline_hops: Some(vec![TrampolineHop::new(t_pk)]),
+                ..Default::default()
+            })
+            .await;
+
+        match res {
+            Ok(pc) => get_outcome(&node_a, pc.payment_hash).await,
+            Err(_) => "send_error".to_string(),
+        }
+    };
+
+    // B pays
+    let invoice_b = invoice_str.clone();
+    let future_b = async {
+        let res = node_b
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice_b),
+                trampoline_hops: Some(vec![TrampolineHop::new(t_pk)]),
+                ..Default::default()
+            })
+            .await;
+
+        match res {
+            Ok(pc) => get_outcome(&node_b, pc.payment_hash).await,
+            Err(_) => "send_error".to_string(),
+        }
+    };
+
+    let (outcome_a, outcome_b) = tokio::join!(future_a, future_b);
+
+    debug!("A outcome: {}, B outcome: {}", outcome_a, outcome_b);
+
+    // One must succeed, one must fail
+    // Possible states: (success, failure) or (failure, success)
+    let success =
+        (if outcome_a == "success" { 1 } else { 0 }) + (if outcome_b == "success" { 1 } else { 0 });
+    let failure =
+        (if outcome_a == "failure" { 1 } else { 0 }) + (if outcome_b == "failure" { 1 } else { 0 });
+
+    assert_eq!(success, 1, "Exactly one should succeed");
+    assert_eq!(failure, 1, "Exactly one should fail");
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_failure_invalid_payment_secret() {
+    init_tracing();
+    // A -> T -> B
+    // A uses an invoice with incorrect payment secret for B.
+    // B should reject the payment.
+
+    let channels_params = vec![
+        (
+            (0, 1), // A -> T
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2), // T -> B
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 3, None).await;
+    let [node_a, node_t, node_b] = nodes.try_into().expect("3 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    wait_until_node_supports_trampoline_routing(&node_b, &node_t).await;
+
+    // 1. Create correct invoice on B with explicit secret
+    let amount = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let secret_real = gen_rand_sha256_hash();
+    let invoice_real = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payment_secret(secret_real)
+        .payee_pub_key(node_b.get_public_key().into())
+        .build()
+        .unwrap();
+    node_b.insert_invoice(invoice_real.clone(), Some(preimage));
+
+    // 2. Create fake invoice (same preimage/hash, different secret)
+    let secret_fake = gen_rand_sha256_hash();
+    let invoice_fake = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payment_secret(secret_fake)
+        .payee_pub_key(node_b.get_public_key().into())
+        .build()
+        .unwrap();
+
+    // Verify secrets are different
+    assert_ne!(secret_real, secret_fake);
+
+    // 3. A sends using fake invoice
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_fake.to_string()),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_t.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    // 4. Expect failure
+    node_a.wait_until_failed(payment_hash).await;
+    let result = node_a.get_payment_result(payment_hash).await;
+    let err = result.failed_error.expect("should fail");
+
+    debug!("Payment failed as expected: {:?}", err);
 }
