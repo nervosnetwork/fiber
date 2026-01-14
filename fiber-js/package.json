@@ -1,6 +1,6 @@
 {
   "name": "@nervosnetwork/fiber-js",
-  "version": "0.6.1-rc2",
+  "version": "0.6.1",
   "main": "dist/index.js",
   "license": "MIT",
   "devDependencies": {
