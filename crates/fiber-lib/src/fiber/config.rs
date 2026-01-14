@@ -101,8 +101,8 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
 /// The maximum number of parts for a multi-part payment.
-pub const DEFAULT_MAX_PARTS: u64 = 16;
-pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 64;
+pub const DEFAULT_MAX_PARTS: u64 = 12;
+pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 24;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.

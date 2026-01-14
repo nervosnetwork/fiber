@@ -46,14 +46,20 @@ async fn test_send_mpp_basic_two_channels_one_time() {
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
     let res = node_0.send_mpp_payment(&node_1, 20000000000, Some(2)).await;
 
-    eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     let invoice = node_1.get_invoice_status(&payment_hash).unwrap();
     assert_eq!(invoice, CkbInvoiceStatus::Open);
 
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
+
     node_0.wait_until_success(payment_hash).await;
+    let find_path_count = node_0
+        .get_payment_find_path_count(payment_hash)
+        .await
+        .unwrap();
+    eprintln!("find_path_count: {}", find_path_count);
+    assert_eq!(find_path_count, 4);
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2316,6 +2322,8 @@ async fn test_send_mpp_will_success_with_retry_split_channels() {
     assert_eq!(payment_res.routers.len(), 3);
 }
 
+// TODO(yukang): this test case used more attempts than expectedf, it's related to the current path finding strategy,
+//  we need to optimize this in the future.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_send_mpp_will_fail_with_disable_single_path() {
     init_tracing();
@@ -3411,7 +3419,7 @@ async fn test_send_mpp_with_reverse_node_send_back() {
         4,
     )
     .await;
-    let [node_0, _node_1, node_2, _node_3] = nodes.try_into().expect("2 nodes");
+    let [node_0, _node_1, node_2, _node_3] = nodes.try_into().expect("4 nodes");
 
     // node 0 send to node 2 with 30000000000 CKB
     for _ in 0..3 {
@@ -3431,7 +3439,9 @@ async fn test_send_mpp_with_reverse_node_send_back() {
         .send_mpp_payment(&node_2, 20000000000, Some(16))
         .await;
     eprintln!("res: {:?}", res);
-    assert!(res.unwrap_err().contains("no path found"));
+    assert!(res
+        .unwrap_err()
+        .contains("Failed to build enough routes for MPP payment"));
 
     // now node 2 send back to node 0 20000000000 CKB
     for _ in 0..2 {
@@ -4028,4 +4038,38 @@ async fn test_send_payment_mpp_with_node_not_in_graph() {
 
     let error = payment_hash.unwrap_err().to_string();
     assert!(error.contains("no path found"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_send_mpp_find_path_perf() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let result = node_0
+        .send_mpp_payment(&node_2, 100000 * 30, Some(10))
+        .await;
+
+    assert!(result.is_err());
+    let find_path_count = node_0.get_payment_path_count_sum().await;
+    assert_eq!(find_path_count, 1);
+
+    let result = node_0.send_mpp_payment(&node_2, 90000 * 2, Some(10)).await;
+    assert!(result.is_ok());
+    let payment_hash = result.unwrap().payment_hash;
+    let find_path_count = node_0.get_payment_find_path_count(payment_hash).await;
+    assert_eq!(find_path_count, Some(10));
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 }

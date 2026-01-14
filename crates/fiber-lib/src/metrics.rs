@@ -9,6 +9,7 @@ pub const TOTAL_PEER_COUNT: &str = "fiber.total_peer_count";
 pub const INBOUND_PEER_COUNT: &str = "fiber.inbound_peer_count";
 pub const OUTBOUND_PEER_COUNT: &str = "fiber.outbound_peer_count";
 pub const DOWN_WITH_CHANNEL_PEER_COUNT: &str = "fiber.down_with_channel_peer_count";
+pub const SEND_PAYMENT_FIND_PATH_COUNT: &str = "fiber.send_payment_find_path_count";
 pub const INFLIGHT_PAYMENTS_COUNT: &str = "fiber.inflight_payments_count";
 
 pub const CCH_LND_TRACKER_INVOICE_QUEUE_LEN: &str = "fiber.cch.lnd_tracker.invoice_queue_len";

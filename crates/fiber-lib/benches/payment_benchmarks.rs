@@ -73,12 +73,82 @@ fn bench_payment_path_finding(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_payment_path_finding_basic_mpp(c: &mut Criterion) {
+    // Create a runtime for async functions
+    let rt = Runtime::new().unwrap();
+
+    let mut group = c.benchmark_group("payment_path_finding_basic_mpp");
+
+    // Use many parallel channels between sender and receiver (a known-good basic MPP setup),
+    // and also add extra nodes/channels to make the graph larger.
+    for parallel_channels in [2_usize, 4, 8, 16] {
+        group.throughput(Throughput::Elements(parallel_channels as u64));
+
+        group.bench_function(BenchmarkId::new("basic_mpp", parallel_channels), |b| {
+            b.iter_custom(|iters| {
+                rt.block_on(async move {
+                    const PART_AMOUNT: u128 = 10_000_000_000;
+                    const EXTRA_NODES: usize = 30;
+
+                    let sender = 0;
+                    let receiver = 1;
+                    let node_count = std::cmp::max(EXTRA_NODES, 2);
+                    let max_parts = std::cmp::min(parallel_channels, 4) as u64;
+                    let payment_amount = (max_parts as u128) * PART_AMOUNT;
+
+                    let mut channel_configs = Vec::new();
+
+                    // Parallel channels between sender and receiver so MPP must split.
+                    for _ in 0..parallel_channels {
+                        channel_configs.push((
+                            (sender, receiver),
+                            (MIN_RESERVED_CKB + PART_AMOUNT, MIN_RESERVED_CKB),
+                        ));
+                    }
+
+                    // Add extra channels among other nodes to enlarge the graph.
+                    for i in 2..(node_count - 1) {
+                        channel_configs.push((
+                            (i, i + 1),
+                            (MIN_RESERVED_CKB + PART_AMOUNT, MIN_RESERVED_CKB),
+                        ));
+                        if i + 2 < node_count {
+                            channel_configs.push((
+                                (i, i + 2),
+                                (MIN_RESERVED_CKB + PART_AMOUNT, MIN_RESERVED_CKB),
+                            ));
+                        }
+                    }
+
+                    let (nodes, _channels) =
+                        create_n_nodes_network(&channel_configs, node_count).await;
+
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let start = std::time::Instant::now();
+
+                    for _ in 0..iters {
+                        let res = nodes[sender]
+                            .send_mpp_payment(&nodes[receiver], payment_amount, Some(max_parts))
+                            .await
+                            .unwrap();
+                        nodes[sender].wait_until_success(res.payment_hash).await;
+                    }
+
+                    start.elapsed()
+                })
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(std::time::Duration::from_millis(1500))
-        .measurement_time(std::time::Duration::from_secs(100))
+        .measurement_time(std::time::Duration::from_secs(300))
         .sample_size(10);
-    targets = bench_payment_path_finding
+    targets = bench_payment_path_finding, bench_payment_path_finding_basic_mpp
 }
 criterion_main!(benches);

@@ -1469,7 +1469,7 @@ where
                 }
 
                 // update metrics
-                #[cfg(feature = "metrics")]
+                #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
                 {
                     // channels
                     metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
