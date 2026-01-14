@@ -1,14 +1,33 @@
 #![cfg(not(target_arch = "wasm32"))]
+use crate::fiber::channel::PrevTlcInfo; // Fixed import
 use crate::fiber::config::{DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA};
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::*;
+use crate::fiber::hash_algorithm::HashAlgorithm; // Fixed import
+use crate::fiber::network::{
+    NetworkActorCommand,
+    NetworkActorMessage, // Fixed import
+    SendOnionPacketCommand,
+};
 use crate::fiber::payment::{SendPaymentCommand, TrampolineHop};
+use crate::fiber::types::{
+    CurrentPaymentHopData,
+    PeeledPaymentOnionPacket,
+    Privkey,
+    Pubkey,
+    TlcErrorCode, // Fixed import
+    TrampolineHopPayload,
+    TrampolineOnionPacket,
+};
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::tests::test_utils::*;
 use crate::{
     create_channel_with_nodes, gen_rand_sha256_hash, ChannelParameters, HUGE_CKB_AMOUNT,
     MIN_RESERVED_CKB,
 };
+use ractor::RpcReplyPort;
+use secp256k1::Secp256k1;
+use tokio::sync::oneshot;
 
 #[tokio::test]
 async fn test_trampoline_routing_basic() {
@@ -1001,4 +1020,159 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
 
     let payment_res = node_a.get_payment_result(payment_hash).await;
     assert!(payment_res.failed_error.is_some());
+}
+
+#[tokio::test]
+async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
+    init_tracing();
+    // A -- B. We test B.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+
+    // Deconstruct nodes
+    let _node_a = &nodes[0];
+    let node_b = &nodes[1];
+    let channel_ab = channels[0];
+
+    let secp = Secp256k1::new();
+    let payment_hash = gen_rand_sha256_hash();
+
+    // 1. Construct Trampoline Onion for B
+    // B should forward 1000 to some final target.
+    let (_sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
+    let final_target: Pubkey = pk.into();
+
+    let forward_payload = TrampolineHopPayload::Forward {
+        next_node_id: final_target,
+        amount_to_forward: 1000,
+        build_max_fee_amount: Some(0),
+        tlc_expiry_delta: 144,
+        tlc_expiry_limit: 5000,
+    };
+
+    // Path: [B, Final].
+    let payloads = vec![
+        forward_payload,
+        TrampolineHopPayload::Final {
+            final_amount: 1000,
+            final_tlc_expiry_delta: 144,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let path = vec![node_b.pubkey, final_target];
+
+    let session_key = Privkey::from_slice(&[2u8; 32]);
+    let trampoline_onion_bytes = TrampolineOnionPacket::create(
+        session_key,
+        path,
+        payloads,
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create onion")
+    .into_bytes();
+
+    // 2. Mock incoming packet stats
+    // Incoming amount 900 < 1000
+    let peeled_packet = PeeledPaymentOnionPacket {
+        current: CurrentPaymentHopData {
+            amount: 900,
+            expiry: 5000,
+            payment_preimage: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+            funding_tx_hash: Default::default(),
+            custom_records: None,
+            trampoline_onion: Some(trampoline_onion_bytes),
+        },
+        shared_secret: [0u8; 32],
+        next: None,
+    };
+
+    let (sender, receiver) = oneshot::channel();
+    let command = NetworkActorCommand::SendPaymentOnionPacket(
+        SendOnionPacketCommand {
+            peeled_onion_packet: peeled_packet,
+            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, 0)),
+            payment_hash,
+            attempt_id: None,
+        },
+        RpcReplyPort::from(sender),
+    );
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(command))
+        .expect("send command");
+
+    // 3. Assert Error
+    let res = receiver.await.expect("recv result");
+    match res {
+        Err(tlc_err) => {
+            assert_eq!(tlc_err.error_code, TlcErrorCode::FeeInsufficient);
+        }
+        Ok(_) => panic!("Should have failed with FeeInsufficient"),
+    }
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_loop_failure_insufficient_fee() {
+    init_tracing();
+
+    // A -- B -- C -- D -- E
+    // A uses B -> C -> D as trampoline hops to pay E.
+    // Path: A -> B -> C -> D -> E.
+    // Test expects failure because max_fee_amount is set to 0.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((3, 4), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        5,
+    )
+    .await;
+
+    let [node_a, node_b, node_c, node_d, node_e] = nodes.try_into().expect("5 nodes");
+
+    // Ensure A has full graph info to validate trampoline supports
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+    wait_until_node_supports_trampoline_routing(&node_a, &node_c).await;
+    wait_until_node_supports_trampoline_routing(&node_a, &node_d).await;
+    wait_until_node_supports_trampoline_routing(&node_a, &node_e).await;
+
+    let amount = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_e.get_public_key().into())
+        .build()
+        .expect("build invoice");
+
+    node_e.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            // Set fee budget to 0, which should be insufficient for 3 trampoline hops
+            max_fee_amount: Some(0),
+            trampoline_hops: Some(vec![
+                TrampolineHop::new(node_b.get_public_key()),
+                TrampolineHop::new(node_c.get_public_key()),
+                TrampolineHop::new(node_d.get_public_key()),
+            ]),
+            ..Default::default()
+        })
+        .await;
+
+    // Should fail locally at A during route/fee calculation
+    assert!(res.is_err());
+    let err_msg = res.err().unwrap().to_string();
+    assert!(err_msg.contains("max_fee_amount too low") || err_msg.contains("fee"));
+    // Match graph.rs error
 }

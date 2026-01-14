@@ -663,7 +663,8 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
     // With trampoline: should succeed by routing to C only.
     payment_data.trampoline_hops = Some(vec![crate::fiber::payment::TrampolineHop::new(
         trampoline.into(),
-    )]);
+    )
+    .with_fee_rate(0)]);
     let route = network
         .graph
         .build_route(payment_data.amount, None, None, &payment_data)
@@ -686,7 +687,9 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
             .is_ok(),
         "trampoline_onion should be a valid sphinx onion packet"
     );
-    assert_eq!(last.amount, payment_data.amount);
+    // The amount sent to the trampoline includes the allocated fee budget.
+    // With 1000 amount and 500 max fee, distributed 50/50, we expect 1250.
+    assert_eq!(last.amount, 1250);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -977,10 +980,10 @@ fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_graph_trampoline_routing_fee_rate_default_zero_allows_zero_fee_budget() {
+fn test_graph_trampoline_routing_fee_rate_explicit_zero_allows_zero_fee_budget() {
     init_tracing();
 
-    // If trampoline hop fee_rate is omitted, it defaults to 0. With max_fee_amount=0,
+    // If trampoline hop fee_rate is explicitly set to 0. With max_fee_amount=0,
     // building a trampoline route should still succeed (route only needs to reach the first trampoline).
     let mut network = MockNetworkGraph::new(3);
     network.graph.set_add_rand_expiry_delta(false);
@@ -999,7 +1002,8 @@ fn test_graph_trampoline_routing_fee_rate_default_zero_allows_zero_fee_budget() 
             .max_fee_amount(Some(0))
             .trampoline_hops(Some(vec![crate::fiber::payment::TrampolineHop::new(
                 t1.into(),
-            )]))
+            )
+            .with_fee_rate(0)]))
             .build()
             .expect("valid payment_data");
 
@@ -1108,16 +1112,9 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     }
 
     let t_budgets = &budgets[1..];
-    let mut exp_build_amounts = vec![0u128; hops.len()];
     let mut exp_build_max_fee_amounts = vec![0u128; hops.len()];
     for idx in 0..hops.len() {
         exp_build_max_fee_amounts[idx] = t_budgets.get(idx).copied().unwrap_or(0);
-        if idx + 1 == hops.len() {
-            exp_build_amounts[idx] = final_amount;
-        } else {
-            exp_build_amounts[idx] = min_incoming_for_service[idx + 1]
-                .saturating_add(t_budgets.get(idx + 1).copied().unwrap_or(0));
-        }
     }
 
     let secp = secp256k1::Secp256k1::new();
@@ -1141,13 +1138,11 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
         crate::fiber::types::TrampolineHopPayload::Forward {
             next_node_id,
             amount_to_forward,
-            build_amount,
             build_max_fee_amount,
             ..
         } => {
             assert_eq!(next_node_id, t2.into());
             assert_eq!(amount_to_forward, forward_amounts[0]);
-            assert_eq!(build_amount, exp_build_amounts[0]);
             assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[0]));
         }
         other => panic!("unexpected payload at t1: {other:?}"),
@@ -1166,13 +1161,11 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
         crate::fiber::types::TrampolineHopPayload::Forward {
             next_node_id,
             amount_to_forward,
-            build_amount,
             build_max_fee_amount,
             ..
         } => {
             assert_eq!(next_node_id, t3.into());
             assert_eq!(amount_to_forward, forward_amounts[1]);
-            assert_eq!(build_amount, exp_build_amounts[1]);
             assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[1]));
         }
         other => panic!("unexpected payload at t2: {other:?}"),
@@ -1191,13 +1184,11 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
         crate::fiber::types::TrampolineHopPayload::Forward {
             next_node_id,
             amount_to_forward,
-            build_amount,
             build_max_fee_amount,
             ..
         } => {
             assert_eq!(next_node_id, final_recipient.into());
             assert_eq!(amount_to_forward, forward_amounts[2]);
-            assert_eq!(build_amount, exp_build_amounts[2]);
             assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[2]));
         }
         other => panic!("unexpected payload at t3: {other:?}"),

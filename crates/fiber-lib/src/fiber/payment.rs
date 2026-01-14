@@ -1073,6 +1073,11 @@ impl TrampolineHop {
             tlc_expiry_delta: None,
         }
     }
+
+    pub fn with_fee_rate(mut self, fee_rate: u64) -> Self {
+        self.fee_rate = Some(fee_rate);
+        self
+    }
 }
 
 // 0 ~ 65535 is reserved for endpoint usage, index aboving 65535 is reserved for internal usage
@@ -1731,8 +1736,8 @@ where
                     let session_route = &attempt.route;
                     #[cfg(debug_assertions)]
                     dbg!(
-                        "left amount: {}, minimal_amount: {} target amount: {}",
-                        remain_amount - session_route.receiver_amount(),
+                        "remain amount: {}, minimal_amount: {} receiver amount: {}",
+                        remain_amount,
                         target_amount,
                         session_route.receiver_amount()
                     );
@@ -1759,7 +1764,11 @@ where
                         }
                     }
                     let current_amount = session_route.receiver_amount();
-                    remain_amount -= current_amount;
+                    if session.request.allow_trampoline_routing() {
+                        remain_amount -= target_amount;
+                    } else {
+                        remain_amount -= current_amount;
+                    }
                     target_amount = if let Some(single) = single_path_max {
                         single.min(remain_amount)
                     } else {

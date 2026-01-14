@@ -2366,6 +2366,7 @@ where
                     previous_tlc,
                     payment_hash,
                     trampoline_outer_shared_secret,
+                    peeled_onion_packet.current.amount,
                 )
                 .await;
         }
@@ -2435,6 +2436,7 @@ where
         previous_tlc: Option<PrevTlcInfo>,
         payment_hash: Hash256,
         trampoline_outer_shared_secret: Option<[u8; 32]>,
+        incoming_amount: u128,
     ) -> Result<(), TlcErr> {
         let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
         let prev_channel_state = self
@@ -2457,11 +2459,21 @@ where
             TrampolineHopPayload::Forward {
                 next_node_id,
                 amount_to_forward,
-                build_amount: _build_amount,
                 build_max_fee_amount,
                 tlc_expiry_delta,
                 tlc_expiry_limit,
             } => {
+                if incoming_amount < amount_to_forward {
+                    error!(
+                        "Trampoline forwarding fee insufficient: incoming {}, forward {}",
+                        incoming_amount, amount_to_forward
+                    );
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::FeeInsufficient,
+                        state.get_public_key(),
+                    ));
+                }
+
                 let remaining_trampoline_onion = peeled_trampoline.next.map(|p| p.into_bytes());
 
                 if let Some(mut prev_tlc) = previous_tlc {
