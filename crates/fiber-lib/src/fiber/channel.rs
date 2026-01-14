@@ -7,7 +7,7 @@ use super::{
 };
 use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
-#[cfg(any(debug_assertions, feature = "bench"))]
+#[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::TxSignatures;

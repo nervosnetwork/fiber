@@ -151,10 +151,21 @@ pub fn init_tracing() {
     static INIT: Once = Once::new();
 
     INIT.call_once(|| {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .pretty()
-            .init();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .pretty()
+                .init();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // In wasm32, SystemTime is not supported, so we disable timestamps
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .without_time()
+                .init();
+        }
     });
 }
 
@@ -896,6 +907,34 @@ impl NetworkNode {
             ..Default::default()
         })
         .await
+    }
+
+    #[cfg(any(feature = "metrics", test))]
+    pub async fn get_payment_find_path_count(&self, payment_hash: Hash256) -> Option<u128> {
+        let graph = self.network_graph.read().await;
+        let res = graph
+            .payment_find_path_stats
+            .lock()
+            .get(&payment_hash)
+            .copied();
+        res
+    }
+
+    #[cfg(not(any(feature = "metrics", test)))]
+    pub async fn get_payment_find_path_count(&self, _payment_hash: Hash256) -> Option<u128> {
+        None
+    }
+
+    #[cfg(any(feature = "metrics", test))]
+    pub async fn get_payment_path_count_sum(&self) -> u128 {
+        let graph = self.network_graph.read().await;
+        let res = graph.payment_find_path_stats.lock().values().sum();
+        res
+    }
+
+    #[cfg(not(any(feature = "metrics", test)))]
+    pub async fn get_payment_path_count_sum(&self) -> u128 {
+        0
     }
 
     pub async fn get_inflight_payment_count(&self) -> u32 {

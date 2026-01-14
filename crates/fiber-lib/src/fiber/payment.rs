@@ -1369,21 +1369,34 @@ where
             (graph.get_source_pubkey(), graph.channel_stats())
         };
         let active_parts = session.attempts().filter(|a| a.is_active()).count();
+        let is_self_pay = source == session.request.target_pubkey;
         let mut remain_amount = session.remain_amount();
         let mut max_fee = session.remain_fee_amount();
         let mut result = vec![];
 
         if remain_amount == 0 {
             let error = format!("Send amount {} is not expected to be 0", remain_amount);
-            self.set_payment_fail_with_error(session, &error);
             return Err(Error::SendPaymentError(error));
         }
 
         session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
+        let amount_low_bound = Some(1);
         let mut attempt_id = session.attempts_count() as u64;
         let mut target_amount = remain_amount;
-        let amount_low_bound = Some(1);
+        let mut single_path_max = None;
         let mut iteration = 0;
+
+        if session.max_parts() > 1 && !is_self_pay {
+            let path_max = {
+                let graph = self.network_graph.read().await;
+                graph.find_path_max_capacity(&session.request)?
+            };
+            if path_max * (session.max_parts() as u128) < remain_amount {
+                let error = "Failed to build enough routes for MPP payment".to_string();
+                return Err(Error::SendPaymentError(error));
+            }
+            single_path_max = Some(path_max);
+        }
 
         while (result.len() < session.max_parts() - active_parts) && remain_amount > 0 {
             iteration += 1;
@@ -1417,7 +1430,6 @@ where
             match build_route_result {
                 Err(e) => {
                     let error = format!("Failed to build route, {}", e);
-                    self.set_payment_fail_with_error(session, &error);
                     return Err(Error::SendPaymentError(error));
                 }
                 Ok(hops) => {
@@ -1466,19 +1478,29 @@ where
                             }
                         }
                     }
-                    remain_amount -= session_route.receiver_amount();
-                    target_amount = remain_amount;
+                    let current_amount = session_route.receiver_amount();
+                    remain_amount -= current_amount;
+                    target_amount = if let Some(single) = single_path_max {
+                        single.min(remain_amount)
+                    } else {
+                        remain_amount
+                    };
                     if let Some(fee) = max_fee {
                         max_fee = Some(fee - session_route.fee());
                     }
                     result.push(attempt);
+                    if remain_amount > 0
+                        && remain_amount
+                            > current_amount * (session.max_parts() - result.len()) as u128
+                    {
+                        break;
+                    }
                 }
             };
         }
 
         if remain_amount > 0 {
             let error = "Failed to build enough routes for MPP payment".to_string();
-            self.set_payment_fail_with_error(session, &error);
             return Err(Error::SendPaymentError(error));
         }
 
@@ -1878,8 +1900,30 @@ where
         state: &mut PaymentActorState,
         payment_data: SendPaymentData,
     ) -> Result<SendPaymentResponse, Error> {
-        self.send_payment_with_payment_data(myself, state, payment_data)
-            .await
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        let payment_hash = payment_data.payment_hash;
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        let start_time = std::time::Instant::now();
+        let res = self
+            .send_payment_with_payment_data(myself, state, payment_data)
+            .await;
+
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        {
+            if let Some(count) = self
+                .network_graph
+                .read()
+                .await
+                .payment_find_path_stats
+                .lock()
+                .get(&payment_hash)
+            {
+                metrics::gauge!(crate::metrics::SEND_PAYMENT_FIND_PATH_COUNT).set(*count as u32);
+            }
+            let duration = start_time.elapsed().as_millis();
+            metrics::histogram!("fiber.send_payment_cost_time").record(duration as u32);
+        }
+        res
     }
 
     async fn send_payment_with_payment_data(
