@@ -9,7 +9,9 @@ use crate::fiber::config::{
     MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::graph::{GraphChannelStat, NetworkGraph, NetworkGraphStateStore, RouterHop};
+use crate::fiber::graph::{
+    GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
+};
 use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT,
     DEFAULT_PAYMENT_TRY_LIMIT, MAX_CUSTOM_RECORDS_SIZE,
@@ -1199,6 +1201,9 @@ impl SendPaymentWithRouterCommand {
     }
 }
 
+/// The interval at which to check payment status for timeout detection
+const PAYMENT_STATUS_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
 #[derive(Debug, AsRefStr)]
 pub enum PaymentActorMessage {
     // SendPayment
@@ -1215,6 +1220,8 @@ pub enum PaymentActorMessage {
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
     },
+    /// Periodic check to detect stuck payments and log status
+    CheckPaymentStatus,
 }
 
 pub struct PaymentActorState {
@@ -1287,6 +1294,11 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // Set up periodic status check for timeout detection
+        myself.send_interval(PAYMENT_STATUS_CHECK_INTERVAL, || {
+            PaymentActorMessage::CheckPaymentStatus
+        });
+
         let init_msg = state
             .init_command
             .take()
@@ -1366,6 +1378,39 @@ where
         graph.load_from_store();
     }
 
+    /// Spawn a blocking task to build route
+    /// NOTE: build route is a CPU intensive task
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn build_route_in_spawn_task(
+        &self,
+        amount: u128,
+        amount_low_bound: Option<u128>,
+        max_fee_amount: Option<u128>,
+        request: SendPaymentData,
+    ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        let network_graph = self.network_graph.clone();
+        tokio::task::spawn_blocking(move || {
+            let graph = network_graph.blocking_read();
+            graph.build_route(amount, amount_low_bound, max_fee_amount, &request)
+        })
+        .await
+        .map_err(|err| PathFindError::Other(format!("blocking task failed: {}", err)))?
+    }
+
+    /// NOTE: `spawn_blocking` is not supported on wasm, so this original implementation of `build_route` will be used on wasm
+    #[cfg(target_arch = "wasm32")]
+    async fn build_route(
+        &self,
+        amount: u128,
+        amount_low_bound: Option<u128>,
+        max_fee_amount: Option<u128>,
+        request: SendPaymentData,
+    ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        let network_graph = self.network_graph.clone();
+        let graph = network_graph.read().await;
+        graph.build_route(amount, amount_low_bound, max_fee_amount, &request)
+    }
+
     pub async fn handle_command(
         &self,
         myself: ActorRef<PaymentActorMessage>,
@@ -1410,8 +1455,62 @@ where
                     .await;
                 self.check_payment_final(myself, state);
             }
+            PaymentActorMessage::CheckPaymentStatus => {
+                self.handle_check_payment_status(myself, state);
+            }
         };
         Ok(())
+    }
+
+    /// Handle periodic status check to detect stuck payments
+    fn handle_check_payment_status(
+        &self,
+        myself: ActorRef<PaymentActorMessage>,
+        state: &mut PaymentActorState,
+    ) {
+        let payment_hash = state.payment_hash;
+        if let Some(session) = self.store.get_payment_session(payment_hash) {
+            if session.status.is_final() {
+                // Payment has reached final status, stop the actor
+                myself.stop(Some(format!(
+                    "Payment complete with status {:?}",
+                    session.status
+                )));
+            } else {
+                // Payment is still not final, log the current status for debugging
+                let active_attempts = session.active_attempts().count();
+                let inflight_attempts = session.attempts().filter(|a| a.is_inflight()).count();
+                let failed_attempts = session.attempts().filter(|a| a.is_failed()).count();
+                let total_attempts = session.attempts_count();
+
+                warn!(
+                    "Payment {:?} is still not final after periodic check, maybe the channel is down. \
+                    Status: {:?}, Active attempts: {}, Inflight: {}, Failed: {}, Total: {}, \
+                    Retry count: {}, Last error: {:?}",
+                    payment_hash,
+                    session.status,
+                    active_attempts,
+                    inflight_attempts,
+                    failed_attempts,
+                    total_attempts,
+                    state.retry_send_payment_count,
+                    session.last_error
+                );
+
+                // The tlc may stuck due to the channel is down
+                // we stop the actor, the actor will be resumed once tlc is processed
+                myself.stop(Some(
+                    "Payment is still not final, the tlc may stuck due to the channel is down"
+                        .to_string(),
+                ));
+            }
+        } else {
+            error!(
+                "Payment session not found during periodic check: {:?}",
+                payment_hash
+            );
+            myself.stop(Some("Payment session not found".to_string()));
+        }
     }
 
     fn check_payment_final(
@@ -1490,12 +1589,24 @@ where
             // attempts to send the payment.
             let amount = session.remain_amount() + attempt.route.receiver_amount();
             let max_fee = session.remain_fee_amount();
-            let graph = self.network_graph.read().await;
+            let channel_stats = {
+                let graph = self.network_graph.read().await;
+                graph.channel_stats()
+            };
 
-            session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+            session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
+            #[cfg(not(target_arch = "wasm32"))]
+            let hops = self
+                .build_route_in_spawn_task(amount, None, max_fee, session.request.clone())
+                .await
+                .map_err(|e| {
+                    Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
+                })?;
 
-            let hops = graph
-                .build_route(amount, None, max_fee, &session.request)
+            #[cfg(target_arch = "wasm32")]
+            let hops = self
+                .build_route(amount, None, max_fee, session.request.clone())
+                .await
                 .map_err(|e| {
                     Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
                 })?;
@@ -1511,24 +1622,39 @@ where
         &self,
         session: &mut PaymentSession,
     ) -> Result<Vec<Attempt>, Error> {
-        let graph = self.network_graph.read().await;
-        let source = graph.get_source_pubkey();
+        let (source, channel_stats) = {
+            let graph = self.network_graph.read().await;
+            (graph.get_source_pubkey(), graph.channel_stats())
+        };
         let active_parts = session.attempts().filter(|a| a.is_active()).count();
+        let is_self_pay = source == session.request.target_pubkey;
         let mut remain_amount = session.remain_amount();
         let mut max_fee = session.remain_fee_amount();
         let mut result = vec![];
 
         if remain_amount == 0 {
             let error = format!("Send amount {} is not expected to be 0", remain_amount);
-            self.set_payment_fail_with_error(session, &error);
             return Err(Error::SendPaymentError(error));
         }
 
-        session.request.channel_stats = GraphChannelStat::new(Some(graph.channel_stats()));
+        session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
+        let amount_low_bound = Some(1);
         let mut attempt_id = session.attempts_count() as u64;
         let mut target_amount = remain_amount;
-        let amount_low_bound = Some(1);
+        let mut single_path_max = None;
         let mut iteration = 0;
+
+        if session.max_parts() > 1 && !is_self_pay {
+            let path_max = {
+                let graph = self.network_graph.read().await;
+                graph.find_path_max_capacity(&session.request)?
+            };
+            if path_max * (session.max_parts() as u128) < remain_amount {
+                let error = "Failed to build enough routes for MPP payment".to_string();
+                return Err(Error::SendPaymentError(error));
+            }
+            single_path_max = Some(path_max);
+        }
 
         while (result.len() < session.max_parts() - active_parts) && remain_amount > 0 {
             iteration += 1;
@@ -1540,10 +1666,28 @@ where
                 amount_low_bound,
                 remain_amount,
             );
-            match graph.build_route(target_amount, amount_low_bound, max_fee, &session.request) {
+            #[cfg(not(target_arch = "wasm32"))]
+            let build_route_result = self
+                .build_route_in_spawn_task(
+                    target_amount,
+                    amount_low_bound,
+                    max_fee,
+                    session.request.clone(),
+                )
+                .await;
+            #[cfg(target_arch = "wasm32")]
+            let build_route_result = self
+                .build_route(
+                    target_amount,
+                    amount_low_bound,
+                    max_fee,
+                    session.request.clone(),
+                )
+                .await;
+
+            match build_route_result {
                 Err(e) => {
                     let error = format!("Failed to build route, {}", e);
-                    self.set_payment_fail_with_error(session, &error);
                     return Err(Error::SendPaymentError(error));
                 }
                 Ok(hops) => {
@@ -1571,29 +1715,50 @@ where
                         session_route.receiver_amount()
                     );
 
-                    for (from, channel_outpoint, amount) in session_route.channel_outpoints() {
-                        if let Some(sent_node) = graph.get_channel_sent_node(channel_outpoint, from)
-                        {
-                            session.request.channel_stats.add_channel(
-                                channel_outpoint,
-                                sent_node,
-                                amount,
-                            );
+                    let route_channels: Vec<_> = session_route
+                        .channel_outpoints()
+                        .map(|(from, channel_outpoint, amount)| {
+                            (from, channel_outpoint.clone(), amount)
+                        })
+                        .collect();
+
+                    {
+                        let graph = self.network_graph.read().await;
+                        for (from, channel_outpoint, amount) in &route_channels {
+                            if let Some(sent_node) =
+                                graph.get_channel_sent_node(channel_outpoint, *from)
+                            {
+                                session.request.channel_stats.add_channel(
+                                    channel_outpoint,
+                                    sent_node,
+                                    *amount,
+                                );
+                            }
                         }
                     }
-                    remain_amount -= session_route.receiver_amount();
-                    target_amount = remain_amount;
+                    let current_amount = session_route.receiver_amount();
+                    remain_amount -= current_amount;
+                    target_amount = if let Some(single) = single_path_max {
+                        single.min(remain_amount)
+                    } else {
+                        remain_amount
+                    };
                     if let Some(fee) = max_fee {
                         max_fee = Some(fee - session_route.fee());
                     }
                     result.push(attempt);
+                    if remain_amount > 0
+                        && remain_amount
+                            > current_amount * (session.max_parts() - result.len()) as u128
+                    {
+                        break;
+                    }
                 }
             };
         }
 
         if remain_amount > 0 {
             let error = "Failed to build enough routes for MPP payment".to_string();
-            self.set_payment_fail_with_error(session, &error);
             return Err(Error::SendPaymentError(error));
         }
 
@@ -1993,8 +2158,30 @@ where
         state: &mut PaymentActorState,
         payment_data: SendPaymentData,
     ) -> Result<SendPaymentResponse, Error> {
-        self.send_payment_with_payment_data(myself, state, payment_data)
-            .await
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        let payment_hash = payment_data.payment_hash;
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        let start_time = std::time::Instant::now();
+        let res = self
+            .send_payment_with_payment_data(myself, state, payment_data)
+            .await;
+
+        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        {
+            if let Some(count) = self
+                .network_graph
+                .read()
+                .await
+                .payment_find_path_stats
+                .lock()
+                .get(&payment_hash)
+            {
+                metrics::gauge!(crate::metrics::SEND_PAYMENT_FIND_PATH_COUNT).set(*count as u32);
+            }
+            let duration = start_time.elapsed().as_millis();
+            metrics::histogram!("fiber.send_payment_cost_time").record(duration as u32);
+        }
+        res
     }
 
     async fn send_payment_with_payment_data(

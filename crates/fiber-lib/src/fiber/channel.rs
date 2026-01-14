@@ -7,7 +7,7 @@ use super::{
 };
 use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
-#[cfg(any(debug_assertions, feature = "bench"))]
+#[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::TxSignatures;
@@ -1012,14 +1012,20 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
-    ) {
+    ) -> Result<(), ProcessingChannelError> {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
         match self.store.get_invoice(&tlc_info.payment_hash) {
             Some(invoice) => {
-                self.try_to_settle_down_tlc_with_invoice(myself, state, tlc_info, invoice)
+                if state.funding_udt_type_script.as_ref() != invoice.udt_type_script() {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "UDT type script not match".to_string(),
+                    ));
+                }
+                self.try_to_settle_down_tlc_with_invoice(myself, state, tlc_info, invoice);
             }
             None => self.try_to_settle_down_tlc_without_invoice(myself, state, tlc_info),
         }
+        return Ok(());
     }
 
     fn apply_add_tlc_operation(
@@ -1063,7 +1069,8 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id);
+        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
+            .map_err(|err| err.without_shared_secret())?;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
@@ -5120,9 +5127,13 @@ impl ChannelActorState {
 
     // Send RevokeAndAck message to the counterparty, and update the
     // channel state accordingly.
-    fn send_revoke_and_ack_message(&mut self) -> ProcessingChannelResult {
-        // special case for reestablishing channel state
-        if self.remote_revocation_nonce_for_send.is_none() {
+    // If `resend` is true, we MUST use the cached message (for reestablish scenarios).
+    fn send_revoke_and_ack_message(&mut self, resend: bool) -> ProcessingChannelResult {
+        // When resending during reestablish, we MUST use the cached message because:
+        // 1. The cached message was signed with the correct nonces at the time
+        // 2. The nonce state may have already advanced since then
+        // 3. The peer expects to verify with the original nonces
+        if resend || self.remote_revocation_nonce_for_send.is_none() {
             match self.last_revoke_ack_msg {
                 Some(ref revoke_and_ack) => {
                     self.network()
@@ -5137,7 +5148,7 @@ impl ChannelActorState {
                     return Ok(());
                 }
                 None => {
-                    let error = "Error reestablishing channel state, RevokeAndAck message not sent, but remote_revocation_nonce_for_send is None";
+                    let error = "Error reestablishing channel state, RevokeAndAck message not sent, but last_revoke_ack_msg is None";
                     warn!(error);
                     return Err(ProcessingChannelError::InvalidState(error.to_string()));
                 }
@@ -6446,7 +6457,7 @@ impl ChannelActorState {
                 self.maybe_transfer_to_tx_signatures(flags)?;
             }
             CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
-                self.send_revoke_and_ack_message()?;
+                self.send_revoke_and_ack_message(false)?;
             }
         }
         self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
@@ -6934,10 +6945,10 @@ impl ChannelActorState {
                     self.set_waiting_ack(myself, false);
                     self.resend_tlcs_on_reestablish(true)?;
                 } else if my_remote_commitment_number == peer_local_commitment_number + 1 {
-                    // peer need ACK, I need to send my revoke_and_ack message
+                    // peer need ACK, I need to resend my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
-                    self.send_revoke_and_ack_message()?;
+                    self.send_revoke_and_ack_message(true)?;
                     if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
                         self.set_waiting_ack(myself, false);

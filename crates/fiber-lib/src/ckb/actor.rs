@@ -1,10 +1,5 @@
-use ckb_jsonrpc_types::JsonBytes;
-use ckb_sdk::{rpc::ckb_indexer::*, CkbRpcAsyncClient, RpcError};
-use ckb_types::{
-    core::{tx_pool::TxStatus, TransactionView},
-    packed,
-    prelude::IntoTransactionView as _,
-};
+use ckb_sdk::RpcError;
+use ckb_types::{core::TransactionView, packed, prelude::IntoTransactionView as _};
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -19,7 +14,6 @@ use crate::{
 
 use super::{
     funding::{FundingContext, LiveCellsExclusionMap},
-    jsonrpc_types_convert::{transaction_view_from_json, tx_status_from_json},
     tx_tracing_actor::{
         CkbTxTracer, CkbTxTracingActor, CkbTxTracingArguments, CkbTxTracingMessage,
     },
@@ -37,117 +31,6 @@ pub struct CkbChainState {
     secret_key: secp256k1::SecretKey,
     funding_source_lock_script: packed::Script,
     live_cells_exclusion_map: LiveCellsExclusionMap,
-}
-
-#[derive(Debug, Clone)]
-pub struct GetBlockTimestampRequest {
-    block_hash: Hash256,
-}
-
-impl GetBlockTimestampRequest {
-    pub fn from_block_hash(block_hash: Hash256) -> Self {
-        Self { block_hash }
-    }
-
-    pub fn block_hash(&self) -> Hash256 {
-        self.block_hash
-    }
-}
-
-pub type GetBlockTimestampResponse = u64;
-
-#[derive(Debug, Clone)]
-pub struct GetTxResponse {
-    /// The transaction.
-    pub transaction: Option<TransactionView>,
-    pub tx_status: TxStatus,
-}
-
-impl Default for GetTxResponse {
-    fn default() -> Self {
-        Self {
-            transaction: None,
-            tx_status: TxStatus::Unknown,
-        }
-    }
-}
-
-impl From<Option<ckb_jsonrpc_types::TransactionWithStatusResponse>> for GetTxResponse {
-    fn from(value: Option<ckb_jsonrpc_types::TransactionWithStatusResponse>) -> Self {
-        match value {
-            Some(response) => Self {
-                transaction: response.transaction.map(|tx| match tx.inner {
-                    ckb_jsonrpc_types::Either::Left(json) => transaction_view_from_json(json),
-                    ckb_jsonrpc_types::Either::Right(_) => {
-                        panic!("bytes response format not used");
-                    }
-                }),
-                tx_status: tx_status_from_json(response.tx_status),
-            },
-            None => Self::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GetShutdownTxRequest {
-    pub funding_lock_script: packed::Script,
-}
-
-#[derive(Debug, Clone)]
-pub struct GetShutdownTxResponse {
-    /// The transaction.
-    pub transaction: Option<TransactionView>,
-    pub tx_status: TxStatus,
-}
-
-impl Default for GetShutdownTxResponse {
-    fn default() -> Self {
-        Self {
-            transaction: None,
-            tx_status: TxStatus::Unknown,
-        }
-    }
-}
-
-impl From<Option<ckb_jsonrpc_types::TransactionWithStatusResponse>> for GetShutdownTxResponse {
-    fn from(value: Option<ckb_jsonrpc_types::TransactionWithStatusResponse>) -> Self {
-        match value {
-            Some(response) => Self {
-                transaction: response.transaction.map(|tx| match tx.inner {
-                    ckb_jsonrpc_types::Either::Left(json) => transaction_view_from_json(json),
-                    ckb_jsonrpc_types::Either::Right(_) => {
-                        panic!("bytes response format not used");
-                    }
-                }),
-                tx_status: tx_status_from_json(response.tx_status),
-            },
-            None => Self::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GetCellsRequest {
-    pub search_key: SearchKey,
-    pub order: Order,
-    pub limit: u32,
-    pub after: Option<JsonBytes>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct GetCellsResponse {
-    pub objects: Vec<Cell>,
-    pub last_cursor: JsonBytes,
-}
-
-impl From<Pagination<Cell>> for GetCellsResponse {
-    fn from(value: Pagination<Cell>) -> Self {
-        Self {
-            objects: value.objects,
-            last_cursor: value.last_cursor,
-        }
-    }
 }
 
 #[derive(Debug, AsRefStr)]
@@ -174,21 +57,9 @@ pub enum CkbChainMessage {
     CommitFundingTx(Hash256, u64),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
-    GetTx(Hash256, RpcReplyPort<Result<GetTxResponse, RpcError>>),
     CreateTxTracer(CkbTxTracer),
     RemoveTxTracers(Hash256),
-    GetBlockTimestamp(
-        GetBlockTimestampRequest,
-        RpcReplyPort<Result<Option<GetBlockTimestampResponse>, RpcError>>,
-    ),
-    GetShutdownTx(
-        GetShutdownTxRequest,
-        RpcReplyPort<Result<Option<GetShutdownTxResponse>, RpcError>>,
-    ),
-    GetCells(
-        GetCellsRequest,
-        RpcReplyPort<Result<GetCellsResponse, RpcError>>,
-    ),
+
     Stop,
 }
 
@@ -325,14 +196,7 @@ impl Actor for CkbChainActor {
                     let _ = reply_port.send(result);
                 }
             }
-            CkbChainMessage::GetTx(tx_hash, reply_port) => {
-                let ckb_client = state.config.ckb_rpc_client();
-                let result = ckb_client.get_transaction(tx_hash.into()).await;
-                if !reply_port.is_closed() {
-                    // ignore error
-                    let _ = reply_port.send(result.map(Into::into));
-                }
-            }
+
             CkbChainMessage::CreateTxTracer(tracer) => {
                 debug!(
                     "[{}] trace transaction {} with {} confs",
@@ -349,28 +213,7 @@ impl Actor for CkbChainActor {
                     .ckb_tx_tracing_actor
                     .send_message(CkbTxTracingMessage::RemoveTracers(tx_hash))?;
             }
-            CkbChainMessage::GetBlockTimestamp(
-                GetBlockTimestampRequest { block_hash },
-                reply_port,
-            ) => {
-                let ckb_client = state.config.ckb_rpc_client();
-                let _ = reply_port.send(
-                    ckb_client
-                        .get_header(block_hash.into())
-                        .await
-                        .map(|x| x.map(|x| x.inner.timestamp.into())),
-                );
-            }
-            CkbChainMessage::GetShutdownTx(request, reply_port) => {
-                let client = state.config.ckb_rpc_client();
-                let response = get_shutdown_tx(&client, request).await;
-                let _ = reply_port.send(response);
-            }
-            CkbChainMessage::GetCells(request, reply_port) => {
-                let client = state.config.ckb_rpc_client();
-                let response = get_cells(&client, request).await;
-                let _ = reply_port.send(response);
-            }
+
             CkbChainMessage::Stop => {
                 myself.stop(Some("stop received".to_string()));
             }
@@ -457,50 +300,4 @@ async fn fund_via_shell(
 ) -> Result<FundingTx, FundingError> {
     // Never called in WASM
     unreachable!();
-}
-
-async fn get_shutdown_tx(
-    client: &CkbRpcAsyncClient,
-    GetShutdownTxRequest {
-        funding_lock_script,
-    }: GetShutdownTxRequest,
-) -> Result<Option<GetShutdownTxResponse>, RpcError> {
-    // query transaction spent the funding cell
-    let search_key = SearchKey {
-        script: funding_lock_script.into(),
-        script_type: ScriptType::Lock,
-        script_search_mode: Some(SearchMode::Exact),
-        with_data: None,
-        filter: None,
-        group_by_transaction: None,
-    };
-    let txs = client
-        .get_transactions(search_key, Order::Desc, 1u32.into(), None)
-        .await?;
-
-    let Some(Tx::Ungrouped(tx)) = txs.objects.first() else {
-        return Ok(None);
-    };
-    if !matches!(tx.io_type, CellType::Input) {
-        return Ok(None);
-    }
-
-    let shutdown_tx_hash: Hash256 = tx.tx_hash.clone().into();
-    let tx_with_status = client.get_transaction(shutdown_tx_hash.into()).await?;
-    Ok(Some(tx_with_status.into()))
-}
-
-async fn get_cells(
-    client: &CkbRpcAsyncClient,
-    GetCellsRequest {
-        search_key,
-        order,
-        limit,
-        after,
-    }: GetCellsRequest,
-) -> Result<GetCellsResponse, RpcError> {
-    client
-        .get_cells(search_key, order, limit.into(), after)
-        .await
-        .map(GetCellsResponse::from)
 }

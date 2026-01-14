@@ -25,7 +25,9 @@ use std::sync::Arc;
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr, TransportType};
+#[cfg(not(target_arch = "wasm32"))]
+use tentacle::utils::TransportType;
+use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -56,6 +58,7 @@ use super::channel::{
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::config::AnnouncedNodeName;
+use crate::ckb::client::CkbChainClient;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 
 use super::features::FeatureVector;
@@ -73,10 +76,7 @@ use super::{
 };
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
-use crate::ckb::{
-    CkbChainMessage, FundingError, FundingRequest, FundingTx, GetCellsRequest,
-    GetShutdownTxRequest, GetShutdownTxResponse,
-};
+use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
     tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
     ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
@@ -596,6 +596,9 @@ pub enum NetworkActorEvent {
 
     // A payment actor stopped event.
     PaymentActorStopped(Hash256),
+
+    // Channel settlement check completed - channel is fully settled on-chain.
+    ChannelSettlementCompleted(Hash256),
 }
 
 #[derive(Debug)]
@@ -639,15 +642,16 @@ impl GossipMessageWithPeerId {
     }
 }
 
-pub struct NetworkActor<S> {
+pub struct NetworkActor<S, C> {
     // An event emitter to notify outside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
+    chain_client: C,
 }
 
-impl<S> NetworkActor<S>
+impl<S, C> NetworkActor<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
@@ -659,25 +663,28 @@ where
         + Send
         + Sync
         + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     pub fn new(
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
         store: S,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
+        chain_client: C,
     ) -> Self {
         Self {
             event_sender,
             chain_actor,
             store: store.clone(),
             network_graph,
+            chain_client,
         }
     }
 
     pub async fn handle_peer_message(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         peer_id: PeerId,
         message: FiberMessage,
     ) -> crate::Result<()> {
@@ -758,7 +765,7 @@ where
     pub async fn handle_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         event: NetworkActorEvent,
     ) -> crate::Result<()> {
         match event {
@@ -995,6 +1002,17 @@ where
             NetworkActorEvent::PaymentActorStopped(payment_hash) => {
                 state.on_payment_actor_stopped(payment_hash).await;
             }
+            NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
+                // Update channel state to remove WAITING_ONCHAIN_SETTLEMENT flag
+                if let Some(mut actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                    if let ChannelState::Closed(mut flags) = actor_state.state {
+                        flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+                        actor_state.state = ChannelState::Closed(flags);
+                        self.store.insert_channel_actor_state(actor_state);
+                        info!("Channel {channel_id:?} on-chain settlement completed");
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1002,7 +1020,7 @@ where
     pub async fn handle_command(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
         match command {
@@ -1198,13 +1216,18 @@ where
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let funding_lock_script = state
                                 .get_cached_channel_funding_lock_script(channel_id, &actor_state);
-                            // Check channel shutdown
-                            self.check_channel_shutdown(
-                                myself.clone(),
-                                &actor_state,
-                                funding_lock_script,
-                            )
-                            .await;
+                            // Spawn async task for concurrent RPC call
+                            let chain_client = self.chain_client.clone();
+                            let myself_clone = myself.clone();
+                            crate::tasks::spawn(async move {
+                                Self::check_channel_shutdown(
+                                    chain_client,
+                                    myself_clone,
+                                    channel_id,
+                                    funding_lock_script,
+                                )
+                                .await;
+                            });
                         }
                     } else if matches!(
                         channel_state,
@@ -1212,7 +1235,17 @@ where
                             if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                            self.check_channel_shutdown_settlement(actor_state).await;
+                            // Spawn async task for concurrent RPC call
+                            let chain_client = self.chain_client.clone();
+                            let myself_clone = myself.clone();
+                            crate::tasks::spawn(async move {
+                                Self::check_channel_shutdown_settlement(
+                                    chain_client,
+                                    myself_clone,
+                                    actor_state,
+                                )
+                                .await;
+                            });
                         }
                     }
                 }
@@ -1441,7 +1474,7 @@ where
                 }
 
                 // update metrics
-                #[cfg(feature = "metrics")]
+                #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
                 {
                     // channels
                     metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
@@ -1928,13 +1961,18 @@ where
                 if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
                     let funding_lock_script =
                         state.get_cached_channel_funding_lock_script(channel_id, &channel_state);
-                    // Check channel shutdown
-                    self.check_channel_shutdown(
-                        myself.clone(),
-                        &channel_state,
-                        funding_lock_script,
-                    )
-                    .await;
+                    // Spawn async task for concurrent RPC call
+                    let chain_client = self.chain_client.clone();
+                    let myself_clone = myself.clone();
+                    crate::tasks::spawn(async move {
+                        Self::check_channel_shutdown(
+                            chain_client,
+                            myself_clone,
+                            channel_id,
+                            funding_lock_script,
+                        )
+                        .await;
+                    });
                 } else {
                     tracing::debug!(
                         "stop check channel shutdown, can't find {channel_id:?} actor state"
@@ -2080,48 +2118,35 @@ where
         Ok(())
     }
 
+    /// Async version of check_channel_shutdown that runs in spawned task.
+    /// Checks if the channel funding cell has been spent (indicating remote force close).
     async fn check_channel_shutdown(
-        &self,
+        chain_client: C,
         myself: ActorRef<NetworkActorMessage>,
-        state: &ChannelActorState,
+        channel_id: Hash256,
         funding_lock_script: Script,
     ) {
-        // stop check if channel closed
-        if matches!(state.state, ChannelState::Closed(..)) {
-            tracing::debug!(
-                "stop check channel shutdown, {:?} is closed",
-                state.get_id()
-            );
-            return;
-        }
-        // check channel ready state
-        if matches!(
-            state.state,
-            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
-        ) {
-            let channel_id = state.get_id();
-            // check shutdown transactions
-            let request = GetShutdownTxRequest {
-                funding_lock_script,
-            };
-            if let Err(err) = self.chain_actor.call_and_forward(
-                |tx| CkbChainMessage::GetShutdownTx(request, tx),
-                &myself,
-                move |shutdown_tx| {
-                    NetworkActorMessage::Command(NetworkActorCommand::RemoteForceShutdownChannel(
-                        channel_id,
-                        shutdown_tx.unwrap_or_default(),
-                    ))
-                },
-                None,
-            ) {
-                tracing::error!("Failed to call_and_forward chain_actor: {err:?}");
+        match chain_client.get_shutdown_tx(funding_lock_script).await {
+            Ok(shutdown_tx) => {
+                let _ = myself.send_message(NetworkActorMessage::Command(
+                    NetworkActorCommand::RemoteForceShutdownChannel(channel_id, shutdown_tx),
+                ));
+            }
+            Err(err) => {
+                tracing::error!("Failed to check shutdown tx for channel {channel_id:?}: {err:?}");
             }
         }
     }
 
-    async fn check_channel_shutdown_settlement(&self, mut state: ChannelActorState) {
-        let ChannelState::Closed(mut flags) = state.state else {
+    /// Async version of check_channel_shutdown_settlement that runs in spawned task.
+    /// Checks if the commitment transaction outputs have been spent (indicating settlement complete).
+    async fn check_channel_shutdown_settlement(
+        chain_client: C,
+        myself: ActorRef<NetworkActorMessage>,
+        state: ChannelActorState,
+    ) {
+        let channel_id = state.get_id();
+        let ChannelState::Closed(flags) = state.state else {
             return;
         };
         if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
@@ -2131,28 +2156,16 @@ where
         let Some(tx_hash) = state.shutdown_transaction_hash.clone() else {
             debug!(
                 "stop check channel settlement, {:?} missing shutdown tx hash",
-                state.get_id()
+                channel_id
             );
             return;
         };
 
-        let tx_response = match call_t!(
-            self.chain_actor,
-            CkbChainMessage::GetTx,
-            DEFAULT_CHAIN_ACTOR_TIMEOUT,
-            tx_hash.clone().into()
-        ) {
-            Ok(Ok(response)) => response,
-            Ok(Err(err)) => {
-                error!(
-                    "Failed to load commitment tx {:?} during settlement check: {:?}",
-                    tx_hash, err
-                );
-                return;
-            }
+        let tx_response = match chain_client.get_transaction(tx_hash.clone()).await {
+            Ok(response) => response,
             Err(err) => {
                 error!(
-                    "Timeout while loading commitment tx {:?} during settlement check: {:?}",
+                    "Failed to load commitment tx {:?} during settlement check: {:?}",
                     tx_hash, err
                 );
                 return;
@@ -2197,40 +2210,24 @@ where
             filter: None,
             group_by_transaction: None,
         };
-        let request = GetCellsRequest {
-            search_key,
-            order: Order::Desc,
-            limit: 1,
-            after: None,
-        };
 
-        match call_t!(
-            self.chain_actor,
-            CkbChainMessage::GetCells,
-            DEFAULT_CHAIN_ACTOR_TIMEOUT,
-            request
-        ) {
-            Ok(Ok(response)) => {
+        match chain_client
+            .get_cells(search_key, Order::Desc, 1, None)
+            .await
+        {
+            Ok(response) => {
+                let response = crate::ckb::GetCellsResponse::from(response);
                 if response.objects.is_empty() {
-                    let channel_id = state.get_id();
-                    flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
-                    state.state = ChannelState::Closed(flags);
-                    self.store.insert_channel_actor_state(state);
-                    info!("Channel {channel_id:?} on-chain settlement completed");
+                    // Notify actor that settlement is complete
+                    let _ = myself.send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+                    ));
                 }
-            }
-            Ok(Err(err)) => {
-                error!(
-                    "Failed to check commitment cells for {:?}: {:?}",
-                    state.get_id(),
-                    err
-                );
             }
             Err(err) => {
                 error!(
-                    "GetCells request timed out for {:?}: {:?}",
-                    state.get_id(),
-                    err
+                    "Failed to check commitment cells for {:?}: {:?}",
+                    channel_id, err
                 );
             }
         }
@@ -2348,7 +2345,7 @@ where
 
     async fn handle_send_onion_packet_command(
         &self,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         command: SendOnionPacketCommand,
     ) -> Result<(), TlcErr> {
         trace!("Entering handle_send_onion_packet_command");
@@ -2535,7 +2532,7 @@ where
 
     fn get_tlc_error(
         &self,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         error: &Error,
         channel_outpoint: &OutPoint,
     ) -> TlcErr {
@@ -2566,7 +2563,7 @@ where
     async fn on_remove_tlc_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
@@ -2593,7 +2590,7 @@ where
     async fn on_add_tlc_result_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
@@ -2651,7 +2648,7 @@ where
     async fn resume_payment_actor_and_send_command(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
         message: PaymentActorMessage,
     ) {
@@ -2674,7 +2671,7 @@ where
     async fn start_payment_actor(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S>,
+        state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
         init_command: PaymentActorMessage,
     ) {
@@ -2755,7 +2752,7 @@ where
     }
 }
 
-pub struct NetworkActorState<S> {
+pub struct NetworkActorState<S, C> {
     store: S,
     state_to_be_persisted: PersistentNetworkActorState,
     // The name of the node to be announced to the network, may be empty.
@@ -2791,6 +2788,8 @@ pub struct NetworkActorState<S> {
     pending_channels: HashMap<OutPoint, Hash256>,
     // Used to broadcast and query network info.
     chain_actor: ActorRef<CkbChainMessage>,
+    // Used to query on-chain info.
+    chain_client: C,
     // If the other party funding more than this amount, we will automatically accept the channel.
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // The default amount of CKB to be funded when auto accepting a channel.
@@ -2910,7 +2909,7 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
     )
 }
 
-impl<S> NetworkActorState<S>
+impl<S, C> NetworkActorState<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
@@ -2922,6 +2921,7 @@ where
         + Send
         + Sync
         + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     pub fn get_or_create_new_node_announcement_message(&mut self) -> NodeAnnouncement {
         let now = now_timestamp_as_millis_u64();
@@ -3192,6 +3192,7 @@ where
     ) -> crate::Result<()> {
         let handler = InFlightCkbTxActor {
             chain_actor: self.chain_actor.clone(),
+            chain_client: self.chain_client.clone(),
             network_actor: self.network.clone(),
             tx_hash,
             tx_kind,
@@ -3218,6 +3219,7 @@ where
 
         let handler = InFlightCkbTxActor {
             chain_actor: self.chain_actor.clone(),
+            chain_client: self.chain_client.clone(),
             network_actor: self.network.clone(),
             tx_hash,
             tx_kind,
@@ -4039,7 +4041,7 @@ pub struct NetworkActorStartArguments {
 
 #[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl<S> Actor for NetworkActor<S>
+impl<S, C> Actor for NetworkActor<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
@@ -4051,9 +4053,10 @@ where
         + Send
         + Sync
         + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     type Msg = NetworkActorMessage;
-    type State = NetworkActorState<S>;
+    type State = NetworkActorState<S, C>;
     type Arguments = NetworkActorStartArguments;
 
     async fn pre_start(
@@ -4091,6 +4094,7 @@ where
             gossip_config,
             self.store.clone(),
             self.chain_actor.clone(),
+            self.chain_client.clone(),
             myself.get_cell(),
         )
         .await;
@@ -4259,6 +4263,7 @@ where
             to_be_accepted_channels: ToBeAcceptedChannels::new_with_config(&config),
             pending_channels: Default::default(),
             chain_actor,
+            chain_client: self.chain_client.clone(),
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
@@ -4543,8 +4548,10 @@ pub async fn start_network<
         + Send
         + Sync
         + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 >(
     config: FiberConfig,
+    chain_client: C,
     chain_actor: ActorRef<CkbChainMessage>,
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     tracker: TaskTracker,
@@ -4558,7 +4565,13 @@ pub async fn start_network<
 
     let (actor, _handle) = Actor::spawn_linked(
         Some(format!("Network {}", my_peer_id)),
-        NetworkActor::new(event_sender, chain_actor, store, network_graph),
+        NetworkActor::new(
+            event_sender,
+            chain_actor,
+            store,
+            network_graph,
+            chain_client,
+        ),
         NetworkActorStartArguments {
             config,
             tracker,
@@ -4572,7 +4585,7 @@ pub async fn start_network<
     actor
 }
 
-#[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     let mut iter = addr.iter();
 

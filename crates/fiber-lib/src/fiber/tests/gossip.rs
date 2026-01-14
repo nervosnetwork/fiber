@@ -10,10 +10,15 @@ use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
-use crate::fiber::gossip::{GossipActorMessage, GossipConfig, GossipService};
-use crate::fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement};
-use crate::tests::test_utils::create_mock_chain_actor;
 use crate::tests::test_utils::{establish_channel_between_nodes, ChannelParameters, NetworkNode};
+use crate::{
+    ckb::tests::test_utils::MockCkbChainClient,
+    fiber::gossip::{GossipActorMessage, GossipConfig, GossipService},
+};
+use crate::{
+    ckb::tests::test_utils::{MockChainActor, MockChainState},
+    fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement},
+};
 use crate::{
     ckb::{tests::test_utils::submit_tx, CkbChainMessage},
     fiber::{
@@ -33,20 +38,25 @@ use crate::test_utils::{get_test_root_actor, TempDir};
 struct GossipTestingContext {
     chain_actor: ActorRef<CkbChainMessage>,
     gossip_actor: ActorRef<GossipActorMessage>,
-    gossip_service: GossipService<Store>,
+    gossip_service: GossipService<Store, MockCkbChainClient>,
 }
 
 impl GossipTestingContext {
     async fn new() -> Self {
         let dir = TempDir::new("test-gossip-store");
         let store = Store::new(dir).expect("created store failed");
-        let chain_actor = create_mock_chain_actor().await;
+        let shared_state = Arc::new(std::sync::RwLock::new(MockChainState::new()));
+        let chain_actor = Actor::spawn(None, MockChainActor::new(), (None, shared_state.clone()))
+            .await
+            .expect("start mock chain actor")
+            .0;
         let root_actor = get_test_root_actor().await;
 
         let (gossip_service, gossip_protocol_handle) = GossipService::start(
             GossipConfig::default(),
             store.clone(),
             chain_actor.clone(),
+            MockCkbChainClient::new(shared_state.clone()),
             root_actor.get_cell(),
         )
         .await;

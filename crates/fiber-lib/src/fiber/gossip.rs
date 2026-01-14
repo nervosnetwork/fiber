@@ -11,6 +11,7 @@ use ckb_hash::blake2b_256;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::OutPoint,
+    prelude::Unpack,
 };
 use ractor::{
     call, call_t, concurrency::JoinHandle, Actor, ActorCell, ActorProcessingErr, ActorRef,
@@ -33,12 +34,11 @@ use tokio::sync::oneshot;
 use tokio_util::codec::length_delimited;
 use tracing::{debug, error, info, trace, warn};
 
+#[cfg(any(test, feature = "bench"))]
+use crate::fiber::network::DEFAULT_CHAIN_ACTOR_TIMEOUT;
 use crate::{
-    ckb::{CkbChainMessage, GetBlockTimestampRequest, GetTxResponse},
-    fiber::{
-        network::{DEFAULT_CHAIN_ACTOR_TIMEOUT, MAX_SERVICE_PROTOCOAL_DATA_SIZE},
-        types::secp256k1_instance,
-    },
+    ckb::{client::CkbChainClient, CkbChainMessage, GetTxResponse},
+    fiber::{network::MAX_SERVICE_PROTOCOAL_DATA_SIZE, types::secp256k1_instance},
     now_timestamp_as_millis_u64, unwrap_or_return,
     utils::actor::ActorHandleLogGuard,
     Error,
@@ -427,18 +427,21 @@ impl From<&FiberConfig> for GossipConfig {
     }
 }
 
-pub struct GossipService<S> {
+pub struct GossipService<S, C> {
     extended_store: ExtendedGossipMessageStore<S>,
+    _marker: PhantomData<C>,
 }
 
-impl<S> GossipService<S>
+impl<S, C> GossipService<S, C>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     pub(crate) async fn start(
         gossip_config: GossipConfig,
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
+        chain_client: C,
         supervisor: ActorCell,
     ) -> (Self, GossipProtocolHandle) {
         let GossipConfig {
@@ -470,6 +473,7 @@ where
                 num_targeted_outbound_passive_syncing_peers,
                 store,
                 chain_actor,
+                chain_client,
             ),
             supervisor,
         )
@@ -478,6 +482,7 @@ where
         (
             Self {
                 extended_store: store,
+                _marker: std::marker::PhantomData,
             },
             GossipProtocolHandle::new(actor, network_control_sender),
         )
@@ -498,13 +503,14 @@ where
     }
 }
 
-pub(crate) struct GossipActor<S> {
-    _phantom: std::marker::PhantomData<S>,
+pub(crate) struct GossipActor<S, C> {
+    _phantom: std::marker::PhantomData<(S, C)>,
 }
 
-impl<S> GossipActor<S>
+impl<S, C> GossipActor<S, C>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     fn new() -> Self {
         Self {
@@ -514,7 +520,7 @@ where
 
     async fn update_peer_filter(
         &self,
-        state: &mut GossipActorState<S>,
+        state: &mut GossipActorState<S, C>,
         peer_id: &PeerId,
         after_cursor: &Cursor,
         myself: ActorRef<GossipActorMessage>,
@@ -568,10 +574,11 @@ struct SyncingPeerState {
     failed_times: usize,
 }
 
-pub struct GossipSyncingActorState<S> {
+pub struct GossipSyncingActorState<S, C> {
     peer_id: PeerId,
     gossip_actor: ActorRef<GossipActorMessage>,
     chain_actor: ActorRef<CkbChainMessage>,
+    chain_client: C,
     store: ExtendedGossipMessageStore<S>,
     // The problem of using the cursor from the store is that a malicious peer may only
     // send large cursor to us, which may cause us to miss some messages.
@@ -585,11 +592,12 @@ pub struct GossipSyncingActorState<S> {
         HashMap<u64, JoinHandle<Result<(), MessagingErr<GossipSyncingActorMessage>>>>,
 }
 
-impl<S> GossipSyncingActorState<S> {
+impl<S, C> GossipSyncingActorState<S, C> {
     fn new(
         peer_id: PeerId,
         gossip_actor: ActorRef<GossipActorMessage>,
         chain_actor: ActorRef<CkbChainMessage>,
+        chain_client: C,
         store: ExtendedGossipMessageStore<S>,
         cursor: Cursor,
     ) -> Self {
@@ -597,6 +605,7 @@ impl<S> GossipSyncingActorState<S> {
             peer_id,
             gossip_actor,
             chain_actor,
+            chain_client,
             store,
             cursor,
             peer_state: Default::default(),
@@ -616,11 +625,11 @@ impl<S> GossipSyncingActorState<S> {
     }
 }
 
-pub(crate) struct GossipSyncingActor<S> {
-    _phantom: std::marker::PhantomData<S>,
+pub(crate) struct GossipSyncingActor<S, C> {
+    _phantom: std::marker::PhantomData<(S, C)>,
 }
 
-impl<S> GossipSyncingActor<S> {
+impl<S, C> GossipSyncingActor<S, C> {
     fn new() -> Self {
         Self {
             _phantom: Default::default(),
@@ -641,16 +650,18 @@ pub(crate) enum GossipSyncingActorMessage {
 
 #[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl<S> Actor for GossipSyncingActor<S>
+impl<S, C> Actor for GossipSyncingActor<S, C>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     type Msg = GossipSyncingActorMessage;
-    type State = GossipSyncingActorState<S>;
+    type State = GossipSyncingActorState<S, C>;
     type Arguments = (
         PeerId,
         ActorRef<GossipActorMessage>,
         ActorRef<CkbChainMessage>,
+        C,
         ExtendedGossipMessageStore<S>,
         Cursor,
     );
@@ -658,7 +669,7 @@ where
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (peer_id, gossip_actor, chain_actor, store, cursor): Self::Arguments,
+        (peer_id, gossip_actor, chain_actor, chain_client, store, cursor): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         myself
             .send_message(GossipSyncingActorMessage::NewGetRequest())
@@ -667,6 +678,7 @@ where
             peer_id,
             gossip_actor,
             chain_actor,
+            chain_client,
             store,
             cursor,
         ))
@@ -711,6 +723,7 @@ where
                                 last_message,
                                 &state.store.store,
                                 &state.chain_actor,
+                                &state.chain_client,
                             )
                             .await
                             {
@@ -1055,12 +1068,13 @@ impl<S> ExtendedGossipMessageStore<S>
 where
     S: GossipMessageStore + Send + Sync + Clone + 'static,
 {
-    async fn new(
+    async fn new<C: CkbChainClient + Clone + Send + Sync + 'static>(
         maintenance_interval: Duration,
         announce_private_addr: bool,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
         chain_actor: ActorRef<CkbChainMessage>,
+        chain_client: C,
         supervisor: ActorCell,
     ) -> Self {
         let (actor, _) = Actor::spawn_linked(
@@ -1075,6 +1089,7 @@ where
                 store.clone(),
                 gossip_actor,
                 chain_actor,
+                chain_client.clone(),
             ),
             supervisor,
         )
@@ -1188,11 +1203,12 @@ pub enum GossipMessageProcessingError {
     NewerMessageSaved(BroadcastMessageWithTimestamp),
 }
 
-pub struct ExtendedGossipMessageStoreState<S> {
+pub struct ExtendedGossipMessageStoreState<S, C> {
     announce_private_addr: bool,
     store: S,
     gossip_actor: ActorRef<GossipActorMessage>,
     chain_actor: ActorRef<CkbChainMessage>,
+    chain_client: C,
     next_id: u64,
     output_ports: HashMap<u64, BroadcastMessageOutput>,
     // A map from peer_id to the messages that need to be saved.
@@ -1201,18 +1217,20 @@ pub struct ExtendedGossipMessageStoreState<S> {
     num_query_tasks_running: usize,
 }
 
-impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
+impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S, C> {
     fn new(
         announce_private_addr: bool,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
         chain_actor: ActorRef<CkbChainMessage>,
+        chain_client: C,
     ) -> Self {
         Self {
             announce_private_addr,
             store,
             gossip_actor,
             chain_actor,
+            chain_client,
             next_id: Default::default(),
             output_ports: Default::default(),
             messages_to_be_saved: Default::default(),
@@ -1248,7 +1266,13 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
 
         let mut verified_sorted_messages = Vec::with_capacity(sorted_messages.len());
         for message in sorted_messages {
-            match verify_and_save_broadcast_message(&message, &self.store, &self.chain_actor).await
+            match verify_and_save_broadcast_message(
+                &message,
+                &self.store,
+                &self.chain_actor,
+                &self.chain_client,
+            )
+            .await
             {
                 Ok(message) => {
                     verified_sorted_messages.push(message);
@@ -1498,11 +1522,11 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
 // which means that the messages in the store is always consistent.
 // 3). Used in ExtendedGossipMessageStore, we can subscribe to the updates of the store, which means that
 // it is possible to get a consistent view of the store without loading all the messages from the store.
-struct ExtendedGossipMessageStoreActor<S> {
-    phantom: PhantomData<S>,
+struct ExtendedGossipMessageStoreActor<S, C> {
+    phantom: PhantomData<(S, C)>,
 }
 
-impl<S: GossipMessageStore> ExtendedGossipMessageStoreActor<S> {
+impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreActor<S, C> {
     fn new() -> Self {
         Self {
             phantom: Default::default(),
@@ -1512,15 +1536,18 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreActor<S> {
 
 #[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMessageStoreActor<S> {
+impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + Sync + 'static> Actor
+    for ExtendedGossipMessageStoreActor<S, C>
+{
     type Msg = ExtendedGossipMessageStoreMessage;
-    type State = ExtendedGossipMessageStoreState<S>;
+    type State = ExtendedGossipMessageStoreState<S, C>;
     type Arguments = (
         Duration,
         bool,
         S,
         ActorRef<GossipActorMessage>,
         ActorRef<CkbChainMessage>,
+        C,
     );
 
     async fn pre_start(
@@ -1532,6 +1559,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
             store,
             gossip_actor,
             chain_actor,
+            chain_client,
         ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         myself.send_interval(gossip_store_maintenance_interval, || {
@@ -1542,6 +1570,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
             store,
             gossip_actor,
             chain_actor,
+            chain_client,
         ))
     }
 
@@ -1735,7 +1764,7 @@ pub enum ExtendedGossipMessageStoreMessage {
     Tick,
 }
 
-pub(crate) struct GossipActorState<S> {
+pub(crate) struct GossipActorState<S, C> {
     store: ExtendedGossipMessageStore<S>,
     control: Option<ServiceAsyncControl>,
     // The number of active syncing peers that we have finished syncing with.
@@ -1753,14 +1782,16 @@ pub(crate) struct GossipActorState<S> {
     next_request_id: u64,
     myself: ActorRef<GossipActorMessage>,
     chain_actor: ActorRef<CkbChainMessage>,
+    chain_client: C,
     query_reply_ports:
         HashMap<(PeerId, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
     peer_states: HashMap<PeerId, PeerState>,
 }
 
-impl<S> GossipActorState<S>
+impl<S, C> GossipActorState<S, C>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     fn is_ready_for_passive_syncing(&self) -> bool {
         self.num_finished_active_syncing_peers > 0
@@ -1879,6 +1910,7 @@ where
                 peer_id.clone(),
                 self.myself.clone(),
                 self.chain_actor.clone(),
+                self.chain_client.clone(),
                 self.store.clone(),
                 safe_cursor,
             ),
@@ -2022,11 +2054,13 @@ async fn get_message_cursor<S: GossipMessageStore>(
     message: &BroadcastMessage,
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
+    client: &impl CkbChainClient,
 ) -> Result<Cursor, Error> {
     match message {
         BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
             let timestamp =
-                get_channel_timestamp(&channel_announcement.channel_outpoint, store, chain).await?;
+                get_channel_timestamp(&channel_announcement.channel_outpoint, store, chain, client)
+                    .await?;
             Ok(Cursor::new(
                 timestamp,
                 BroadcastMessageID::ChannelAnnouncement(
@@ -2092,11 +2126,12 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     message: &BroadcastMessage,
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
+    client: &impl CkbChainClient,
 ) -> Result<BroadcastMessageWithTimestamp, Error> {
     let timestamp = match message {
         BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
             let on_chain_info =
-                get_channel_on_chain_info(channel_announcement.out_point(), chain).await?;
+                get_channel_on_chain_info(channel_announcement.out_point(), chain, client).await?;
             if !verify_channel_announcement(channel_announcement, &on_chain_info, store).await? {
                 store.save_channel_announcement(
                     on_chain_info.timestamp,
@@ -2124,6 +2159,7 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
 async fn get_channel_tx(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
+    client: &impl CkbChainClient,
 ) -> Result<(TransactionView, Hash256), Error> {
     // Wait for the tx to be available in test.
     //
@@ -2142,22 +2178,14 @@ async fn get_channel_tx(
         }),
         DEFAULT_CHAIN_ACTOR_TIMEOUT
     );
+    #[cfg(not(any(test, feature = "bench")))]
+    let _ = chain;
 
-    match call_t!(
-        chain,
-        CkbChainMessage::GetTx,
-        DEFAULT_CHAIN_ACTOR_TIMEOUT,
-        outpoint.tx_hash().into()
-    ) {
-        Ok(Ok(GetTxResponse {
+    match client.get_transaction(outpoint.tx_hash().unpack()).await {
+        Ok(GetTxResponse {
             transaction: Some(tx),
             tx_status: TxStatus::Committed(_, block_hash, _)
-        })) => Ok((tx, block_hash.into())),
-        Ok(Err(err)) => Err(Error::InvalidParameter(format!(
-            "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
-            &outpoint.tx_hash(),
-            err
-        ))),
+        }) => Ok((tx, block_hash.into())),
         Err(err) => Err(Error::InvalidParameter(format!(
             "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
             &outpoint.tx_hash(),
@@ -2174,12 +2202,13 @@ async fn get_channel_timestamp<S: GossipMessageStore>(
     outpoint: &OutPoint,
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
+    client: &impl CkbChainClient,
 ) -> Result<u64, Error> {
     if let Some((timestamp, _)) = store.get_latest_channel_announcement(outpoint) {
         return Ok(timestamp);
     }
 
-    let on_chain_info = get_channel_on_chain_info(outpoint, chain).await?;
+    let on_chain_info = get_channel_on_chain_info(outpoint, chain, client).await?;
 
     Ok(on_chain_info.timestamp)
 }
@@ -2187,8 +2216,9 @@ async fn get_channel_timestamp<S: GossipMessageStore>(
 async fn get_channel_on_chain_info(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
+    client: &impl CkbChainClient,
 ) -> Result<ChannelOnchainInfo, Error> {
-    let (tx, block_hash) = get_channel_tx(outpoint, chain).await?;
+    let (tx, block_hash) = get_channel_tx(outpoint, chain, client).await?;
     let first_output = match tx.outputs().get(0) {
         None => {
             return Err(Error::InvalidParameter(format!(
@@ -2199,30 +2229,20 @@ async fn get_channel_on_chain_info(
         Some(output) => output.clone().into(),
     };
 
-    let timestamp: u64 = match call_t!(
-        chain,
-        CkbChainMessage::GetBlockTimestamp,
-        DEFAULT_CHAIN_ACTOR_TIMEOUT,
-        GetBlockTimestampRequest::from_block_hash(block_hash)
-    ) {
-        Ok(Ok(Some(timestamp))) => timestamp,
-        Ok(Ok(None)) => {
+    let timestamp: u64 = match client.get_block_timestamp(block_hash).await {
+        Ok(Some(timestamp)) => timestamp,
+        Ok(None) => {
             return Err(Error::InternalError(anyhow::anyhow!(
                 "Unable to find block {:?} for channel outpoint {:?}",
                 &block_hash,
                 &outpoint
             )));
         }
-        Ok(Err(err)) => {
-            return Err(Error::CkbRpcError(err));
-        }
         Err(err) => {
-            return Err(Error::InternalError(anyhow::Error::new(err).context(
-                format!(
-                    "Error while trying to obtain block {:?} for channel outpoint {:?}",
-                    block_hash, &outpoint
-                ),
-            )));
+            return Err(Error::InternalError(err.context(format!(
+                "Error while trying to obtain block {:?} for channel outpoint {:?}",
+                block_hash, &outpoint
+            ))));
         }
     };
 
@@ -2463,12 +2483,13 @@ impl GossipProtocolHandle {
 }
 #[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl<S> Actor for GossipActor<S>
+impl<S, C> Actor for GossipActor<S, C>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     type Msg = GossipActorMessage;
-    type State = GossipActorState<S>;
+    type State = GossipActorState<S, C>;
     type Arguments = (
         oneshot::Receiver<ServiceAsyncControl>,
         oneshot::Sender<ExtendedGossipMessageStore<S>>,
@@ -2480,6 +2501,7 @@ where
         usize,
         S,
         ActorRef<CkbChainMessage>,
+        C,
     );
 
     async fn pre_start(
@@ -2496,6 +2518,7 @@ where
             num_targeted_outbound_passive_syncing_peers,
             store,
             chain_actor,
+            chain_client,
         ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let store = ExtendedGossipMessageStore::new(
@@ -2504,6 +2527,7 @@ where
             store,
             myself.clone(),
             chain_actor.clone(),
+            chain_client.clone(),
             myself.get_cell(),
         )
         .await;
@@ -2547,6 +2571,7 @@ where
             num_targeted_outbound_passive_syncing_peers,
             myself,
             chain_actor,
+            chain_client,
             next_request_id: Default::default(),
             query_reply_ports: Default::default(),
             num_finished_active_syncing_peers: Default::default(),
