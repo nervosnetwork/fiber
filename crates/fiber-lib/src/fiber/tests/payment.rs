@@ -647,6 +647,7 @@ async fn test_send_payment_with_normal_invoice_workflow() {
         .gen_invoice(NewInvoiceParams {
             amount: 1000,
             description: Some("test invoice".to_string()),
+            final_expiry_delta: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             expiry: None,
             ..Default::default()
         })
