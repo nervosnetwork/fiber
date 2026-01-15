@@ -57,7 +57,8 @@ pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 14 * 24 * 60 * 60 * 1000; // 2 wee
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
 
-/// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. 1000 means 0.1%.
+/// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc.
+/// The unit is millionths of the amount. 1000 means 0.1%.
 pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u128 = 1000;
 
 /// Whether to automatically announce the node on startup. false means not announcing.
