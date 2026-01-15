@@ -18,6 +18,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 data_dir="$script_dir/node-data"
 nodes_dir="$script_dir/../nodes"
 
+ckb-cli() {
+    # Don't pollute the home directory.
+    env HOME="$data_dir" ckb-cli --url http://127.0.0.1:8114 "$@"
+}
+
 # If -f is used, we will remove old state data. Otherwise we will skip the initialization.
 while getopts "f" opt; do
     case $opt in

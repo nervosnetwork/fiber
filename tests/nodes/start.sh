@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export SHELLOPTS
-export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::trackers::lnd_trackers=off,fnn::fiber::gossip=off,fnn::fiber::graph=off
+export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::trackers::lnd_trackers=off,fnn::fiber::gossip=off,fnn::fiber::graph=off fnn::utils::actor=off
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
