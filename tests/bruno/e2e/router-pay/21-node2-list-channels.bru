@@ -29,7 +29,7 @@ body:json {
 }
 
 script:pre-request {
-  await new Promise(r => setTimeout(r, 3000));
+  await new Promise(r => setTimeout(r, 6000));
 }
 
 assert {
@@ -43,7 +43,11 @@ script:post-response {
   // step 14: 1555
   // step 15: 500
   // sum is: 2455  (0x997)
-  if (res.body.result.channels[0].remote_balance != "0x997" || res.body.result.channels[0].local_balance != "0x37785d3ec369") {
-    throw new Error("Assertion failed: channel amount is not right");
+  const channel = res.body.result.channels[0];
+  if (channel.remote_balance != "0x997" || channel.local_balance != "0x37785d3ec369") {
+    throw new Error(`Assertion failed: channel amount is not right.
+      Expected remote: 0x997, got: ${channel.remote_balance}.
+      Expected local: 0x37785d3ec369, got: ${channel.local_balance}.
+      Pending HTLCs: ${JSON.stringify(channel.pending_htlcs)}`);
   }
 }
