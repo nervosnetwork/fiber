@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
 use super::types::{Hash256, Privkey, Pubkey, TlcErrData};
-use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
+use crate::fiber::channel::{ChannelActorStateStore, PrevTlcInfo, ProcessingChannelError};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
     MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
@@ -170,7 +170,8 @@ pub struct SendPaymentData {
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
     pub trampoline_hops: Option<Vec<TrampolineHop>>,
-    pub final_trampoline_onion: Option<Vec<u8>>,
+    #[serde(default)]
+    pub trampoline_context: Option<TrampolineContext>,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
 }
@@ -196,7 +197,7 @@ pub struct SendPaymentDataBuilder {
     allow_mpp: bool,
     dry_run: bool,
     trampoline_hops: Option<Vec<TrampolineHop>>,
-    final_trampoline_onion: Option<Vec<u8>>,
+    trampoline_context: Option<TrampolineContext>,
     channel_stats: GraphChannelStat,
 }
 
@@ -308,8 +309,8 @@ impl SendPaymentDataBuilder {
         self
     }
 
-    pub fn final_trampoline_onion(mut self, final_trampoline_onion: Option<Vec<u8>>) -> Self {
-        self.final_trampoline_onion = final_trampoline_onion;
+    pub fn trampoline_context(mut self, trampoline_context: Option<TrampolineContext>) -> Self {
+        self.trampoline_context = trampoline_context;
         self
     }
 
@@ -453,8 +454,8 @@ impl SendPaymentDataBuilder {
             allow_mpp: self.allow_mpp,
             dry_run: self.dry_run,
             trampoline_hops: self.trampoline_hops,
-            final_trampoline_onion: self.final_trampoline_onion,
             channel_stats: self.channel_stats,
+            trampoline_context: self.trampoline_context,
         })
     }
 }
@@ -609,7 +610,7 @@ impl SendPaymentData {
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
             .trampoline_hops(command.trampoline_hops)
-            .final_trampoline_onion(command.final_trampoline_onion)
+            .trampoline_context(command.trampoline_context)
             .channel_stats(Default::default())
             .build()
     }
@@ -1129,12 +1130,21 @@ pub struct SendPaymentCommand {
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
     pub trampoline_hops: Option<Vec<TrampolineHop>>,
+
+    /// Context for trampoline routing.
+    pub trampoline_context: Option<TrampolineContext>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct TrampolineContext {
     /// Optional final trampoline onion packet.
     ///
-    /// When provided, this onion packet will be attached to the payload of the final hop
+    /// When provided, this onion packet will be attached to the payload of the next hop
     /// (which in this context is the next trampoline node).
-    #[serde(skip)]
-    pub final_trampoline_onion: Option<Vec<u8>>,
+    pub remaining_trampoline_onion: Vec<u8>,
+    /// Previous TLCs information for the payment session.
+    /// This is used to associate the outgoing payment with the incoming payment.
+    pub previous_tlcs: Vec<PrevTlcInfo>,
 }
 
 impl SendPaymentCommand {
@@ -1713,9 +1723,10 @@ where
                 Ok(mut hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
 
-                    if let Some(trampoline_onion) = &session.request.final_trampoline_onion {
+                    if let Some(trampoline) = &session.request.trampoline_context {
                         if let Some(last_hop) = hops.last_mut() {
-                            last_hop.trampoline_onion = Some(trampoline_onion.clone());
+                            last_hop.trampoline_onion =
+                                Some(trampoline.remaining_trampoline_onion.clone());
                         }
                     }
 

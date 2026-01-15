@@ -92,7 +92,7 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
     AttemptStatus, PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords,
-    PaymentStatus, SendPaymentCommand, SendPaymentWithRouterCommand,
+    PaymentStatus, SendPaymentCommand, SendPaymentWithRouterCommand, TrampolineContext,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -2474,19 +2474,21 @@ where
                     ));
                 }
 
-                let remaining_trampoline_onion = peeled_trampoline.next.map(|p| p.into_bytes());
+                let (Some(remaining_trampoline_onion), Some(mut prev_tlc)) =
+                    (peeled_trampoline.next.map(|p| p.into_bytes()), previous_tlc)
+                else {
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::InvalidOnionPayload,
+                        state.get_public_key(),
+                    ));
+                };
 
-                if let Some(mut prev_tlc) = previous_tlc {
-                    if let Some(shared_secret) = trampoline_outer_shared_secret {
-                        prev_tlc.shared_secret = Some(shared_secret);
-                    }
-                    state
-                        .trampoline_forwarding_tlcs
-                        .entry(payment_hash)
-                        .or_default()
-                        .push(prev_tlc);
+                if let Some(shared_secret) = trampoline_outer_shared_secret {
+                    prev_tlc.shared_secret = Some(shared_secret);
                 }
-
+                // currently we only support single previous tlc in trampoline forwarding,
+                // maybe we need to support multiple previous tlcs in the future
+                let previous_tlcs = vec![prev_tlc];
                 let command = SendPaymentCommand {
                     target_pubkey: Some(next_node_id),
                     amount: Some(amount_to_forward),
@@ -2497,7 +2499,10 @@ where
                     max_parts: Some(1),
                     udt_type_script,
                     allow_self_payment: true,
-                    final_trampoline_onion: remaining_trampoline_onion,
+                    trampoline_context: Some(TrampolineContext {
+                        remaining_trampoline_onion,
+                        previous_tlcs,
+                    }),
                     ..Default::default()
                 };
 
@@ -2811,9 +2816,6 @@ pub struct NetworkActorState<S, C> {
 
     // Inflight payment actors
     inflight_payments: HashMap<Hash256, ActorRef<PaymentActorMessage>>,
-
-    // Trampoline forwarding map: payment_hash -> Vec<PrevTlcInfo>
-    trampoline_forwarding_tlcs: HashMap<Hash256, Vec<PrevTlcInfo>>,
 }
 
 #[derive(Debug, Clone)]
@@ -3968,19 +3970,25 @@ where
             error!("Can't find inflight payment actor");
         }
 
-        if let Some(prev_tlcs) = self.trampoline_forwarding_tlcs.remove(&payment_hash) {
-            let session = self.store.get_payment_session(payment_hash);
-            match session {
-                Some(session) if session.status == PaymentStatus::Success => {
+        // If this payment has associated previous TLCs,
+        // meaning it's a trampoline forwarding payment,
+        // we need to resolve those upstream TLCs based on the payment outcome.
+        let Some(session) = self.store.get_payment_session(payment_hash) else {
+            return;
+        };
+        let trampoline_context = session.request.trampoline_context.as_ref();
+
+        if let Some(context) = trampoline_context {
+            match session.status {
+                PaymentStatus::Success => {
                     let preimage = session
                         .attempts()
                         .find(|a| a.is_success())
                         .and_then(|a| a.preimage);
 
                     if let Some(preimage) = preimage {
-                        // Store preimage globally
                         self.store.insert_preimage(payment_hash, preimage);
-                        for prev_tlc in prev_tlcs {
+                        for prev_tlc in &context.previous_tlcs {
                             let (send, _recv) = oneshot::channel();
                             let rpc_reply = RpcReplyPort::from(send);
                             let command = ChannelCommand::RemoveTlc(
@@ -4003,8 +4011,8 @@ where
                         error!("Payment success but no preimage found for {payment_hash}");
                     }
                 }
-                Some(session) if session.status == PaymentStatus::Failed => {
-                    for prev_tlc in prev_tlcs {
+                PaymentStatus::Failed => {
+                    for prev_tlc in &context.previous_tlcs {
                         let (send, _recv) = oneshot::channel();
                         let rpc_reply = RpcReplyPort::from(send);
                         let shared_secret = prev_tlc.shared_secret.unwrap_or([0u8; 32]);
@@ -4346,7 +4354,6 @@ where
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
             inflight_payments: Default::default(),
-            trampoline_forwarding_tlcs: Default::default(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();

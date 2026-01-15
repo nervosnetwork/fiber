@@ -1,33 +1,26 @@
 #![cfg(not(target_arch = "wasm32"))]
-use crate::fiber::channel::PrevTlcInfo; // Fixed import
+use crate::fiber::channel::{ChannelActorStateStore, PrevTlcInfo};
 use crate::fiber::config::{DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA};
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::*;
-use crate::fiber::hash_algorithm::HashAlgorithm; // Fixed import
-use crate::fiber::network::{
-    NetworkActorCommand,
-    NetworkActorMessage, // Fixed import
-    SendOnionPacketCommand,
-};
+use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand};
 use crate::fiber::payment::{PaymentStatus, SendPaymentCommand, TrampolineHop};
 use crate::fiber::types::{
-    CurrentPaymentHopData,
-    Hash256,
-    PeeledPaymentOnionPacket,
-    Privkey,
-    Pubkey,
-    TlcErrorCode, // Fixed import
-    TrampolineHopPayload,
-    TrampolineOnionPacket,
+    CurrentPaymentHopData, Hash256, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErrorCode,
+    TrampolineHopPayload, TrampolineOnionPacket,
 };
-use crate::invoice::{Currency, InvoiceBuilder};
+use crate::gen_rand_fiber_public_key;
+use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
 use crate::tests::test_utils::*;
 use crate::{
     create_channel_with_nodes, gen_rand_sha256_hash, ChannelParameters, HUGE_CKB_AMOUNT,
     MIN_RESERVED_CKB,
 };
 use ractor::RpcReplyPort;
+use rand::Rng;
 use secp256k1::Secp256k1;
+use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -2047,4 +2040,211 @@ async fn test_trampoline_routing_failure_invalid_payment_secret() {
     let err = result.failed_error.expect("should fail");
 
     debug!("Payment failed as expected: {:?}", err);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_trampoline_node_restart() {
+    init_tracing();
+
+    // A --(public)--> B --(private)--> C
+    // Note: Use large amounts to ensure capacity.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), false),
+        ],
+        3,
+    )
+    .await;
+
+    let [node_a, mut node_b, node_c] = nodes.try_into().expect("3 nodes");
+
+    // Wait until A learns B (public channel).
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    // Create an invoice on C.
+    // Use a large timeout so we have time to restart B.
+    let amount: u128 = 10000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .expiry_time(Duration::from_secs(3600)) // 1 hour
+        .build()
+        .expect("build invoice");
+
+    // We insert invoice but NOT the preimage yet.
+    // This allows C to receive the HTLC but hold it (unable to settle).
+    let _ = node_c.store.insert_invoice(invoice.clone(), None);
+
+    // Initial Payment A -> B -> C
+    let payment_command = SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        max_fee_amount: Some(5000),
+        trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
+        ..Default::default()
+    };
+
+    let res = node_a.send_payment(payment_command).await;
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    debug!("Payment started: {:?}", payment_hash);
+
+    // Helper to wait for C to have a pending received TLC.
+    async fn wait_for_received_tlc(node: &NetworkNode, payment_hash: Hash256) {
+        let now = std::time::Instant::now();
+        while now.elapsed().as_secs() < 10 {
+            let mut found = false;
+            // Accessing hold tlcs for the node (final node)
+            for (ph, _) in node.store.get_node_hold_tlcs() {
+                if ph == payment_hash {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        panic!("Timed out waiting for received TLC on node C");
+    }
+
+    wait_for_received_tlc(&node_c, payment_hash).await;
+    debug!("Node C received HTLC. Stopping Node B.");
+
+    // Restart B
+    node_b.restart().await;
+    debug!("Node B restarted.");
+
+    // Wait for channels to be ready/active again.
+    // We can assume after connect_to, channel re-establishment kicks in.
+    let start = std::time::Instant::now();
+    loop {
+        let channels = node_b.store.get_channel_states(None);
+        let ready_count = channels
+            .iter()
+            .filter(|(_, _, state)| {
+                matches!(*state, crate::fiber::channel::ChannelState::ChannelReady)
+            })
+            .count();
+        if ready_count == 2 {
+            break;
+        }
+        if start.elapsed().as_secs() > 10 {
+            panic!(
+                "Timeout waiting for channels ready. Expected 2, found {}",
+                ready_count
+            );
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    debug!("Inserting preimage to Node C to finish payment.");
+    // Now give C the preimage.
+    node_c.store.insert_preimage(payment_hash, preimage);
+
+    // Trigger C to settle.
+    node_c
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SettleTlcSet(payment_hash, None),
+        ))
+        .expect("Failed to send settle command");
+
+    debug!("Waiting for success on Node A...");
+    // Wait for A to succeed.
+    node_a.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
+    init_tracing();
+
+    // Create 2 nodes with 1 channel so we have a valid previous channel for forwarding check.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+    let node = &nodes[0];
+    let next_node_pubkey = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+
+    fn gen_rand_session_key() -> crate::fiber::types::Privkey {
+        let mut rng = rand::thread_rng();
+        let mut key = [0u8; 32];
+        rng.fill(&mut key);
+        key.into()
+    }
+
+    // 1. Construct a Trampoline Onion with Forward payload but no next hop (single hop).
+    let hop_data = TrampolineHopPayload::Forward {
+        next_node_id: next_node_pubkey,
+        amount_to_forward: 1000,
+        build_max_fee_amount: Some(1000),
+        tlc_expiry_delta: 100,
+        tlc_expiry_limit: 5000,
+    };
+
+    let session_key = gen_rand_session_key();
+    let secp = Secp256k1::new();
+    let trampoline_packet = TrampolineOnionPacket::create(
+        session_key,
+        vec![node.pubkey],
+        vec![hop_data],
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("build trampoline");
+
+    // 2. Prepare the PeeledPaymentOnionPacket
+    let current_hop = CurrentPaymentHopData {
+        amount: 1000,
+        expiry: 5000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+        trampoline_onion: Some(trampoline_packet.into_bytes()),
+    };
+
+    let peeled_onion = PeeledPaymentOnionPacket {
+        current: current_hop,
+        next: None,
+        shared_secret: [0u8; 32],
+    };
+
+    let prev_tlc = PrevTlcInfo {
+        prev_channel_id: channels[0],
+        prev_tlc_id: 1, // arbitrary
+        forwarding_fee: 0,
+        shared_secret: None,
+    };
+
+    let command = SendOnionPacketCommand {
+        peeled_onion_packet: peeled_onion,
+        previous_tlc: Some(prev_tlc),
+        payment_hash,
+        attempt_id: Some(1),
+    };
+
+    // 3. Send the command to NetworkActor
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let port = ractor::RpcReplyPort::from(tx);
+    let msg =
+        NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(command, port));
+
+    node.network_actor.send_message(msg).expect("send message");
+
+    let res = rx.await.expect("receive reply");
+
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+
+    // Expect InvalidOnionPayload because next onion is missing (it's the last hop) but payload is Forward.
+    assert_eq!(err.error_code(), TlcErrorCode::InvalidOnionPayload);
 }

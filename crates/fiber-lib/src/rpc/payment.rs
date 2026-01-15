@@ -419,7 +419,6 @@ where
                         .trampoline_hops
                         .clone()
                         .map(|hops| hops.into_iter().map(|h| h.into()).collect::<Vec<_>>()),
-                    final_trampoline_onion: None,
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
@@ -429,6 +428,8 @@ where
                         .clone()
                         .map(|hints| hints.into_iter().map(|hint| hint.into()).collect()),
                     dry_run: params.dry_run.unwrap_or(false),
+                    // these two fields are not exposed in RPC
+                    trampoline_context: None,
                 },
                 rpc_reply,
             ))
