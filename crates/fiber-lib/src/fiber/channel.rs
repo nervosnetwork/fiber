@@ -1098,7 +1098,7 @@ where
         // - Extract public key from onion_packet[1..34]
         // - Obtain share secret using DH Key Exchange from the public key
         // and the network private key stored in the network actor state.
-        match add_tlc.onion_packet.clone() {
+        let should_settle = match add_tlc.onion_packet.clone() {
             Some(onion_packet) => {
                 let peeled = onion_packet
                     .peel(
@@ -1110,7 +1110,7 @@ where
                     .map_err(ProcessingChannelError::without_shared_secret)?;
                 let shared_secret = peeled.shared_secret;
                 self.apply_add_tlc_operation_with_peeled_onion_packet(state, add_tlc, peeled)
-                    .map_err(move |err| err.with_shared_secret(shared_secret))?;
+                    .map_err(move |err| err.with_shared_secret(shared_secret))?
             }
             None => {
                 // The TLC is with a NO_SHARED_SECRET and no onion packet.
@@ -1123,14 +1123,18 @@ where
                     )
                     .without_shared_secret());
                 }
+                // allow test code to manually add tlc without onion packet
+                true
             }
-        }
+        };
 
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
-            .map_err(|err| err.without_shared_secret())?;
+        if should_settle {
+            self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
+                .map_err(|err| err.without_shared_secret())?;
+        }
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
@@ -1141,9 +1145,10 @@ where
         state: &mut ChannelActorState,
         add_tlc: &TlcInfo,
         peeled_onion_packet: PeeledPaymentOnionPacket,
-    ) -> ProcessingChannelResult {
+    ) -> Result<bool, ProcessingChannelError> {
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
+        let is_last = peeled_onion_packet.is_last();
 
         let tlc = state
             .tlc_state
@@ -1151,7 +1156,7 @@ where
             .expect("expect tlc");
         tlc.applied_flags = AppliedFlags::ADD;
 
-        if peeled_onion_packet.is_last() {
+        if is_last {
             if forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
@@ -1294,7 +1299,7 @@ where
                 forward_fee,
             );
         }
-        Ok(())
+        Ok(is_last)
     }
 
     fn store_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
@@ -2021,11 +2026,17 @@ where
 
         match result.add_tlc_result {
             Ok((channel_id, tlc_id)) => {
-                state
-                    .tlc_state
-                    .get_mut(&TLCId::Received(result.tlc_id))
-                    .expect("tlc should exist")
-                    .forwarding_tlc = Some((channel_id, tlc_id));
+                if let Some(tlc) = state.tlc_state.get_mut(&TLCId::Received(result.tlc_id)) {
+                    tlc.forwarding_tlc = Some((channel_id, tlc_id));
+                } else {
+                    // This case should be unreachable because we have fixed the race condition where
+                    // intermediate nodes could settle the TLC locally.
+                    error!(
+                        "TLC {:?} removed while waiting for forwarding result",
+                        result.tlc_id
+                    );
+                    debug_assert!(false, "TLC removed while waiting for forwarding result");
+                }
             }
             Err((ProcessingChannelError::WaitingTlcAck, _)) => {
                 // peer already buffered the tlc, we already removed the forward tlc record
