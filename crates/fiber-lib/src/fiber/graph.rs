@@ -1213,12 +1213,20 @@ where
             // If a router is explicitly provided, use it.
             // Assume it's valid for the requested `amount`.
             (payment_data.router.clone(), amount, None)
+        } else if payment_data.use_trampoline_routing() {
+            let res = self.find_trampoline_route(source, amount, max_fee_amount, payment_data)?;
+            debug!(
+                "found trampoline route: {:?}, amount_to_trampoline: {}",
+                res.route_to_trampoline, res.amount_to_trampoline
+            );
+            final_hop_expiry_delta_override = Some(res.final_hop_expiry_delta_override);
+            (
+                res.route_to_trampoline,
+                res.amount_to_trampoline,
+                Some(res.trampoline_onion),
+            )
         } else {
             let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
-            debug!(
-                "allow_trampoline_routing: {:?}",
-                payment_data.allow_trampoline_routing()
-            );
             match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
                 Ok(route) => (route, amount, None),
                 Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
@@ -1234,20 +1242,6 @@ where
                         return Err(PathFindError::NoPathFound);
                     };
                     (res.0, res.1, None)
-                }
-                Err(PathFindError::NoPathFound) if payment_data.allow_trampoline_routing() => {
-                    let res =
-                        self.find_trampoline_route(source, amount, max_fee_amount, payment_data)?;
-                    debug!(
-                        "found trampoline route: {:?}, amount_to_trampoline: {}",
-                        res.route_to_trampoline, res.amount_to_trampoline
-                    );
-                    final_hop_expiry_delta_override = Some(res.final_hop_expiry_delta_override);
-                    (
-                        res.route_to_trampoline,
-                        res.amount_to_trampoline,
-                        Some(res.trampoline_onion),
-                    )
                 }
                 Err(err) => return Err(err),
             }
@@ -1931,8 +1925,8 @@ where
         FIND_PATH_CALL_COUNT_FOR_TESTS.fetch_add(1, Ordering::SeqCst);
 
         debug!(
-            "begin find_path from {:?} to {:?} amount: {:?}",
-            source, target, amount
+            "begin find_path from {:?} to {:?} amount: {:?} allow_mpp: {}",
+            source, target, amount, allow_mpp
         );
 
         let route_to_self = source == target;

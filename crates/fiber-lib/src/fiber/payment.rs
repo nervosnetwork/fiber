@@ -162,6 +162,7 @@ pub struct SendPaymentData {
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
     pub router: Vec<RouterHop>,
+    /// This flag indicates the invoice whether to allow multi-path payment.
     pub allow_mpp: bool,
     pub dry_run: bool,
 
@@ -624,7 +625,7 @@ impl SendPaymentData {
         self.allow_mpp && self.max_parts() > 1 && !self.keysend
     }
 
-    pub fn allow_trampoline_routing(&self) -> bool {
+    pub fn use_trampoline_routing(&self) -> bool {
         self.trampoline_hops
             .as_ref()
             .is_some_and(|hops| !hops.is_empty())
@@ -731,7 +732,7 @@ impl PaymentSession {
     }
 
     pub fn max_parts(&self) -> usize {
-        if self.allow_mpp() {
+        if self.allow_mpp() && !self.request.use_trampoline_routing() {
             self.request.max_parts()
         } else {
             1
@@ -1775,7 +1776,7 @@ where
                         }
                     }
                     let current_amount = session_route.receiver_amount();
-                    if session.request.allow_trampoline_routing() {
+                    if session.request.use_trampoline_routing() {
                         remain_amount -= target_amount;
                     } else {
                         remain_amount -= current_amount;

@@ -1999,13 +1999,14 @@ where
                     }
                 };
 
-                self.start_payment_actor(
-                    myself,
-                    state,
-                    payment_request.payment_hash,
-                    PaymentActorMessage::SendPayment(payment_request, reply),
-                )
-                .await;
+                let _ = self
+                    .start_payment_actor(
+                        myself,
+                        state,
+                        payment_request.payment_hash,
+                        PaymentActorMessage::SendPayment(payment_request, reply),
+                    )
+                    .await;
             }
             NetworkActorCommand::SendPaymentWithRouter(payment_request, reply) => {
                 let source = self.network_graph.read().await.get_source_pubkey();
@@ -2017,13 +2018,14 @@ where
                         return Ok(());
                     }
                 };
-                self.start_payment_actor(
-                    myself,
-                    state,
-                    payment_request.payment_hash,
-                    PaymentActorMessage::SendPayment(payment_request, reply),
-                )
-                .await;
+                let _ = self
+                    .start_payment_actor(
+                        myself,
+                        state,
+                        payment_request.payment_hash,
+                        PaymentActorMessage::SendPayment(payment_request, reply),
+                    )
+                    .await;
             }
             NetworkActorCommand::BuildPaymentRouter(build_payment_router, reply) => {
                 match self.on_build_payment_router(build_payment_router).await {
@@ -2496,7 +2498,7 @@ where
                     final_tlc_expiry_delta: Some(tlc_expiry_delta),
                     tlc_expiry_limit: Some(tlc_expiry_limit),
                     max_fee_amount: build_max_fee_amount,
-                    max_parts: Some(1),
+                    max_parts: Some(12),
                     udt_type_script,
                     allow_self_payment: true,
                     trampoline_context: Some(TrampolineContext {
@@ -2506,24 +2508,35 @@ where
                     ..Default::default()
                 };
 
-                let payment_data = command.build_send_payment_data().map_err(|_| {
+                let mut payment_data = command.build_send_payment_data().map_err(|_| {
                     TlcErr::new_node_fail(
                         TlcErrorCode::TemporaryNodeFailure,
                         state.get_public_key(),
                     )
                 })?;
+                payment_data.allow_mpp = true;
 
                 let (send, _recv) = oneshot::channel();
                 let rpc_reply = RpcReplyPort::from(send);
 
-                self.start_payment_actor(
-                    state.network.clone(),
-                    state,
-                    payment_hash,
-                    PaymentActorMessage::SendPayment(payment_data, rpc_reply),
-                )
-                .await;
-                Ok(())
+                match self
+                    .start_payment_actor(
+                        state.network.clone(),
+                        state,
+                        payment_hash,
+                        PaymentActorMessage::SendPayment(payment_data, rpc_reply),
+                    )
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        error!("Failed to start trampoline payment: {}", e);
+                        Err(TlcErr::new_node_fail(
+                            TlcErrorCode::TemporaryNodeFailure,
+                            state.get_public_key(),
+                        ))
+                    }
+                }
             }
             TrampolineHopPayload::Final { .. } => {
                 // The channel actor should directly settle when this node is the final recipient.
@@ -2669,8 +2682,12 @@ where
                 "Can't find inflight payment actor for {payment_hash:?}, start a new payment actor"
             );
 
-            self.start_payment_actor(myself, state, payment_hash, message)
-                .await;
+            if let Err(e) = self
+                .start_payment_actor(myself, state, payment_hash, message)
+                .await
+            {
+                warn!("Failed to resume payment actor: {}", e);
+            }
         }
     }
 
@@ -2680,16 +2697,18 @@ where
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
         init_command: PaymentActorMessage,
-    ) {
+    ) -> Result<(), String> {
         if state.inflight_payments.contains_key(&payment_hash) {
             error!("Already had a payment actor with the same hash {payment_hash:?}");
 
             if let PaymentActorMessage::SendPayment(_, reply) = init_command {
                 let _ = reply.send(Err(format!(
-                "Payment session already exists, stop start new payment actor for {payment_hash:?}"
-            )));
+                    "Payment session already exists, stop start new payment actor for {payment_hash:?}"
+                )));
             }
-            return;
+            return Err(format!(
+                "Payment session already exists for {payment_hash:?}"
+            ));
         }
 
         let args = PaymentActorArguments {
@@ -2715,9 +2734,11 @@ where
             Ok((actor, _handle)) => {
                 debug!("Payment actor start {payment_hash}");
                 state.inflight_payments.insert(payment_hash, actor);
+                Ok(())
             }
             Err(err) => {
                 error!("Failed to start payment actor: {:?}", err);
+                Err(format!("Failed to start payment actor: {:?}", err))
             }
         }
     }

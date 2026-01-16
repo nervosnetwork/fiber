@@ -911,7 +911,7 @@ where
                 if !is_mpp && !is_invoice_fulfilled(&invoice, std::iter::once(&tlc)) {
                     // Single path with insufficient amount
                     RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(TlcErrorCode::AmountBelowMinimum),
+                        TlcErr::new(TlcErrorCode::FinalIncorrectTlcAmount),
                         &tlc.shared_secret,
                     ))
                 } else {
@@ -957,6 +957,7 @@ where
             }
         };
 
+        error!("hello remove_reason: {:?}", remove_reason);
         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason);
     }
 
@@ -1174,7 +1175,7 @@ where
             custom_records,
         }) = last_hop_inner_onion
         {
-            if forward_amount != add_tlc.amount || forward_amount != final_amount {
+            if forward_amount != add_tlc.amount || forward_amount > final_amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
 
