@@ -1,11 +1,3 @@
-#[derive(Debug)]
-struct TrampolineRouteResult {
-    route_to_trampoline: Vec<RouterHop>,
-    amount_to_trampoline: u128,
-    trampoline_onion: Vec<u8>,
-    final_hop_expiry_delta_override: u64,
-}
-
 use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
 use super::config::AnnouncedNodeName;
 use super::features::FeatureVector;
@@ -542,6 +534,14 @@ pub struct RouterHop {
     /// the only thing missing is current time. So the expiry is the current time plus the expiry delta.
     #[serde_as(as = "U64Hex")]
     pub(crate) incoming_tlc_expiry: u64,
+}
+
+#[derive(Debug)]
+struct ResolvedRoute {
+    hops: Vec<RouterHop>,
+    amount: u128,
+    trampoline_onion: Option<Vec<u8>>,
+    final_hop_expiry_delta_override: Option<u64>,
 }
 
 impl<S> NetworkGraph<S>
@@ -1208,56 +1208,25 @@ where
             ));
         }
 
-        let mut final_hop_expiry_delta_override: Option<u64> = None;
-        let (route_hops, route_amount, trampoline_payload) = if !payment_data.router.is_empty() {
-            // If a router is explicitly provided, use it.
-            // Assume it's valid for the requested `amount`.
-            (payment_data.router.clone(), amount, None)
-        } else if payment_data.use_trampoline_routing() {
-            let res = self.find_trampoline_route(source, amount, max_fee_amount, payment_data)?;
-            debug!(
-                "found trampoline route: {:?}, amount_to_trampoline: {}",
-                res.route_to_trampoline, res.amount_to_trampoline
-            );
-            final_hop_expiry_delta_override = Some(res.final_hop_expiry_delta_override);
-            (
-                res.route_to_trampoline,
-                res.amount_to_trampoline,
-                Some(res.trampoline_onion),
-            )
-        } else {
-            let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
-            match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
-                Ok(route) => (route, amount, None),
-                Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
-                    if payment_data.allow_mpp() && amount_low_bound < amount =>
-                {
-                    let Ok(res) = self.binary_find_path_in_range(
-                        source,
-                        amount.saturating_sub(1),
-                        amount_low_bound,
-                        max_fee_amount,
-                        payment_data,
-                    ) else {
-                        return Err(PathFindError::NoPathFound);
-                    };
-                    (res.0, res.1, None)
-                }
-                Err(err) => return Err(err),
-            }
-        };
+        let path = self.resolve_route(
+            source,
+            amount,
+            amount_low_bound,
+            max_fee_amount,
+            payment_data,
+        )?;
 
         debug_assert!(
-            !route_hops.is_empty(),
+            !path.hops.is_empty(),
             "Route hops should not be empty if Ok"
         );
 
         Ok(self.build_router_from_path(
-            &route_hops,
-            route_amount,
+            &path.hops,
+            path.amount,
             payment_data,
-            trampoline_payload,
-            final_hop_expiry_delta_override,
+            path.trampoline_onion,
+            path.final_hop_expiry_delta_override,
         ))
     }
 
@@ -1268,13 +1237,72 @@ where
             .unwrap_or(true)
     }
 
+    fn resolve_route(
+        &self,
+        source: Pubkey,
+        amount: u128,
+        amount_low_bound: Option<u128>,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentData,
+    ) -> Result<ResolvedRoute, PathFindError> {
+        if !payment_data.router.is_empty() {
+            // If a router is explicitly provided, use it.
+            // Assume it's valid for the requested `amount`.
+            return Ok(ResolvedRoute {
+                hops: payment_data.router.clone(),
+                amount,
+                trampoline_onion: None,
+                final_hop_expiry_delta_override: None,
+            });
+        }
+
+        if payment_data.use_trampoline_routing() {
+            let res = self.find_trampoline_route(source, amount, max_fee_amount, payment_data)?;
+            debug!(
+                "found trampoline route: {:?}, amount_to_trampoline: {}",
+                res.hops, res.amount
+            );
+            return Ok(res);
+        }
+
+        let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
+        match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
+            Ok(route) => Ok(ResolvedRoute {
+                hops: route,
+                amount,
+                trampoline_onion: None,
+                final_hop_expiry_delta_override: None,
+            }),
+            Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
+                if payment_data.allow_mpp() && amount_low_bound < amount =>
+            {
+                let (hops, amount) = self
+                    .binary_find_path_in_range(
+                        source,
+                        amount.saturating_sub(1),
+                        amount_low_bound,
+                        max_fee_amount,
+                        payment_data,
+                    )
+                    .map_err(|_| PathFindError::NoPathFound)?;
+                Ok(ResolvedRoute {
+                    hops,
+                    amount,
+                    trampoline_onion: None,
+                    final_hop_expiry_delta_override: None,
+                })
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     fn find_trampoline_route(
         &self,
         source: Pubkey,
         final_amount: u128,
         max_fee_amount: Option<u128>,
         payment_data: &SendPaymentData,
-    ) -> Result<TrampolineRouteResult, PathFindError> {
+    ) -> Result<ResolvedRoute, PathFindError> {
         let target = payment_data.target_pubkey;
         // Prefer the per-call override from `build_route` when present, else fall back to
         // the budget carried in `payment_data`.
@@ -1412,8 +1440,12 @@ where
             let per_trampoline_routing_budgets = &budgets[1..];
 
             // The first trampoline must receive the total expected incoming amount, which consists of:
-            // 1. `amount_to_first_trampoline`: This covers the amount it needs to forward to the next node (which recursively includes final amount + subsequent service fees) plus its own trampoline service fee.
-            // 2. `per_trampoline_routing_budgets.first()`: This is the routing fee budget specifically allocated for this node (T1) to pay for the route to the next node (T2).
+            // 1. `amount_to_first_trampoline`:
+            //     This covers the amount it needs to forward to the next node (which recursively includes
+            //     final amount + subsequent service fees) plus its own trampoline service fee.
+            // 2. `per_trampoline_routing_budgets.first()`:
+            //     This is the routing fee budget specifically allocated for this node (T1) to pay for the route
+            //     to the next node (T2).
             let amount_to_trampoline = amount_to_first_trampoline
                 .saturating_add(per_trampoline_routing_budgets.first().copied().unwrap_or(0));
 
@@ -1502,15 +1534,15 @@ where
             .map_err(|_| PathFindError::NoPathFound)?
             .into_bytes();
 
-            return Ok(TrampolineRouteResult {
-                route_to_trampoline,
-                amount_to_trampoline,
-                trampoline_onion,
-                final_hop_expiry_delta_override: trampoline_forward_expiry_delta(
+            return Ok(ResolvedRoute {
+                hops: route_to_trampoline,
+                amount: amount_to_trampoline,
+                trampoline_onion: Some(trampoline_onion),
+                final_hop_expiry_delta_override: Some(trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,
                     hops,
                     payment_data.tlc_expiry_limit,
-                )?,
+                )?),
             });
         }
 
