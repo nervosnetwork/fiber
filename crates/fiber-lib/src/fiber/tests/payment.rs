@@ -16,6 +16,7 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
+use crate::invoice::PreimageStore;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::invoice::NewInvoiceParams;
@@ -833,7 +834,7 @@ async fn test_send_payment_with_private_channel_hints() {
 }
 
 #[test]
-fn test_send_payment_data_rejects_hop_hints_when_invoice_disallows_trampoline_routing() {
+fn test_send_payment_rejects_hop_hints_when_invoice_disallows() {
     let payee_pubkey = gen_rand_fiber_public_key();
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -6761,4 +6762,101 @@ async fn test_send_payment_two_with_same_invoice() {
         }
     }
     assert_eq!(succeeded_count, 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_tlc_removed_while_waiting_for_forwarding_result() {
+    init_tracing();
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters::new(MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB),
+            ),
+            (
+                (1, 2),
+                ChannelParameters::new(MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB),
+            ),
+        ],
+        3,
+        Some(gen_rpc_config()),
+    )
+    .await;
+
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    // 1. Successful payment to ensure route and preimage on Node 1 (Router)
+    let amount = 1000000;
+    let preimage = gen_rand_sha256_hash();
+
+    let invoice_params = NewInvoiceParams {
+        amount,
+        payment_preimage: Some(preimage),
+        description: Some("Description".to_string()),
+        ..Default::default()
+    };
+
+    let invoice_result = node_2.gen_invoice(invoice_params).await;
+    let invoice = invoice_result.invoice;
+    let payment_hash = invoice.data.payment_hash;
+    let invoice_address = invoice_result.invoice_address;
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(amount),
+            payment_hash: Some(payment_hash),
+            invoice: Some(invoice_address.clone()),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+    node_0.wait_until_success(payment_hash).await;
+
+    // Node 1 should now have the preimage.
+    // Intermediate nodes don't persist preimages by default in this implementation,
+    // but the bug relies on the node having it (possibly from race or other source).
+    // We manually insert it to simulate the condition.
+    if node_1.store.get_preimage(&payment_hash).is_none() {
+        node_1.store.insert_preimage(payment_hash, preimage);
+    }
+    assert!(node_1.store.get_preimage(&payment_hash).is_some());
+
+    // 2. Send duplicate payment with SAME payment hash
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(amount),
+            payment_hash: Some(payment_hash),
+            invoice: Some(invoice_address.clone()),
+            ..Default::default()
+        })
+        .await;
+
+    if res.is_ok() {
+        node_0.wait_until_failed(payment_hash).await;
+    }
+
+    // 3. Verify Node 1 is alive by making a fresh payment
+    let invoice_params2 = NewInvoiceParams {
+        amount,
+        description: Some("Fresh Payment".to_string()),
+        ..Default::default()
+    };
+    let invoice_result2 = node_2.gen_invoice(invoice_params2).await;
+    let invoice2 = invoice_result2.invoice;
+    let payment_hash2 = invoice2.data.payment_hash;
+    let invoice_address2 = invoice_result2.invoice_address;
+
+    let res2 = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(amount),
+            invoice: Some(invoice_address2),
+            ..Default::default()
+        })
+        .await;
+    assert!(res2.is_ok());
+    node_0.wait_until_success(payment_hash2).await;
 }
