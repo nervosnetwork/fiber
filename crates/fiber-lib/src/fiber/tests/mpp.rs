@@ -123,7 +123,9 @@ async fn test_send_mpp_will_not_enabled_if_not_set_allow_mpp() {
     eprintln!("res: {:?}", res);
     assert!(res.is_err(), "should fail because allow_mpp is not set");
     // no path found since mpp is not enabled
-    assert!(res.unwrap_err().contains("no path found"));
+    assert!(res
+        .unwrap_err()
+        .contains("payment invoice is not allow MPP"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4002,6 +4004,8 @@ async fn test_send_payment_mpp_with_node_not_in_graph() {
         .amount(Some(1000))
         .payment_preimage(preimage)
         .payee_pub_key(wrong_target_pubkey)
+        .payment_secret(gen_rand_sha256_hash())
+        .allow_mpp(true)
         .build()
         .expect("build invoice success");
 

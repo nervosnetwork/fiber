@@ -410,6 +410,9 @@ impl SendPaymentDataBuilder {
                     PAYMENT_MAX_PARTS_LIMIT
                 ));
             }
+            if !self.allow_mpp && max_parts > 1 && self.trampoline_context.is_none() {
+                return Err("payment invoice is not allow MPP".to_string());
+            }
         }
 
         if self.keysend {
@@ -566,7 +569,6 @@ impl SendPaymentData {
         }
 
         let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
-
         let payment_secret = invoice
             .as_ref()
             .and_then(|inv| inv.payment_secret().cloned());
@@ -607,11 +609,9 @@ impl SendPaymentData {
             .custom_records(custom_records)
             .allow_self_payment(command.allow_self_payment)
             .hop_hints(hop_hints)
-            .router(vec![])
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
             .trampoline_hops(command.trampoline_hops)
-            .trampoline_context(command.trampoline_context)
             .channel_stats(Default::default())
             .build()
     }
@@ -1131,9 +1131,6 @@ pub struct SendPaymentCommand {
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
     pub trampoline_hops: Option<Vec<TrampolineHop>>,
-
-    /// Context for trampoline routing.
-    pub trampoline_context: Option<TrampolineContext>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

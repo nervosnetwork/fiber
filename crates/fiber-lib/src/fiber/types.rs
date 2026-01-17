@@ -3798,6 +3798,9 @@ pub enum TrampolineHopPayload {
         ///
         /// This allows propagating the payer's expiry budget constraints across trampoline hops.
         tlc_expiry_limit: u64,
+
+        /// whether trampoline node should use MPP when forwarding to next hop
+        max_parts: Option<u64>,
     },
     /// Payload for the final recipient.
     Final {

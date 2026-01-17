@@ -1046,6 +1046,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
         build_max_fee_amount: Some(0),
         tlc_expiry_delta: 144,
         tlc_expiry_limit: 5000,
+        max_parts: None,
     };
 
     // Path: [B, Final].
@@ -2188,6 +2189,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
         build_max_fee_amount: Some(1000),
         tlc_expiry_delta: 100,
         tlc_expiry_limit: 5000,
+        max_parts: None,
     };
 
     let session_key = gen_rand_session_key();
@@ -2289,7 +2291,7 @@ async fn test_trampoline_routing_mpp_last_hop() {
 
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
-    tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     // Use a larger amount than single channel capacity (1000000000) to force MPP
     let amount: u128 = 1500000000;
@@ -2321,6 +2323,79 @@ async fn test_trampoline_routing_mpp_last_hop() {
 
     assert!(res.is_ok());
     node_a.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_invoice_not_allow_mpp_will_fail() {
+    init_tracing();
+
+    // A --(public)--> B --(private, 2 channels)--> C
+    // A sends to B (trampoline), B uses MPP to send to C.
+    // Capacity A->B is large enough.
+    // Capacity B->C is split across 2 channels, need MPP to fulfill large payment.
+
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + 10_000_000_000, MIN_RESERVED_CKB),
+                true,
+            ),
+            (
+                (1, 2),
+                (MIN_RESERVED_CKB + 1000000000, MIN_RESERVED_CKB),
+                false,
+            ),
+            (
+                (1, 2),
+                (MIN_RESERVED_CKB + 1000000000, MIN_RESERVED_CKB),
+                false,
+            ),
+        ],
+        3,
+    )
+    .await;
+
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let node_b_channels = node_b.store.get_channel_states(None);
+    debug!(
+        "Node B: {:?} channels: {:?}",
+        node_b.pubkey, node_b_channels
+    );
+
+    // Wait until A learns B supports trampoline routing.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Use a larger amount than single channel capacity (1000000000) to force MPP
+    let amount: u128 = 1500000000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .allow_trampoline_routing(true)
+        .allow_mpp(false) // NOT allowing MPP
+        .payee_pub_key(node_c.get_public_key().into())
+        .payment_secret(gen_rand_sha256_hash())
+        .build();
+    debug!("Built invoice: {:?}", invoice);
+    let invoice = invoice.expect("build invoice");
+
+    error!("node_c pubkey: {:?}", node_c.get_public_key());
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let payment_hash = *invoice.payment_hash();
+
+    // Node A sends to C via B (Trampoline)
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    node_a.wait_until_failed(payment_hash).await;
 }
 
 #[tokio::test]

@@ -428,8 +428,6 @@ where
                         .clone()
                         .map(|hints| hints.into_iter().map(|hint| hint.into()).collect()),
                     dry_run: params.dry_run.unwrap_or(false),
-                    // these two fields are not exposed in RPC
-                    trampoline_context: None,
                 },
                 rpc_reply,
             ))

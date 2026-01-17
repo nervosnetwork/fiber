@@ -131,7 +131,6 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
         target_pubkey: Some(target),
         allow_self_payment: false,
         payment_hash: Some(payment_hash),
-        trampoline_context: None,
         final_tlc_expiry_delta: None,
         tlc_expiry_limit: None,
         timeout: None,

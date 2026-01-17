@@ -92,7 +92,8 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
     AttemptStatus, PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords,
-    PaymentStatus, SendPaymentCommand, SendPaymentWithRouterCommand, TrampolineContext,
+    PaymentStatus, SendPaymentCommand, SendPaymentDataBuilder, SendPaymentWithRouterCommand,
+    TrampolineContext,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -2464,6 +2465,7 @@ where
                 build_max_fee_amount,
                 tlc_expiry_delta,
                 tlc_expiry_limit,
+                max_parts,
             } => {
                 if incoming_amount < amount_to_forward {
                     error!(
@@ -2488,33 +2490,27 @@ where
                 if let Some(shared_secret) = trampoline_outer_shared_secret {
                     prev_tlc.shared_secret = Some(shared_secret);
                 }
-                // currently we only support single previous tlc in trampoline forwarding,
-                // maybe we need to support multiple previous tlcs in the future
-                let previous_tlcs = vec![prev_tlc];
-                let command = SendPaymentCommand {
-                    target_pubkey: Some(next_node_id),
-                    amount: Some(amount_to_forward),
-                    payment_hash: Some(payment_hash),
-                    final_tlc_expiry_delta: Some(tlc_expiry_delta),
-                    tlc_expiry_limit: Some(tlc_expiry_limit),
-                    max_fee_amount: build_max_fee_amount,
-                    max_parts: Some(12),
-                    udt_type_script,
-                    allow_self_payment: true,
-                    trampoline_context: Some(TrampolineContext {
-                        remaining_trampoline_onion,
-                        previous_tlcs,
-                    }),
-                    ..Default::default()
-                };
-
-                let mut payment_data = command.build_send_payment_data().map_err(|_| {
-                    TlcErr::new_node_fail(
-                        TlcErrorCode::TemporaryNodeFailure,
-                        state.get_public_key(),
-                    )
-                })?;
-                payment_data.allow_mpp = true;
+                let payment_data =
+                    SendPaymentDataBuilder::new(next_node_id, amount_to_forward, payment_hash)
+                        .final_tlc_expiry_delta(tlc_expiry_delta)
+                        .tlc_expiry_limit(tlc_expiry_limit)
+                        .max_fee_amount(build_max_fee_amount)
+                        .max_parts(max_parts)
+                        .udt_type_script(udt_type_script)
+                        .trampoline_context(Some(TrampolineContext {
+                            remaining_trampoline_onion,
+                            // currently we only support single previous tlc in trampoline forwarding,
+                            // maybe we need to support multiple previous tlcs in the future
+                            previous_tlcs: vec![prev_tlc],
+                        }))
+                        .allow_mpp(max_parts.is_some_and(|v| v > 1))
+                        .build()
+                        .map_err(|_| {
+                            TlcErr::new_node_fail(
+                                TlcErrorCode::TemporaryNodeFailure,
+                                state.get_public_key(),
+                            )
+                        })?;
 
                 let (send, _recv) = oneshot::channel();
                 let rpc_reply = RpcReplyPort::from(send);

@@ -5248,7 +5248,6 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
                 target_pubkey: None,
                 allow_self_payment: true,
                 payment_hash: None,
-                trampoline_context: None,
                 final_tlc_expiry_delta: None,
                 tlc_expiry_limit: None,
                 timeout: None,

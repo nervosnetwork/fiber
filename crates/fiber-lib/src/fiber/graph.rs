@@ -1482,6 +1482,13 @@ where
                 })
                 .collect();
 
+            // allow next trampoline to know whether MPP is allowed and max parts
+            let max_parts = if payment_data.allow_mpp() {
+                Some(payment_data.max_parts() as u64)
+            } else {
+                None
+            };
+
             let mut payloads: Vec<TrampolineHopPayload> = Vec::with_capacity(hops.len() + 1);
             for (idx, _node) in hops.iter().enumerate() {
                 let is_last_trampoline = idx + 1 == hops.len();
@@ -1510,6 +1517,7 @@ where
                         remaining_trampoline_hops,
                         payment_data.tlc_expiry_limit,
                     )?,
+                    max_parts,
                     tlc_expiry_limit: payment_data.tlc_expiry_limit,
                 });
             }
