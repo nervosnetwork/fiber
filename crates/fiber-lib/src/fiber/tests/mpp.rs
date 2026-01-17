@@ -8,7 +8,10 @@ use crate::{
         channel::{
             AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
         },
-        config::{CKB_SHANNONS, DEFAULT_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT},
+        config::{
+            CKB_SHANNONS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
+            PAYMENT_MAX_PARTS_LIMIT,
+        },
         features::FeatureVector,
         hash_algorithm::HashAlgorithm,
         network::DebugEvent,
@@ -2979,6 +2982,7 @@ async fn test_send_mpp_with_generated_invoice() {
         .gen_invoice(NewInvoiceParams {
             amount: 20000000001,
             payment_preimage: Some(gen_rand_sha256_hash()),
+            final_expiry_delta: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             allow_mpp: Some(true),
             ..Default::default()
         })
@@ -3000,6 +3004,7 @@ async fn test_send_mpp_with_generated_invoice() {
             amount: 20000000000,
             payment_preimage: Some(gen_rand_sha256_hash()),
             allow_mpp: Some(true),
+            final_expiry_delta: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             ..Default::default()
         })
         .await
