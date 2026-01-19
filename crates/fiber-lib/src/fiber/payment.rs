@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use strum::AsRefStr;
 use tokio::sync::RwLock;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, instrument, warn};
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
@@ -1153,6 +1153,10 @@ where
         graph.build_route(amount, amount_low_bound, max_fee_amount, &request)
     }
 
+    #[instrument(
+        skip(self, myself, state, command),
+        fields(payment_hash = ?state.payment_hash)
+    )]
     pub async fn handle_command(
         &self,
         myself: ActorRef<PaymentActorMessage>,
