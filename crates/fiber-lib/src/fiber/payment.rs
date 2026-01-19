@@ -713,7 +713,7 @@ impl AttemptStatus {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: u64,
     pub try_limit: u32,
@@ -728,6 +728,26 @@ pub struct Attempt {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub last_error: Option<String>,
+}
+
+impl std::fmt::Debug for Attempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attempt")
+            .field("id", &self.id)
+            .field("try_limit", &self.try_limit)
+            .field("tried_times", &self.tried_times)
+            .field("hash", &self.hash)
+            .field("status", &self.status)
+            .field("payment_hash", &self.payment_hash)
+            .field("route", &self.route)
+            .field("route_hops", &self.route_hops)
+            .field("session_key", &"[REDACTED]")
+            .field("preimage", &self.preimage.as_ref().map(|_| "[REDACTED]"))
+            .field("created_at", &self.created_at)
+            .field("last_updated_at", &self.last_updated_at)
+            .field("last_error", &self.last_error)
+            .finish()
+    }
 }
 
 impl Attempt {
