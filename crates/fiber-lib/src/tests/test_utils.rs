@@ -399,6 +399,7 @@ impl NetworkNodeConfigBuilder {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ChannelParameters {
     pub public: bool,
+    pub one_way: bool,
     pub node_a_funding_amount: u128,
     pub node_b_funding_amount: u128,
     pub a_max_tlc_number_in_flight: Option<u64>,
@@ -418,6 +419,7 @@ impl ChannelParameters {
     pub fn new(node_a_funding_amount: u128, node_b_funding_amount: u128) -> Self {
         Self {
             public: true,
+            one_way: false,
             node_a_funding_amount,
             node_b_funding_amount,
             ..Default::default()
@@ -435,7 +437,7 @@ pub(crate) async fn create_channel_with_nodes(
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: params.public,
-                one_way: false,
+                one_way: params.one_way,
                 shutdown_script: None,
                 funding_amount: params.node_a_funding_amount,
                 funding_udt_type_script: params.funding_udt_type_script,
@@ -664,6 +666,7 @@ pub async fn create_n_nodes_network_with_visibility(
                 (*i, *j),
                 ChannelParameters {
                     public: *public,
+                    one_way: false,
                     node_a_funding_amount: *a,
                     node_b_funding_amount: *b,
                     ..Default::default()
