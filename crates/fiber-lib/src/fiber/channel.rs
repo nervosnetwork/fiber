@@ -1,6 +1,7 @@
 use super::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
 };
+use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -11,24 +12,8 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 use crate::fiber::network::DebugEvent;
 use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::TxSignatures;
-use crate::utils::actor::ActorHandleLogGuard;
-use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
-#[cfg(test)]
-use musig2::BinaryEncoding;
-use musig2::SecNonceBuilder;
-use secp256k1::{Secp256k1, XOnlyPublicKey};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::iter;
-#[cfg(test)]
-use std::{
-    backtrace::Backtrace,
-    sync::{LazyLock, Mutex},
-};
-use strum::AsRefStr;
-use tracing::{debug, error, info, trace, warn};
-
-use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 use crate::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::actor::ActorHandleLogGuard;
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{
     ckb::{
@@ -60,6 +45,7 @@ use crate::{
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
+use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{util::blake160, Since, SinceType};
@@ -73,6 +59,9 @@ use ckb_types::{
     H256,
 };
 use molecule::prelude::{Builder, Entity};
+#[cfg(test)]
+use musig2::BinaryEncoding;
+use musig2::SecNonceBuilder;
 use musig2::{
     aggregate_partial_signatures,
     errors::{RoundFinalizeError, SigningError, VerifyError},
@@ -85,15 +74,25 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort,
 };
+use secp256k1::{Secp256k1, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::iter;
+#[cfg(test)]
+use std::{
+    backtrace::Backtrace,
+    sync::{LazyLock, Mutex},
+};
 use std::{
     fmt::{self, Debug, Display},
     sync::Arc,
 };
+use strum::AsRefStr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tracing::{debug, error, info, trace, warn};
 
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
@@ -4659,7 +4658,7 @@ impl ChannelActorState {
     }
 
     fn get_channel_update_channel_flags(&self) -> ChannelUpdateChannelFlags {
-        if self.is_tlc_forwarding_enabled() {
+        if self.is_tlc_forwarding_enabled() && self.can_be_tlc_sender() {
             ChannelUpdateChannelFlags::empty()
         } else {
             ChannelUpdateChannelFlags::DISABLED
@@ -5306,6 +5305,10 @@ impl ChannelActorState {
         let balance = self.get_local_balance();
         let mut info = ChannelUpdateInfo::from(&self.local_tlc_info);
         info.outbound_liquidity = Some(balance);
+        if self.is_one_way && self.is_acceptor {
+            // disable local tlc if one-way channel and we are not the tlc sender
+            info.enabled = false;
+        }
         info
     }
 
@@ -5322,6 +5325,10 @@ impl ChannelActorState {
         self.remote_tlc_info.as_ref().map(|tlc_info| {
             let mut info = ChannelUpdateInfo::from(tlc_info);
             info.outbound_liquidity = Some(balance);
+            if self.is_one_way && !self.is_acceptor {
+                // disable remote tlc if one-way channel and we are the tlc sender
+                info.enabled = false;
+            }
             info
         })
     }

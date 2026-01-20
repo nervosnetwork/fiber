@@ -108,9 +108,9 @@ async fn test_one_way_channel_rejects_reverse_payment() {
             ..Default::default()
         })
         .await;
-    assert!(res.is_ok());
-    let payment_hash = res.unwrap().payment_hash;
-    node_b.wait_until_failed(payment_hash).await;
+    assert!(res.is_err());
+    let error = res.err().unwrap();
+    assert!(error.contains("Failed to build route"));
 
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
