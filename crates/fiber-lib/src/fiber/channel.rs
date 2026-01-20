@@ -1303,9 +1303,6 @@ where
         state: &mut ChannelActorState,
         add_tlc: AddTlc,
     ) -> ProcessingChannelResult {
-        if state.is_one_way && !state.is_acceptor {
-            return Err(ProcessingChannelError::IncorrectTlcDirection);
-        }
         // TODO: here we only check the error which sender didn't follow agreed rules,
         //       if any error happened here we need go to shutdown procedure
 
@@ -5957,6 +5954,18 @@ impl ChannelActorState {
     }
 
     fn check_for_tlc_update(&self, action: TlcUpdateAction) -> ProcessingChannelResult {
+        match action {
+            TlcUpdateAction::AddTlcCommand { amount: _ } | TlcUpdateAction::RemoveTlcPeer => {
+                if !self.can_be_tlc_sender() {
+                    return Err(ProcessingChannelError::IncorrectTlcDirection);
+                }
+            }
+            TlcUpdateAction::AddTlcPeer { amount: _ } | TlcUpdateAction::RemoveTlcCommand => {
+                if !self.can_be_tlc_receiver() {
+                    return Err(ProcessingChannelError::IncorrectTlcDirection);
+                }
+            }
+        }
         match self.state {
             ChannelState::ChannelReady => {}
             ChannelState::ShuttingDown(flags)

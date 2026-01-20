@@ -4,9 +4,7 @@ use crate::fiber::config::{DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DE
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::*;
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::network::{
-    DebugEvent, NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand,
-};
+use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand};
 use crate::fiber::payment::{PaymentStatus, SendPaymentCommand, TrampolineHop};
 use crate::fiber::types::{
     CurrentPaymentHopData, Hash256, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErrorCode,
@@ -16,8 +14,8 @@ use crate::gen_rand_fiber_public_key;
 use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
 use crate::tests::test_utils::*;
 use crate::{
-    create_channel_with_nodes, gen_rand_sha256_hash, ChannelParameters, NetworkServiceEvent,
-    HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
+    create_channel_with_nodes, gen_rand_sha256_hash, ChannelParameters, HUGE_CKB_AMOUNT,
+    MIN_RESERVED_CKB,
 };
 use ractor::RpcReplyPort;
 use rand::Rng;
@@ -91,7 +89,7 @@ async fn test_one_way_channel_rejects_reverse_payment() {
         None,
     )
     .await;
-    let [mut node_a, node_b] = nodes.try_into().expect("2 nodes");
+    let [node_a, node_b] = nodes.try_into().expect("2 nodes");
 
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
@@ -103,31 +101,37 @@ async fn test_one_way_channel_rejects_reverse_payment() {
         .expect("build invoice");
     node_a.insert_invoice(invoice.clone(), Some(preimage));
 
-    let (send, _recv) = oneshot::channel();
-    let rpc_reply = RpcReplyPort::from(send);
-    node_b
-        .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendPayment(
-                SendPaymentCommand {
-                    invoice: Some(invoice.to_string()),
-                    max_fee_amount: Some(5_000),
-                    ..Default::default()
-                },
-                rpc_reply,
-            ),
-        ))
-        .expect("node_b network actor alive");
-
-    node_a
-        .expect_event(|event| {
-            matches!(
-                event,
-                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
-                    if msg.contains("IncorrectTlcDirection")
-            )
+    let res = node_b
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5_000),
+            ..Default::default()
         })
         .await;
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_b.wait_until_failed(payment_hash).await;
+
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_b.get_public_key().into())
+        .build()
+        .expect("build invoice");
+    node_b.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5_000),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_success(payment_hash).await;
 }
 
 #[tokio::test]
