@@ -99,7 +99,7 @@ services:
   - ckb
 `
 const mainnetConfig = `
-# This configuration file only contains the necessary configurations for the testnet deployment.
+# This configuration file only contains the necessary configurations for the mainnet deployment.
 # All options' descriptions can be found via fnn --help and be overridden by command line arguments or environment variables.
 fiber:
   # standalone_watchtower_rpc_url: http://127.0.0.1:23456
