@@ -234,6 +234,12 @@ pub struct Channel {
     pub channel_id: Hash256,
     /// Whether the channel is public
     pub is_public: bool,
+    /// Is this channel initially inbound?
+    /// An inbound channel is one where the counterparty is the funder of the channel.
+    pub is_acceptor: bool,
+    /// Is this channel one-way?
+    /// Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
+    pub is_one_way: bool,
     #[serde_as(as = "Option<EntityHex>")]
     /// The outpoint of the channel
     pub channel_outpoint: Option<OutPoint>,
@@ -534,6 +540,8 @@ where
                     .map(|state| Channel {
                         channel_id,
                         is_public: state.is_public(),
+                        is_acceptor: state.is_acceptor,
+                        is_one_way: state.is_one_way,
                         channel_outpoint: state.get_funding_transaction_outpoint(),
                         peer_id,
                         funding_udt_type_script: state

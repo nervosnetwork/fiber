@@ -1109,6 +1109,10 @@ The channel data structure
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID
 * `is_public` - <em>`bool`</em>, Whether the channel is public
+* `is_acceptor` - <em>`bool`</em>, Is this channel initially inbound?
+ An inbound channel is one where the counterparty is the funder of the channel.
+* `is_one_way` - <em>`bool`</em>, Is this channel one-way?
+ Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
 * `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint of the channel
 * `peer_id` - <em>`PeerId`</em>, The peer ID of the channel
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel

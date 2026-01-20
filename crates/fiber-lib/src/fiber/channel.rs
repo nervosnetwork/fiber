@@ -1309,7 +1309,9 @@ where
         // TODO: here we only check the error which sender didn't follow agreed rules,
         //       if any error happened here we need go to shutdown procedure
 
-        state.check_for_tlc_update(Some(add_tlc.amount), false, false)?;
+        state.check_for_tlc_update(TlcUpdateAction::AddTlcPeer {
+            amount: add_tlc.amount,
+        })?;
         let tlc_info = state.create_inbounding_tlc(add_tlc.clone())?;
         state.check_insert_tlc(&tlc_info)?;
         state.tlc_state.add_received_tlc(tlc_info);
@@ -1322,7 +1324,7 @@ where
         state: &mut ChannelActorState,
         remove_tlc: RemoveTlc,
     ) -> ProcessingChannelResult {
-        state.check_for_tlc_update(None, false, false)?;
+        state.check_for_tlc_update(TlcUpdateAction::RemoveTlcPeer)?;
         // TODO: here if we received a invalid remove tlc, it's maybe a malioucious peer,
         // maybe we need to go through shutdown process for this error
         state
@@ -1584,7 +1586,9 @@ where
         state: &mut ChannelActorState,
         command: &AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
-        state.check_for_tlc_update(Some(command.amount), true, true)?;
+        state.check_for_tlc_update(TlcUpdateAction::AddTlcCommand {
+            amount: command.amount,
+        })?;
         state.check_tlc_expiry(command.expiry)?;
         state.check_tlc_forward_amount(
             command.amount,
@@ -1630,7 +1634,7 @@ where
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
-        state.check_for_tlc_update(None, true, false)?;
+        state.check_for_tlc_update(TlcUpdateAction::RemoveTlcCommand)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
         let payment_hash = state
             .tlc_state
@@ -4304,6 +4308,14 @@ pub(crate) fn tlc_expiry_delay(delay_epoch: &EpochNumberWithFraction) -> u64 {
         / 3.0) as u64
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TlcUpdateAction {
+    AddTlcCommand { amount: u128 },
+    AddTlcPeer { amount: u128 },
+    RemoveTlcCommand,
+    RemoveTlcPeer,
+}
+
 // Constructors for the channel actor state.
 impl ChannelActorState {
     pub fn network(&self) -> ActorRef<NetworkActorMessage> {
@@ -5277,6 +5289,14 @@ impl ChannelActorState {
         self.id
     }
 
+    pub fn can_be_tlc_sender(&self) -> bool {
+        !self.is_one_way || !self.is_acceptor
+    }
+
+    pub fn can_be_tlc_receiver(&self) -> bool {
+        !self.is_one_way || self.is_acceptor
+    }
+
     pub fn get_local_pubkey(&self) -> Pubkey {
         self.local_pubkey
     }
@@ -5936,45 +5956,57 @@ impl ChannelActorState {
         }
     }
 
-    fn check_for_tlc_update(
-        &self,
-        add_tlc_amount: Option<u128>,
-        is_tlc_command_message: bool,
-        is_sent: bool,
-    ) -> ProcessingChannelResult {
+    fn check_for_tlc_update(&self, action: TlcUpdateAction) -> ProcessingChannelResult {
         match self.state {
             ChannelState::ChannelReady => {}
             ChannelState::ShuttingDown(flags)
-                if add_tlc_amount.is_none()
-                    || (!is_sent && flags == ShuttingDownFlags::OUR_SHUTDOWN_SENT) =>
+                if matches!(
+                    action,
+                    TlcUpdateAction::RemoveTlcCommand | TlcUpdateAction::RemoveTlcPeer
+                ) || (matches!(action, TlcUpdateAction::AddTlcPeer { .. })
+                    && flags == ShuttingDownFlags::OUR_SHUTDOWN_SENT) =>
             {
                 // when we've sent out shutting down command,
                 // we can only remove tlc or process add_tlc peer message
             }
             _ => {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Invalid state {:?} for {} tlc",
-                    self.state,
-                    if add_tlc_amount.is_some() {
+                let action_str = match action {
+                    TlcUpdateAction::AddTlcCommand { .. } | TlcUpdateAction::AddTlcPeer { .. } => {
                         "adding"
-                    } else {
+                    }
+                    TlcUpdateAction::RemoveTlcCommand | TlcUpdateAction::RemoveTlcPeer => {
                         "removing"
                     }
-                )))
+                };
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Invalid state {:?} for {} tlc",
+                    self.state, action_str
+                )));
             }
         }
 
         // don't check whether channel is public,
         // since private channel could also forward tlc
-        if let Some(add_amount) = add_tlc_amount {
-            if is_tlc_command_message && !self.local_tlc_info.enabled {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "TLC forwarding is not enabled for channel {}",
-                    self.get_id()
-                )));
+        match action {
+            TlcUpdateAction::AddTlcCommand { amount } => {
+                if !self.local_tlc_info.enabled {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "TLC forwarding is not enabled for channel {}",
+                        self.get_id()
+                    )));
+                }
+                self.check_tlc_limits(amount, true)?;
             }
-            self.check_tlc_limits(add_amount, is_sent)?;
+            TlcUpdateAction::AddTlcPeer { amount } => {
+                self.check_tlc_limits(amount, false)?;
+            }
+            _ => {}
         }
+
+        let is_tlc_command_message = matches!(
+            action,
+            TlcUpdateAction::AddTlcCommand { .. } | TlcUpdateAction::RemoveTlcCommand
+        );
 
         if is_tlc_command_message && (self.is_waiting_tlc_ack() || self.reestablishing) {
             return Err(ProcessingChannelError::WaitingTlcAck);
