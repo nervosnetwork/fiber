@@ -31,8 +31,8 @@ fiber:
   # disable_built_in_watchtower: true
   listening_addr: "/ip4/127.0.0.1/tcp/8228"
   bootnode_addrs:
-    - "/dns4/bottle.fiber.channel/tcp/443/wss/p2p/QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo"
-    - "/dns4/bracer.fiber.channel/tcp/443/wss/p2p/QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89"
+    - "/dns4/thrall.fiber.channel/tcp/443/wss/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
+    - "/dns4/onyxia.fiber.channel/tcp/443/wss/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"
   announce_listening_addr: false
   announced_addrs:
     # If you want to announce your fiber node public address to the network, you need to add the address here, please change the ip to your public ip accordingly.

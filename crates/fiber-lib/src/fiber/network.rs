@@ -1985,10 +1985,13 @@ where
                 }
             }
             NetworkActorCommand::BroadcastMessages(message) => {
-                state
-                    .gossip_actor
-                    .send_message(GossipActorMessage::TryBroadcastMessages(message))
-                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
+                if let Some(ref gossip_actor) = state.gossip_actor {
+                    gossip_actor
+                        .send_message(GossipActorMessage::TryBroadcastMessages(message))
+                        .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
+                } else {
+                    debug!("Gossip actor is not available, skipping broadcast message");
+                }
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
                 let payment_request = match payment_request.build_send_payment_data() {
@@ -2824,7 +2827,8 @@ pub struct NetworkActorState<S, C> {
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u128,
     // The gossip messages actor to process and send gossip messages.
-    gossip_actor: ActorRef<GossipActorMessage>,
+    // None if gossip is disabled via sync_network_graph config.
+    gossip_actor: Option<ActorRef<GossipActorMessage>>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
     // The features of the node, used to indicate the capabilities of the node.
@@ -4181,45 +4185,65 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
-        let mut gossip_config = GossipConfig::from(&config);
-        gossip_config.peer_id = Some(my_peer_id.clone());
-        let (gossip_service, gossip_handle) = GossipService::start(
-            gossip_config,
-            self.store.clone(),
-            self.chain_actor.clone(),
-            self.chain_client.clone(),
-            myself.get_cell(),
-        )
-        .await;
-        let mut graph = self.network_graph.write().await;
-        let graph_subscribing_cursor = graph
-            .get_latest_cursor()
-            .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
 
-        gossip_service
-            .get_subscriber()
-            .subscribe(graph_subscribing_cursor, myself.clone(), |m| {
-                Some(NetworkActorMessage::new_event(
-                    NetworkActorEvent::GossipMessageUpdates(m),
-                ))
-            })
-            .await
-            .expect("subscribe to gossip store updates");
-        let gossip_actor = gossip_handle.actor().clone();
+        // Conditionally start GossipService based on sync_network_graph config
+        let (gossip_actor, gossip_handle_opt) = if config.sync_network_graph() {
+            let mut gossip_config = GossipConfig::from(&config);
+            gossip_config.peer_id = Some(my_peer_id.clone());
+            let (gossip_service, gossip_handle) = GossipService::start(
+                gossip_config,
+                self.store.clone(),
+                self.chain_actor.clone(),
+                self.chain_client.clone(),
+                myself.get_cell(),
+            )
+            .await;
+
+            let graph_subscribing_cursor = {
+                let graph = self.network_graph.write().await;
+                graph
+                    .get_latest_cursor()
+                    .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT)
+            };
+
+            gossip_service
+                .get_subscriber()
+                .subscribe(graph_subscribing_cursor, myself.clone(), |m| {
+                    Some(NetworkActorMessage::new_event(
+                        NetworkActorEvent::GossipMessageUpdates(m),
+                    ))
+                })
+                .await
+                .expect("subscribe to gossip store updates");
+            (Some(gossip_handle.actor().clone()), Some(gossip_handle))
+        } else {
+            info!("Gossip network synchronization is disabled (sync_network_graph = false)");
+            (None, None)
+        };
+
+        // Build service with or without gossip protocol based on configuration
         #[cfg(not(target_arch = "wasm32"))]
-        let mut service = ServiceBuilder::default()
-            .insert_protocol(fiber_handle.create_meta())
-            .insert_protocol(gossip_handle.create_meta())
-            .handshake_type(secio_kp.into())
-            .build(handle);
+        let mut service = {
+            let mut builder = ServiceBuilder::default()
+                .insert_protocol(fiber_handle.create_meta())
+                .handshake_type(secio_kp.into());
+            if let Some(gossip_handle) = gossip_handle_opt {
+                builder = builder.insert_protocol(gossip_handle.create_meta());
+            }
+            builder.build(handle)
+        };
         #[cfg(target_arch = "wasm32")]
-        let mut service = ServiceBuilder::default()
-            .insert_protocol(fiber_handle.create_meta())
-            .insert_protocol(gossip_handle.create_meta())
-            .handshake_type(secio_kp.into())
-            // Sets forever to true so the network service won't be shutdown due to no incoming connections
-            .forever(true)
-            .build(handle);
+        let mut service = {
+            let mut builder = ServiceBuilder::default()
+                .insert_protocol(fiber_handle.create_meta())
+                .handshake_type(secio_kp.into())
+                // Sets forever to true so the network service won't be shutdown due to no incoming connections
+                .forever(true);
+            if let Some(gossip_handle) = gossip_handle_opt {
+                builder = builder.insert_protocol(gossip_handle.create_meta());
+            }
+            builder.build(handle)
+        };
 
         let mut announced_addrs = Vec::with_capacity(config.announced_addrs.len() + 1);
 
@@ -4374,7 +4398,10 @@ where
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
-        graph.process_node_announcement(node_announcement);
+        {
+            let mut graph = self.network_graph.write().await;
+            graph.process_node_announcement(node_announcement);
+        }
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
