@@ -1030,15 +1030,16 @@ where
                 // The TLC is with a NO_SHARED_SECRET and no onion packet.
                 // this may only happen in testing or development environment.
                 debug_assert!(add_tlc.onion_packet.is_none());
-                #[cfg(not(debug_assertions))]
-                {
+                if cfg!(debug_assertions) {
+                    warn!("Processing TLC with no onion packet, only for testing or development environment");
+                    // allow test code to manually add tlc without onion packet
+                    true
+                } else {
                     return Err(ProcessingChannelError::PeelingOnionPacketError(
                         "TLC with no onion packet is not supported".to_string(),
                     )
                     .without_shared_secret());
                 }
-                // allow test code to manually add tlc without onion packet
-                true
             }
         };
 
