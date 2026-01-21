@@ -99,6 +99,8 @@ pub enum InternalMessage {
 pub enum CkbTxTracingMessage {
     CreateTracer(CkbTxTracer),
     RemoveTracers(Hash256),
+    // Tell tracer that the tx has been rejected when trying to send it.
+    ReportRejected(Hash256),
 
     Internal(InternalMessage),
 }
@@ -140,11 +142,12 @@ impl Actor for CkbTxTracingActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use CkbTxTracingMessage::{CreateTracer, Internal, RemoveTracers};
+        use CkbTxTracingMessage::{CreateTracer, Internal, RemoveTracers, ReportRejected};
 
         match message {
             CreateTracer(arguments) => state.create_tracer(myself, arguments).await,
             RemoveTracers(arguments) => state.remove_tracers(arguments),
+            ReportRejected(tx_hash) => state.report_rejected(myself, tx_hash).await,
             Internal(InternalMessage::RunTracers) => state.run_tracers(myself, None).await,
             Internal(InternalMessage::ReportTracingResult(result, tip_block_number)) => {
                 state
@@ -182,6 +185,36 @@ impl CkbTxTracingState {
     fn remove_tracers(&mut self, tx_hash: Hash256) -> Result<(), ActorProcessingErr> {
         self.tracers.remove(&tx_hash);
         Ok(())
+    }
+
+    async fn report_rejected(
+        &mut self,
+        myself: ActorRef<CkbTxTracingMessage>,
+        tx_hash: Hash256,
+    ) -> Result<(), ActorProcessingErr> {
+        // Get tip block number for reporting
+        let ckb_client = new_ckb_rpc_async_client(&self.rpc_url);
+        let tip_block_number = match ckb_client.get_tip_block_number().await {
+            Ok(n) => u64::from(n),
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to get tip block number when reporting rejected tx {}: {:?}",
+                    tx_hash,
+                    err
+                );
+                return Ok(());
+            }
+        };
+
+        // Create a rejected result
+        let result = CkbTxTracingResult {
+            tx_hash,
+            tx_status: TxStatus::Rejected("Transaction rejected when submitting".to_string()),
+        };
+
+        // Report the result which will trigger callbacks for tracers with Rejected mask
+        self.report_tracing_result(myself, result, tip_block_number)
+            .await
     }
 
     /// Run the tracers to check the txs statuses.
