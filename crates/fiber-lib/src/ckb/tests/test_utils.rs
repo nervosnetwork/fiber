@@ -655,6 +655,10 @@ impl Actor for MockChainActor {
                 }
             }
 
+            ReportRejected(_) => {
+                // ignore
+            }
+
             Stop => {
                 myself.stop(Some("stop received".to_string()));
             }
