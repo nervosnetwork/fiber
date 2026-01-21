@@ -1712,11 +1712,13 @@ where
             iteration += 1;
 
             debug!(
-                "build route iteration {}, target_amount: {} amount_low_bound: {:?} remain_amount: {}",
+                "build route iteration {}, target_amount: {} amount_low_bound: {:?} remain_amount: {}, max_parts: {}, max_fee: {:?}",
                 iteration,
                 target_amount,
                 amount_low_bound,
                 remain_amount,
+                session.max_parts(),
+                max_fee,
             );
             #[cfg(not(target_arch = "wasm32"))]
             let build_route_result = self
@@ -1739,6 +1741,7 @@ where
 
             match build_route_result {
                 Err(e) => {
+                    error!("Here failed to build route: {}", e);
                     let error = format!("Failed to build route, {}", e);
                     return Err(Error::SendPaymentError(error));
                 }

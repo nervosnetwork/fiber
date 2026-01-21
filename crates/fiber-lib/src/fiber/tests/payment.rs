@@ -226,6 +226,53 @@ async fn test_send_payment_prefer_newer_channels() {
 }
 
 #[tokio::test]
+async fn test_send_payment_keysend_without_max_fee() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_0, _node_1, node_2] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_2.pubkey;
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000000),
+            keysend: Some(true),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    eprintln!("res: {:?}", res);
+
+    assert_eq!(res.fee, 10000);
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000000),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let payment_hash = res.payment_hash;
+    source_node.wait_until_success(payment_hash).await;
+    let payment = source_node.get_payment_result(payment_hash).await;
+
+    eprintln!("payment info: {:?}", payment);
+}
+
+#[tokio::test]
 async fn test_send_payment_prefer_channels_with_larger_balance() {
     init_tracing();
 

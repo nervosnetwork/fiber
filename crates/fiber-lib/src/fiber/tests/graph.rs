@@ -1009,10 +1009,9 @@ fn test_graph_trampoline_routing_fee_rate_explicit_zero_allows_zero_fee_budget()
 
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data)
-        .expect("trampoline route should be built with zero fee budget when fee_rate is omitted");
-    assert_eq!(route.len(), 2);
-    assert_eq!(route[0].next_hop, Some(t1.into()));
+        .build_route(payment_data.amount, None, None, &payment_data);
+    let err = route.unwrap_err().to_string();
+    assert!(err.contains("max_fee_amount too low for trampoline service fees"));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -1042,7 +1041,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
 
     let payment_hash = Hash256::default();
     let final_amount: u128 = 1000;
-    let max_fee_amount: u128 = 10;
+    let max_fee_amount: u128 = 15;
 
     let mut h1 = crate::fiber::payment::TrampolineHop::new(t1.into());
     h1.fee_rate = Some(1_000);
@@ -1090,24 +1089,14 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     );
     let remaining_budget = max_fee_amount.saturating_sub(service_fee_total);
 
-    let mut weights = Vec::with_capacity(hops.len() + 1);
-    weights.push(amount_to_first_trampoline);
-    for a in forward_amounts.iter().copied() {
-        weights.push(a);
-    }
-    let weight_sum: u128 = weights.iter().copied().sum();
-    let mut budgets = vec![0u128; weights.len()];
-    if remaining_budget > 0 && weight_sum > 0 {
-        let mut allocated = 0u128;
-        for (i, w) in weights.iter().copied().enumerate() {
-            let b = remaining_budget.saturating_mul(w) / weight_sum;
-            budgets[i] = b;
-            allocated = allocated.saturating_add(b);
-        }
-        let remainder = remaining_budget.saturating_sub(allocated);
-        debug_assert!(remainder < budgets.len() as u128);
-        for i in 0..(remainder as usize) {
-            budgets[i] = budgets[i].saturating_add(1);
+    let mut budgets = vec![0u128; hops.len() + 1];
+    if remaining_budget > 0 {
+        let slots = budgets.len() as u128;
+        let base = remaining_budget / slots;
+        let remainder = (remaining_budget % slots) as usize;
+        budgets.iter_mut().for_each(|b| *b = base);
+        for budget in budgets.iter_mut().take(remainder) {
+            *budget = budget.saturating_add(1);
         }
     }
 

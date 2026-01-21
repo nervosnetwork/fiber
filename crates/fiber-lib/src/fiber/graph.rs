@@ -1196,8 +1196,8 @@ where
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         info!(
-            "entered build_route: amount: {}, amount_low_bound: {:?}",
-            amount, amount_low_bound
+            "entered build_route: amount: {}, amount_low_bound: {:?}, max_fee_amount: {:?}",
+            amount, amount_low_bound, max_fee_amount
         );
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
@@ -1307,36 +1307,8 @@ where
         // Prefer the per-call override from `build_route` when present, else fall back to
         // the budget carried in `payment_data`.
         let max_fee_amount = max_fee_amount.or(payment_data.max_fee_amount);
-        let total_fee_budget = max_fee_amount.unwrap_or(0);
 
         let secp = Secp256k1::new();
-        let trampoline_forward_expiry_delta =
-            |base_final: u64,
-             remaining_trampoline_hops: &[crate::fiber::payment::TrampolineHop],
-             tlc_expiry_limit: u64|
-             -> Result<u64, PathFindError> {
-                let slack = remaining_trampoline_hops
-                    .iter()
-                    .map(|h| h.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA))
-                    .try_fold(0u64, |acc, d| {
-                        acc.checked_add(d).ok_or_else(|| {
-                            PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
-                        })
-                    })?;
-
-                let total = base_final.checked_add(slack).ok_or_else(|| {
-                    PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
-                })?;
-
-                if total > tlc_expiry_limit {
-                    return Err(PathFindError::Other(format!(
-                        "trampoline tlc_expiry_delta exceeds tlc_expiry_limit: {} > {}",
-                        total, tlc_expiry_limit
-                    )));
-                }
-
-                Ok(total)
-            };
 
         if let Some(hops) = payment_data.trampoline_hops().filter(|h| !h.is_empty()) {
             let first = hops[0].pubkey;
@@ -1372,7 +1344,7 @@ where
             // `forward_amounts[idx]` is the *minimum incoming amount* required by the next hop to
             // cover its own trampoline service fee.
             let mut forward_amounts = vec![0u128; hops.len()];
-            let mut min_incoming_for_service = vec![0u128; hops.len()];
+            let mut forwarding_amounts = vec![0u128; hops.len()];
             let mut next_amount_to_forward = final_amount;
             for (idx, hop) in hops.iter().enumerate().rev() {
                 forward_amounts[idx] = next_amount_to_forward;
@@ -1388,55 +1360,57 @@ where
                 )?;
 
                 next_amount_to_forward = next_amount_to_forward.saturating_add(fee);
-                min_incoming_for_service[idx] = next_amount_to_forward;
+                forwarding_amounts[idx] = next_amount_to_forward;
             }
 
             let amount_to_first_trampoline = next_amount_to_forward;
             let trampoline_service_fee_total =
                 amount_to_first_trampoline.saturating_sub(final_amount);
 
-            // Only enforce the service-fee budget constraint when the caller explicitly
-            // provided `max_fee_amount`. When unset, we treat it as "no explicit fee cap"
-            // (matching the historical behavior of these graph unit tests).
-            if max_fee_amount.is_some() && trampoline_service_fee_total > total_fee_budget {
-                return Err(PathFindError::Other(format!(
-                    "max_fee_amount too low for trampoline service fees: required={}, budget={}",
-                    trampoline_service_fee_total, total_fee_budget
-                )));
+            // if max_fee_amount is not specified, use default fee calculation
+            let single_forward_fee = calculate_tlc_forward_fee(
+                amount_to_first_trampoline,
+                crate::fiber::channel::DEFAULT_FEE_RATE as u128,
+            )
+            .map_err(|e| PathFindError::Other(format!("invalid default fee calculation: {e}")))?;
+            let default_min_fee_amount =
+                trampoline_service_fee_total + hops.len() as u128 * single_forward_fee;
+
+            // Give a recommend max fee amount that is 10x the single forward fee for routing
+            let default_max_fee_amount =
+                trampoline_service_fee_total + hops.len() as u128 * single_forward_fee * 10;
+
+            if let Some(total_fee) = max_fee_amount {
+                if default_min_fee_amount > total_fee {
+                    return Err(PathFindError::Other(format!(
+                        "max_fee_amount too low for trampoline service fees: recommend_minimal_fee={}, maximal_fee={} current_fee={}",
+                        default_min_fee_amount, default_max_fee_amount, total_fee
+                    )));
+                }
             }
 
+            let total_fee_budget = max_fee_amount.unwrap_or(default_min_fee_amount);
             let remaining_budget = total_fee_budget.saturating_sub(trampoline_service_fee_total);
 
-            // Split remaining budget proportionally to forwarded amounts:
+            // Split remaining budget evenly across:
             // - index 0: payer routing to first trampoline
             // - index i+1: routing budget available at trampoline i
-            let mut budget_weights: Vec<u128> = Vec::with_capacity(hops.len() + 1);
-            budget_weights.push(amount_to_first_trampoline);
-            debug_assert_eq!(forward_amounts.len(), hops.len());
-            for amount in &forward_amounts {
-                budget_weights.push(*amount);
-            }
-
-            let weight_sum: u128 = budget_weights.iter().copied().sum();
-            let mut budgets = vec![0u128; budget_weights.len()];
-            if remaining_budget > 0 && weight_sum > 0 {
-                let mut allocated = 0u128;
-                for (idx, w) in budget_weights.iter().copied().enumerate() {
-                    let b = remaining_budget.saturating_mul(w) / weight_sum;
-                    budgets[idx] = b;
-                    allocated = allocated.saturating_add(b);
-                }
-
-                // Distribute rounding remainder deterministically.
-                let remainder = remaining_budget.saturating_sub(allocated);
-                debug_assert!(remainder < budgets.len() as u128);
-                let r = remainder as usize;
-                for budget in budgets.iter_mut().take(r) {
+            let mut budgets = vec![0u128; hops.len() + 1];
+            if remaining_budget > 0 {
+                let slots = budgets.len() as u128;
+                let base = remaining_budget / slots;
+                let remainder = (remaining_budget % slots) as usize;
+                budgets.iter_mut().for_each(|b| *b = base);
+                for budget in budgets.iter_mut().take(remainder) {
                     *budget = budget.saturating_add(1);
                 }
             }
 
-            let payer_routing_budget = budgets[0];
+            let payer_routing_budget = if max_fee_amount.is_some() {
+                Some(budgets[0])
+            } else {
+                None
+            };
             let per_trampoline_routing_budgets = &budgets[1..];
 
             // The first trampoline must receive the total expected incoming amount, which consists of:
@@ -1449,13 +1423,17 @@ where
             let amount_to_trampoline = amount_to_first_trampoline
                 .saturating_add(per_trampoline_routing_budgets.first().copied().unwrap_or(0));
 
+            debug!(
+                "now got amount_to_trampoline: {:?} budgets: {:?}",
+                amount_to_trampoline, budgets
+            );
             let route_to_trampoline = self.find_path(
                 source,
                 first,
                 Some(amount_to_trampoline),
-                Some(payer_routing_budget),
+                payer_routing_budget,
                 payment_data.udt_type_script.clone(),
-                trampoline_forward_expiry_delta(
+                self.trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,
                     hops,
                     payment_data.tlc_expiry_limit,
@@ -1512,7 +1490,7 @@ where
                     next_node_id,
                     amount_to_forward,
                     build_max_fee_amount,
-                    tlc_expiry_delta: trampoline_forward_expiry_delta(
+                    tlc_expiry_delta: self.trampoline_forward_expiry_delta(
                         payment_data.final_tlc_expiry_delta,
                         remaining_trampoline_hops,
                         payment_data.tlc_expiry_limit,
@@ -1546,7 +1524,7 @@ where
                 hops: route_to_trampoline,
                 amount: amount_to_trampoline,
                 trampoline_onion: Some(trampoline_onion),
-                final_hop_expiry_delta_override: Some(trampoline_forward_expiry_delta(
+                final_hop_expiry_delta_override: Some(self.trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,
                     hops,
                     payment_data.tlc_expiry_limit,
@@ -1556,6 +1534,35 @@ where
 
         // Trampoline routing requires an explicit trampoline hop list.
         Err(PathFindError::NoPathFound)
+    }
+
+    fn trampoline_forward_expiry_delta(
+        &self,
+        base_final: u64,
+        remaining_trampoline_hops: &[crate::fiber::payment::TrampolineHop],
+        tlc_expiry_limit: u64,
+    ) -> Result<u64, PathFindError> {
+        let slack = remaining_trampoline_hops
+            .iter()
+            .map(|h| h.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA))
+            .try_fold(0u64, |acc, d| {
+                acc.checked_add(d).ok_or_else(|| {
+                    PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
+                })
+            })?;
+
+        let total = base_final.checked_add(slack).ok_or_else(|| {
+            PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
+        })?;
+
+        if total > tlc_expiry_limit {
+            return Err(PathFindError::Other(format!(
+                "trampoline tlc_expiry_delta exceeds tlc_expiry_limit: {} > {}",
+                total, tlc_expiry_limit
+            )));
+        }
+
+        Ok(total)
     }
 
     fn find_path_with_payment_data(
@@ -2125,8 +2132,8 @@ where
         route: Option<&[RouterHop]>,
     ) -> Result<Vec<RouterHop>, PathFindError> {
         debug!(
-            "begin inner_find_path from {:?} to {:?} amount: {:?}",
-            source, target, amount
+            "begin inner_find_path from {:?} to {:?} amount: {:?} max_fee: {:?}",
+            source, target, amount, max_fee_amount
         );
         let started_time = crate::time::Instant::now();
         let nodes_len = self.nodes.len();

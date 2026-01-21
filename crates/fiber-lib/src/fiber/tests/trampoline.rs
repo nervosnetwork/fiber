@@ -171,6 +171,83 @@ async fn test_trampoline_routing_keysend_success() {
 }
 
 #[tokio::test]
+async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
+    init_tracing();
+
+    // A --(public)--> B --(public)--> C --(private, expensive)--> D
+    // A -> D with trampoline [B]. If B forwards without accounting for C->D fee,
+    // the payment should succeed with sufficient max_fee_amount.
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 100000,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 100000,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (2, 3),
+                ChannelParameters {
+                    public: false,
+                    node_a_funding_amount: MIN_RESERVED_CKB + 100000,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+        ],
+        4,
+        None,
+    )
+    .await;
+
+    let [node_a, _node_b, node_c, node_d] = nodes.try_into().expect("4 nodes");
+
+    // will fail without max_fee_amount
+    let amount: u128 = 1000;
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_d.pubkey),
+            amount: Some(amount),
+            keysend: Some(true),
+            max_fee_amount: None, // no max fee amount specified
+            trampoline_hops: Some(vec![TrampolineHop::new(node_c.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_success(payment_hash).await;
+
+    // will success with sufficient max_fee_amount
+    let amount: u128 = 1000;
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_d.pubkey),
+            amount: Some(amount),
+            keysend: Some(true),
+            max_fee_amount: Some(2000),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_c.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_trampoline_routing_multi_trampoline_hops_keysend_success() {
     init_tracing();
 
@@ -1824,12 +1901,14 @@ async fn test_trampoline_routing_concurrent_payments() {
     let pay1_fut = node_a.send_payment(SendPaymentCommand {
         invoice: Some(invoice1.to_string()),
         trampoline_hops: Some(vec![TrampolineHop::new(node_t.get_public_key())]),
+        max_fee_amount: Some(amount1),
         ..Default::default()
     });
 
     let pay2_fut = node_c.send_payment(SendPaymentCommand {
         invoice: Some(invoice2.to_string()),
         trampoline_hops: Some(vec![TrampolineHop::new(node_t.get_public_key())]),
+        max_fee_amount: Some(amount2),
         ..Default::default()
     });
 
@@ -1889,6 +1968,7 @@ async fn test_trampoline_routing_no_path_found() {
     let res = node_a
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(1000),
             trampoline_hops: Some(vec![TrampolineHop::new(node_t.get_public_key())]),
             ..Default::default()
         })
@@ -1984,6 +2064,7 @@ async fn test_trampoline_routing_race_same_invoice() {
         let res = node_a
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice_a),
+                max_fee_amount: Some(amount),
                 trampoline_hops: Some(vec![TrampolineHop::new(t_pk)]),
                 ..Default::default()
             })
@@ -2001,6 +2082,7 @@ async fn test_trampoline_routing_race_same_invoice() {
         let res = node_b
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice_b),
+                max_fee_amount: Some(amount),
                 trampoline_hops: Some(vec![TrampolineHop::new(t_pk)]),
                 ..Default::default()
             })
@@ -2091,6 +2173,7 @@ async fn test_trampoline_routing_failure_invalid_payment_secret() {
     let res = node_a
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice_fake.to_string()),
+            max_fee_amount: Some(amount),
             trampoline_hops: Some(vec![TrampolineHop::new(node_t.get_public_key())]),
             ..Default::default()
         })
@@ -2453,6 +2536,7 @@ async fn test_trampoline_routing_invoice_not_allow_mpp_will_fail() {
     let res = node_a
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(18030000),
             trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
             ..Default::default()
         })
