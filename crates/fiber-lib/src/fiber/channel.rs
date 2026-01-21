@@ -752,6 +752,12 @@ where
         } else {
             None
         };
+        error!(
+            "Generating TlcErr from error {:?} to error_code {:?} for channel {}",
+            error,
+            error_code,
+            state.get_id()
+        );
         TlcErr::new_channel_fail(
             error_code,
             state.local_pubkey,
@@ -963,14 +969,20 @@ where
     ) {
         let status = self.get_invoice_status(&invoice);
         let remove_reason = match status {
-            CkbInvoiceStatus::Expired => RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                TlcErr::new(TlcErrorCode::InvoiceExpired),
-                &tlc.shared_secret,
-            )),
-            CkbInvoiceStatus::Cancelled => RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                TlcErr::new(TlcErrorCode::InvoiceCancelled),
-                &tlc.shared_secret,
-            )),
+            CkbInvoiceStatus::Expired => {
+                error!("payment hash {:?} invoice expired", tlc.payment_hash);
+                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::InvoiceExpired),
+                    &tlc.shared_secret,
+                ))
+            }
+            CkbInvoiceStatus::Cancelled => {
+                error!("payment hash {:?} invoice cancelled", tlc.payment_hash);
+                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::InvoiceCancelled),
+                    &tlc.shared_secret,
+                ))
+            }
             CkbInvoiceStatus::Paid => {
                 // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
                 // this maybe happened when process is killed and restart
@@ -1123,7 +1135,6 @@ where
                 .map_err(|err| err.without_shared_secret())?;
         }
 
-        warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
     }
 
@@ -1166,6 +1177,10 @@ where
 
                 // ensure tlc expiry is large than the now + final_tlc_minimum_expiry_delta
                 if invoice.is_tlc_expire_too_soon(add_tlc.expiry) {
+                    error!(
+                        "final tlc expiry is too soon for payment hash {:?}: add_tlc.expiry {}",
+                        payment_hash, add_tlc.expiry
+                    );
                     return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
                 }
             }

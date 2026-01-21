@@ -1481,7 +1481,7 @@ where
             .saturating_sub(route.first().map(|r| r.incoming_tlc_expiry).unwrap_or(0))
             / DEFAULT_TLC_EXPIRY_DELTA;
 
-        thread_rng().gen_range(0..max_rand_expiry_num.max(1)) * DEFAULT_TLC_EXPIRY_DELTA
+        thread_rng().gen_range(1..max_rand_expiry_num.max(2)) * DEFAULT_TLC_EXPIRY_DELTA
     }
 
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.
