@@ -11,7 +11,7 @@ use track_outgoing_payment::TrackOutgoingPaymentDispatcher;
 use anyhow::Result;
 use ractor::ActorRef;
 
-use crate::cch::{actor::CchState, CchMessage, CchOrder, CchOrderStatus};
+use crate::cch::{actor::CchState, CchMessage, CchOrder, CchOrderStatus, CchOrderStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CchOrderAction {
@@ -29,8 +29,8 @@ pub trait ActionExecutor: Send + Sync {
 pub struct ActionDispatcher;
 
 impl ActionDispatcher {
-    fn dispatch(
-        state: &mut CchState,
+    fn dispatch<S: CchOrderStore>(
+        state: &CchState<S>,
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
         action: CchOrderAction,
@@ -51,6 +51,21 @@ impl ActionDispatcher {
         }
     }
 
+    /// The actions to be taken when the state machine is started for the order.
+    pub fn on_starting(order: &CchOrder) -> Vec<CchOrderAction> {
+        let mut actions = Self::on_entering(order);
+        match order.status {
+            CchOrderStatus::IncomingAccepted
+            | CchOrderStatus::OutgoingInFlight
+            | CchOrderStatus::OutgoingSucceeded => {
+                // Ensure start incoming invoice tracking.
+                actions.push(CchOrderAction::TrackIncomingInvoice);
+            }
+            _ => {}
+        }
+        actions
+    }
+
     /// The actions to be taken when the order enters a new status.
     pub fn on_entering(order: &CchOrder) -> Vec<CchOrderAction> {
         match order.status {
@@ -69,8 +84,8 @@ impl ActionDispatcher {
     /// Execute an action.
     ///
     /// Executor cannot modify the order directly, but can send events to the actor.
-    pub async fn execute(
-        state: &mut CchState,
+    pub async fn execute<S: CchOrderStore>(
+        state: &CchState<S>,
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
         action: CchOrderAction,

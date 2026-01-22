@@ -8,7 +8,7 @@ use crate::{
         },
         actor::CchState,
         trackers::LndTrackerMessage,
-        CchMessage, CchOrder,
+        CchMessage, CchOrder, CchOrderStore,
     },
     fiber::types::Hash256,
 };
@@ -36,8 +36,8 @@ impl TrackIncomingInvoiceDispatcher {
         !order.is_final()
     }
 
-    pub fn dispatch(
-        state: &mut CchState,
+    pub fn dispatch<S: CchOrderStore>(
+        state: &CchState<S>,
         _cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
     ) -> Option<Box<dyn ActionExecutor>> {

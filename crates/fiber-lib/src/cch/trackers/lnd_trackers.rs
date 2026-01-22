@@ -95,6 +95,9 @@ pub enum LndTrackerMessage {
     /// Track a new invoice
     TrackInvoice(Hash256),
 
+    /// Stop tracking an invoice (remove from queue if not yet being tracked)
+    StopTracking(Hash256),
+
     /// Notification that an invoice tracker task has completed
     ///
     /// Sent by InvoiceTracker tasks when they terminate (either successfully
@@ -240,6 +243,12 @@ impl Actor for LndTrackerActor {
             LndTrackerMessage::TrackInvoice(payment_hash) => {
                 state.invoice_queue.push_back(payment_hash);
                 state.process_invoice_queue(myself).await?;
+                Ok(())
+            }
+            LndTrackerMessage::StopTracking(payment_hash) => {
+                // Remove from queue if present
+                state.invoice_queue.retain(|&hash| hash != payment_hash);
+                tracing::debug!("Stopped tracking invoice {:x}", payment_hash);
                 Ok(())
             }
             LndTrackerMessage::InvoiceTrackerCompleted {
