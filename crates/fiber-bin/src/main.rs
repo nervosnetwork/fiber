@@ -21,7 +21,7 @@ use fnn::tasks::{
 use fnn::watchtower::{
     WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS,
 };
-use fnn::{start_cch, start_network, Config, NetworkServiceEvent};
+use fnn::{start_network, CchActor, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
@@ -330,7 +330,9 @@ pub async fn main() -> Result<(), ExitMessage> {
                 })?
                 .read_or_generate_secret_key()
                 .map_err(|err| ExitMessage(format!("failed to read secret key: {}", err)))?;
-            match start_cch(
+            match Actor::spawn_linked(
+                Some("cch actor".to_string()),
+                CchActor,
                 CchArgs {
                     config: cch_config,
                     tracker: new_tokio_task_tracker(),
@@ -353,7 +355,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                         ));
                     }
                 }
-                Ok(actor) => {
+                Ok((actor, _handle)) => {
                     if let Some(port) = cch_fiber_store_event_port {
                         actor.subscribe_to_port(&port);
                     }
