@@ -3093,3 +3093,124 @@ async fn test_trampoline_routing_dry_run_get_default_fee() {
     assert_eq!(final_payment.status, PaymentStatus::Success);
     assert_eq!(final_payment.fee, dry_run_fee);
 }
+
+#[tokio::test]
+async fn test_trampoline_mpp_with_oneway() {
+    init_tracing();
+
+    let amount_1000_ckb = 1000 * 100_000_000;
+    let amount_5000_ckb = 5000 * 100_000_000;
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            // fiber1 -> fiber2: 1000 CKB, one-way, private
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: false,
+                    one_way: true,
+                    node_a_funding_amount: amount_1000_ckb,
+                    node_b_funding_amount: amount_1000_ckb,
+                    ..Default::default()
+                },
+            ),
+            // fiber1 -> fiber2: 1000 CKB, public
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: amount_1000_ckb,
+                    node_b_funding_amount: amount_1000_ckb,
+                    ..Default::default()
+                },
+            ),
+            // fiber2 -> fiber3: 1000 CKB, private
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: false,
+                    node_a_funding_amount: amount_1000_ckb,
+                    node_b_funding_amount: amount_1000_ckb,
+                    ..Default::default()
+                },
+            ),
+            // fiber2 -> fiber4: 1000 CKB, public
+            (
+                (1, 3),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: amount_1000_ckb,
+                    node_b_funding_amount: amount_1000_ckb,
+                    ..Default::default()
+                },
+            ),
+            // fiber2 -> fiber3: 1000 CKB, public
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: amount_1000_ckb,
+                    node_b_funding_amount: amount_1000_ckb,
+                    ..Default::default()
+                },
+            ),
+            // fiber3 -> fiber4: 1000 CKB, public
+            (
+                (2, 3),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: amount_1000_ckb,
+                    node_b_funding_amount: amount_1000_ckb,
+                    ..Default::default()
+                },
+            ),
+            // fiber1 -> fiber4: 5000 CKB, public
+            (
+                (0, 3),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: amount_5000_ckb,
+                    node_b_funding_amount: amount_5000_ckb,
+                    ..Default::default()
+                },
+            ),
+        ],
+        4,
+        None,
+    )
+    .await;
+
+    let [node1, node2, _node3, node4] = nodes.try_into().expect("4 nodes");
+
+    // Wait until node1 learns node2 supports trampoline routing.
+    wait_until_node_supports_trampoline_routing(&node1, &node2).await;
+
+    let invoice_amount = 1001 * 10_000_000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(invoice_amount))
+        .payment_preimage(preimage)
+        .payment_secret(gen_rand_sha256_hash())
+        .payee_pub_key(node4.get_public_key().into())
+        .allow_mpp(true)
+        .allow_trampoline_routing(true)
+        .build()
+        .expect("build invoice");
+    node4.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node1
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![TrampolineHop::new(node2.get_public_key())]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(
+        res.is_ok(),
+        "Payment should be initiated successfully: {:?}",
+        res.err()
+    );
+    let payment_hash = res.unwrap().payment_hash;
+    node1.wait_until_success(payment_hash).await;
+}
