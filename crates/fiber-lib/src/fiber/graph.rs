@@ -1328,23 +1328,20 @@ where
                 ));
             }
 
-            // Eclair-style budgeting model:
-            // 1) compute per-trampoline *service fee* from (amount_to_forward, fee_rate) backwards,
-            // 2) reserve those fees from `max_fee_amount`,
+            // Trampoline budgeting model:
+            // 1) compute per-trampoline service fees backwards (final -> first trampoline),
+            // 2) reserve those service fees from the fee budget,
             // 3) allocate the remaining budget to routing:
-            //    - payer routing budget to reach the first trampoline,
-            //    - per-trampoline routing budgets (each trampoline will use it to build its outer route).
+            //    - payer routing budget (to reach first trampoline),
+            //    - per-trampoline routing budgets (used by each trampoline to build its outer route).
             //
-            // Invariants we want:
-            // - each trampoline i receives `incoming = min_incoming_for_service + routing_budget_i`,
-            // - the previous hop sets `forward_amount = min_incoming_for_service`, so the receiving
-            //   trampoline sees `forward_fee = routing_budget_i`.
+            // Key idea:
+            // - service fee ladder defines the minimum incoming amount for each trampoline,
+            // - routing budgets are additional slack and can be split independently.
 
             // Amount ladder for trampoline service fees (compounds from the tail backwards).
-            // `forward_amounts[idx]` is the *minimum incoming amount* required by the next hop to
-            // cover its own trampoline service fee.
+            // `forward_amounts[idx]` is the amount that trampoline `idx` should forward to the next hop.
             let mut forward_amounts = vec![0u128; hops.len()];
-            let mut forwarding_amounts = vec![0u128; hops.len()];
             let mut next_amount_to_forward = final_amount;
             for (idx, hop) in hops.iter().enumerate().rev() {
                 forward_amounts[idx] = next_amount_to_forward;
@@ -1360,14 +1357,13 @@ where
                 )?;
 
                 next_amount_to_forward = next_amount_to_forward.saturating_add(fee);
-                forwarding_amounts[idx] = next_amount_to_forward;
             }
 
             let amount_to_first_trampoline = next_amount_to_forward;
             let trampoline_service_fee_total =
                 amount_to_first_trampoline.saturating_sub(final_amount);
 
-            // if max_fee_amount is not specified, use default fee calculation
+            // If max_fee_amount is not specified, use default fee calculation.
             let single_forward_fee = calculate_tlc_forward_fee(
                 amount_to_first_trampoline,
                 crate::fiber::channel::DEFAULT_FEE_RATE as u128,
@@ -1376,21 +1372,27 @@ where
             let default_min_fee_amount =
                 trampoline_service_fee_total + hops.len() as u128 * single_forward_fee;
 
+            error!(
+                "default_min_fee_amount: {} trampoline_service_fee_total: {} single_forward_fee: {}",
+                default_min_fee_amount, trampoline_service_fee_total, single_forward_fee
+            );
+
             // Give a recommend max fee amount that is 10x the single forward fee for routing
             let default_max_fee_amount =
                 trampoline_service_fee_total + hops.len() as u128 * single_forward_fee * 10;
 
-            if let Some(total_fee) = max_fee_amount {
-                if default_min_fee_amount > total_fee {
+            if let Some(max_fee_amount) = max_fee_amount {
+                if default_min_fee_amount > max_fee_amount {
                     return Err(PathFindError::Other(format!(
-                        "max_fee_amount too low for trampoline service fees: recommend_minimal_fee={}, maximal_fee={} current_fee={}",
-                        default_min_fee_amount, default_max_fee_amount, total_fee
+                        "max_fee_amount is too low for trampoline service fees: recommend_minimal_fee={}, maximal_fee={} current_fee={}",
+                        default_min_fee_amount, default_max_fee_amount, max_fee_amount
                     )));
                 }
             }
 
             let total_fee_budget = max_fee_amount.unwrap_or(default_min_fee_amount);
             let remaining_budget = total_fee_budget.saturating_sub(trampoline_service_fee_total);
+            let use_minimal_fee_budget = total_fee_budget <= default_min_fee_amount;
 
             // Split remaining budget evenly across:
             // - index 0: payer routing to first trampoline
@@ -1406,31 +1408,32 @@ where
                 }
             }
 
-            let payer_routing_budget = if max_fee_amount.is_some() {
-                Some(budgets[0])
-            } else {
+            let payer_routing_budget = if use_minimal_fee_budget {
                 None
+            } else {
+                max_fee_amount.map(|_| budgets[0])
             };
-            let per_trampoline_routing_budgets = &budgets[1..];
-
-            // The first trampoline must receive the total expected incoming amount, which consists of:
-            // 1. `amount_to_first_trampoline`:
-            //     This covers the amount it needs to forward to the next node (which recursively includes
-            //     final amount + subsequent service fees) plus its own trampoline service fee.
-            // 2. `per_trampoline_routing_budgets.first()`:
-            //     This is the routing fee budget specifically allocated for this node (T1) to pay for the route
-            //     to the next node (T2).
-            let amount_to_trampoline = amount_to_first_trampoline
-                .saturating_add(per_trampoline_routing_budgets.first().copied().unwrap_or(0));
+            // The first trampoline must receive:
+            // - the service-fee ladder amount (`amount_to_first_trampoline`), plus
+            // - its routing budget to reach the next hop (normally `budgets[1]`).
+            // In minimal-budget mode we fold the remaining budget into the incoming amount
+            // to ensure the dry_run fee is at least the default minimum.
+            let first_trampoline_budget = if use_minimal_fee_budget {
+                remaining_budget
+            } else {
+                budgets[1]
+            };
+            let first_trampoline_hop_amount =
+                amount_to_first_trampoline.saturating_add(first_trampoline_budget);
 
             debug!(
                 "now got amount_to_trampoline: {:?} budgets: {:?}",
-                amount_to_trampoline, budgets
+                first_trampoline_hop_amount, budgets
             );
             let route_to_trampoline = self.find_path(
                 source,
                 first,
-                Some(amount_to_trampoline),
+                Some(first_trampoline_hop_amount),
                 payer_routing_budget,
                 payment_data.udt_type_script.clone(),
                 self.trampoline_forward_expiry_delta(
@@ -1445,19 +1448,11 @@ where
                 payment_data.allow_mpp(),
             )?;
 
-            // Pre-compute per-hop parameters used by each trampoline hop when it builds the *outer*
-            // route to the next hop.
-            //
-            // - `build_max_fee_amount[idx]` is the routing budget available *at trampoline idx*.
+            // Pre-compute per-hop parameters used by each trampoline hop when it builds the outer
+            // route to the next hop. `build_max_fee_amount[idx]` is the routing budget available at
+            // trampoline `idx` (budgets[0] is reserved for payer routing).
             let build_max_fee_amounts: Vec<Option<u128>> = (0..hops.len())
-                .map(|idx| {
-                    Some(
-                        per_trampoline_routing_budgets
-                            .get(idx)
-                            .copied()
-                            .unwrap_or(0),
-                    )
-                })
+                .map(|idx| Some(budgets.get(idx + 1).copied().unwrap_or(0)))
                 .collect();
 
             // allow next trampoline to know whether MPP is allowed and max parts
@@ -1522,7 +1517,7 @@ where
 
             return Ok(ResolvedRoute {
                 hops: route_to_trampoline,
-                amount: amount_to_trampoline,
+                amount: first_trampoline_hop_amount,
                 trampoline_onion: Some(trampoline_onion),
                 final_hop_expiry_delta_override: Some(self.trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,

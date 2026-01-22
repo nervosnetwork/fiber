@@ -22,6 +22,7 @@ use ckb_types::{
     prelude::Entity,
 };
 use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
+use tracing::debug;
 
 use crate::{
     gen_rand_secp256k1_keypair_tuple, generate_store, init_tracing, now_timestamp_as_millis_u64,
@@ -973,7 +974,7 @@ fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
         .expect_err("should fail due to insufficient max_fee_amount for service fees");
     let msg = err.to_string();
     assert!(
-        msg.contains("max_fee_amount too low for trampoline service fees"),
+        msg.contains("max_fee_amount is too low for trampoline service fees"),
         "unexpected error: {msg}"
     );
 }
@@ -1011,7 +1012,8 @@ fn test_graph_trampoline_routing_fee_rate_explicit_zero_allows_zero_fee_budget()
         .graph
         .build_route(payment_data.amount, None, None, &payment_data);
     let err = route.unwrap_err().to_string();
-    assert!(err.contains("max_fee_amount too low for trampoline service fees"));
+    debug!("route err: {}", err);
+    assert!(err.contains("max_fee_amount is too low for trampoline service fees"));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

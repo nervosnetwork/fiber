@@ -2933,29 +2933,6 @@ async fn test_trampoline_routing_dry_run() {
     // The fee includes both trampoline service fee and routing fee
     assert_eq!(dry_run_response.fee, 251);
 
-    // Debug: Print router details to understand the amount in each node
-    debug!("Number of routers: {}", dry_run_response.routers.len());
-    for (route_idx, route) in dry_run_response.routers.iter().enumerate() {
-        debug!("Route {}: {} nodes", route_idx, route.nodes.len());
-        for (node_idx, node) in route.nodes.iter().enumerate() {
-            debug!(
-                "  Node {}: pubkey={:?}, amount={}, channel={:?}",
-                node_idx, node.pubkey, node.amount, node.channel_outpoint
-            );
-        }
-        debug!("  Route fee: {}", route.fee());
-    }
-
-    debug!(
-        "Dry run succeeded - fee: {}, routes: {:?}",
-        dry_run_response.fee,
-        dry_run_response
-            .routers
-            .iter()
-            .map(|r| (r.nodes.len(), r.fee()))
-            .collect::<Vec<_>>()
-    );
-
     // Verify that no payment session was created for dry run
     // (We don't need to check the payment_hash since dry_run doesn't persist)
 
@@ -3027,4 +3004,92 @@ async fn test_trampoline_routing_dry_run() {
         "Node B earned fee: {} (received: {}, paid: {})",
         node_b_net_gain, node_b_received_from_a, node_b_paid_to_c
     );
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_dry_run_get_default_fee() {
+    init_tracing();
+
+    // A --(public)--> B --(private)--> C
+    // Test that dry_run mode works correctly with trampoline routing.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        3,
+    )
+    .await;
+
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+
+    // Wait until A learns B supports trampoline routing.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    // Create an invoice on C.
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .expect("build invoice");
+
+    // First, do a dry run to check if the payment can be made
+    let dry_run_res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(dry_run_res.is_ok(), "Dry run should succeed");
+    let dry_run_response = dry_run_res.unwrap();
+
+    // Verify dry run response contains route information
+    assert_eq!(dry_run_response.status, PaymentStatus::Created);
+
+    debug!("Dry run response: {:?}", dry_run_response);
+
+    assert!(
+        !dry_run_response.routers.is_empty(),
+        "Dry run should return route information"
+    );
+
+    // For trampoline routing, fee should be calculated correctly
+    // The fee includes both trampoline service fee and routing fee
+    let dry_run_fee = dry_run_response.fee;
+    debug!("Dry run fee: {}", dry_run_fee);
+    assert!(dry_run_fee > 0, "Fee should be greater than 0");
+
+    // Verify that no payment session was created for dry run
+    // (We don't need to check the payment_hash since dry_run doesn't persist)
+
+    // Now do the actual payment using the dry_run fee as max_fee_amount
+    // The dry_run fee should be sufficient for the actual payment
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let actual_res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(dry_run_fee),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
+            dry_run: false,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(actual_res.is_ok(), "Actual payment should succeed");
+    let actual_payment_hash = actual_res.unwrap().payment_hash;
+
+    node_a.wait_until_success(actual_payment_hash).await;
+
+    // Verify the actual payment was processed successfully
+    let final_payment = node_a.get_payment_result(actual_payment_hash).await;
+    debug!("Final payment result: {:?}", final_payment);
+    assert_eq!(final_payment.status, PaymentStatus::Success);
+    assert_eq!(final_payment.fee, dry_run_fee);
 }

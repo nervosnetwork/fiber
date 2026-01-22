@@ -128,7 +128,8 @@ pub struct SendPaymentCommandParams {
     #[serde_as(as = "Option<U64Hex>")]
     pub timeout: Option<u64>,
 
-    /// the maximum fee amounts in shannons that the sender is willing to pay
+    /// the maximum fee amounts in shannons that the sender is willing to pay.
+    /// Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
     #[serde_as(as = "Option<U128Hex>")]
     pub max_fee_amount: Option<u128>,
 
