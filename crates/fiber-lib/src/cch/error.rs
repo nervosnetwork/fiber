@@ -7,22 +7,36 @@ use thiserror::Error;
 pub enum CchError {
     #[error("Database error: {0}")]
     DbError(#[from] super::order::CchDbError),
+    #[error("Outgoing invoice expiry time is too short")]
+    OutgoingInvoiceExpiryTooShort,
     #[error("BTC invoice parse error: {0}")]
     BTCInvoiceParseError(#[from] lightning_invoice::ParseOrSemanticError),
     #[error("BTC invoice expired")]
     BTCInvoiceExpired,
     #[error("BTC invoice missing amount")]
     BTCInvoiceMissingAmount,
+    #[error("BTC invoice final TLC expiry delta exceeds safe limit for cross-chain swap")]
+    BTCInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("CKB invoice error: {0}")]
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
+    #[error("CKB invoice expired")]
+    CKBInvoiceExpired,
     #[error("CKB invoice missing amount")]
     CKBInvoiceMissingAmount,
+    #[error("CKB invoice final TLC expiry delta exceeds safe limit for cross-chain swap")]
+    CKBInvoiceFinalTlcExpiryDeltaTooLarge,
+    #[error("CKB invoice hash algorithm is not SHA256, which is required for LND compatibility")]
+    CKBInvoiceIncompatibleHashAlgorithm,
     #[error("ReceiveBTC order payment amount is too small")]
     ReceiveBTCOrderAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too large")]
     ReceiveBTCOrderAmountTooLarge,
+    #[error("Wrapped BTC type script mismatch")]
+    WrappedBTCTypescriptMismatch,
     #[error("Expect preimage in settled payment but missing")]
     SettledPaymentMissingPreimage,
+    #[error("Preimage hash mismatch")]
+    PreimageHashMismatch,
     #[error("Invalid transition from {0:?} to {1:?}")]
     InvalidTransition(CchOrderStatus, CchOrderStatus),
     #[error("System time error: {0}")]

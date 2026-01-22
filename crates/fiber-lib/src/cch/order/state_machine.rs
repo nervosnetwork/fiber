@@ -18,57 +18,24 @@ pub enum CchOrderEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CchOrderAction {
-    TrackIncomingInvoice,
-    SendOutgoingPayment,
-    TrackOutgoingPayment,
-    SettleIncomingInvoice,
-}
-
-/// The state machine transition result contains the new order and the actions to be taken.
-#[derive(Debug, Clone)]
-pub struct CchOrderTransition {
-    pub order: CchOrder,
-    /// Whether the order has been modified.
-    pub dirty: bool,
-    pub actions: Vec<CchOrderAction>,
-}
-
 pub struct CchOrderStateMachine;
 
 impl CchOrderStateMachine {
-    /// The actions to be taken when the order enters a new status.
-    pub fn on_entering(order: &CchOrder) -> Vec<CchOrderAction> {
-        match order.status {
-            CchOrderStatus::Pending => vec![CchOrderAction::TrackIncomingInvoice],
-            CchOrderStatus::IncomingAccepted => vec![
-                CchOrderAction::SendOutgoingPayment,
-                CchOrderAction::TrackOutgoingPayment,
-            ],
-            CchOrderStatus::OutgoingInFlight => vec![CchOrderAction::TrackOutgoingPayment],
-            CchOrderStatus::OutgoingSucceeded => vec![CchOrderAction::SettleIncomingInvoice],
-            CchOrderStatus::Succeeded => vec![],
-            CchOrderStatus::Failed => vec![],
-        }
-    }
-
     /// Apply an event to the order and return the transition.
+    ///
+    /// Returns `Ok(Some(new_status))` if the order is transit to a new status.
+    /// or `Ok(None)` if the order stays in the same status without changes.
     pub fn apply(
-        mut order: CchOrder,
+        order: &mut CchOrder,
         event: CchOrderEvent,
-    ) -> Result<CchOrderTransition, CchError> {
-        let prev_status = order.status;
-
+    ) -> Result<Option<CchOrderStatus>, CchError> {
         match event {
             CchOrderEvent::IncomingInvoiceChanged {
                 status,
                 failure_reason,
-            } => {
-                Self::try_transite_to(&mut order, status.into(), move || {
-                    failure_reason.unwrap_or_else(|| format!("incoming invoice failed: {}", status))
-                })?;
-            }
+            } => Self::try_transite_to(order, status.into(), move || {
+                failure_reason.unwrap_or_else(|| format!("incoming invoice failed: {}", status))
+            }),
             CchOrderEvent::OutgoingPaymentChanged {
                 status,
                 payment_preimage,
@@ -77,28 +44,25 @@ impl CchOrderStateMachine {
                 if status == PaymentStatus::Success && payment_preimage.is_none() {
                     return Err(CchError::SettledPaymentMissingPreimage);
                 }
-                Self::try_transite_to(&mut order, status.into(), move || {
+                // Verify preimage hashes to payment_hash if provided
+                if let Some(ref preimage) = payment_preimage {
+                    use crate::fiber::hash_algorithm::HashAlgorithm;
+                    let hash_algorithm = HashAlgorithm::Sha256;
+                    let computed_hash = hash_algorithm.hash(*preimage);
+                    if computed_hash.as_slice() != order.payment_hash.as_ref() {
+                        return Err(CchError::PreimageHashMismatch);
+                    }
+                }
+                let new_status = Self::try_transite_to(order, status.into(), move || {
                     failure_reason
                         .unwrap_or_else(|| format!("outgoing payment failed: {:?}", status))
                 })?;
-                if order.payment_preimage.is_none() {
+                if new_status.is_some() && order.payment_preimage.is_none() {
                     order.payment_preimage = payment_preimage;
                 }
+                Ok(new_status)
             }
         }
-
-        // Currently we won't modify the order unless after a transition to a new status.
-        let dirty = order.status != prev_status;
-        let actions = if dirty {
-            Self::on_entering(&order)
-        } else {
-            vec![]
-        };
-        Ok(CchOrderTransition {
-            order,
-            dirty,
-            actions,
-        })
     }
 
     fn allow_transition(from: CchOrderStatus, to: CchOrderStatus) -> bool {
@@ -123,18 +87,22 @@ impl CchOrderStateMachine {
         order: &mut CchOrder,
         to: CchOrderStatus,
         failure_reason_fn: F,
-    ) -> Result<(), CchError>
+    ) -> Result<Option<CchOrderStatus>, CchError>
     where
         F: FnOnce() -> String,
     {
         if !Self::allow_transition(order.status, to) {
             return Err(CchError::InvalidTransition(order.status, to));
         }
-        order.status = to;
-        if to == CchOrderStatus::Failed {
-            order.failure_reason = Some(failure_reason_fn());
+        if order.status != to {
+            order.status = to;
+            if to == CchOrderStatus::Failed {
+                order.failure_reason = Some(failure_reason_fn());
+            }
+            Ok(Some(to))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 }
 

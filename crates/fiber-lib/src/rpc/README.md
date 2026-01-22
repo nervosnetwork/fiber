@@ -111,18 +111,20 @@ RPC module for cross chain hub demonstration.
 <a id="cch-send_btc"></a>
 #### Method `send_btc`
 
-Send BTC to a address.
+Creates a CCH order for a BTC Lightning payee.
 
 ##### Params
 
-* `btc_pay_req` - <em>`String`</em>, Bitcoin payment request string
+* `btc_pay_req` - <em>`String`</em>, Payment request string for the BTC Lightning payee.
+
+ The invoice should not be expired soon. The remaining expiry time should be greater than the CCH config
+ `min_incoming_invoice_expiry_delta_seconds`.
 * `currency` - <em>[Currency](#type-currency)</em>, Request currency
 
 ##### Returns
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
@@ -138,17 +140,19 @@ Send BTC to a address.
 <a id="cch-receive_btc"></a>
 #### Method `receive_btc`
 
-Receive BTC from a payment hash.
+Creates a CCH order for a CKB Fiber payee.
 
 ##### Params
 
-* `fiber_pay_req` - <em>`String`</em>, Fiber payment request string
+* `fiber_pay_req` - <em>`String`</em>, Payment request string for the CKB Fiber payee.
+
+ The invoice should not be expired soon. The remaining expiry time should be greater than the CCH config
+ `min_incoming_invoice_expiry_delta_seconds`.
 
 ##### Returns
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
@@ -164,7 +168,7 @@ Receive BTC from a payment hash.
 <a id="cch-get_cch_order"></a>
 #### Method `get_cch_order`
 
-Get receive BTC order by payment hash.
+Get a CCH order by payment hash.
 
 ##### Params
 
@@ -173,8 +177,7 @@ Get receive BTC order by payment hash.
 ##### Returns
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.

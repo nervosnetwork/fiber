@@ -11,7 +11,15 @@ use track_outgoing_payment::TrackOutgoingPaymentDispatcher;
 use anyhow::Result;
 use ractor::ActorRef;
 
-use crate::cch::{actor::CchState, order::CchOrderAction, CchMessage, CchOrder};
+use crate::cch::{actor::CchState, CchMessage, CchOrder, CchOrderStatus};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CchOrderAction {
+    TrackIncomingInvoice,
+    SendOutgoingPayment,
+    TrackOutgoingPayment,
+    SettleIncomingInvoice,
+}
 
 #[async_trait::async_trait]
 pub trait ActionExecutor: Send + Sync {
@@ -40,6 +48,21 @@ impl ActionDispatcher {
             CchOrderAction::SettleIncomingInvoice => {
                 SettleIncomingInvoiceDispatcher::dispatch(state, cch_actor_ref, order)
             }
+        }
+    }
+
+    /// The actions to be taken when the order enters a new status.
+    pub fn on_entering(order: &CchOrder) -> Vec<CchOrderAction> {
+        match order.status {
+            CchOrderStatus::Pending => vec![CchOrderAction::TrackIncomingInvoice],
+            CchOrderStatus::IncomingAccepted => vec![
+                CchOrderAction::SendOutgoingPayment,
+                CchOrderAction::TrackOutgoingPayment,
+            ],
+            CchOrderStatus::OutgoingInFlight => vec![CchOrderAction::TrackOutgoingPayment],
+            CchOrderStatus::OutgoingSucceeded => vec![CchOrderAction::SettleIncomingInvoice],
+            CchOrderStatus::Succeeded => vec![],
+            CchOrderStatus::Failed => vec![],
         }
     }
 

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tentacle::secio::SecioKeyPair;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::cch::actions::ActionDispatcher;
-use crate::cch::order::{CchOrderAction, CchOrderStateMachine, CchOrderTransition};
+use crate::cch::actions::{ActionDispatcher, CchOrderAction};
+use crate::cch::order::CchOrderStateMachine;
 use crate::cch::trackers::{
     CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
 };
@@ -28,7 +28,6 @@ use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
 pub const ACTION_RETRY_MAX_MILLIS: u64 = 600_000; // 10 minute max delay
 
@@ -171,7 +170,7 @@ impl Actor for CchActor {
             CchMessage::SendBTC(send_btc, port) => {
                 let result = state.send_btc(send_btc).await;
                 if let Ok(order) = &result {
-                    let actions = CchOrderStateMachine::on_entering(order);
+                    let actions = ActionDispatcher::on_entering(order);
                     append_actions(myself, order.payment_hash, actions)?;
                 }
                 if !port.is_closed() {
@@ -183,7 +182,7 @@ impl Actor for CchActor {
             CchMessage::ReceiveBTC(receive_btc, port) => {
                 let result = state.receive_btc(receive_btc).await;
                 if let Ok(order) = &result {
-                    let actions = CchOrderStateMachine::on_entering(order);
+                    let actions = ActionDispatcher::on_entering(order);
                     append_actions(myself, order.payment_hash, actions)?;
                 }
                 if !port.is_closed() {
@@ -291,11 +290,25 @@ impl CchState {
         tracing::debug!("BTC invoice: {:?}", invoice);
         let payment_hash = (*invoice.payment_hash()).into();
 
-        let expiry = invoice
+        // Validate that outgoing BTC invoice's final CLTV is less than half of incoming CKB invoice's final TLC expiry.
+        // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
+        // BTC uses blocks (~10 min each), CKB uses seconds.
+        let btc_final_cltv_seconds = invoice.min_final_cltv_expiry_delta() * 600;
+        let ckb_final_tlc_seconds = self.config.ckb_final_tlc_expiry_delta_seconds;
+        if btc_final_cltv_seconds >= ckb_final_tlc_seconds / 2 {
+            return Err(CchError::BTCInvoiceFinalTlcExpiryDeltaTooLarge);
+        }
+
+        let outgoing_invoice_expiry_delta_seconds = invoice
             .expires_at()
             .and_then(|expired_at| expired_at.checked_sub(duration_since_epoch))
             .map(|duration| duration.as_secs())
             .ok_or(CchError::BTCInvoiceExpired)?;
+        if outgoing_invoice_expiry_delta_seconds
+            < self.config.min_outgoing_invoice_expiry_delta_seconds
+        {
+            return Err(CchError::OutgoingInvoiceExpiryTooShort);
+        }
 
         let amount_msat = invoice
             .amount_milli_satoshis()
@@ -324,8 +337,8 @@ impl CchState {
             .amount(Some(invoice_amount_sats))
             .payment_hash(payment_hash)
             .hash_algorithm(HashAlgorithm::Sha256)
-            .expiry_time(Duration::from_secs(expiry))
-            .final_expiry_delta(self.config.ckb_final_tlc_expiry_delta)
+            .expiry_time(Duration::from_secs(outgoing_invoice_expiry_delta_seconds))
+            .final_expiry_delta(self.config.ckb_final_tlc_expiry_delta_seconds * 1000)
             .udt_type_script(wrapped_btc_type_script.clone().into())
             .payee_pub_key(self.node_keypair.0)
             .build_with_sign(|hash| {
@@ -346,9 +359,8 @@ impl CchState {
 
         let order = CchOrder {
             amount_sats: invoice_amount_sats,
-            ckb_final_tlc_expiry_delta: self.config.ckb_final_tlc_expiry_delta,
             created_at: duration_since_epoch.as_secs(),
-            expires_after: expiry,
+            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
             failure_reason: None,
             incoming_invoice: CchInvoice::Fiber(invoice),
             outgoing_pay_req: send_btc.btc_pay_req,
@@ -367,9 +379,40 @@ impl CchState {
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
         let payment_hash = *invoice.payment_hash();
         let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
-        let final_tlc_minimum_expiry_delta =
-            *invoice.final_tlc_minimum_expiry_delta().unwrap_or(&0);
+
+        // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
+        // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
+        // CKB uses milliseconds, BTC uses blocks (~10 min each).
+        let ckb_final_tlc_millis = invoice
+            .final_tlc_minimum_expiry_delta()
+            .copied()
+            .unwrap_or(0);
+        let btc_final_cltv_millis = self.config.btc_final_tlc_expiry_delta_blocks * 600 * 1000;
+        if ckb_final_tlc_millis >= btc_final_cltv_millis / 2 {
+            return Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge);
+        }
+
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        // Convert timestamp + expiry_time to the expiry time relative to `duration_since`.
+        let outgoing_invoice_expiry_delta_seconds = match invoice.expiry_time() {
+            Some(expiry) => invoice
+                .data
+                .timestamp
+                .checked_add(expiry.as_millis())
+                .and_then(|expiry_at| {
+                    u64::try_from(expiry_at / 1000)
+                        .unwrap_or(u64::MAX)
+                        .checked_sub(duration_since_epoch.as_secs())
+                })
+                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
+            // CKB invoice has no default expiry, use minimal * 2 to create the invoice
+            None => self.config.min_outgoing_invoice_expiry_delta_seconds * 2,
+        };
+        if outgoing_invoice_expiry_delta_seconds
+            < self.config.min_outgoing_invoice_expiry_delta_seconds
+        {
+            return Err(CchError::OutgoingInvoiceExpiryTooShort);
+        }
 
         let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
             / 1_000_000u128
@@ -381,21 +424,7 @@ impl CchState {
             return Err(CchError::ReceiveBTCOrderAmountTooLarge);
         }
 
-        let mut client = self.lnd_connection.create_invoices_client().await?;
-        let req = invoicesrpc::AddHoldInvoiceRequest {
-            hash: payment_hash.as_ref().to_vec(),
-            value_msat: (amount_sats * 1_000u128) as i64,
-            expiry: DEFAULT_ORDER_EXPIRY_SECONDS as i64,
-            cltv_expiry: self.config.btc_final_tlc_expiry + final_tlc_minimum_expiry_delta,
-            ..Default::default()
-        };
-        let add_invoice_resp = client
-            .add_hold_invoice(req)
-            .await
-            .map_err(|err| CchError::LndRpcError(err.to_string()))?
-            .into_inner();
-        let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
-
+        // Verify wrapped_btc_type_script matches invoice UDT type script
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
             Contract::SimpleUDT,
             hex::decode(
@@ -409,10 +438,44 @@ impl CchState {
             .as_ref(),
         )
         .into();
+
+        // Verify invoice UDT type script matches configured wrapped_btc_type_script
+        if let Some(invoice_udt_script) = invoice.udt_type_script() {
+            let invoice_script: ckb_jsonrpc_types::Script = invoice_udt_script.clone().into();
+            if invoice_script.code_hash != wrapped_btc_type_script.code_hash
+                || invoice_script.hash_type != wrapped_btc_type_script.hash_type
+                || invoice_script.args != wrapped_btc_type_script.args
+            {
+                return Err(CchError::WrappedBTCTypescriptMismatch);
+            }
+        } else {
+            return Err(CchError::WrappedBTCTypescriptMismatch);
+        }
+
+        // Validate hash algorithm - must be SHA256 for LND compatibility
+        let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+        if hash_algorithm != HashAlgorithm::Sha256 {
+            return Err(CchError::CKBInvoiceIncompatibleHashAlgorithm);
+        }
+
+        let mut client = self.lnd_connection.create_invoices_client().await?;
+        let req = invoicesrpc::AddHoldInvoiceRequest {
+            hash: payment_hash.as_ref().to_vec(),
+            value_msat: (amount_sats * 1_000u128) as i64,
+            expiry: outgoing_invoice_expiry_delta_seconds as i64,
+            cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
+            ..Default::default()
+        };
+        let add_invoice_resp = client
+            .add_hold_invoice(req)
+            .await
+            .map_err(|err| CchError::LndRpcError(err.to_string()))?
+            .into_inner();
+        let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
+
         let order = CchOrder {
-            ckb_final_tlc_expiry_delta: final_tlc_minimum_expiry_delta,
             created_at: duration_since_epoch.as_secs(),
-            expires_after: DEFAULT_ORDER_EXPIRY_SECONDS,
+            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
             failure_reason: None,
             incoming_invoice: CchInvoice::Lightning(incoming_invoice),
             outgoing_pay_req: receive_btc.fiber_pay_req,
@@ -432,20 +495,17 @@ impl CchState {
         &mut self,
         event: CchTrackingEvent,
     ) -> Result<Vec<CchOrderAction>> {
-        let order = match self.get_active_order_or_none(event.payment_hash())? {
+        let mut order = match self.get_active_order_or_none(event.payment_hash())? {
             None => return Ok(vec![]),
             Some(order) => order,
         };
 
-        let CchOrderTransition {
-            order,
-            dirty,
-            actions,
-        } = CchOrderStateMachine::apply(order, event.into())?;
-        if dirty {
+        if CchOrderStateMachine::apply(&mut order, event.into())?.is_some() {
             self.orders_db.update_cch_order(order.clone())?;
+            Ok(ActionDispatcher::on_entering(&order))
+        } else {
+            Ok(vec![])
         }
-        Ok(actions)
     }
 }
 
