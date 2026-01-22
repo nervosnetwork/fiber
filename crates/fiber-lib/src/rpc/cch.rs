@@ -1,14 +1,11 @@
-#[cfg(not(target_arch = "wasm32"))]
-use crate::cch::{CchMessage, CchOrder, CchOrderStatus};
 use crate::{
-    cch::CchInvoice,
+    cch::{CchInvoice, CchMessage, CchOrder, CchOrderStatus},
     fiber::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
     },
     invoice::Currency,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
@@ -71,8 +68,6 @@ pub struct GetCchOrderParams {
 }
 
 /// RPC module for cross chain hub demonstration.
-// #[rpc(server)]
-#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait CchRpc {
     /// Send BTC to a address.
@@ -105,7 +100,6 @@ impl CchRpcServerImpl {
 }
 
 const TIMEOUT: u64 = 1000;
-#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl CchRpcServer for CchRpcServerImpl {
     /// Send BTC to a address.

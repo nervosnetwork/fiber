@@ -1,7 +1,7 @@
 meta {
-  name: 14-node1-send-shutdown-channel
+  name: 16-node1-send-shutdown-channel
   type: http
-  seq: 14
+  seq: 16
 }
 
 post {
@@ -34,13 +34,13 @@ body:json {
   }
 }
 
-script:pre-request {
-  await new Promise(r => setTimeout(r, 5000));
-}
-
 assert {
   res.body.error: isUndefined
   res.body.result: isNull
+}
+
+script:pre-request {
+  await new Promise(r => setTimeout(r, 5000));
 }
 
 script:post-response {

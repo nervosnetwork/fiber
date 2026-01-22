@@ -1,21 +1,12 @@
-use crate::time::SystemTimeError;
+use crate::{cch::CchOrderStatus, time::SystemTimeError};
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum CchDbError {
-    #[error("Inserting duplicated key: {0}")]
-    Duplicated(String),
-
-    #[error("Key not found: {0}")]
-    NotFound(String),
-}
-
-#[derive(Error, Debug)]
 pub enum CchError {
     #[error("Database error: {0}")]
-    DbError(#[from] CchDbError),
+    DbError(#[from] super::order::CchDbError),
     #[error("BTC invoice parse error: {0}")]
     BTCInvoiceParseError(#[from] lightning_invoice::ParseOrSemanticError),
     #[error("BTC invoice expired")]
@@ -32,6 +23,8 @@ pub enum CchError {
     ReceiveBTCOrderAmountTooLarge,
     #[error("Expect preimage in settled payment but missing")]
     SettledPaymentMissingPreimage,
+    #[error("Invalid transition from {0:?} to {1:?}")]
+    InvalidTransition(CchOrderStatus, CchOrderStatus),
     #[error("System time error: {0}")]
     SystemTimeError(#[from] SystemTimeError),
     #[error("JSON serialization error: {0}")]

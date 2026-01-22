@@ -1,0 +1,20 @@
+meta {
+  name: 09-check-payee-received-btc-in-lnd
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{LND_BOB_RPC_URL}}/v1/balance/channels
+  body: none
+  auth: none
+}
+
+vars:post-response {
+  max_iterations: 10
+}
+
+assert {
+  res.status: eq 200
+  res.body.local_balance.sat: eq "100000"
+}

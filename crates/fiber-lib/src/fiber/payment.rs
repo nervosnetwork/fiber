@@ -43,7 +43,7 @@ use tracing::{debug, error, instrument, warn};
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PaymentStatus {
     /// initial status, a payment session is created, no HTLC is sent
     Created,

@@ -1,7 +1,7 @@
 meta {
-  name: 12-pay-btc-invoice
+  name: 13-pay-btc-invoice
   type: http
-  seq: 12
+  seq: 13
 }
 
 post {
@@ -38,7 +38,9 @@ script:pre-request {
     data: body,
     responseType: 'stream'
   });
-  resp.data.destroy();
+  if (resp.data !== undefined) {
+    resp.data.destroy();
+  }
 }
 
 docs {

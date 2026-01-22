@@ -1,15 +1,11 @@
 mod actor;
-pub use actor::{start_cch, CchActor, CchArgs, CchMessage, ReceiveBTC, SendBTC};
+pub use actor::{CchActor, CchArgs, CchMessage, ReceiveBTC, SendBTC};
 
 mod error;
 pub use error::{CchError, CchResult};
 
-mod events;
-pub use events::{CchIncomingEvent, CchIncomingPaymentStatus, CchOutgoingPaymentStatus};
 mod trackers;
-pub use trackers::{
-    CchFiberStoreWatcher, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
-};
+pub use trackers::CchFiberStoreWatcher;
 
 mod config;
 pub use config::{
@@ -18,10 +14,9 @@ pub use config::{
 };
 
 mod order;
-pub use order::{CchInvoice, CchOrder, CchOrderStatus};
+pub use order::{CchDbError, CchInvoice, CchOrder, CchOrderStatus, CchOrdersDb};
 
-mod orders_db;
-pub use orders_db::CchOrdersDb;
+mod actions;
 
 #[cfg(test)]
 pub mod tests;
