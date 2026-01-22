@@ -12,6 +12,7 @@ get {
 
 vars:post-response {
   max_iterations: 10
+  LND_BOB_BALANCE: res.body.remote_balance.sat
 }
 
 assert {

@@ -8,10 +8,7 @@ mod trackers;
 pub use trackers::CchFiberStoreWatcher;
 
 mod config;
-pub use config::{
-    CchConfig, DEFAULT_BTC_FINAL_TLC_EXPIRY_TIME, DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA,
-    DEFAULT_ORDER_EXPIRY_TIME,
-};
+pub use config::CchConfig;
 
 mod order;
 pub use order::{CchDbError, CchInvoice, CchOrder, CchOrderStatus, CchOrdersDb};
