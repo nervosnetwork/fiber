@@ -11,7 +11,7 @@ use crate::{
         },
         actor::CchState,
         trackers::{map_lnd_payment_changed_event, CchTrackingEvent, LndConnectionInfo},
-        CchMessage, CchOrder, CchOrderStatus,
+        CchMessage, CchOrder, CchOrderStatus, CchOrderStore,
     },
     fiber::{
         payment::{PaymentStatus, SendPaymentCommand},
@@ -162,8 +162,8 @@ impl SendOutgoingPaymentDispatcher {
         order.status == CchOrderStatus::IncomingAccepted
     }
 
-    pub fn dispatch(
-        state: &mut CchState,
+    pub fn dispatch<S: CchOrderStore>(
+        state: &CchState<S>,
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
     ) -> Option<Box<dyn ActionExecutor>> {

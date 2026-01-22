@@ -10,7 +10,7 @@ use crate::{
         },
         actor::CchState,
         trackers::{CchTrackingEvent, LndConnectionInfo},
-        CchMessage, CchOrder, CchOrderStatus,
+        CchMessage, CchOrder, CchOrderStatus, CchOrderStore,
     },
     fiber::{types::Hash256, NetworkActorCommand, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE},
     invoice::{CkbInvoiceStatus, SettleInvoiceError},
@@ -125,8 +125,8 @@ impl SettleIncomingInvoiceDispatcher {
         order.status == CchOrderStatus::OutgoingSucceeded
     }
 
-    pub fn dispatch(
-        state: &mut CchState,
+    pub fn dispatch<S: CchOrderStore>(
+        state: &CchState<S>,
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
     ) -> Option<Box<dyn ActionExecutor>> {

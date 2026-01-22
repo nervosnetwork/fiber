@@ -1,8 +1,8 @@
-mod db;
+mod order_store;
 pub(crate) mod state_machine;
 mod status;
 
-pub use db::{CchDbError, CchOrdersDb};
+pub use order_store::CchOrderStore;
 pub use state_machine::CchOrderStateMachine;
 pub use status::CchOrderStatus;
 
@@ -65,5 +65,20 @@ pub struct CchOrder {
 impl CchOrder {
     pub fn is_final(&self) -> bool {
         self.status == CchOrderStatus::Succeeded || self.status == CchOrderStatus::Failed
+    }
+
+    /// Check if the order is expired given the current time, and mark it as Failed if expired.
+    ///
+    /// Returns `true` if the order was expired (and has been marked as Failed).
+    /// Updates `status` to `Failed` and sets `failure_reason` when expired.
+    pub fn update_if_expired(&mut self, current_time: u64) -> bool {
+        let expiry_time = self.created_at + self.expiry_delta_seconds;
+        if expiry_time < current_time {
+            self.status = CchOrderStatus::Failed;
+            self.failure_reason = Some("Order expired on startup".to_string());
+            true
+        } else {
+            false
+        }
     }
 }

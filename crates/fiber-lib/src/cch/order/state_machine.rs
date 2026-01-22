@@ -75,7 +75,7 @@ impl CchOrderStateMachine {
             ) => true,
             (CchOrderStatus::OutgoingInFlight, CchOrderStatus::OutgoingSucceeded) => true,
             (CchOrderStatus::OutgoingSucceeded, CchOrderStatus::Succeeded) => true,
-            (_, CchOrderStatus::Failed) => true,
+            (_, CchOrderStatus::Failed) if from != CchOrderStatus::Succeeded => true,
             _ => {
                 // Allow staying in the same status
                 from == to
