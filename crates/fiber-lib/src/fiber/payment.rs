@@ -744,7 +744,22 @@ impl PaymentSession {
     }
 
     pub fn fee_paid(&self) -> u128 {
-        self.active_attempts().map(|a| a.route.fee()).sum()
+        if self.request.use_trampoline_routing() {
+            // For trampoline routing, calculate the actual total fee
+            // which includes both trampoline service fee and routing fee
+            let total_sent: u128 = self
+                .active_attempts()
+                .map(|a| {
+                    // The first node's amount is what we send
+                    a.route.nodes.first().map_or(0, |n| n.amount)
+                })
+                .sum();
+            let total_received = self.request.amount;
+            total_sent.saturating_sub(total_received)
+        } else {
+            // For normal routing, sum up the fee from each route
+            self.active_attempts().map(|a| a.route.fee()).sum()
+        }
     }
 
     fn success_attempts_amount_is_enough(&self) -> bool {
@@ -1748,6 +1763,8 @@ where
                 Ok(mut hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
 
+                    // Embed trampoline onion in the last hop if available
+                    // This is needed both for actual payments and dry_run to get correct fee calculations
                     if let Some(trampoline) = &session.request.trampoline_context {
                         if let Some(last_hop) = hops.last_mut() {
                             last_hop.trampoline_onion =

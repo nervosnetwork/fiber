@@ -1827,6 +1827,16 @@ where
                 .len(),
             route_len
         );
+        // if is trampoline payment
+        #[cfg(debug_assertions)]
+        {
+            if payment_data.use_trampoline_routing() {
+                assert!(hops_data.len() >= 2);
+                let len = hops_data.len();
+                assert_eq!(hops_data[len - 2].amount, hops_data[len - 1].amount);
+                assert!(hops_data.last().unwrap().trampoline_onion.is_some());
+            }
+        }
         hops_data
     }
 

@@ -175,9 +175,9 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
     init_tracing();
 
     // A --(public)--> B --(public)--> C --(private, expensive)--> D
-    // A -> D with trampoline [B]. If B forwards without accounting for C->D fee,
+    // A -> D with trampoline [C]. C forwards to D.
     // the payment should succeed with sufficient max_fee_amount.
-    let (nodes, _channels) = create_n_nodes_network_with_params(
+    let (nodes, channels) = create_n_nodes_network_with_params(
         &[
             (
                 (0, 1),
@@ -212,9 +212,17 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
     )
     .await;
 
-    let [node_a, _node_b, node_c, node_d] = nodes.try_into().expect("4 nodes");
+    let [node_a, node_b, node_c, node_d] = nodes.try_into().expect("4 nodes");
 
-    // will fail without max_fee_amount
+    // Record initial balances for first payment test
+    let node_a_initial_1 = node_a.get_local_balance_from_channel(channels[0]);
+    let node_b_initial_1_a_side = node_b.get_local_balance_from_channel(channels[0]);
+    let node_b_initial_1_c_side = node_b.get_local_balance_from_channel(channels[1]);
+    let node_c_initial_1_b_side = node_c.get_local_balance_from_channel(channels[1]);
+    let node_c_initial_1_d_side = node_c.get_local_balance_from_channel(channels[2]);
+    let node_d_initial_1 = node_d.get_local_balance_from_channel(channels[2]);
+
+    // will success with default fee calculation
     let amount: u128 = 1000;
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -227,8 +235,79 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
         })
         .await;
     assert!(res.is_ok());
-    let payment_hash = res.unwrap().payment_hash;
+    let response_1 = res.unwrap();
+    let payment_hash = response_1.payment_hash;
+    debug!("Payment 1 response fee: {}", response_1.fee);
     node_a.wait_until_success(payment_hash).await;
+
+    // Verify balances after first payment (default fee calculation)
+    let node_a_final_1 = node_a.get_local_balance_from_channel(channels[0]);
+    let node_a_paid_1 = node_a_initial_1 - node_a_final_1;
+    let actual_fee_1 = node_a_paid_1 - amount;
+    debug!(
+        "Payment 1: Node A paid: {} (amount: {}, fee: {})",
+        node_a_paid_1, amount, actual_fee_1
+    );
+    assert_eq!(
+        node_a_paid_1,
+        amount + actual_fee_1,
+        "Node A should pay amount + fee"
+    );
+    assert_eq!(
+        response_1.fee, actual_fee_1,
+        "Response fee should match actual fee paid"
+    );
+
+    let node_d_final_1 = node_d.get_local_balance_from_channel(channels[2]);
+    let node_d_received_1 = node_d_final_1 - node_d_initial_1;
+    debug!("Payment 1: Node D received: {}", node_d_received_1);
+    assert_eq!(
+        node_d_received_1, amount,
+        "Node D should receive exactly the amount"
+    );
+
+    // Node B's balance changes (A->B channel)
+    let node_b_final_1_a_side = node_b.get_local_balance_from_channel(channels[0]);
+    let node_b_received_from_a_1 = node_b_final_1_a_side - node_b_initial_1_a_side;
+
+    // Node B's balance changes (B->C channel)
+    let node_b_final_1_c_side = node_b.get_local_balance_from_channel(channels[1]);
+    let node_b_paid_to_c_1 = node_b_initial_1_c_side - node_b_final_1_c_side;
+
+    // Node B's net gain (forwarding fee earned)
+    let node_b_net_gain_1 = node_b_received_from_a_1 - node_b_paid_to_c_1;
+    debug!(
+        "Payment 1: Node B net gain: {} (received: {}, paid: {})",
+        node_b_net_gain_1, node_b_received_from_a_1, node_b_paid_to_c_1
+    );
+    assert!(node_b_net_gain_1 > 0, "Node B should earn forwarding fee");
+
+    // Node C's balance changes (B->C channel)
+    let node_c_final_1_b_side = node_c.get_local_balance_from_channel(channels[1]);
+    let node_c_received_from_b_1 = node_c_final_1_b_side - node_c_initial_1_b_side;
+
+    // Node C's balance changes (C->D channel)
+    let node_c_final_1_d_side = node_c.get_local_balance_from_channel(channels[2]);
+    let node_c_paid_to_d_1 = node_c_initial_1_d_side - node_c_final_1_d_side;
+
+    // Node C's net gain (trampoline service fee + forwarding fee)
+    let node_c_net_gain_1 = node_c_received_from_b_1 - node_c_paid_to_d_1;
+    debug!(
+        "Payment 1: Node C net gain: {} (received: {}, paid: {})",
+        node_c_net_gain_1, node_c_received_from_b_1, node_c_paid_to_d_1
+    );
+    assert!(
+        node_c_net_gain_1 > 0,
+        "Node C should earn trampoline service fee"
+    );
+
+    // Record initial balances for second payment test
+    let node_a_initial_2 = node_a_final_1;
+    let node_b_initial_2_a_side = node_b_final_1_a_side;
+    let node_b_initial_2_c_side = node_b_final_1_c_side;
+    let node_c_initial_2_b_side = node_c_final_1_b_side;
+    let node_c_initial_2_d_side = node_c_final_1_d_side;
+    let node_d_initial_2 = node_d_final_1;
 
     // will success with sufficient max_fee_amount
     let amount: u128 = 1000;
@@ -243,8 +322,71 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
         })
         .await;
     assert!(res.is_ok());
-    let payment_hash = res.unwrap().payment_hash;
+    let response_2 = res.unwrap();
+    let payment_hash = response_2.payment_hash;
+    debug!("Payment 2 response fee: {}", response_2.fee);
     node_a.wait_until_success(payment_hash).await;
+
+    // Verify balances after second payment (with max_fee_amount = 2000)
+    let node_a_final_2 = node_a.get_local_balance_from_channel(channels[0]);
+    let node_a_paid_2 = node_a_initial_2 - node_a_final_2;
+    let actual_fee_2 = node_a_paid_2 - amount;
+    debug!(
+        "Payment 2: Node A paid: {} (amount: {}, fee: {})",
+        node_a_paid_2, amount, actual_fee_2
+    );
+    assert_eq!(
+        node_a_paid_2,
+        amount + actual_fee_2,
+        "Node A should pay amount + fee"
+    );
+    assert_eq!(
+        response_2.fee, actual_fee_2,
+        "Response fee should match actual fee paid"
+    );
+
+    let node_d_final_2 = node_d.get_local_balance_from_channel(channels[2]);
+    let node_d_received_2 = node_d_final_2 - node_d_initial_2;
+    debug!("Payment 2: Node D received: {}", node_d_received_2);
+    assert_eq!(
+        node_d_received_2, amount,
+        "Node D should receive exactly the amount"
+    );
+
+    // Node B's balance changes (A->B channel)
+    let node_b_final_2_a_side = node_b.get_local_balance_from_channel(channels[0]);
+    let node_b_received_from_a_2 = node_b_final_2_a_side - node_b_initial_2_a_side;
+
+    // Node B's balance changes (B->C channel)
+    let node_b_final_2_c_side = node_b.get_local_balance_from_channel(channels[1]);
+    let node_b_paid_to_c_2 = node_b_initial_2_c_side - node_b_final_2_c_side;
+
+    // Node B's net gain (forwarding fee earned)
+    let node_b_net_gain_2 = node_b_received_from_a_2 - node_b_paid_to_c_2;
+    debug!(
+        "Payment 2: Node B net gain: {} (received: {}, paid: {})",
+        node_b_net_gain_2, node_b_received_from_a_2, node_b_paid_to_c_2
+    );
+    assert!(node_b_net_gain_2 > 0, "Node B should earn forwarding fee");
+
+    // Node C's balance changes (B->C channel)
+    let node_c_final_2_b_side = node_c.get_local_balance_from_channel(channels[1]);
+    let node_c_received_from_b_2 = node_c_final_2_b_side - node_c_initial_2_b_side;
+
+    // Node C's balance changes (C->D channel)
+    let node_c_final_2_d_side = node_c.get_local_balance_from_channel(channels[2]);
+    let node_c_paid_to_d_2 = node_c_initial_2_d_side - node_c_final_2_d_side;
+
+    // Node C's net gain (trampoline service fee + forwarding fee)
+    let node_c_net_gain_2 = node_c_received_from_b_2 - node_c_paid_to_d_2;
+    debug!(
+        "Payment 2: Node C net gain: {} (received: {}, paid: {})",
+        node_c_net_gain_2, node_c_received_from_b_2, node_c_paid_to_d_2
+    );
+    assert!(
+        node_c_net_gain_2 > 0,
+        "Node C should earn trampoline service fee"
+    );
 }
 
 #[tokio::test]
@@ -684,7 +826,7 @@ async fn test_trampoline_routing_single_trampoline_hop_succeeds_with_long_public
     // We should only need to specify a single trampoline hop: [T5].
     // Important: keep `max_fee_amount` reasonable; in trampoline routing it also contributes to
     // the amount sent to the first trampoline (forwarding fee budget).
-    let (nodes, _channel_ids) = create_n_nodes_network_with_visibility(
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true),
             ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true),
@@ -703,6 +845,13 @@ async fn test_trampoline_routing_single_trampoline_hop_succeeds_with_long_public
 
     let [node_a, node_t1, node_x12, node_t2, node_x23, node_t3, node_x34, node_t4, node_x45, node_t5, node_c] =
         nodes.try_into().expect("11 nodes");
+
+    // Capture initial balances for all nodes
+    let all_nodes = [
+        &node_a, &node_t1, &node_x12, &node_t2, &node_x23, &node_t3, &node_x34, &node_t4,
+        &node_x45, &node_t5, &node_c,
+    ];
+    let balances_before = capture_balances(&all_nodes, &channels);
 
     // Ensure A knows T5 supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_t5).await;
@@ -736,7 +885,57 @@ async fn test_trampoline_routing_single_trampoline_hop_succeeds_with_long_public
         })
         .await;
     assert!(res.is_ok());
-    node_a.wait_until_success(res.unwrap().payment_hash).await;
+    let response = res.unwrap();
+    let payment_hash = response.payment_hash;
+
+    node_a.wait_until_success(payment_hash).await;
+
+    // Capture balances after payment and calculate changes
+    let balances_after = capture_balances(&all_nodes, &channels);
+    let balance_changes = calculate_balance_changes(&balances_before, &balances_after);
+
+    // Verify balance changes
+    debug!("Balance changes for all nodes:");
+    for (idx, (node, changes)) in all_nodes.iter().zip(balance_changes.iter()).enumerate() {
+        debug!(
+            "  Node {}: pubkey={:?}, changes={:?}",
+            idx,
+            node.get_public_key(),
+            changes
+        );
+    }
+
+    // Node A (sender) should have paid amount + fee
+    let node_a_total_paid: i128 = balance_changes[0]
+        .iter()
+        .filter(|&&c| c < 0)
+        .sum::<i128>()
+        .abs();
+    debug!("Node A total paid: {}", node_a_total_paid);
+    assert_eq!(
+        node_a_total_paid as u128,
+        amount + response.fee,
+        "Node A should pay amount + fee"
+    );
+
+    // Node C (receiver) should have received exactly the amount
+    let node_c_total_received: i128 = balance_changes[10].iter().filter(|&&c| c > 0).sum();
+    debug!("Node C total received: {}", node_c_total_received);
+    assert_eq!(
+        node_c_total_received as u128, amount,
+        "Node C should receive exactly the amount"
+    );
+
+    // All intermediate nodes should have earned fees (net positive or zero)
+    for (idx, changes) in balance_changes.iter().enumerate().skip(1).take(9) {
+        let net_change: i128 = changes.iter().sum();
+        debug!("Node {} net change: {}", idx, net_change);
+        assert!(
+            net_change >= 0,
+            "Intermediate node {} should not lose money",
+            idx
+        );
+    }
 }
 
 #[tokio::test]
@@ -746,7 +945,7 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
     // A --(public)--> T1 --(public)--> X --(public)--> T2 --(private)--> T3 --(public)--> Y --(public)--> T4 --(private)--> C
     // The forward hops between trampolines can be routed over public multi-hop paths (T1->T2 and T3->T4).
     // The last hop to the recipient is private, so A cannot build a direct route from the gossip graph.
-    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
             ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
@@ -760,8 +959,14 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
     )
     .await;
 
-    let [node_a, node_t1, _node_x, node_t2, node_t3, _node_y, node_t4, node_c] =
+    let [node_a, node_t1, node_x, node_t2, node_t3, node_y, node_t4, node_c] =
         nodes.try_into().expect("8 nodes");
+
+    // Capture initial balances for all nodes
+    let all_nodes = [
+        &node_a, &node_t1, &node_x, &node_t2, &node_t3, &node_y, &node_t4, &node_c,
+    ];
+    let balances_before = capture_balances(&all_nodes, &channels);
 
     // Wait until A learns T1 supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
@@ -797,8 +1002,57 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
         })
         .await;
     assert!(res.is_ok());
+    let response = res.unwrap();
+    let payment_hash = response.payment_hash;
 
-    node_a.wait_until_success(res.unwrap().payment_hash).await;
+    node_a.wait_until_success(payment_hash).await;
+
+    // Capture balances after payment and calculate changes
+    let balances_after = capture_balances(&all_nodes, &channels);
+    let balance_changes = calculate_balance_changes(&balances_before, &balances_after);
+
+    // Verify balance changes
+    debug!("Balance changes for all nodes:");
+    for (idx, (node, changes)) in all_nodes.iter().zip(balance_changes.iter()).enumerate() {
+        debug!(
+            "  Node {}: pubkey={:?}, changes={:?}",
+            idx,
+            node.get_public_key(),
+            changes
+        );
+    }
+
+    // Node A (sender) should have paid amount + fee
+    let node_a_total_paid: i128 = balance_changes[0]
+        .iter()
+        .filter(|&&c| c < 0)
+        .sum::<i128>()
+        .abs();
+    debug!("Node A total paid: {}", node_a_total_paid);
+    assert_eq!(
+        node_a_total_paid as u128,
+        amount + response.fee,
+        "Node A should pay amount + fee"
+    );
+
+    // Node C (receiver) should have received exactly the amount
+    let node_c_total_received: i128 = balance_changes[7].iter().filter(|&&c| c > 0).sum();
+    debug!("Node C total received: {}", node_c_total_received);
+    assert_eq!(
+        node_c_total_received as u128, amount,
+        "Node C should receive exactly the amount"
+    );
+
+    // All intermediate nodes should have earned fees (net positive or zero)
+    for (idx, changes) in balance_changes.iter().enumerate().skip(1).take(6) {
+        let net_change: i128 = changes.iter().sum();
+        debug!("Node {} net change: {}", idx, net_change);
+        assert!(
+            net_change >= 0,
+            "Intermediate node {} should not lose money",
+            idx
+        );
+    }
 
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
@@ -2613,4 +2867,164 @@ async fn test_trampoline_routing_mpp_intermediate_hop_will_fail() {
 
     assert!(res.is_ok());
     node_a.wait_until_failed(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_dry_run() {
+    init_tracing();
+
+    // A --(public)--> B --(private)--> C
+    // Test that dry_run mode works correctly with trampoline routing.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        3,
+    )
+    .await;
+
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+
+    // Record initial balances
+    let node_a_initial = node_a.get_local_balance_from_channel(channels[0]);
+    let node_b_initial_a_side = node_b.get_local_balance_from_channel(channels[0]);
+    let node_b_initial_c_side = node_b.get_local_balance_from_channel(channels[1]);
+    let node_c_initial = node_c.get_local_balance_from_channel(channels[1]);
+
+    // Wait until A learns B supports trampoline routing.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    // Create an invoice on C.
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .expect("build invoice");
+
+    // First, do a dry run to check if the payment can be made
+    let dry_run_res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(500),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(dry_run_res.is_ok(), "Dry run should succeed");
+    let dry_run_response = dry_run_res.unwrap();
+
+    // Verify dry run response contains route information
+    assert_eq!(dry_run_response.status, PaymentStatus::Created);
+
+    debug!("Dry run response: {:?}", dry_run_response);
+
+    assert!(
+        !dry_run_response.routers.is_empty(),
+        "Dry run should return route information"
+    );
+
+    // For trampoline routing, fee should be calculated correctly
+    // The fee includes both trampoline service fee and routing fee
+    assert_eq!(dry_run_response.fee, 251);
+
+    // Debug: Print router details to understand the amount in each node
+    debug!("Number of routers: {}", dry_run_response.routers.len());
+    for (route_idx, route) in dry_run_response.routers.iter().enumerate() {
+        debug!("Route {}: {} nodes", route_idx, route.nodes.len());
+        for (node_idx, node) in route.nodes.iter().enumerate() {
+            debug!(
+                "  Node {}: pubkey={:?}, amount={}, channel={:?}",
+                node_idx, node.pubkey, node.amount, node.channel_outpoint
+            );
+        }
+        debug!("  Route fee: {}", route.fee());
+    }
+
+    debug!(
+        "Dry run succeeded - fee: {}, routes: {:?}",
+        dry_run_response.fee,
+        dry_run_response
+            .routers
+            .iter()
+            .map(|r| (r.nodes.len(), r.fee()))
+            .collect::<Vec<_>>()
+    );
+
+    // Verify that no payment session was created for dry run
+    // (We don't need to check the payment_hash since dry_run doesn't persist)
+
+    // Now do the actual payment to verify the route works
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let actual_res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(500),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
+            dry_run: false,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(actual_res.is_ok(), "Actual payment should succeed");
+    let actual_payment_hash = actual_res.unwrap().payment_hash;
+
+    node_a.wait_until_success(actual_payment_hash).await;
+
+    // Verify the actual payment was processed successfully
+    let final_payment = node_a.get_payment_result(actual_payment_hash).await;
+    debug!("Final payment result: {:?}", final_payment);
+    assert_eq!(final_payment.status, PaymentStatus::Success);
+    assert_eq!(final_payment.fee, 251);
+
+    // Verify balances after payment
+    // Node A should have paid amount + fee = 1000 + 251 = 1251
+    let node_a_final = node_a.get_local_balance_from_channel(channels[0]);
+    let node_a_paid = node_a_initial - node_a_final;
+    assert_eq!(node_a_paid, amount + 251, "Node A should pay amount + fee");
+    debug!(
+        "Node A paid: {} (amount: {}, fee: {})",
+        node_a_paid, amount, 251
+    );
+
+    // Node C should have received exactly the amount (1000)
+    let node_c_final = node_c.get_local_balance_from_channel(channels[1]);
+    let node_c_received = node_c_final - node_c_initial;
+    assert_eq!(
+        node_c_received, amount,
+        "Node C should receive exactly the amount"
+    );
+    debug!("Node C received: {}", node_c_received);
+
+    // Node B (trampoline node) should have earned the fee
+    // B's balance on A side should increase by what A paid
+    let node_b_final_a_side = node_b.get_local_balance_from_channel(channels[0]);
+    let node_b_received_from_a = node_b_final_a_side - node_b_initial_a_side;
+    assert_eq!(
+        node_b_received_from_a,
+        amount + 251,
+        "Node B should receive amount + fee from A"
+    );
+
+    // B's balance on C side should decrease by what C received
+    let node_b_final_c_side = node_b.get_local_balance_from_channel(channels[1]);
+    let node_b_paid_to_c = node_b_initial_c_side - node_b_final_c_side;
+    assert_eq!(
+        node_b_paid_to_c, amount,
+        "Node B should pay exactly amount to C"
+    );
+
+    // Node B's net gain should be the fee (received from A - paid to C)
+    let node_b_net_gain = node_b_received_from_a - node_b_paid_to_c;
+    assert_eq!(node_b_net_gain, 251, "Node B should earn the fee");
+    debug!(
+        "Node B earned fee: {} (received: {}, paid: {})",
+        node_b_net_gain, node_b_received_from_a, node_b_paid_to_c
+    );
 }

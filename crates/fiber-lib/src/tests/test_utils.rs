@@ -2094,6 +2094,43 @@ pub async fn wait_until_node_has_public_channels_at_least(node: &NetworkNode, ch
         .await;
 }
 
+/// Helper function to capture all nodes' balances across all channels
+/// Returns 0 for channels that don't exist on a particular node
+pub fn capture_balances(
+    nodes: &[&NetworkNode],
+    channels: &[crate::fiber::types::Hash256],
+) -> Vec<Vec<u128>> {
+    nodes
+        .iter()
+        .map(|node| {
+            channels
+                .iter()
+                .map(|channel| {
+                    node.store
+                        .get_channel_actor_state(channel)
+                        .map(|state| state.to_local_amount)
+                        .unwrap_or(0)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Helper function to calculate balance changes
+pub fn calculate_balance_changes(before: &[Vec<u128>], after: &[Vec<u128>]) -> Vec<Vec<i128>> {
+    before
+        .iter()
+        .zip(after.iter())
+        .map(|(before_node, after_node)| {
+            before_node
+                .iter()
+                .zip(after_node.iter())
+                .map(|(b, a)| *a as i128 - *b as i128)
+                .collect()
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;
