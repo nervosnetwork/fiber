@@ -2017,8 +2017,8 @@ where
             // this can help us early return if the payment is not possible to be sent
             // otherwise when PathFind error is returned, we need to retry with half amount
             error!(
-                "no path found from {:?} to {:?} for amount: {:?}",
-                source, target, amount
+                "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
+                source, target, amount, max_fee_amount
             );
             return Err(PathFindError::NoPathFound);
         }
