@@ -41,6 +41,9 @@ use strum::AsRefStr;
 use tokio::sync::RwLock;
 use tracing::{debug, error, instrument, warn};
 
+const DEFAULT_MAX_FEE_RATE: u64 = 5;
+const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
+
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -290,11 +293,38 @@ impl SendPaymentData {
             return Err("amount must be greater than 0".to_string());
         }
 
-        let max_fee_amount = command.max_fee_amount.unwrap_or(0);
-        if amount.checked_add(max_fee_amount).is_none() {
+        let max_fee_rate = command.max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE);
+        let max_fee_amount_by_rate =
+            amount
+                .checked_mul(u128::from(max_fee_rate))
+                .ok_or_else(|| {
+                    format!(
+                        "amount * max_fee_rate overflow: amount = {}, max_fee_rate = {}",
+                        amount, max_fee_rate
+                    )
+                })?
+                / MAX_FEE_RATE_DENOMINATOR;
+        let max_fee_amount_by_rate = if max_fee_amount_by_rate == 0 {
+            amount
+        } else {
+            max_fee_amount_by_rate
+        };
+
+        let max_fee_amount = match command.max_fee_amount {
+            Some(max_fee_amount) => Some(max_fee_amount.min(max_fee_amount_by_rate)),
+            None => Some(max_fee_amount_by_rate),
+        };
+
+        error!(
+            "now get : {:?} command.max_fee_amount: {:?} command.max_fee_rate: {:?} amount: {:?}",
+            max_fee_amount, command.max_fee_amount, command.max_fee_rate, amount
+        );
+
+        if amount.checked_add(max_fee_amount.unwrap_or(0)).is_none() {
             return Err(format!(
                 "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
-                amount, max_fee_amount
+                amount,
+                max_fee_amount.unwrap_or(0)
             ));
         }
 
@@ -355,7 +385,7 @@ impl SendPaymentData {
             final_tlc_expiry_delta,
             tlc_expiry_limit,
             timeout: command.timeout,
-            max_fee_amount: command.max_fee_amount,
+            max_fee_amount,
             max_parts: command.max_parts,
             keysend,
             udt_type_script,
@@ -860,8 +890,10 @@ pub struct SendPaymentCommand {
     pub tlc_expiry_limit: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
-    // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
+    // the maximum fee amounts in shannons that the sender is willing to pay, default is 0.5% * amount.
     pub max_fee_amount: Option<u128>,
+    // the maximum fee rate per thousand (‰), default is 5 (0.5%).
+    pub max_fee_rate: Option<u64>,
     // max parts for the payment, only used for multi-part payments
     pub max_parts: Option<u64>,
     // keysend payment, default is false
