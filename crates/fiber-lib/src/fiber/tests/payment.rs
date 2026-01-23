@@ -618,9 +618,8 @@ async fn test_send_payment_for_pay_self_with_invoice() {
     let res = node_0
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.invoice_address),
-            amount: None,
-            keysend: None,
             allow_self_payment: true,
+            max_fee_rate: Some(1000),
             ..Default::default()
         })
         .await;
@@ -5163,6 +5162,7 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice.to_string()),
                 amount: invoice.amount,
+                max_fee_rate: Some(1000),
                 allow_self_payment: true,
                 ..Default::default()
             })

@@ -8,6 +8,7 @@ use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
     MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
+use crate::fiber::fee::calculate_fee_with_base;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{
     GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
@@ -293,30 +294,17 @@ impl SendPaymentData {
             return Err("amount must be greater than 0".to_string());
         }
 
-        let max_fee_rate = command.max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE);
+        let max_fee_rate = command.max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE) as u128;
         let max_fee_amount_by_rate =
-            amount
-                .checked_mul(u128::from(max_fee_rate))
-                .ok_or_else(|| {
-                    format!(
-                        "amount * max_fee_rate overflow: amount = {}, max_fee_rate = {}",
-                        amount, max_fee_rate
-                    )
-                })?
-                / MAX_FEE_RATE_DENOMINATOR;
-        let max_fee_amount_by_rate = if max_fee_amount_by_rate == 0 {
-            amount
-        } else {
-            max_fee_amount_by_rate
-        };
+            calculate_fee_with_base(amount, max_fee_rate, MAX_FEE_RATE_DENOMINATOR)?;
 
         let max_fee_amount = match command.max_fee_amount {
             Some(max_fee_amount) => Some(max_fee_amount.min(max_fee_amount_by_rate)),
             None => Some(max_fee_amount_by_rate),
         };
 
-        error!(
-            "now get : {:?} command.max_fee_amount: {:?} command.max_fee_rate: {:?} amount: {:?}",
+        debug!(
+            "SendPaymentData now get : {:?} command.max_fee_amount: {:?} command.max_fee_rate: {:?} amount: {:?}",
             max_fee_amount, command.max_fee_amount, command.max_fee_rate, amount
         );
 
