@@ -15,6 +15,7 @@
 //! | 193          | OutPoint | Direction | TimedResult                 |
 //! | 194          | Hash256              | PaymentCustomRecords        |
 //! | 224          | Hash256              | ChannelData                 |
+//! | 232          | Payment_hash         | CchOrder                    |
 //! +--------------+----------------------+-----------------------------+
 
 pub(crate) const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -41,3 +42,5 @@ mod watchtower {
 }
 #[cfg(feature = "watchtower")]
 pub(crate) use watchtower::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const CCH_ORDER_PREFIX: u8 = 232;

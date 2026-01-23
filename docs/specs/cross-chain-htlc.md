@@ -42,6 +42,8 @@ To understand how HTLCs can be used for cross-chain payments, let's break down t
    - Once Ingrid has the preimage, he can use it to unlock the funds on Blockchain A.
    - Both transactions are completed atomically, meaning either both are completed, or neither is.
 
+The process can be extended to routed payments in both Blockchain A and B.
+
 ## Example Between Bitcoin and CKB
 
 ### Setup

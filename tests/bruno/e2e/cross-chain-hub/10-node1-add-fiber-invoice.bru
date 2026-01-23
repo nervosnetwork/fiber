@@ -1,7 +1,7 @@
 meta {
-  name: 09-node1-add-fiber-invoice
+  name: 10-node1-add-fiber-invoice
   type: http
-  seq: 9
+  seq: 10
 }
 
 post {
@@ -24,6 +24,7 @@ body:json {
       {
         "amount": "0xc350",
         "currency": "Fibd",
+        "hash_algorithm": "sha256",
         "udt_type_script": {
           "args": "{{UDT_SCRIPT_ARGS}}",
           "code_hash": "0xe1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419",

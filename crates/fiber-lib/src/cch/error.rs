@@ -1,37 +1,53 @@
-use crate::time::SystemTimeError;
+use crate::{cch::CchOrderStatus, fiber::types::Hash256, time::SystemTimeError};
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
-#[derive(Error, Debug)]
-pub enum CchDbError {
+#[derive(Error, Debug, Eq, PartialEq)]
+pub enum CchStoreError {
     #[error("Inserting duplicated key: {0}")]
-    Duplicated(String),
+    Duplicated(Hash256),
 
     #[error("Key not found: {0}")]
-    NotFound(String),
+    NotFound(Hash256),
 }
 
 #[derive(Error, Debug)]
 pub enum CchError {
-    #[error("Database error: {0}")]
-    DbError(#[from] CchDbError),
+    #[error("Store error: {0}")]
+    StoreError(#[from] CchStoreError),
+    #[error("Outgoing invoice expiry time is too short")]
+    OutgoingInvoiceExpiryTooShort,
     #[error("BTC invoice parse error: {0}")]
     BTCInvoiceParseError(#[from] lightning_invoice::ParseOrSemanticError),
     #[error("BTC invoice expired")]
     BTCInvoiceExpired,
     #[error("BTC invoice missing amount")]
     BTCInvoiceMissingAmount,
+    #[error("BTC invoice final TLC expiry delta exceeds safe limit for cross-chain swap")]
+    BTCInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("CKB invoice error: {0}")]
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
+    #[error("CKB invoice expired")]
+    CKBInvoiceExpired,
     #[error("CKB invoice missing amount")]
     CKBInvoiceMissingAmount,
+    #[error("CKB invoice final TLC expiry delta exceeds safe limit for cross-chain swap")]
+    CKBInvoiceFinalTlcExpiryDeltaTooLarge,
+    #[error("CKB invoice hash algorithm is not SHA256, which is required for LND compatibility")]
+    CKBInvoiceIncompatibleHashAlgorithm,
     #[error("ReceiveBTC order payment amount is too small")]
     ReceiveBTCOrderAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too large")]
     ReceiveBTCOrderAmountTooLarge,
+    #[error("Wrapped BTC type script mismatch")]
+    WrappedBTCTypescriptMismatch,
     #[error("Expect preimage in settled payment but missing")]
     SettledPaymentMissingPreimage,
+    #[error("Preimage hash mismatch")]
+    PreimageHashMismatch,
+    #[error("Invalid transition from {0:?} to {1:?}")]
+    InvalidTransition(CchOrderStatus, CchOrderStatus),
     #[error("System time error: {0}")]
     SystemTimeError(#[from] SystemTimeError),
     #[error("JSON serialization error: {0}")]
