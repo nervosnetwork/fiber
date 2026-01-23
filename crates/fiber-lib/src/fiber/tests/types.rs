@@ -285,6 +285,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
             build_max_fee_amount: None,
             tlc_expiry_delta: 1234,
             max_parts: None,
+            hash_algorithm: HashAlgorithm::Sha256,
             tlc_expiry_limit: crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         },
         TrampolineHopPayload::Forward {
@@ -293,6 +294,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
             build_max_fee_amount: None,
             tlc_expiry_delta: 1234,
             max_parts: None,
+            hash_algorithm: HashAlgorithm::Sha256,
             tlc_expiry_limit: crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         },
         TrampolineHopPayload::Final {

@@ -25,7 +25,6 @@ use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
 use crate::fiber::types::Privkey;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
-use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use parking_lot::Mutex;
@@ -1485,6 +1484,7 @@ where
                     next_node_id,
                     amount_to_forward,
                     build_max_fee_amount,
+                    hash_algorithm: payment_data.hash_algorithm(),
                     tlc_expiry_delta: self.trampoline_forward_expiry_delta(
                         payment_data.final_tlc_expiry_delta,
                         remaining_trampoline_hops,
@@ -1765,15 +1765,7 @@ where
         trampoline_payload: Option<Vec<u8>>,
         final_hop_expiry_delta_override: Option<u64>,
     ) -> Vec<PaymentHopData> {
-        let invoice = payment_data
-            .invoice
-            .clone()
-            .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
-        let hash_algorithm = invoice
-            .as_ref()
-            .and_then(|x| x.hash_algorithm().copied())
-            .unwrap_or_default();
-
+        let hash_algorithm = payment_data.hash_algorithm();
         let route_len = route.len();
         let now = now_timestamp_as_millis_u64();
         let mut hops_data = Vec::with_capacity(route.len() + 1);

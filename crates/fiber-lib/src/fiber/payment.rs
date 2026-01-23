@@ -12,6 +12,7 @@ use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{
     GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
 };
+use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT,
     DEFAULT_PAYMENT_TRY_LIMIT, MAX_CUSTOM_RECORDS_SIZE,
@@ -634,6 +635,25 @@ impl SendPaymentData {
     pub fn trampoline_hops(&self) -> Option<&[TrampolineHop]> {
         self.trampoline_hops.as_deref()
     }
+
+    pub fn payment_invoice(&self) -> Option<CkbInvoice> {
+        self.invoice
+            .as_ref()
+            .and_then(|x| x.parse::<CkbInvoice>().ok())
+    }
+
+    pub fn hash_algorithm(&self) -> HashAlgorithm {
+        let invoice = self.payment_invoice();
+        invoice
+            .as_ref()
+            .and_then(|x| x.hash_algorithm().copied())
+            .unwrap_or_else(|| {
+                self.trampoline_context
+                    .as_ref()
+                    .map(|c| c.hash_algorithm)
+                    .unwrap_or_default()
+            })
+    }
 }
 
 #[serde_as]
@@ -1178,6 +1198,8 @@ pub struct TrampolineContext {
     /// Previous TLCs information for the payment session.
     /// This is used to associate the outgoing payment with the incoming payment.
     pub previous_tlcs: Vec<PrevTlcInfo>,
+    /// Hash algorighm used for the payment.
+    pub hash_algorithm: HashAlgorithm,
 }
 
 impl SendPaymentCommand {

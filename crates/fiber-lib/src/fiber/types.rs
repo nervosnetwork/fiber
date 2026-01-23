@@ -3782,6 +3782,8 @@ pub enum TrampolineHopPayload {
         next_node_id: Pubkey,
         /// Amount that should be forwarded to `next_node_id` (excluding this node's fee).
         amount_to_forward: u128,
+        /// Hash algorighmm used for the payment.
+        hash_algorithm: HashAlgorithm,
         /// Fee budget used when building the *outer* route from this trampoline node to `next_node_id`.
         ///
         /// This is computed during the initial router build (trampoline onion construction), so

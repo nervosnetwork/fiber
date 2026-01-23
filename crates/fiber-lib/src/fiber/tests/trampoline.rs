@@ -1442,6 +1442,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
         tlc_expiry_delta: 144,
         tlc_expiry_limit: 5000,
         max_parts: None,
+        hash_algorithm: HashAlgorithm::Sha256,
     };
 
     // Path: [B, Final].
@@ -2591,6 +2592,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
         tlc_expiry_delta: 100,
         tlc_expiry_limit: 5000,
         max_parts: None,
+        hash_algorithm: HashAlgorithm::Sha256,
     };
 
     let session_key = gen_rand_session_key();
@@ -3185,32 +3187,43 @@ async fn test_trampoline_mpp_with_oneway() {
     // Wait until node1 learns node2 supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node1, &node2).await;
 
-    let invoice_amount = 1001 * 10_000_000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(invoice_amount))
-        .payment_preimage(preimage)
-        .payment_secret(gen_rand_sha256_hash())
-        .payee_pub_key(node4.get_public_key().into())
-        .allow_mpp(true)
-        .allow_trampoline_routing(true)
-        .build()
-        .expect("build invoice");
-    node4.insert_invoice(invoice.clone(), Some(preimage));
+    async fn run_with_hash_algo(
+        node1: &NetworkNode,
+        node2: &NetworkNode,
+        node4: &NetworkNode,
+        hash_algo: HashAlgorithm,
+    ) {
+        let invoice_amount = 1001 * 10_000_000;
+        let preimage = gen_rand_sha256_hash();
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(invoice_amount))
+            .payment_preimage(preimage)
+            .payment_secret(gen_rand_sha256_hash())
+            .hash_algorithm(hash_algo)
+            .payee_pub_key(node4.get_public_key().into())
+            .allow_mpp(true)
+            .allow_trampoline_routing(true)
+            .build()
+            .expect("build invoice");
+        node4.insert_invoice(invoice.clone(), Some(preimage));
 
-    let res = node1
-        .send_payment(SendPaymentCommand {
-            invoice: Some(invoice.to_string()),
-            trampoline_hops: Some(vec![TrampolineHop::new(node2.get_public_key())]),
-            ..Default::default()
-        })
-        .await;
+        let res = node1
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                trampoline_hops: Some(vec![TrampolineHop::new(node2.get_public_key())]),
+                ..Default::default()
+            })
+            .await;
 
-    assert!(
-        res.is_ok(),
-        "Payment should be initiated successfully: {:?}",
-        res.err()
-    );
-    let payment_hash = res.unwrap().payment_hash;
-    node1.wait_until_success(payment_hash).await;
+        assert!(
+            res.is_ok(),
+            "Payment should be initiated successfully: {:?}",
+            res.err()
+        );
+        let payment_hash = res.unwrap().payment_hash;
+        node1.wait_until_success(payment_hash).await;
+    }
+
+    run_with_hash_algo(&node1, &node2, &node4, HashAlgorithm::CkbHash).await;
+    run_with_hash_algo(&node1, &node2, &node4, HashAlgorithm::Sha256).await;
 }

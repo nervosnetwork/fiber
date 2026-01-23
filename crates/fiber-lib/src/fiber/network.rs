@@ -2465,6 +2465,7 @@ where
             TrampolineHopPayload::Forward {
                 next_node_id,
                 amount_to_forward,
+                hash_algorithm,
                 build_max_fee_amount,
                 tlc_expiry_delta,
                 tlc_expiry_limit,
@@ -2505,6 +2506,7 @@ where
                             // currently we only support single previous tlc in trampoline forwarding,
                             // maybe we need to support multiple previous tlcs in the future
                             previous_tlcs: vec![prev_tlc],
+                            hash_algorithm,
                         }))
                         .allow_mpp(max_parts.is_some_and(|v| v > 1))
                         .build()
