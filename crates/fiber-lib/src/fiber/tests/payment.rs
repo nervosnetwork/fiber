@@ -695,8 +695,7 @@ async fn test_send_payment_with_normal_invoice_workflow() {
         .gen_invoice(NewInvoiceParams {
             amount: 1000,
             description: Some("test invoice".to_string()),
-            final_expiry_delta: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
-            expiry: None,
+            final_expiry_delta: Some(2048),
             ..Default::default()
         })
         .await;
@@ -705,9 +704,6 @@ async fn test_send_payment_with_normal_invoice_workflow() {
     let res = node_0
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.invoice_address),
-            amount: None,
-            keysend: None,
-            allow_self_payment: false,
             ..Default::default()
         })
         .await;
