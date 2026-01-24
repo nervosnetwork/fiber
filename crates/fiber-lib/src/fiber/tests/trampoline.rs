@@ -719,6 +719,7 @@ async fn test_trampoline_routing_four_private_trampoline_hops_payment_success() 
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(100_000),
+            max_fee_rate: Some(1000),
             trampoline_hops: Some(vec![
                 TrampolineHop::new(node_t1.get_public_key()),
                 TrampolineHop::new(node_t2.get_public_key()),
@@ -792,6 +793,7 @@ async fn test_trampoline_routing_max_trampoline_hops_success_and_each_hop_pathfi
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(10_000),
+            max_fee_rate: Some(1000),
             trampoline_hops: Some(vec![
                 TrampolineHop::new(node_t1.get_public_key()),
                 TrampolineHop::new(node_t2.get_public_key()),
@@ -880,6 +882,7 @@ async fn test_trampoline_routing_single_trampoline_hop_succeeds_with_long_public
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(100_000),
+            max_fee_rate: Some(1000),
             trampoline_hops: Some(vec![TrampolineHop::new(node_t5.get_public_key())]),
             ..Default::default()
         })
@@ -994,6 +997,7 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(1000),
+            max_fee_rate: Some(1000),
             trampoline_hops: Some(vec![
                 TrampolineHop::new(node_t2.get_public_key()),
                 TrampolineHop::new(node_t4.get_public_key()),
@@ -1069,6 +1073,7 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(1000),
+            max_fee_rate: Some(1000),
             trampoline_hops: Some(vec![TrampolineHop::new(node_t4.get_public_key())]),
             ..Default::default()
         })
@@ -1079,6 +1084,7 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(1000),
+            max_fee_rate: Some(1000),
             trampoline_hops: Some(vec![TrampolineHop::new(node_t2.get_public_key())]),
             ..Default::default()
         })
@@ -2872,7 +2878,7 @@ async fn test_trampoline_routing_mpp_intermediate_hop_will_fail() {
 }
 
 #[tokio::test]
-async fn test_trampoline_routing_dry_run() {
+async fn test_trampoline_routing_dry_run_basic() {
     init_tracing();
 
     // A --(public)--> B --(private)--> C
@@ -2911,7 +2917,8 @@ async fn test_trampoline_routing_dry_run() {
     let dry_run_res = node_a
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
-            max_fee_amount: Some(500),
+            max_fee_amount: Some(251),
+            max_fee_rate: Some(1000),
             trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
             dry_run: true,
             ..Default::default()
@@ -2944,7 +2951,8 @@ async fn test_trampoline_routing_dry_run() {
     let actual_res = node_a
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
-            max_fee_amount: Some(500),
+            max_fee_amount: Some(251),
+            max_fee_rate: Some(1000),
             trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
             dry_run: false,
             ..Default::default()

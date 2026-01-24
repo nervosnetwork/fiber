@@ -688,9 +688,9 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
             .is_ok(),
         "trampoline_onion should be a valid sphinx onion packet"
     );
-    // The amount sent to the trampoline includes the allocated fee budget.
-    // With 1000 amount and 500 max fee, distributed 50/50, we expect 1250.
-    assert_eq!(last.amount, 1250);
+    // The amount sent to the trampoline includes the remaining fee budget.
+    // With 1000 amount and 500 max fee, we expect 1500.
+    assert_eq!(last.amount, 1500);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -974,7 +974,7 @@ fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
         .expect_err("should fail due to insufficient max_fee_amount for service fees");
     let msg = err.to_string();
     assert!(
-        msg.contains("max_fee_amount is too low for trampoline service fees"),
+        msg.contains("max_fee_amount is too low for trampoline routing"),
         "unexpected error: {msg}"
     );
 }
@@ -1013,7 +1013,7 @@ fn test_graph_trampoline_routing_fee_rate_explicit_zero_allows_zero_fee_budget()
         .build_route(payment_data.amount, None, None, &payment_data);
     let err = route.unwrap_err().to_string();
     debug!("route err: {}", err);
-    assert!(err.contains("max_fee_amount is too low for trampoline service fees"));
+    assert!(err.contains("max_fee_amount is too low for trampoline routing"));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -1026,7 +1026,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     //   final=node5 disconnected.
     // We validate that the inner trampoline onion encodes:
     // - amount_to_forward ladder derived from per-hop fee_rate
-    // - build_amount / build_max_fee_amount derived from remaining fee budget allocation.
+    // - build_max_fee_amount derived from remaining fee budget allocation.
     let mut network = MockNetworkGraph::new(5);
     network.graph.set_add_rand_expiry_delta(false);
 
@@ -1070,10 +1070,11 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
 
     // Compute expected values following `NetworkGraph::find_trampoline_route` logic.
     let hops = vec![h1, h2, h3];
-    let mut fees = vec![0u128; hops.len() + 1];
+    let mut fees = vec![0u128; hops.len()];
+    let remaining_fee = max_fee_amount;
     let slots = fees.len() as u128;
-    let base = max_fee_amount / slots;
-    let remainder = (max_fee_amount % slots) as usize;
+    let base = remaining_fee / slots;
+    let remainder = (remaining_fee % slots) as usize;
     fees.iter_mut().for_each(|b| *b = base);
     for fee in fees.iter_mut().take(remainder) {
         *fee = fee.saturating_add(1);
@@ -1081,12 +1082,12 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
 
     let mut forward_amounts = vec![0u128; hops.len()];
     for idx in 0..hops.len() {
-        forward_amounts[idx] = final_amount + fees[(idx + 2)..].iter().sum::<u128>();
+        forward_amounts[idx] = final_amount + fees[(idx + 1)..].iter().sum::<u128>();
     }
 
     let mut exp_build_max_fee_amounts = vec![0u128; hops.len()];
     for idx in 0..hops.len() {
-        exp_build_max_fee_amounts[idx] = fees.get(idx + 1).copied().unwrap_or(0);
+        exp_build_max_fee_amounts[idx] = fees.get(idx).copied().unwrap_or(0);
     }
 
     let secp = secp256k1::Secp256k1::new();

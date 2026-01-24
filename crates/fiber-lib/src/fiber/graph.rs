@@ -1216,11 +1216,6 @@ where
             payment_data,
         )?;
 
-        debug_assert!(
-            !path.hops.is_empty(),
-            "Route hops should not be empty if Ok"
-        );
-
         Ok(self.build_router_from_path(
             &path.hops,
             path.amount,
@@ -1326,37 +1321,26 @@ where
         }
 
         let low_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 1, hops)?;
-        let mut fees = vec![0u128; hops.len() + 1];
-        if let Some(max_fee_amount) = max_fee_amount {
-            if max_fee_amount < low_total_trampoline_fee {
-                let high_total_trampoline_fee =
-                    self.estimate_trampoline_fee(final_amount, 10, hops)?;
-                return Err(PathFindError::Other(format!(
+        let mut fees = vec![0u128; hops.len()];
+        let Some(max_fee_amount) = max_fee_amount else {
+            return Err(PathFindError::Other(
+                "max_fee_amount is required for trampoline routing".to_string(),
+            ));
+        };
+
+        if max_fee_amount < low_total_trampoline_fee {
+            let high_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 10, hops)?;
+            return Err(PathFindError::Other(format!(
                     "max_fee_amount is too low for trampoline routing: recommend_minimal_fee={}, maximal_fee={} current_fee={}",
                     low_total_trampoline_fee, high_total_trampoline_fee, max_fee_amount
                 )));
-            }
-            let slots = fees.len() as u128;
-            let base = max_fee_amount / slots;
-            let remainder = (max_fee_amount % slots) as usize;
-            fees.iter_mut().for_each(|b| *b = base);
-            for fee in fees.iter_mut().take(remainder) {
-                *fee = fee.saturating_add(1);
-            }
         }
 
-        let amount_to_first_trampoline =
-            final_amount + (max_fee_amount.unwrap_or(0).saturating_sub(fees[0]));
-
-        debug!(
-            "now got amount_to_trampoline: {:?} fees: {:?}",
-            amount_to_first_trampoline, fees
-        );
-        let route_to_trampoline = self.find_path(
+        let mut route_to_trampoline = self.find_path(
             source,
             first,
-            Some(amount_to_first_trampoline),
-            Some(fees[0]),
+            Some(final_amount + max_fee_amount),
+            None,
             payment_data.udt_type_script.clone(),
             self.trampoline_forward_expiry_delta(
                 payment_data.final_tlc_expiry_delta,
@@ -1369,6 +1353,36 @@ where
             &payment_data.channel_stats,
             false,
         )?;
+
+        let first_hop_fee = final_amount
+            .saturating_sub(route_to_trampoline.last().map_or(0, |h| h.amount_received));
+
+        if first_hop_fee > max_fee_amount {
+            return Err(PathFindError::Other(format!(
+                "max_fee_amount is too low for trampoline routing: first_hop_fee={} current_fee={}",
+                first_hop_fee, max_fee_amount
+            )));
+        } else {
+            for r in route_to_trampoline.iter_mut() {
+                r.amount_received = r.amount_received.saturating_sub(first_hop_fee);
+            }
+        }
+
+        let remaining_fee = max_fee_amount.saturating_sub(first_hop_fee);
+        let slots = fees.len() as u128;
+        let base = remaining_fee / slots;
+        let remainder = (remaining_fee % slots) as usize;
+        fees.iter_mut().for_each(|b| *b = base);
+        for fee in fees.iter_mut().take(remainder) {
+            *fee = fee.saturating_add(1);
+        }
+
+        if fees.iter().any(|&f| f == 0) {
+            return Err(PathFindError::Other(
+                "max_fee_amount is too low for trampoline routing: fee for a trampoline hop is zero"
+                    .to_string(),
+            ));
+        }
 
         // allow next trampoline to know whether MPP is allowed and max parts
         let max_parts = if payment_data.allow_mpp() {
@@ -1393,8 +1407,8 @@ where
                 &hops[(idx + 1)..]
             };
 
-            let build_max_fee_amount = Some(fees[idx + 1]);
-            let amount_to_forward = final_amount + (fees[idx + 2..].iter().sum::<u128>());
+            let build_max_fee_amount = Some(fees[idx]);
+            let amount_to_forward = final_amount + (fees[idx + 1..].iter().sum::<u128>());
             payloads.push(TrampolineHopPayload::Forward {
                 next_node_id,
                 amount_to_forward,
@@ -1434,7 +1448,7 @@ where
 
         return Ok(ResolvedRoute {
             hops: route_to_trampoline,
-            amount: amount_to_first_trampoline,
+            amount: final_amount + remaining_fee,
             trampoline_onion: Some(trampoline_onion),
             final_hop_expiry_delta_override: Some(self.trampoline_forward_expiry_delta(
                 payment_data.final_tlc_expiry_delta,
@@ -1698,11 +1712,13 @@ where
     fn build_router_from_path(
         &self,
         route: &Vec<RouterHop>,
-        max_amount: u128,
+        amount: u128,
         payment_data: &SendPaymentData,
         trampoline_payload: Option<Vec<u8>>,
         final_hop_expiry_delta_override: Option<u64>,
     ) -> Vec<PaymentHopData> {
+        debug_assert!(!route.is_empty(), "Route hops should not be empty if Ok");
+
         let hash_algorithm = payment_data.hash_algorithm();
         let route_len = route.len();
         let now = now_timestamp_as_millis_u64();
@@ -1722,9 +1738,9 @@ where
 
         let (last_amount, payment_preimage, custom_records, trampoline_onion) =
             match trampoline_payload {
-                Some(onion) => (max_amount, None, None, Some(onion)),
+                Some(onion) => (amount, None, None, Some(onion)),
                 None => (
-                    max_amount,
+                    amount,
                     payment_data.preimage,
                     payment_data.custom_records.clone(),
                     None,

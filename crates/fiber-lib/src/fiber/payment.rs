@@ -191,7 +191,6 @@ pub struct SendPaymentDataBuilder {
     tlc_expiry_limit: u64,
     timeout: Option<u64>,
     max_fee_amount: Option<u128>,
-    max_fee_rate: Option<u64>,
     max_parts: Option<u64>,
     keysend: bool,
     udt_type_script: Option<Script>,
@@ -257,11 +256,6 @@ impl SendPaymentDataBuilder {
 
     pub fn max_fee_amount(mut self, max_fee_amount: Option<u128>) -> Self {
         self.max_fee_amount = max_fee_amount;
-        self
-    }
-
-    pub fn max_fee_rate(mut self, max_fee_rate: Option<u64>) -> Self {
-        self.max_fee_rate = max_fee_rate;
         self
     }
 
