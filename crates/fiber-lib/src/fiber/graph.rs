@@ -29,7 +29,8 @@ use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Bound;
 use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
@@ -89,6 +90,7 @@ impl From<NodeAnnouncement> for NodeInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelInfo {
     pub channel_outpoint: OutPoint,
+    pub is_public: bool,
     // The timestamp in the block header of the block that includes the funding transaction of the channel.
     pub timestamp: u64,
 
@@ -199,8 +201,10 @@ impl TryFrom<&ChannelActorState> for ChannelInfo {
                 Some(state.get_local_channel_update_info()),
             )
         };
+        let is_public = state.is_public();
         Ok(Self {
             channel_outpoint,
+            is_public,
             timestamp,
             features: 0,
             node1,
@@ -217,6 +221,7 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
     fn from((timestamp, channel_announcement): (u64, ChannelAnnouncement)) -> Self {
         Self {
             channel_outpoint: channel_announcement.channel_outpoint,
+            is_public: true,
             timestamp,
             features: channel_announcement.features,
             node1: channel_announcement.node1_id,
@@ -444,10 +449,12 @@ pub struct NetworkGraph<S> {
     pub always_process_gossip_message: bool,
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
+    // The count of private channels
+    pub(crate) private_channels_count: usize,
     // All the channels in the network.
-    pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
+    pub(crate) channels: BTreeMap<OutPoint, ChannelInfo>,
     // All the nodes in the network.
-    nodes: HashMap<Pubkey, NodeInfo>,
+    pub(crate) nodes: BTreeMap<Pubkey, NodeInfo>,
 
     // Channel stats map, used to track the attempts for each channel,
     // this information is used to HELP the path finding algorithm for better routing in two ways:
@@ -532,9 +539,10 @@ where
             #[cfg(any(test, feature = "bench"))]
             always_process_gossip_message: false,
             source,
-            channels: HashMap::new(),
+            private_channels_count: 0,
+            channels: BTreeMap::new(),
             channel_stats: Default::default(),
-            nodes: HashMap::new(),
+            nodes: BTreeMap::new(),
             latest_cursor: Cursor::default(),
             store: store.clone(),
             history: PaymentHistory::new(source, None, store),
@@ -626,11 +634,18 @@ where
                 // so we can just overwrite the old channel info.
                 self.history
                     .remove_channel_history(&channel_info.channel_outpoint);
+                if !channel_info.is_public {
+                    self.private_channels_count += 1;
+                }
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
-                self.channels.remove(&channel_outpoint);
+                if let Some(channel_info) = self.channels.remove(&channel_outpoint) {
+                    if !channel_info.is_public {
+                        self.private_channels_count -= 1;
+                    }
+                }
                 self.channel_stats.lock().remove_channel(&channel_outpoint);
             }
             OwnedChannelUpdateEvent::Updated(channel_outpoint, node, channel_update) => {
@@ -672,19 +687,6 @@ where
     #[cfg(any(test, feature = "bench"))]
     pub(crate) fn clear_history(&mut self) {
         self.history.reset();
-    }
-
-    fn load_channel_updates_from_store(&self, channel_info: &mut ChannelInfo) {
-        let channel_update_of_node1 = self
-            .store
-            .get_latest_channel_update(&channel_info.channel_outpoint, true)
-            .map(Into::into);
-        let channel_update_of_node2 = self
-            .store
-            .get_latest_channel_update(&channel_info.channel_outpoint, false)
-            .map(Into::into);
-        channel_info.update_of_node1 = channel_update_of_node1;
-        channel_info.update_of_node2 = channel_update_of_node2;
     }
 
     fn load_channel_info_mut(&mut self, channel_outpoint: &OutPoint) -> Option<&mut ChannelInfo> {
@@ -872,19 +874,21 @@ where
         self.nodes.values()
     }
 
-    pub fn get_nodes_with_params(&self, limit: usize, after: Option<Cursor>) -> Vec<NodeInfo> {
-        let cursor = after.unwrap_or_default();
-        self.store
-            .get_broadcast_messages_iter(&cursor)
-            .into_iter()
-            .filter_map(|message| match message {
-                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
-                    Some(NodeInfo::from(node_announcement))
-                }
-                _ => None,
-            })
-            .take(limit)
-            .collect()
+    pub fn get_nodes_with_params(&self, limit: usize, after: Option<Pubkey>) -> Vec<NodeInfo> {
+        match after {
+            Some(after) => self
+                .nodes
+                .range((Bound::Excluded(after), Bound::Unbounded))
+                .take(limit)
+                .map(|(_pubkey, node)| node.to_owned())
+                .collect(),
+            None => self
+                .nodes
+                .iter()
+                .take(limit)
+                .map(|(_pubkey, node)| node.to_owned())
+                .collect(),
+        }
     }
 
     pub fn get_node(&self, node_id: &Pubkey) -> Option<&NodeInfo> {
@@ -933,33 +937,29 @@ where
     pub fn get_channels_with_params(
         &self,
         limit: usize,
-        after: Option<Cursor>,
+        after: Option<OutPoint>,
     ) -> Vec<ChannelInfo> {
-        let cursor = after.unwrap_or_default();
-        self.store
-            .get_broadcast_messages_iter(&cursor)
-            .into_iter()
-            .filter_map(|message| match message {
-                BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                    timestamp,
-                    channel_announcement,
-                ) => {
-                    let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
-                    self.load_channel_updates_from_store(&mut channel_info);
-
-                    // assuming channel is closed if disabled from the both side
-                    let is_closed = channel_info.update_of_node1.is_some_and(|u| !u.enabled)
-                        && channel_info.update_of_node2.is_some_and(|u| !u.enabled);
-                    if !is_closed {
-                        Some(channel_info)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .take(limit)
-            .collect()
+        let filter = |(_out_point, channel_info): (&OutPoint, &ChannelInfo)| {
+            if channel_info.is_public {
+                Some(channel_info.to_owned())
+            } else {
+                None
+            }
+        };
+        match after {
+            Some(after) => self
+                .channels
+                .range((Bound::Excluded(after), Bound::Unbounded))
+                .take(limit)
+                .filter_map(filter)
+                .collect(),
+            None => self
+                .channels
+                .iter()
+                .take(limit)
+                .filter_map(filter)
+                .collect(),
+        }
     }
 
     pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {
@@ -1136,6 +1136,7 @@ where
         self.channels.clear();
         self.nodes.clear();
         self.history.reset();
+        self.private_channels_count = 0;
     }
 
     #[cfg(any(test, feature = "bench"))]

@@ -467,6 +467,7 @@ Get the list of nodes in the network graph.
 
 * `nodes` - <em>Vec<[NodeInfo](#type-nodeinfo)></em>, The list of nodes.
 * `last_cursor` - <em>`JsonBytes`</em>, The last cursor.
+* `total_count` - <em>`Uint64`</em>, The total count of nodes
 
 ---
 
@@ -486,6 +487,7 @@ Get the list of channels in the network graph.
 
 * `channels` - <em>Vec<[ChannelInfo](#type-channelinfo)></em>, A list of channels.
 * `last_cursor` - <em>`JsonBytes`</em>, The last cursor for pagination.
+* `total_count` - <em>`Uint64`</em>, The total count of channels
 
 ---
 
