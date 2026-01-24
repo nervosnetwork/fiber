@@ -665,6 +665,7 @@ Sends a payment to a peer.
 * `timeout` - <em>`Option<u64>`</em>, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
 * `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay.
  Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
+* `max_fee_rate` - <em>`Option<u64>`</em>, the maximum fee rate per thousand (‰), default is 5 (0.5%)
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
 * `trampoline_hops` - <em>Option<Vec<[TrampolineHopParams](#type-trampolinehopparams)>></em>, Optional explicit trampoline hops.
 

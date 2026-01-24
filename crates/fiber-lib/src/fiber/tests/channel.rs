@@ -1469,7 +1469,12 @@ async fn test_send_payment_with_3_nodes_overflow() {
 
     let sent_amount = 0xfffffffffffffffffffffffffffffff;
     let res = node_a
-        .send_payment_keysend(&node_c, sent_amount, false)
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_c.pubkey),
+            amount: Some(sent_amount),
+            keysend: Some(true),
+            ..Default::default()
+        })
         .await;
     assert!(res.is_err());
     assert!(res
@@ -5515,6 +5520,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
+            max_fee_rate: Some(1000),
             invoice: Some(invoice.clone()),
             ..Default::default()
         })
@@ -5564,6 +5570,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
+            max_fee_rate: Some(1000),
             invoice: Some(ckb_invoice.to_string()),
             ..Default::default()
         })
@@ -5632,6 +5639,7 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
+            max_fee_rate: Some(1000),
             invoice: Some(ckb_invoice.to_string()),
             ..Default::default()
         })
@@ -5715,6 +5723,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(100),
+            max_fee_rate: Some(1000),
             invoice: Some(ckb_invoice.to_string()),
             ..Default::default()
         })

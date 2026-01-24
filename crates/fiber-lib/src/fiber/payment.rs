@@ -8,6 +8,7 @@ use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
     MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
+use crate::fiber::fee::calculate_fee_with_base;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{
     GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
@@ -46,6 +47,8 @@ use tracing::{debug, error, instrument, warn};
 // Maximum number of trampoline nodes encoded in the inner trampoline onion.
 // This is a safety guard against excessive route construction work.
 const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
+const DEFAULT_MAX_FEE_RATE: u64 = 5;
+const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
@@ -188,6 +191,7 @@ pub struct SendPaymentDataBuilder {
     tlc_expiry_limit: u64,
     timeout: Option<u64>,
     max_fee_amount: Option<u128>,
+    max_fee_rate: Option<u64>,
     max_parts: Option<u64>,
     keysend: bool,
     udt_type_script: Option<Script>,
@@ -253,6 +257,11 @@ impl SendPaymentDataBuilder {
 
     pub fn max_fee_amount(mut self, max_fee_amount: Option<u128>) -> Self {
         self.max_fee_amount = max_fee_amount;
+        self
+    }
+
+    pub fn max_fee_rate(mut self, max_fee_rate: Option<u64>) -> Self {
+        self.max_fee_rate = max_fee_rate;
         self
     }
 
@@ -326,11 +335,13 @@ impl SendPaymentDataBuilder {
             return Err("amount must be greater than 0".to_string());
         }
 
-        let max_fee_amount = self.max_fee_amount.unwrap_or(0);
-        if amount.checked_add(max_fee_amount).is_none() {
+        if amount
+            .checked_add(self.max_fee_amount.expect("must got max_fee_amount"))
+            .is_none()
+        {
             return Err(format!(
-                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
-                amount, max_fee_amount
+                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {:?}",
+                amount, self.max_fee_amount
             ));
         }
 
@@ -512,6 +523,15 @@ impl SendPaymentData {
             "amount",
         )?;
 
+        let max_fee_rate = command.max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE) as u128;
+        let max_fee_amount_by_rate =
+            calculate_fee_with_base(amount, max_fee_rate, MAX_FEE_RATE_DENOMINATOR)?;
+
+        let max_fee_amount = match command.max_fee_amount {
+            Some(max_fee_amount) => Some(max_fee_amount.min(max_fee_amount_by_rate)),
+            None => Some(max_fee_amount_by_rate),
+        };
+
         let udt_type_script = match validate_field(
             command.udt_type_script.clone(),
             invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
@@ -602,7 +622,7 @@ impl SendPaymentData {
             .final_tlc_expiry_delta(final_tlc_expiry_delta)
             .tlc_expiry_limit(tlc_expiry_limit)
             .timeout(command.timeout)
-            .max_fee_amount(command.max_fee_amount)
+            .max_fee_amount(max_fee_amount)
             .max_parts(command.max_parts)
             .keysend(keysend)
             .udt_type_script(udt_type_script)
@@ -1164,8 +1184,10 @@ pub struct SendPaymentCommand {
     pub tlc_expiry_limit: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
-    // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
+    // the maximum fee amounts in shannons that the sender is willing to pay, default is 0.5% * amount.
     pub max_fee_amount: Option<u128>,
+    // the maximum fee rate per thousand (‰), default is 5 (0.5%).
+    pub max_fee_rate: Option<u64>,
     // max parts for the payment, only used for multi-part payments
     pub max_parts: Option<u64>,
     // keysend payment, default is false

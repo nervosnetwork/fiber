@@ -133,6 +133,10 @@ pub struct SendPaymentCommandParams {
     #[serde_as(as = "Option<U128Hex>")]
     pub max_fee_amount: Option<u128>,
 
+    /// the maximum fee rate per thousand (‰), default is 5 (0.5%)
+    #[serde_as(as = "Option<U64Hex>")]
+    pub max_fee_rate: Option<u64>,
+
     /// max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
     pub max_parts: Option<u64>,
@@ -415,6 +419,7 @@ where
                     invoice: params.invoice.clone(),
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,
+                    max_fee_rate: params.max_fee_rate,
                     max_parts: params.max_parts,
                     trampoline_hops: params
                         .trampoline_hops

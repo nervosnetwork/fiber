@@ -339,9 +339,10 @@ async fn test_send_payment_with_tool_large_fee_and_amount() {
         })
         .await;
 
-    assert!(res.is_err());
-    assert!(res.unwrap_err().to_string().contains("max_fee_amount"));
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    // will succeed because of default max_fee_rate is 0.5%
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    node_0.wait_until_success(payment_hash).await;
 }
 
 #[tokio::test]
@@ -388,7 +389,14 @@ async fn test_send_payment_fee_rate() {
     node_0.submit_tx(funding_tx_1).await;
 
     let res = node_0
-        .send_payment_keysend(&node_2, 10_000_000, false)
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_2.pubkey),
+            amount: Some(10_000_000),
+            keysend: Some(true),
+            // use a high max fee rate to make sure payment success
+            max_fee_rate: Some(5000),
+            ..Default::default()
+        })
         .await;
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
@@ -403,7 +411,16 @@ async fn test_send_payment_fee_rate() {
     node_0.wait_until_success(payment_hash).await;
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 
-    let res = node_2.send_payment_keysend(&node_0, 1_000_000, false).await;
+    let res = node_2
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_0.pubkey),
+            amount: Some(1_000_000),
+            keysend: Some(true),
+            // use a high max fee rate to make sure payment success
+            max_fee_rate: Some(5000),
+            ..Default::default()
+        })
+        .await;
     assert!(res.is_ok(), "Send payment failed: {:?}", res);
     let res = res.unwrap();
     assert!(res.fee > 0);
@@ -648,9 +665,8 @@ async fn test_send_payment_for_pay_self_with_invoice() {
     let res = node_0
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.invoice_address),
-            amount: None,
-            keysend: None,
             allow_self_payment: true,
+            max_fee_rate: Some(1000),
             ..Default::default()
         })
         .await;
@@ -5230,6 +5246,7 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice.to_string()),
                 amount: invoice.amount,
+                max_fee_rate: Some(1000),
                 allow_self_payment: true,
                 ..Default::default()
             })
@@ -5288,20 +5305,8 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice.to_string()),
                 amount: invoice.amount,
-                target_pubkey: None,
                 allow_self_payment: true,
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                trampoline_hops: None,
-                keysend: None,
-                udt_type_script: None,
-                dry_run: false,
-                hop_hints: None,
-                custom_records: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -5632,14 +5637,14 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
     let _span = tracing::info_span!("node", node = "test").entered();
     let (nodes, channels) = create_n_nodes_network(
         &[
-            ((0, 1), (16 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
-            ((1, 2), (17 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((0, 1), (160000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((1, 2), (170000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
             // path finding algorighm will choose this channel firstly,
             // since it has more capacity than the above two channels,
             // but there capacity from 1->2 is not enough for the payment
             // so the first payment will retry two times,
             // and the following payments will only retry once
-            ((2, 1), (18 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
+            ((2, 1), (180000 + MIN_RESERVED_CKB, MIN_RESERVED_CKB)),
         ],
         3,
     )
@@ -5662,7 +5667,14 @@ async fn test_send_payment_with_reverse_channel_of_capaicity_not_enough() {
 
     let count = 5;
     for _i in 0..count {
-        let payment = nodes[0].send_payment_keysend(&nodes[2], 1, false).await;
+        let payment = nodes[0]
+            .send_payment(SendPaymentCommand {
+                target_pubkey: Some(nodes[2].pubkey),
+                amount: Some(30000),
+                keysend: Some(true),
+                ..Default::default()
+            })
+            .await;
         let payment_hash = payment.unwrap().payment_hash;
         nodes[0].wait_until_success(payment_hash).await;
         let session = nodes[0].get_payment_session(payment_hash).unwrap();
@@ -6473,8 +6485,7 @@ async fn test_network_with_hops_max_number_limit() {
             target_pubkey: Some(nodes[14].pubkey), // can not make a payment with 14 hops
             amount: Some(1000),
             keysend: Some(true),
-            allow_self_payment: false,
-            dry_run: false,
+            max_fee_rate: Some(1000),
             tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
             ..Default::default()
         })
@@ -6488,8 +6499,7 @@ async fn test_network_with_hops_max_number_limit() {
             target_pubkey: Some(nodes[13].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            allow_self_payment: false,
-            dry_run: false,
+            max_fee_rate: Some(1000),
             tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
             ..Default::default()
         })
@@ -6503,8 +6513,7 @@ async fn test_network_with_hops_max_number_limit() {
             target_pubkey: Some(nodes[13].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            allow_self_payment: false,
-            dry_run: false,
+            max_fee_rate: Some(1000),
             tlc_expiry_limit: Some(15 * 24 * 60 * 60 * 1000), // 15 days
             ..Default::default()
         })
@@ -6539,8 +6548,7 @@ async fn test_network_with_relay_remove_will_be_ok() {
             target_pubkey: Some(nodes[5].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            allow_self_payment: false,
-            dry_run: false,
+            max_fee_rate: Some(1000),
             tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 10 + DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             ..Default::default()
         })
@@ -6901,4 +6909,41 @@ async fn test_tlc_removed_while_waiting_for_forwarding_result() {
         .await;
     assert!(res2.is_ok());
     node_0.wait_until_success(payment_hash2).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_max_fee_rate_limit() {
+    let payment_data = SendPaymentData::new(SendPaymentCommand {
+        target_pubkey: Some(gen_rand_fiber_public_key()),
+        amount: Some(1000),
+        keysend: Some(true),
+        ..Default::default()
+    })
+    .expect("payment data ok");
+
+    assert_eq!(payment_data.max_fee_amount, Some(5));
+
+    let payment_data = SendPaymentData::new(SendPaymentCommand {
+        target_pubkey: Some(gen_rand_fiber_public_key()),
+        amount: Some(1000),
+        keysend: Some(true),
+        max_fee_rate: Some(10),
+        max_fee_amount: Some(6),
+        ..Default::default()
+    })
+    .expect("payment data ok");
+
+    assert_eq!(payment_data.max_fee_amount, Some(6));
+
+    let payment_data = SendPaymentData::new(SendPaymentCommand {
+        target_pubkey: Some(gen_rand_fiber_public_key()),
+        amount: Some(1000),
+        keysend: Some(true),
+        max_fee_rate: Some(10),
+        max_fee_amount: Some(20),
+        ..Default::default()
+    })
+    .expect("payment data ok");
+
+    assert_eq!(payment_data.max_fee_amount, Some(10));
 }

@@ -1325,18 +1325,18 @@ where
             ));
         }
 
-        let low_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 1, hops)?;
+        // let low_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 1, hops)?;
 
-        if let Some(max_fee_amount) = max_fee_amount {
-            if max_fee_amount < low_total_trampoline_fee {
-                let high_total_trampoline_fee =
-                    self.estimate_trampoline_fee(final_amount, 10, hops)?;
-                return Err(PathFindError::Other(format!(
-                    "max_fee_amount is too low for trampoline routing: recommend_minimal_fee={}, maximal_fee={} current_fee={}",
-                    low_total_trampoline_fee, high_total_trampoline_fee, max_fee_amount
-                )));
-            }
-        }
+        // if let Some(max_fee_amount) = max_fee_amount {
+        //     if max_fee_amount < low_total_trampoline_fee {
+        //         let high_total_trampoline_fee =
+        //             self.estimate_trampoline_fee(final_amount, 10, hops)?;
+        //         return Err(PathFindError::Other(format!(
+        //             "max_fee_amount is too low for trampoline routing: recommend_minimal_fee={}, maximal_fee={} current_fee={}",
+        //             low_total_trampoline_fee, high_total_trampoline_fee, max_fee_amount
+        //         )));
+        //     }
+        // }
 
         // Trampoline budgeting model:
         // 1) compute per-trampoline service fees backwards (final -> first trampoline),
@@ -1539,6 +1539,7 @@ where
         });
     }
 
+    #[allow(unused)]
     fn estimate_trampoline_fee(
         &self,
         final_amount: u128,
@@ -2417,8 +2418,8 @@ where
             // this can help us early return if the payment is not possible to be sent
             // otherwise when PathFind error is returned, we need to retry with half amount
             error!(
-                "no path found from {:?} to {:?} for amount: {:?}",
-                source, target, amount
+                "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
+                source, target, amount, max_fee_amount
             );
             return Err(PathFindError::NoPathFound);
         }
