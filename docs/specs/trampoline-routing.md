@@ -1,8 +1,118 @@
-# Trampoline Routing Specification
+# Trampoline Routing Specification (Summary)
+
+## Who this is for
+This is a short, tester‑oriented overview of trampoline routing in Fiber. It focuses on behavior and inputs, not implementation details.
+
+## What it does (high‑level)
+- The sender only needs to reach the first trampoline node.
+- The rest of the route is encoded inside an inner trampoline onion and forwarded hop‑by‑hop by trampoline nodes.
+- The final recipient only sees the final payload and settles the payment.
+
+## How to use it (RPC)
+- Use `trampoline_hops` in SendPayment RPC to provide explicit trampoline nodes.
+- Each hop includes `pubkey` and optional hints `fee_rate`, `tlc_expiry_delta` (currently not used in route building).
+- `max_fee_amount` is required when `trampoline_hops` is provided.
+
+RPC definition:
+- [crates/fiber-lib/src/rpc/payment.rs](../../crates/fiber-lib/src/rpc/payment.rs#L143)
+
+## Fee behavior (summary)
+- A recommended min/max fee is estimated using the default fee rate as a guardrail.
+- The sender attempts to deliver `final_amount + max_fee_amount` to the first trampoline.
+- Any fee spent on the outer route reduces what the first trampoline receives.
+- The remaining fee budget is split evenly across trampoline hops and passed as `build_max_fee_amount`.
+
+Implementation reference:
+- [crates/fiber-lib/src/fiber/graph.rs](../../crates/fiber-lib/src/fiber/graph.rs#L1313)
+
+## Expiry behavior (summary)
+- Each remaining trampoline hop contributes a default expiry delta.
+- Total delta must not exceed `tlc_expiry_limit`.
+
+Implementation reference:
+- [crates/fiber-lib/src/fiber/graph.rs](../../crates/fiber-lib/src/fiber/graph.rs#L1468)
+
+## Forwarding behavior (summary)
+- Trampoline node peels the inner onion, validates amounts, and builds a new payment toward the next hop.
+- The hop’s `build_max_fee_amount` bounds the next outer route’s fee.
+
+Implementation reference:
+- [crates/fiber-lib/src/fiber/network.rs](../../crates/fiber-lib/src/fiber/network.rs#L2432)
+
+## Key payloads (links)
+- Trampoline onion packet: [crates/fiber-lib/src/fiber/types.rs](../../crates/fiber-lib/src/fiber/types.rs#L3833)
+- Trampoline hop payloads: [crates/fiber-lib/src/fiber/types.rs](../../crates/fiber-lib/src/fiber/types.rs#L3778)
+
+## Tests to validate
+- Graph‑level construction tests: [crates/fiber-lib/src/fiber/tests/graph.rs](../../crates/fiber-lib/src/fiber/tests/graph.rs)
+- End‑to‑end trampoline tests: [crates/fiber-lib/src/fiber/tests/trampoline.rs](../../crates/fiber-lib/src/fiber/tests/trampoline.rs)
+
+## Known constraints
+- Max trampoline hops: `MAX_TRAMPOLINE_HOPS_LIMIT` (5)
+- Trampoline packet size: `TRAMPOLINE_PACKET_DATA_LEN`
+- `max_fee_amount` must be provided when `trampoline_hops` is set
+
+Constants reference:
+- [crates/fiber-lib/src/fiber/payment.rs](../../crates/fiber-lib/src/fiber/payment.rs#L38)# Trampoline Routing Specification (Summary)
+
+## Who this is for
+This is a short, tester‑oriented overview of trampoline routing in Fiber. It focuses on behavior and inputs, not implementation details.
+
+## What it does (high‑level)
+- The sender only needs to reach the first trampoline node.
+- The rest of the route is encoded inside an inner trampoline onion and forwarded hop‑by‑hop by trampoline nodes.
+- The final recipient only sees the final payload and settles the payment.
+
+## How to use it (RPC)
+- Use `trampoline_hops` in SendPayment RPC to provide explicit trampoline nodes.
+- Each hop includes `pubkey` and optional hints `fee_rate`, `tlc_expiry_delta` (currently not used in route building).
+- `max_fee_amount` is required when `trampoline_hops` is provided.
+
+RPC definition:
+- [crates/fiber-lib/src/rpc/payment.rs](../../crates/fiber-lib/src/rpc/payment.rs#L143)
+
+## Fee behavior (summary)
+- A recommended min/max fee is estimated using the default fee rate as a guardrail.
+- The sender attempts to deliver `final_amount + max_fee_amount` to the first trampoline.
+- Any fee spent on the outer route reduces what the first trampoline receives.
+- The remaining fee budget is split evenly across trampoline hops and passed as `build_max_fee_amount`.
+
+Implementation reference:
+- [crates/fiber-lib/src/fiber/graph.rs](../../crates/fiber-lib/src/fiber/graph.rs#L1313)
+
+## Expiry behavior (summary)
+- Each remaining trampoline hop contributes a default expiry delta.
+- Total delta must not exceed `tlc_expiry_limit`.
+
+Implementation reference:
+- [crates/fiber-lib/src/fiber/graph.rs](../../crates/fiber-lib/src/fiber/graph.rs#L1468)
+
+## Forwarding behavior (summary)
+- Trampoline node peels the inner onion, validates amounts, and builds a new payment toward the next hop.
+- The hop’s `build_max_fee_amount` bounds the next outer route’s fee.
+
+Implementation reference:
+- [crates/fiber-lib/src/fiber/network.rs](../../crates/fiber-lib/src/fiber/network.rs#L2432)
+
+## Key payloads (links)
+- Trampoline onion packet: [crates/fiber-lib/src/fiber/types.rs](../../crates/fiber-lib/src/fiber/types.rs#L3833)
+- Trampoline hop payloads: [crates/fiber-lib/src/fiber/types.rs](../../crates/fiber-lib/src/fiber/types.rs#L3778)
+
+## Tests to validate
+- Graph‑level construction tests: [crates/fiber-lib/src/fiber/tests/graph.rs](../../crates/fiber-lib/src/fiber/tests/graph.rs)
+- End‑to‑end trampoline tests: [crates/fiber-lib/src/fiber/tests/trampoline.rs](../../crates/fiber-lib/src/fiber/tests/trampoline.rs)
+
+## Known constraints
+- Max trampoline hops: `MAX_TRAMPOLINE_HOPS_LIMIT` (5)
+- Trampoline packet size: `TRAMPOLINE_PACKET_DATA_LEN`
+- `max_fee_amount` must be provided when `trampoline_hops` is set
+
+Constants reference:
+- [crates/fiber-lib/src/fiber/payment.rs](../../crates/fiber-lib/src/fiber/payment.rs#L38)# Trampoline Routing Specification
 
 ## Overview
 
-Trampoline routing is a payment routing mechanism that allows nodes with limited routing information to make payments by delegating pathfinding to intermediate "trampoline" nodes. This document describes the implementation of trampoline routing in Fiber Network, inspired by the [Lightning Network BOLT proposal](https://github.com/lightning/bolts/blob/master/proposals/trampoline.md).
+Trampoline routing is a payment routing mechanism that allows nodes with limited routing information to make payments by delegating pathfinding to intermediate "trampoline" nodes. This document describes the implementation of trampoline routing in Fiber Network, inspired by the [Lightning Network BOLT proposal](https://github.com/lightning/bolts/blob/trampoline-routing/proposals/trampoline.md).
 
 ## Motivation
 
@@ -37,86 +147,85 @@ Sender → [Outer Onion] → First Trampoline → [Inner Onion] → Next Trampol
 Defined in [`types.rs`](../../crates/fiber-lib/src/fiber/types.rs#L3833):
 
 ```rust
-pub struct TrampolineOnionPacket {
-    data: Vec<u8>,
-}
-```
-
-- Uses Sphinx onion construction (same as outer payment onion)
-- Smaller packet size: `TRAMPOLINE_PACKET_DATA_LEN = 1300` bytes
-- Embedded in the `trampoline_onion` field of outer payment hop payload
-
-#### 2. Trampoline Hop Payload
-
-Two types of payloads ([`types.rs`](../../crates/fiber-lib/src/fiber/types.rs#L3778)):
-
-**Forward Payload** (for trampoline nodes):
-```rust
-TrampolineHopPayload::Forward {
-    next_node_id: Pubkey,              // Next hop in trampoline route
-    amount_to_forward: u128,           // Amount to forward (excluding fees)
-    build_max_fee_amount: Option<u128>, // Fee budget for outer route construction
-    tlc_expiry_delta: u64,             // Expiry delta for next hop
-    tlc_expiry_limit: u64,             // Upper bound on expiry
-    max_parts: Option<u64>,            // MPP support flag
-}
-```
-
-**Final Payload** (for recipient):
-```rust
-TrampolineHopPayload::Final {
-    final_amount: u128,                // Amount recipient should receive
-    final_tlc_expiry_delta: u64,       // Final expiry delta
-    payment_preimage: Option<Hash256>, // For keysend payments
-    custom_records: Option<PaymentCustomRecords>, // MPP and custom data
-}
-```
-
-## Payment Flow
-
-### 1. Sender Initiates Trampoline Payment
-
-The sender specifies trampoline nodes via RPC ([`payment.rs`](../../crates/fiber-lib/src/rpc/payment.rs#L143)):
-
-```rust
-pub struct SendPaymentCommand {
-    // ... other fields ...
-    pub trampoline_hops: Option<Vec<TrampolineHopParams>>,
-}
-```
-
-Each trampoline hop specifies:
-- `pubkey`: Trampoline node public key
-- `fee_rate`: Optional service fee rate in ppm (default: `DEFAULT_FEE_RATE * 2`)
-- `tlc_expiry_delta`: Optional expiry delta (default: `DEFAULT_TLC_EXPIRY_DELTA`)
-
-### 2. Trampoline Route Construction
-
-The route building process ([`graph.rs`](../../crates/fiber-lib/src/fiber/graph.rs#L1313)) consists of:
-
-#### Step 1: Validate Trampoline Hops
-
-- Must be non-empty
-- Maximum 5 hops (`MAX_TRAMPOLINE_HOPS_LIMIT`)
-- Cannot contain target node
-- No duplicate nodes
 - All nodes must support trampoline routing feature
 
-#### Step 2: Calculate Trampoline Service Fees
+#### Step 2: Validate Fee Budget
 
-Service fees are calculated backwards from final recipient:
+Trampoline routing currently requires `max_fee_amount` to be explicitly set. A minimal
+and maximal recommended fee budget is estimated using the default fee rate (not per-hop
+`fee_rate`) to guard against obviously insufficient budgets.
 
 ```rust
-let mut next_amount_to_forward = final_amount;
-for hop in trampoline_hops.iter().rev() {
-    forward_amounts[idx] = next_amount_to_forward;
-
-    let fee_rate_ppm = hop.fee_rate
-        .unwrap_or(DEFAULT_FEE_RATE * 2) as u128;
-    let fee = calculate_tlc_forward_fee(next_amount_to_forward, fee_rate_ppm)?;
-
-    next_amount_to_forward = next_amount_to_forward.saturating_add(fee);
+let default_min_fee = estimate_trampoline_fee(final_amount, 1, hops)?;
+if max_fee_amount < default_min_fee {
+    let default_max_fee = estimate_trampoline_fee(final_amount, 10, hops)?;
+    return Err("max_fee_amount is too low for trampoline routing: recommend_minimal_fee=...".into());
 }
+```
+
+#### Step 3: Build Outer Route to First Trampoline
+
+```rust
+let route_to_trampoline = self.find_path(
+    source,
+    first_trampoline,
+    Some(final_amount + max_fee_amount),
+    None,
+    // ... other parameters
+)?;
+```
+
+The sender tries to deliver `final_amount + max_fee_amount` to the first trampoline.
+Any routing fee consumed on this outer route reduces the amount received by the first trampoline.
+
+#### Step 4: Allocate Routing Fee Budget Among Trampoline Hops
+
+```rust
+let first_hop_fee = final_amount
+    .saturating_sub(route_to_trampoline.last().map_or(0, |h| h.amount_received));
+
+if first_hop_fee > max_fee_amount {
+    return Err("max_fee_amount is too low for trampoline routing: first_hop_fee=...".into());
+}
+
+let remaining_fee = max_fee_amount.saturating_sub(first_hop_fee);
+let slots = hops.len() as u128;
+let base = remaining_fee / slots;
+let remainder = (remaining_fee % slots) as usize;
+fees.fill(base);
+for fee in fees.iter_mut().take(remainder) {
+    *fee = fee.saturating_add(1);
+}
+
+if fees.iter().any(|&f| f == 0) {
+    return Err("max_fee_amount is too low for trampoline routing: fee for a trampoline hop is zero".into());
+}
+```
+
+The routing budget is evenly split across the trampoline hops (no extra segment for the sender).
+Each hop gets `fees[idx]` as its `build_max_fee_amount`.
+
+#### Step 5: Construct Inner Trampoline Onion
+
+```rust
+let trampoline_onion = TrampolineOnionPacket::create(
+    session_key,
+    trampoline_path,  // [t1, t2, ..., final]
+    payloads,         // Forward/Final payloads
+    Some(payment_hash),
+    &secp_ctx,
+)?;
+```
+
+The outer route embeds the trampoline onion in its final hop:
+```rust
+PaymentHopData {
+    // ... standard fields ...
+    trampoline_onion: Some(trampoline_onion_bytes),
+}
+```
+
+### 3. Trampoline Forwarding
 ```
 
 Formula:
@@ -281,198 +390,3 @@ if let Some(TrampolineHopPayload::Final {
     // Settle TLC with preimage
 }
 ```
-
-## Fee Model
-
-### Service Fees vs Routing Fees
-
-**Trampoline Service Fee**: Fee charged by trampoline node for pathfinding service
-- Configured per-hop via `fee_rate` (ppm)
-- Default: `DEFAULT_FEE_RATE * 2`
-- Calculated and reserved upfront
-
-**Routing Fee**: Fee paid to intermediate channel hops in outer payment onion
-- Dynamically calculated during pathfinding
-- Budget allocated from `max_fee_amount - service_fee_total`
-
-### Fee Budget Calculation
-
-When `max_fee_amount` is not specified, a default budget is calculated:
-
-```rust
-let single_forward_fee = calculate_tlc_forward_fee(
-    amount_to_first_trampoline,
-    DEFAULT_FEE_RATE as u128,
-)?;
-
-let default_min_fee = trampoline_service_fee_total
-    + trampoline_hops.len() as u128 * single_forward_fee;
-
-let default_max_fee = trampoline_service_fee_total
-    + trampoline_hops.len() as u128 * single_forward_fee * 10;
-```
-
-If user-specified `max_fee_amount` is too low:
-```
-Error: max_fee_amount too low for trampoline service fees:
-       recommend_minimal_fee={}, maximal_fee={}, current_fee={}
-```
-
-## Expiry Delta Handling
-
-Trampoline routing accumulates expiry deltas across hops:
-
-```rust
-fn trampoline_forward_expiry_delta(
-    &self,
-    base_final: u64,
-    remaining_trampoline_hops: &[TrampolineHop],
-    tlc_expiry_limit: u64,
-) -> Result<u64, PathFindError> {
-    let slack = remaining_trampoline_hops
-        .iter()
-        .map(|h| h.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA))
-        .try_fold(0u64, |acc, d| acc.checked_add(d))?;
-
-    let total = base_final.checked_add(slack)?;
-
-    if total > tlc_expiry_limit {
-        return Err(PathFindError::ExpiryLimitExceeded);
-    }
-
-    Ok(total)
-}
-```
-
-## Multi-Part Payment (MPP) Support
-
-Trampoline routing supports MPP when:
-- `max_parts > 1` is specified
-- The `max_parts` value is propagated through trampoline hops
-- Each trampoline node can split payments when building outer routes
-
-```rust
-let max_parts = if payment_data.allow_mpp() {
-    Some(payment_data.max_parts() as u64)
-} else {
-    None
-};
-```
-
-## Settlement and Error Handling
-
-### Forward Settlement
-
-When a trampoline forwards a payment, it tracks:
-```rust
-pub struct TrampolineContext {
-    remaining_trampoline_onion: Vec<u8>,
-    previous_tlcs: Vec<PrevTlcInfo>,
-}
-```
-
-The `previous_tlcs` links are used to settle HTLCs backwards when payment succeeds.
-
-### Error Propagation
-
-If forwarding fails, the trampoline returns:
-```rust
-Err(TlcErr::new_node_fail(
-    TlcErrorCode::TemporaryNodeFailure,  // Or FeeInsufficient, etc.
-    state.get_public_key(),
-))
-```
-
-Errors propagate back through the payment chain, settling or failing HTLCs accordingly.
-
-## Privacy Considerations
-
-### Sender Privacy
-- Sender only needs to know first trampoline node
-- Intermediate trampoline nodes don't know sender identity (via outer onion)
-- Route beyond first trampoline is hidden from sender
-
-### Recipient Privacy
-- Trampoline nodes know the final recipient
-- But don't know the original sender
-- Amount privacy depends on fee randomization
-
-### Trampoline Node Privacy
-- Each trampoline node only knows:
-  - Previous hop (from outer onion)
-  - Next hop (from inner onion)
-- Full route is not visible to any single trampoline
-
-## Feature Detection
-
-Nodes advertise trampoline support via feature flags:
-
-```rust
-fn is_node_support_trampoline_routing(&self, pubkey: &Pubkey) -> bool {
-    // Check if node has trampoline routing feature bit set
-    self.get_node_features(pubkey)
-        .map(|f| f.supports_trampoline())
-        .unwrap_or(false)
-}
-```
-
-## Limitations and Constraints
-
-### Hard Limits
-- Maximum trampoline hops: 5 (`MAX_TRAMPOLINE_HOPS_LIMIT`)
-- Trampoline packet size: 1300 bytes (`TRAMPOLINE_PACKET_DATA_LEN`)
-- Outer payment onion size: 6500 bytes (`PACKET_DATA_LEN`)
-
-### Validation Rules
-1. Trampoline hops must be non-empty when specified
-2. Cannot contain duplicate nodes
-3. Cannot contain target node
-4. All nodes must support trampoline routing
-5. Total expiry delta must not exceed `tlc_expiry_limit`
-
-### Fee Requirements
-- `max_fee_amount` must cover all trampoline service fees
-- Remaining budget must be sufficient for routing fees
-- Recommended minimum fee is calculated automatically
-
-## Comparison with Standard Routing
-
-| Aspect | Standard Routing | Trampoline Routing |
-|--------|------------------|-------------------|
-| Network Graph | Full graph required | Only need to know trampolines |
-| Pathfinding | At sender only | Delegated to trampolines |
-| Privacy | Route known to sender | Route partially hidden |
-| Computational Cost | High (full graph) | Low (partial graph) |
-| Fee Overhead | Channel fees only | Service fees + channel fees |
-| Light Client Support | Difficult | Excellent |
-
-## Implementation Files
-
-Key implementation files:
-- [`types.rs`](../../crates/fiber-lib/src/fiber/types.rs): `TrampolineOnionPacket`, `TrampolineHopPayload`
-- [`graph.rs`](../../crates/fiber-lib/src/fiber/graph.rs): Route construction with trampoline support
-- [`network.rs`](../../crates/fiber-lib/src/fiber/network.rs): `forward_trampoline_packet()` handler
-- [`payment.rs`](../../crates/fiber-lib/src/fiber/payment.rs): `SendPaymentData`, `TrampolineHop`, `TrampolineContext`
-- [`channel.rs`](../../crates/fiber-lib/src/fiber/channel.rs): Final recipient processing
-
-## Test Coverage
-
-Comprehensive tests in:
-- [`tests/graph.rs`](../../crates/fiber-lib/src/fiber/tests/graph.rs): Route construction tests
-- [`tests/trampoline.rs`](../../crates/fiber-lib/src/fiber/tests/trampoline.rs): End-to-end trampoline payment tests
-- [`tests/types.rs`](../../crates/fiber-lib/src/fiber/tests/types.rs): Onion packet serialization tests
-
-## Future Enhancements
-
-Potential improvements:
-1. **Dynamic Trampoline Selection**: Auto-select trampoline nodes based on network conditions
-2. **Adaptive Fee Budgets**: Learn optimal fee allocations over time
-3. **Trampoline Reputation**: Track success rates and adjust routing preferences
-4. **Rendezvous Routing**: Combine trampoline with recipient-initiated routing
-5. **Payment Metadata**: Support arbitrary data in trampoline payload (encrypted)
-
-## References
-
-- [Lightning Network Trampoline Proposal](https://github.com/lightning/bolts/blob/master/proposals/trampoline.md)
-- [Eclair Trampoline Implementation](https://github.com/ACINQ/eclair/blob/master/docs/Trampoline.md)
-- [Sphinx Onion Routing](https://cypherpunks.ca/~iang/pubs/Sphinx_Oakland09.pdf)
