@@ -112,9 +112,10 @@ pub(crate) fn calculate_shutdown_tx_fee(
     fee_rate.fee(tx_size).as_u64()
 }
 
-pub(crate) fn calculate_tlc_forward_fee(
+pub(crate) fn calculate_fee_with_base(
     amount: u128,
     fee_proportational_millionths: u128,
+    base: u128,
 ) -> Result<u128, String> {
     let fee = fee_proportational_millionths
         .checked_mul(amount)
@@ -124,13 +125,20 @@ pub(crate) fn calculate_tlc_forward_fee(
                 fee_proportational_millionths, amount
             )
         })?;
-    let base_fee = fee / 1_000_000;
-    let remainder = fee % 1_000_000;
+    let base_fee = fee / base;
+    let remainder = fee % base;
     if remainder > 0 {
         Ok(base_fee + 1)
     } else {
         Ok(base_fee)
     }
+}
+
+pub(crate) fn calculate_tlc_forward_fee(
+    amount: u128,
+    fee_proportational_millionths: u128,
+) -> Result<u128, String> {
+    calculate_fee_with_base(amount, fee_proportational_millionths, 1_000_000)
 }
 
 pub(crate) fn check_open_channel_parameters(

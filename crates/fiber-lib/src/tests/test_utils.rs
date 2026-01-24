@@ -902,6 +902,8 @@ impl NetworkNode {
             target_pubkey: Some(recipient.pubkey),
             amount: Some(amount),
             keysend: Some(true),
+            // set a max fee rate to avoid test failure due to fee rate fluctuation
+            max_fee_rate: Some(1000),
             allow_self_payment: false,
             dry_run,
             ..Default::default()

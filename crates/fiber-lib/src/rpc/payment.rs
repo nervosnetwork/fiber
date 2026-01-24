@@ -127,9 +127,14 @@ pub struct SendPaymentCommandParams {
     #[serde_as(as = "Option<U64Hex>")]
     pub timeout: Option<u64>,
 
-    /// the maximum fee amounts in shannons that the sender is willing to pay
+    /// the maximum fee amounts in shannons that the sender is willing to pay,
+    /// default is 0.5% * amount
     #[serde_as(as = "Option<U128Hex>")]
     pub max_fee_amount: Option<u128>,
+
+    /// the maximum fee rate per thousand (‰), default is 5 (0.5%)
+    #[serde_as(as = "Option<U64Hex>")]
+    pub max_fee_rate: Option<u64>,
 
     /// max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
@@ -383,6 +388,7 @@ where
                     invoice: params.invoice.clone(),
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,
+                    max_fee_rate: params.max_fee_rate,
                     max_parts: params.max_parts,
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
