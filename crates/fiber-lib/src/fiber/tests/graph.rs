@@ -1070,42 +1070,23 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
 
     // Compute expected values following `NetworkGraph::find_trampoline_route` logic.
     let hops = vec![h1, h2, h3];
+    let mut fees = vec![0u128; hops.len() + 1];
+    let slots = fees.len() as u128;
+    let base = max_fee_amount / slots;
+    let remainder = (max_fee_amount % slots) as usize;
+    fees.iter_mut().for_each(|b| *b = base);
+    for fee in fees.iter_mut().take(remainder) {
+        *fee = fee.saturating_add(1);
+    }
+
     let mut forward_amounts = vec![0u128; hops.len()];
-    let mut min_incoming_for_service = vec![0u128; hops.len()];
-    let mut next_amount_to_forward = final_amount;
-    for (idx, hop) in hops.iter().enumerate().rev() {
-        forward_amounts[idx] = next_amount_to_forward;
-        let fee = crate::fiber::fee::calculate_tlc_forward_fee(
-            next_amount_to_forward,
-            hop.fee_rate.unwrap_or(0) as u128,
-        )
-        .expect("fee calc");
-        next_amount_to_forward = next_amount_to_forward.saturating_add(fee);
-        min_incoming_for_service[idx] = next_amount_to_forward;
-    }
-    let amount_to_first_trampoline = next_amount_to_forward;
-    let service_fee_total = amount_to_first_trampoline.saturating_sub(final_amount);
-    assert!(
-        service_fee_total <= max_fee_amount,
-        "test setup: budget too low"
-    );
-    let remaining_budget = max_fee_amount.saturating_sub(service_fee_total);
-
-    let mut budgets = vec![0u128; hops.len() + 1];
-    if remaining_budget > 0 {
-        let slots = budgets.len() as u128;
-        let base = remaining_budget / slots;
-        let remainder = (remaining_budget % slots) as usize;
-        budgets.iter_mut().for_each(|b| *b = base);
-        for budget in budgets.iter_mut().take(remainder) {
-            *budget = budget.saturating_add(1);
-        }
+    for idx in 0..hops.len() {
+        forward_amounts[idx] = final_amount + fees[(idx + 2)..].iter().sum::<u128>();
     }
 
-    let t_budgets = &budgets[1..];
     let mut exp_build_max_fee_amounts = vec![0u128; hops.len()];
     for idx in 0..hops.len() {
-        exp_build_max_fee_amounts[idx] = t_budgets.get(idx).copied().unwrap_or(0);
+        exp_build_max_fee_amounts[idx] = fees.get(idx + 1).copied().unwrap_or(0);
     }
 
     let secp = secp256k1::Secp256k1::new();

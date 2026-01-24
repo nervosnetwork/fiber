@@ -1187,6 +1187,10 @@ where
         }) = last_hop_inner_onion
         {
             if forward_amount != add_tlc.amount || forward_amount > final_amount {
+                error!(
+                    "final amount mismatch for trampoline final hop: {:?}, {:?}, {:?} add_tlc.amount: {:?}",
+                    payment_hash, forward_amount, final_amount, add_tlc.amount
+                );
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
 
