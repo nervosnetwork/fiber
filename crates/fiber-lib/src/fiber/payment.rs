@@ -8,7 +8,7 @@ use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
     MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
-use crate::fiber::fee::calculate_fee_with_base;
+use crate::fiber::fee::{calculate_fee_with_base, calculate_tlc_forward_fee};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{
     GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
@@ -674,6 +674,8 @@ impl SendPaymentData {
 pub struct PaymentSession {
     pub request: SendPaymentData,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_error_code: Option<TlcErrorCode>,
     // For non-MPP, this is the maximum number of single attempt retry limit
     // For MPP, this is the sum limit of all parts' retry times.
     pub try_limit: u32,
@@ -694,6 +696,7 @@ impl PaymentSession {
         Self {
             request,
             last_error: None,
+            last_error_code: None,
             try_limit,
             status: PaymentStatus::Created,
             created_at: now,
@@ -919,6 +922,7 @@ impl PaymentSession {
     pub fn set_success_status(&mut self) {
         self.set_status(PaymentStatus::Success);
         self.last_error = None;
+        self.last_error_code = None;
     }
 
     pub fn set_failed_status(&mut self, error: &str) {
@@ -1195,6 +1199,8 @@ pub struct TrampolineContext {
     pub previous_tlcs: Vec<PrevTlcInfo>,
     /// Hash algorighm used for the payment.
     pub hash_algorithm: HashAlgorithm,
+    /// available max fee amount for trampoline forwarding
+    pub available_fee_amount: u128,
 }
 
 impl SendPaymentCommand {
@@ -1779,6 +1785,8 @@ where
                 }
                 Ok(mut hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
+                    self.apply_trampoline_forwarding_fee(session, source, &hops, &mut max_fee)
+                        .await?;
 
                     // Embed trampoline onion in the last hop if available
                     // This is needed both for actual payments and dry_run to get correct fee calculations
@@ -1845,6 +1853,12 @@ where
                         remain_amount
                     };
                     if let Some(fee) = max_fee {
+                        if session.request.trampoline_context.is_some() && fee < session_route.fee()
+                        {
+                            return Err(Error::SendPaymentError(
+                                "Trampoline forwarding fee insufficient".to_string(),
+                            ));
+                        }
                         max_fee = Some(fee - session_route.fee());
                     }
                     result.push(attempt);
@@ -1868,6 +1882,70 @@ where
         }
 
         return Ok(result);
+    }
+
+    async fn apply_trampoline_forwarding_fee(
+        &self,
+        session: &mut PaymentSession,
+        source: Pubkey,
+        hops: &[PaymentHopData],
+        max_fee: &mut Option<u128>,
+    ) -> Result<(), Error> {
+        if session.request.trampoline_context.is_none() {
+            return Ok(());
+        }
+
+        let first_hop = hops.first().ok_or_else(|| {
+            Error::SendPaymentError("Trampoline forwarding requires at least one hop".to_string())
+        })?;
+        let channel_outpoint = OutPoint::new(first_hop.funding_tx_hash.into(), 0);
+        let fee_rate = {
+            let graph = self.network_graph.read().await;
+            let channel_info = graph.get_channel(&channel_outpoint).ok_or_else(|| {
+                Error::SendPaymentError(format!(
+                    "Trampoline forwarding channel not found: {:?}",
+                    channel_outpoint
+                ))
+            })?;
+            let update = if channel_info.node1 == source {
+                channel_info.update_of_node1.as_ref()
+            } else if channel_info.node2 == source {
+                channel_info.update_of_node2.as_ref()
+            } else {
+                None
+            }
+            .ok_or_else(|| {
+                Error::SendPaymentError(format!(
+                    "Trampoline forwarding channel update missing: {:?}",
+                    channel_outpoint
+                ))
+            })?;
+            update.fee_rate
+        };
+
+        let local_fee =
+            calculate_tlc_forward_fee(first_hop.amount, fee_rate as u128).map_err(|err| {
+                Error::SendPaymentError(format!(
+                    "Trampoline forwarding fee calculation failed: {:?}",
+                    err
+                ))
+            })?;
+
+        let fee_budget = max_fee.ok_or_else(|| {
+            Error::SendPaymentError("Trampoline forwarding requires max_fee_amount".to_string())
+        })?;
+        if fee_budget < local_fee {
+            session.last_error_code = Some(TlcErrorCode::FeeInsufficient);
+            error!(
+                "not enough fee budget for trampoline forwarding: budget {}, required {}",
+                fee_budget, local_fee
+            );
+            return Err(Error::SendPaymentError(
+                "Trampoline forwarding fee insufficient".to_string(),
+            ));
+        }
+        *max_fee = Some(fee_budget - local_fee);
+        Ok(())
     }
 
     async fn send_payment_onion_packet(
@@ -1939,8 +2017,16 @@ where
         }
     }
 
-    fn set_payment_fail_with_error(&self, session: &mut PaymentSession, error: &str) {
+    fn set_payment_fail_with_error(
+        &self,
+        session: &mut PaymentSession,
+        error: &str,
+        error_code: Option<TlcErrorCode>,
+    ) {
         session.set_failed_status(error);
+        if error_code.is_some() {
+            session.last_error_code = error_code;
+        }
         if !session.is_dry_run() {
             self.store.insert_payment_session(session.clone());
         }
@@ -1954,7 +2040,7 @@ where
         retryable: bool,
     ) {
         if !retryable && !session.active_attempts().any(|a| a.id != attempt.id) {
-            self.set_payment_fail_with_error(session, error);
+            self.set_payment_fail_with_error(session, error, None);
         }
 
         attempt.set_failed_status(error, retryable);
@@ -2017,7 +2103,7 @@ where
             .build_payment_routes(&mut session)
             .await
             .inspect_err(|e| {
-                self.set_payment_fail_with_error(&mut session, &e.to_string());
+                self.set_payment_fail_with_error(&mut session, &e.to_string(), None);
             })?;
 
         for attempt in attempts.iter_mut() {
@@ -2232,7 +2318,7 @@ where
         let more_attempt = session.allow_more_attempts();
         if !more_attempt && session.remain_amount() > 0 {
             let err = "Can not send payment with limited attempts";
-            self.set_payment_fail_with_error(session, err);
+            self.set_payment_fail_with_error(session, err, None);
             return Err(Error::SendPaymentError(err.to_string()));
         }
         Ok(more_attempt)

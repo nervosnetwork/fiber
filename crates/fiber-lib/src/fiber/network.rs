@@ -2471,7 +2471,7 @@ where
                 tlc_expiry_limit,
                 max_parts,
             } => {
-                if incoming_amount < amount_to_forward {
+                if incoming_amount <= amount_to_forward {
                     error!(
                         "Trampoline forwarding fee insufficient: incoming {}, forward {}",
                         incoming_amount, amount_to_forward
@@ -2481,6 +2481,97 @@ where
                         state.get_public_key(),
                     ));
                 }
+                let available_fee_amount = incoming_amount.saturating_sub(amount_to_forward);
+                if available_fee_amount != build_max_fee_amount.expect("have fee amount") {
+                    error!(
+                        "Trampoline forwarding fee mismatch: available {}, build max {}",
+                        available_fee_amount,
+                        build_max_fee_amount.expect("have fee amount")
+                    );
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::InvalidOnionPayload,
+                        state.get_public_key(),
+                    ));
+                }
+
+                // let allow_mpp = max_parts.is_some_and(|v| v > 1);
+                // let expected_fee = {
+                //     let graph = self.network_graph.read().await;
+                //     let route = graph
+                //         .find_path(
+                //             state.get_public_key(),
+                //             next_node_id,
+                //             Some(amount_to_forward),
+                //             build_max_fee_amount,
+                //             udt_type_script.clone(),
+                //             tlc_expiry_delta,
+                //             tlc_expiry_limit,
+                //             false,
+                //             &[],
+                //             &Default::default(),
+                //             allow_mpp,
+                //         )
+                //         .map_err(|err| {
+                //             error!("Trampoline forwarding route precheck failed: {:?}", err);
+                //             TlcErr::new_node_fail(
+                //                 TlcErrorCode::TemporaryNodeFailure,
+                //                 state.get_public_key(),
+                //             )
+                //         })?;
+
+                //     let first_hop = route.first().ok_or_else(|| {
+                //         TlcErr::new_node_fail(
+                //             TlcErrorCode::TemporaryNodeFailure,
+                //             state.get_public_key(),
+                //         )
+                //     })?;
+
+                //     let channel =
+                //         graph
+                //             .get_channel(&first_hop.channel_outpoint)
+                //             .ok_or_else(|| {
+                //                 TlcErr::new_node_fail(
+                //                     TlcErrorCode::TemporaryNodeFailure,
+                //                     state.get_public_key(),
+                //                 )
+                //             })?;
+
+                //     let fee_rate = if channel.node1 == state.get_public_key() {
+                //         channel.update_of_node1.map(|u| u.fee_rate)
+                //     } else if channel.node2 == state.get_public_key() {
+                //         channel.update_of_node2.map(|u| u.fee_rate)
+                //     } else {
+                //         None
+                //     }
+                //     .ok_or_else(|| {
+                //         TlcErr::new_node_fail(
+                //             TlcErrorCode::TemporaryNodeFailure,
+                //             state.get_public_key(),
+                //         )
+                //     })?;
+
+                //     calculate_tlc_forward_fee(amount_to_forward, fee_rate as u128).map_err(
+                //         |err| {
+                //             error!("Trampoline forwarding fee calculation failed: {:?}", err);
+                //             TlcErr::new_node_fail(
+                //                 TlcErrorCode::TemporaryNodeFailure,
+                //                 state.get_public_key(),
+                //             )
+                //         },
+                //     )?
+                // };
+
+                // let paid_fee = incoming_amount.saturating_sub(amount_to_forward);
+                // if paid_fee < expected_fee {
+                //     error!(
+                //         "Trampoline forwarding fee too low: paid {}, expected {}",
+                //         paid_fee, expected_fee
+                //     );
+                //     return Err(TlcErr::new_node_fail(
+                //         TlcErrorCode::FeeInsufficient,
+                //         state.get_public_key(),
+                //     ));
+                // }
 
                 let (Some(remaining_trampoline_onion), Some(mut prev_tlc)) =
                     (peeled_trampoline.next.map(|p| p.into_bytes()), previous_tlc)
@@ -2507,6 +2598,7 @@ where
                             // maybe we need to support multiple previous tlcs in the future
                             previous_tlcs: vec![prev_tlc],
                             hash_algorithm,
+                            available_fee_amount,
                         }))
                         .allow_mpp(max_parts.is_some_and(|v| v > 1))
                         .build()
@@ -4035,6 +4127,9 @@ where
                     }
                 }
                 PaymentStatus::Failed => {
+                    let error_code = session
+                        .last_error_code
+                        .unwrap_or(TlcErrorCode::TemporaryNodeFailure);
                     for prev_tlc in &context.previous_tlcs {
                         let (send, _recv) = oneshot::channel();
                         let rpc_reply = RpcReplyPort::from(send);
@@ -4043,7 +4138,7 @@ where
                             RemoveTlcCommand {
                                 id: prev_tlc.prev_tlc_id,
                                 reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    TlcErr::new(TlcErrorCode::TemporaryNodeFailure),
+                                    TlcErr::new(error_code),
                                     &shared_secret,
                                 )),
                             },

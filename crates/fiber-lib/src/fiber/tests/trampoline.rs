@@ -1419,6 +1419,73 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
 }
 
 #[tokio::test]
+async fn test_trampoline_forwarding_fee_insufficient_due_to_rate_cap() {
+    init_tracing();
+
+    // A --(public, cheap)--> T1 --(public, expensive)--> C
+    // Payer's max_fee_amount is clamped by max_fee_rate, causing T1's forwarding fee check to fail.
+    let usable_cap = 20_000_000;
+    let common_funding = MIN_RESERVED_CKB + usable_cap;
+
+    let channels_params = vec![
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(10000),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 3, None).await;
+    let [node_a, node_t1, node_c] = nodes.try_into().expect("3 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+    wait_until_node_has_public_channels_at_least(&node_a, 2).await;
+
+    let amount: u128 = 2000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .expect("build invoice");
+    node_c.insert_invoice(invoice.clone(), Some(preimage));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![TrampolineHop::new(node_t1.get_public_key())]),
+            max_fee_amount: Some(10_000_000),
+            max_fee_rate: Some(5),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_failed(payment_hash).await;
+    let payment_res = node_a.get_payment_result(payment_hash).await;
+    let failed_error = payment_res.failed_error.unwrap_or_default();
+    debug!("Payment failed error: {failed_error}");
+    assert!(failed_error.contains("FeeInsufficient"));
+}
+
+#[tokio::test]
 async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     init_tracing();
     // A -- B. We test B.
@@ -1507,6 +1574,100 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
         .expect("send command");
 
     // 3. Assert Error
+    let res = receiver.await.expect("recv result");
+    match res {
+        Err(tlc_err) => {
+            assert_eq!(tlc_err.error_code, TlcErrorCode::FeeInsufficient);
+        }
+        Ok(_) => panic!("Should have failed with FeeInsufficient"),
+    }
+}
+
+#[tokio::test]
+async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
+    init_tracing();
+    // A -- B. We test B.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+
+    // Deconstruct nodes
+    let node_b = &nodes[1];
+    let channel_ab = channels[0];
+
+    let secp = Secp256k1::new();
+    let payment_hash = gen_rand_sha256_hash();
+
+    // Construct Trampoline Onion for B
+    let (_sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
+    let final_target: Pubkey = pk.into();
+
+    let forward_payload = TrampolineHopPayload::Forward {
+        next_node_id: final_target,
+        amount_to_forward: 1000,
+        build_max_fee_amount: Some(0),
+        tlc_expiry_delta: 144,
+        tlc_expiry_limit: 5000,
+        max_parts: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+    };
+
+    // Path: [B, Final].
+    let payloads = vec![
+        forward_payload,
+        TrampolineHopPayload::Final {
+            final_amount: 1000,
+            final_tlc_expiry_delta: 144,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let path = vec![node_b.pubkey, final_target];
+
+    let session_key = Privkey::from_slice(&[2u8; 32]);
+    let trampoline_onion_bytes = TrampolineOnionPacket::create(
+        session_key,
+        path,
+        payloads,
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create onion")
+    .into_bytes();
+
+    // Incoming amount equals amount_to_forward -> should be treated as insufficient fee
+    let peeled_packet = PeeledPaymentOnionPacket {
+        current: CurrentPaymentHopData {
+            amount: 1000,
+            expiry: 5000,
+            payment_preimage: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+            funding_tx_hash: Default::default(),
+            custom_records: None,
+            trampoline_onion: Some(trampoline_onion_bytes),
+        },
+        shared_secret: [0u8; 32],
+        next: None,
+    };
+
+    let (sender, receiver) = oneshot::channel();
+    let command = NetworkActorCommand::SendPaymentOnionPacket(
+        SendOnionPacketCommand {
+            peeled_onion_packet: peeled_packet,
+            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, 0)),
+            payment_hash,
+            attempt_id: None,
+        },
+        RpcReplyPort::from(sender),
+    );
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(command))
+        .expect("send command");
+
     let res = receiver.await.expect("recv result");
     match res {
         Err(tlc_err) => {
@@ -1693,6 +1854,7 @@ async fn test_trampoline_routing_retry_with_intermediate_failure() {
             invoice: Some(invoice.to_string()),
             trampoline_hops: Some(vec![TrampolineHop::new(node_b.get_public_key())]),
             max_fee_amount: Some(1000000),
+            max_fee_rate: Some(10),
             ..Default::default()
         })
         .await;
@@ -1901,6 +2063,7 @@ async fn test_trampoline_routing_two_hops_both_retry_success() {
                 TrampolineHop::new(node_t2.get_public_key()),
             ]),
             max_fee_amount: Some(10_000_000), // Enough for expensive paths
+            max_fee_rate: Some(1000),
             ..Default::default()
         })
         .await;
@@ -2614,7 +2777,98 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
 
     // 2. Prepare the PeeledPaymentOnionPacket
     let current_hop = CurrentPaymentHopData {
-        amount: 1000,
+        amount: 2000,
+        expiry: 5000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+        trampoline_onion: Some(trampoline_packet.into_bytes()),
+    };
+
+    let peeled_onion = PeeledPaymentOnionPacket {
+        current: current_hop,
+        next: None,
+        shared_secret: [0u8; 32],
+    };
+
+    let prev_tlc = PrevTlcInfo {
+        prev_channel_id: channels[0],
+        prev_tlc_id: 1, // arbitrary
+        forwarding_fee: 0,
+        shared_secret: None,
+    };
+
+    let command = SendOnionPacketCommand {
+        peeled_onion_packet: peeled_onion,
+        previous_tlc: Some(prev_tlc),
+        payment_hash,
+        attempt_id: Some(1),
+    };
+
+    // 3. Send the command to NetworkActor
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let port = ractor::RpcReplyPort::from(tx);
+    let msg =
+        NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(command, port));
+
+    node.network_actor.send_message(msg).expect("send message");
+
+    let res = rx.await.expect("receive reply");
+
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+
+    // Expect InvalidOnionPayload because next onion is missing (it's the last hop) but payload is Forward.
+    assert_eq!(err.error_code(), TlcErrorCode::InvalidOnionPayload);
+}
+
+#[tokio::test]
+async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
+    init_tracing();
+
+    // Create 2 nodes with 1 channel so we have a valid previous channel for forwarding check.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+    let node = &nodes[0];
+    let next_node_pubkey = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+
+    fn gen_rand_session_key() -> crate::fiber::types::Privkey {
+        let mut rng = rand::thread_rng();
+        let mut key = [0u8; 32];
+        rng.fill(&mut key);
+        key.into()
+    }
+
+    // 1. Construct a Trampoline Onion with Forward payload but no next hop (single hop).
+    let hop_data = TrampolineHopPayload::Forward {
+        next_node_id: next_node_pubkey,
+        amount_to_forward: 1000,
+        build_max_fee_amount: Some(1000),
+        tlc_expiry_delta: 100,
+        tlc_expiry_limit: 5000,
+        max_parts: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+    };
+
+    let session_key = gen_rand_session_key();
+    let secp = Secp256k1::new();
+    let trampoline_packet = TrampolineOnionPacket::create(
+        session_key,
+        vec![node.pubkey],
+        vec![hop_data],
+        Some(payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("build trampoline");
+
+    // 2. Prepare the PeeledPaymentOnionPacket
+    let current_hop = CurrentPaymentHopData {
+        amount: 1100, // Invalid amount to build max_fee_amount
         expiry: 5000,
         payment_preimage: None,
         hash_algorithm: HashAlgorithm::Sha256,
