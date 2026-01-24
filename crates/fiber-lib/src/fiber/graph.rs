@@ -1491,7 +1491,7 @@ where
     ) -> Result<u64, PathFindError> {
         let slack = remaining_trampoline_hops
             .iter()
-            .map(|h| h.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA))
+            .map(|_h| DEFAULT_TLC_EXPIRY_DELTA)
             .try_fold(0u64, |acc, d| {
                 acc.checked_add(d).ok_or_else(|| {
                     PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())

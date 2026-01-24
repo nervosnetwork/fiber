@@ -20,7 +20,6 @@ use crate::fiber::network::{
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
-use crate::fiber::serde_utils::U64Hex;
 use crate::fiber::types::{
     BasicMppPaymentData, BroadcastMessageWithTimestamp, PaymentHopData, PeeledPaymentOnionPacket,
     RemoveTlcReason, TlcErr, TlcErrorCode,
@@ -1123,31 +1122,11 @@ pub struct HopHint {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TrampolineHop {
     pub pubkey: Pubkey,
-    /// Optional fee rate (proportional millionths) charged by this trampoline hop.
-    ///
-    /// When provided, the payer uses it to pre-compute the amount ladder across trampoline hops.
-    /// When omitted, it defaults to 0.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub fee_rate: Option<u64>,
-    /// Optional TLC expiry delta (ms) contributed by this trampoline hop.
-    ///
-    /// When omitted, it defaults to `DEFAULT_TLC_EXPIRY_DELTA`.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub tlc_expiry_delta: Option<u64>,
 }
 
 impl TrampolineHop {
     pub fn new(pubkey: Pubkey) -> Self {
-        Self {
-            pubkey,
-            fee_rate: None,
-            tlc_expiry_delta: None,
-        }
-    }
-
-    pub fn with_fee_rate(mut self, fee_rate: u64) -> Self {
-        self.fee_rate = Some(fee_rate);
-        self
+        Self { pubkey }
     }
 }
 

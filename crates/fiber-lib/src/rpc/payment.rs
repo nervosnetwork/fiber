@@ -203,11 +203,7 @@ pub struct TrampolineHopParams {
 
 impl From<TrampolineHopParams> for TrampolineHop {
     fn from(h: TrampolineHopParams) -> Self {
-        TrampolineHop {
-            pubkey: h.pubkey,
-            fee_rate: h.fee_rate,
-            tlc_expiry_delta: h.tlc_expiry_delta,
-        }
+        TrampolineHop { pubkey: h.pubkey }
     }
 }
 /// A hop hint is a hint for a node to use a specific channel.

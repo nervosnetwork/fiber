@@ -3,8 +3,8 @@ use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMI
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::PathFindError;
-use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{SendPaymentData, SendPaymentDataBuilder};
+use crate::fiber::payment::{SessionRoute, TrampolineHop};
 use crate::fiber::types::{
     ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey, TrampolineOnionPacket,
 };
@@ -664,8 +664,7 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
     // With trampoline: should succeed by routing to C only.
     payment_data.trampoline_hops = Some(vec![crate::fiber::payment::TrampolineHop::new(
         trampoline.into(),
-    )
-    .with_fee_rate(0)]);
+    )]);
     let route = network
         .graph
         .build_route(payment_data.amount, None, None, &payment_data)
@@ -956,8 +955,7 @@ fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
 
     network.add_edge(1, 2, Some(10_000), Some(0));
 
-    let mut hop = crate::fiber::payment::TrampolineHop::new(t1.into());
-    hop.fee_rate = Some(1_000); // 1000 ppm => should charge at least 1 for amount=1000
+    let hop = crate::fiber::payment::TrampolineHop::new(t1.into());
 
     let payment_data =
         SendPaymentDataBuilder::new(final_recipient.into(), 1000, Hash256::default())
@@ -1001,10 +999,7 @@ fn test_graph_trampoline_routing_fee_rate_explicit_zero_allows_zero_fee_budget()
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(0))
-            .trampoline_hops(Some(vec![crate::fiber::payment::TrampolineHop::new(
-                t1.into(),
-            )
-            .with_fee_rate(0)]))
+            .trampoline_hops(Some(vec![TrampolineHop::new(t1.into())]))
             .build()
             .expect("valid payment_data");
 
@@ -1045,12 +1040,9 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let final_amount: u128 = 1000;
     let max_fee_amount: u128 = 15;
 
-    let mut h1 = crate::fiber::payment::TrampolineHop::new(t1.into());
-    h1.fee_rate = Some(1_000);
-    let mut h2 = crate::fiber::payment::TrampolineHop::new(t2.into());
-    h2.fee_rate = Some(2_000);
-    let mut h3 = crate::fiber::payment::TrampolineHop::new(t3.into());
-    h3.fee_rate = Some(3_000);
+    let h1 = crate::fiber::payment::TrampolineHop::new(t1.into());
+    let h2 = crate::fiber::payment::TrampolineHop::new(t2.into());
+    let h3 = crate::fiber::payment::TrampolineHop::new(t3.into());
 
     let payment_data =
         SendPaymentDataBuilder::new(final_recipient.into(), final_amount, payment_hash)
@@ -1069,7 +1061,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     assert_eq!(route[0].next_hop, Some(t1.into()));
 
     // Compute expected values following `NetworkGraph::find_trampoline_route` logic.
-    let hops = vec![h1, h2, h3];
+    let hops = [h1, h2, h3];
     let mut fees = vec![0u128; hops.len()];
     let remaining_fee = max_fee_amount;
     let slots = fees.len() as u128;
