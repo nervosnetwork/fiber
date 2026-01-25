@@ -1394,6 +1394,18 @@ impl NetworkNode {
             .expect("network actor is live");
     }
 
+    pub async fn update_node_features_and_wait(&self, features: FeatureVector) {
+        self.update_node_features(features.clone()).await;
+        for _ in 0..50 {
+            let info = self.node_info().await;
+            if info.features == features {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        panic!("node features update did not apply in time");
+    }
+
     pub async fn retry_send_payment(&self, payment_hash: Hash256, attempt_id: Option<u64>) {
         let message = NetworkActorMessage::Event(NetworkActorEvent::RetrySendPayment(
             payment_hash,

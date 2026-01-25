@@ -1357,12 +1357,13 @@ where
         let first_hop_fee = final_amount
             .saturating_sub(route_to_trampoline.last().map_or(0, |h| h.amount_received));
 
-        if first_hop_fee > max_fee_amount {
+        if first_hop_fee >= max_fee_amount {
             return Err(PathFindError::Other(format!(
                 "max_fee_amount is too low for trampoline routing: first_hop_fee={} current_fee={}",
                 first_hop_fee, max_fee_amount
             )));
         } else {
+            // adjust the amount_received by removing the first hop fee
             for r in route_to_trampoline.iter_mut() {
                 r.amount_received = r.amount_received.saturating_sub(first_hop_fee);
             }
@@ -1384,13 +1385,6 @@ where
             ));
         }
 
-        // allow next trampoline to know whether MPP is allowed and max parts
-        let max_parts = if payment_data.allow_mpp() {
-            Some(payment_data.max_parts() as u64)
-        } else {
-            None
-        };
-
         let mut payloads: Vec<TrampolineHopPayload> = Vec::with_capacity(hops.len() + 1);
         for (idx, _node) in hops.iter().enumerate() {
             let is_last_trampoline = idx + 1 == hops.len();
@@ -1400,7 +1394,6 @@ where
                 hops[idx + 1]
             };
 
-            // The next hop (if it is a trampoline) still needs slack for forwarding further.
             let remaining_trampoline_hops = if is_last_trampoline {
                 &[][..]
             } else {
@@ -1412,13 +1405,17 @@ where
                 amount_to_forward: final_amount + (fees[idx + 1..].iter().sum::<u128>()),
                 build_max_fee_amount: fees[idx],
                 hash_algorithm: payment_data.hash_algorithm(),
+                tlc_expiry_limit: payment_data.tlc_expiry_limit,
                 tlc_expiry_delta: self.trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,
                     remaining_trampoline_hops,
                     payment_data.tlc_expiry_limit,
                 )?,
-                max_parts,
-                tlc_expiry_limit: payment_data.tlc_expiry_limit,
+                max_parts: if payment_data.allow_mpp() {
+                    Some(payment_data.max_parts() as u64)
+                } else {
+                    None
+                },
             });
         }
 

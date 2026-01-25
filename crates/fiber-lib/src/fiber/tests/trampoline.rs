@@ -659,7 +659,7 @@ async fn test_trampoline_routing_four_private_trampoline_hops_payment_success() 
 }
 
 #[tokio::test]
-async fn test_trampoline_routing_max_trampoline_hops_success_and_each_hop_pathfinds() {
+async fn test_trampoline_routing_max_trampoline_hops_success() {
     init_tracing();
 
     // MAX_TRAMPOLINE_HOPS_LIMIT is 5.
@@ -733,7 +733,7 @@ async fn test_trampoline_routing_max_trampoline_hops_success_and_each_hop_pathfi
 }
 
 #[tokio::test]
-async fn test_trampoline_routing_single_trampoline_hop_succeeds_with_long_public_prefix_path() {
+async fn test_trampoline_single_hop_long_public_path() {
     init_tracing();
 
     // Only the last hop is private; all prior channels are public.
@@ -1347,6 +1347,116 @@ async fn test_trampoline_forwarding_fee_insufficient_due_to_rate_cap() {
     let failed_error = payment_res.failed_error.unwrap_or_default();
     debug!("Payment failed error: {failed_error}");
     assert!(failed_error.contains("FeeInsufficient"));
+}
+
+#[tokio::test]
+async fn test_trampoline_hops_reject_duplicates_or_target() {
+    init_tracing();
+
+    // A --(public)--> T1 --(public)--> T2 --(private)--> C
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        4,
+    )
+    .await;
+
+    let [node_a, node_t1, node_t2, node_c] = nodes.try_into().expect("4 nodes");
+
+    // Duplicate hop (loop) should be rejected.
+    let amount: u128 = 1000;
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            trampoline_hops: Some(vec![
+                node_t1.get_public_key(),
+                node_t2.get_public_key(),
+                node_t1.get_public_key(),
+            ]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_err());
+    let err_msg = res.err().unwrap().to_string();
+    assert!(err_msg.contains("trampoline_hops must not contain duplicates"));
+
+    // Target pubkey should not appear in trampoline hops.
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            trampoline_hops: Some(vec![node_t1.get_public_key(), node_c.get_public_key()]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_err());
+    let err_msg = res.err().unwrap().to_string();
+    assert!(err_msg.contains("trampoline_hops must not contain target_pubkey"));
+}
+
+#[tokio::test]
+async fn test_trampoline_hop_feature_disabled_during_payment() {
+    init_tracing();
+
+    // A --(public)--> T1 --(public)--> T2 --(private)--> C
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((2, 3), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        4,
+    )
+    .await;
+
+    let [node_a, node_t1, node_t2, node_c] = nodes.try_into().expect("4 nodes");
+
+    // Ensure A knows both hops support trampoline routing at creation time.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t2).await;
+    wait_until_node_has_public_channels_at_least(&node_a, 2).await;
+
+    let amount: u128 = 1000;
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            trampoline_hops: Some(vec![node_t1.get_public_key(), node_t2.get_public_key()]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    // Let the payment start, then disable trampoline feature on an intermediate hop.
+    // node_a.wait_until_inflight(payment_hash).await;
+    let mut features = FeatureVector::default();
+    features.unset_trampoline_routing_required();
+    node_t2.update_node_features_and_wait(features).await;
+
+    // Ensure forwarding happens after the feature update is applied.
+    node_t1.retry_send_payment(payment_hash, None).await;
+
+    node_a.wait_until_failed(payment_hash).await;
+
+    let node_t2_payment = node_t2.get_payment_session(payment_hash);
+    assert!(node_t2_payment.is_none());
+
+    let node_t1_payment = node_t1.get_payment_result(payment_hash).await;
+    let failed_error_t1 = node_t1_payment.failed_error.unwrap_or_default();
+    assert_eq!(failed_error_t1, "RequiredNodeFeatureMissing");
+
+    let payment_res = node_a.get_payment_result(payment_hash).await;
+    let failed_error = payment_res.failed_error.unwrap_or_default();
+    assert_eq!(failed_error, "RequiredNodeFeatureMissing");
 }
 
 #[tokio::test]
@@ -2974,8 +3084,6 @@ async fn test_trampoline_routing_mpp_intermediate_hop_will_fail() {
         .build()
         .expect("build invoice");
     node_d.insert_invoice(invoice.clone(), Some(preimage));
-    let payment_hash = *invoice.payment_hash();
-
     // A specifies B and C as trampoline hops.
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -2985,8 +3093,12 @@ async fn test_trampoline_routing_mpp_intermediate_hop_will_fail() {
         })
         .await;
 
-    assert!(res.is_ok());
-    node_a.wait_until_failed(payment_hash).await;
+    assert!(res.is_err());
+    let err_msg = res.err().unwrap().to_string();
+    assert!(
+        err_msg.contains("trampoline_hops must contain only one hop when MPP is enabled"),
+        "unexpected error: {err_msg}"
+    );
 }
 
 #[tokio::test]

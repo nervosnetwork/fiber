@@ -2444,6 +2444,15 @@ where
         trampoline_outer_shared_secret: Option<[u8; 32]>,
         incoming_amount: u128,
     ) -> Result<(), TlcErr> {
+        if !state.features.supports_trampoline_routing() {
+            error!(
+                "Trampoline forwarding rejected: local node does not support trampoline routing"
+            );
+            return Err(TlcErr::new_node_fail(
+                TlcErrorCode::RequiredNodeFeatureMissing,
+                state.get_public_key(),
+            ));
+        }
         let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
         let prev_channel_state = self
             .store

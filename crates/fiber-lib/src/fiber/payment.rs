@@ -372,8 +372,18 @@ impl SendPaymentDataBuilder {
                     MAX_TRAMPOLINE_HOPS_LIMIT
                 ));
             }
+            if self.allow_mpp && self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) > 1 && hops.len() > 1 {
+                return Err(
+                    "trampoline_hops must contain only one hop when MPP is enabled".to_string(),
+                );
+            }
             if hops.iter().any(|h| *h == target_pubkey) {
                 return Err("trampoline_hops must not contain target_pubkey".to_string());
+            }
+            if self.max_fee_amount.is_none() {
+                return Err(
+                    "max_fee_amount must be set when trampoline_hops is provided".to_string(),
+                );
             }
             let mut uniq = hops.clone();
             uniq.sort();
@@ -1245,7 +1255,6 @@ impl SendPaymentWithRouterCommand {
             ));
         };
 
-        // let source = self.network_graph.read().await.get_source_pubkey();
         let target = last_edge.target;
         let amount = last_edge.amount_received;
 
@@ -1930,7 +1939,7 @@ where
                     "Failed to create onion packet: {:?}, error: {:?}",
                     attempt.hash, e
                 );
-                self.set_attempt_fail_with_error(session, attempt, &err, false);
+                self.set_attempt_fail_with_error(session, attempt, None, &err, false);
                 return Err(Error::FirstHopError(err, false));
             }
         };
@@ -1968,7 +1977,13 @@ where
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
                 );
-                self.set_attempt_fail_with_error(session, attempt, &err, need_to_retry);
+                self.set_attempt_fail_with_error(
+                    session,
+                    attempt,
+                    Some(error_detail.error_code),
+                    &err,
+                    need_to_retry,
+                );
                 return Err(Error::FirstHopError(err, need_to_retry));
             }
             Ok(_) => {
@@ -1996,11 +2011,12 @@ where
         &self,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
+        error_code: Option<TlcErrorCode>,
         error: &str,
         retryable: bool,
     ) {
         if !retryable && !session.active_attempts().any(|a| a.id != attempt.id) {
-            self.set_payment_fail_with_error(session, error, None);
+            self.set_payment_fail_with_error(session, error, error_code);
         }
 
         attempt.set_failed_status(error, retryable);
@@ -2023,7 +2039,7 @@ where
                 self.register_payment_retry(myself, state, Some(attempt.id));
                 return Ok(());
             } else {
-                self.set_attempt_fail_with_error(session, attempt, &err.to_string(), false);
+                self.set_attempt_fail_with_error(session, attempt, None, &err.to_string(), false);
                 return Err(err);
             }
         }
@@ -2107,6 +2123,7 @@ where
                         self.set_attempt_fail_with_error(
                             session,
                             &mut attempt,
+                            None,
                             &err.to_string(),
                             false,
                         );
@@ -2183,6 +2200,7 @@ where
                 self.set_attempt_fail_with_error(
                     &mut session,
                     &mut attempt,
+                    Some(tlc_err.error_code),
                     &error.to_string(),
                     need_to_retry,
                 );
@@ -2228,7 +2246,7 @@ where
                 }
             }
             RemoveTlcReason::RemoveTlcFail(reason) => {
-                let error_detail = reason
+                let tlc_error = reason
                     .decode(&attempt.session_key, attempt.hops_public_keys())
                     .unwrap_or_else(|| {
                         debug_event!(self.network, "InvalidOnionError");
@@ -2236,20 +2254,21 @@ where
                     });
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
-                    error_detail.clone(),
+                    tlc_error.clone(),
                     false,
                 );
                 debug!(
                     "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
                     payment_hash,
-                    error_detail.error_code.as_ref(),
+                    tlc_error.error_code.as_ref(),
                     need_to_retry
                 );
 
                 self.set_attempt_fail_with_error(
                     &mut session,
                     &mut attempt,
-                    error_detail.error_code.as_ref(),
+                    Some(tlc_error.error_code),
+                    tlc_error.error_code.as_ref(),
                     need_to_retry,
                 );
 

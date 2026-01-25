@@ -201,6 +201,10 @@ impl InternalResult {
         let len = nodes.len();
         assert!(len >= 2);
         let error_code = tlc_err.error_code;
+        error!(
+            "Payment failed at node index {}: len: {:?} error_code: {:?}",
+            index, len, error_code
+        );
         if index == 0 {
             // we get error from the source node
             match error_code {
@@ -238,6 +242,9 @@ impl InternalResult {
                     }
                 }
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                | TlcErrorCode::RequiredNodeFeatureMissing
+                | TlcErrorCode::RequiredChannelFeatureMissing
+                | TlcErrorCode::PermanentNodeFailure
                 | TlcErrorCode::InvoiceExpired
                 | TlcErrorCode::InvoiceCancelled
                 | TlcErrorCode::HoldTlcTimeout => {
