@@ -1098,7 +1098,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
         } => {
             assert_eq!(next_node_id, t2.into());
             assert_eq!(amount_to_forward, forward_amounts[0]);
-            assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[0]));
+            assert_eq!(build_max_fee_amount, exp_build_max_fee_amounts[0]);
         }
         other => panic!("unexpected payload at t1: {other:?}"),
     }
@@ -1121,7 +1121,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
         } => {
             assert_eq!(next_node_id, t3.into());
             assert_eq!(amount_to_forward, forward_amounts[1]);
-            assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[1]));
+            assert_eq!(build_max_fee_amount, exp_build_max_fee_amounts[1]);
         }
         other => panic!("unexpected payload at t2: {other:?}"),
     }
@@ -1144,7 +1144,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
         } => {
             assert_eq!(next_node_id, final_recipient.into());
             assert_eq!(amount_to_forward, forward_amounts[2]);
-            assert_eq!(build_max_fee_amount, Some(exp_build_max_fee_amounts[2]));
+            assert_eq!(build_max_fee_amount, exp_build_max_fee_amounts[2]);
         }
         other => panic!("unexpected payload at t3: {other:?}"),
     }

@@ -1122,18 +1122,6 @@ pub struct HopHint {
     pub(crate) tlc_expiry_delta: u64,
 }
 
-#[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TrampolineHop {
-    pub pubkey: Pubkey,
-}
-
-impl TrampolineHop {
-    pub fn new(pubkey: Pubkey) -> Self {
-        Self { pubkey }
-    }
-}
-
 // 0 ~ 65535 is reserved for endpoint usage, index aboving 65535 is reserved for internal usage
 pub const USER_CUSTOM_RECORDS_MAX_INDEX: u32 = 65535;
 /// The custom records to be included in the payment.
@@ -1199,8 +1187,6 @@ pub struct TrampolineContext {
     pub previous_tlcs: Vec<PrevTlcInfo>,
     /// Hash algorighm used for the payment.
     pub hash_algorithm: HashAlgorithm,
-    /// available max fee amount for trampoline forwarding
-    pub available_fee_amount: u128,
 }
 
 impl SendPaymentCommand {
@@ -1779,14 +1765,12 @@ where
 
             match build_route_result {
                 Err(e) => {
-                    error!("Here failed to build route: {}", e);
+                    error!("build_payment_routes failed to build route: {}", e);
                     let error = format!("Failed to build route, {}", e);
                     return Err(Error::SendPaymentError(error));
                 }
                 Ok(mut hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
-                    self.apply_trampoline_forwarding_fee(session, source, &hops, &mut max_fee)
-                        .await?;
 
                     // Embed trampoline onion in the last hop if available
                     // This is needed both for actual payments and dry_run to get correct fee calculations
@@ -1795,6 +1779,8 @@ where
                             last_hop.trampoline_onion =
                                 Some(trampoline.remaining_trampoline_onion.clone());
                         }
+                        self.apply_trampoline_forwarding_fee(session, source, &hops, &mut max_fee)
+                            .await?;
                     }
 
                     let new_attempt_id = if session.is_dry_run() {
@@ -1812,14 +1798,6 @@ where
                     );
 
                     let session_route = &attempt.route;
-                    #[cfg(debug_assertions)]
-                    dbg!(
-                        "remain amount: {}, minimal_amount: {} receiver amount: {}",
-                        remain_amount,
-                        target_amount,
-                        session_route.receiver_amount()
-                    );
-
                     let route_channels: Vec<_> = session_route
                         .channel_outpoints()
                         .map(|(from, channel_outpoint, amount)| {
@@ -1853,12 +1831,6 @@ where
                         remain_amount
                     };
                     if let Some(fee) = max_fee {
-                        if session.request.trampoline_context.is_some() && fee < session_route.fee()
-                        {
-                            return Err(Error::SendPaymentError(
-                                "Trampoline forwarding fee insufficient".to_string(),
-                            ));
-                        }
                         max_fee = Some(fee - session_route.fee());
                     }
                     result.push(attempt);
@@ -1901,25 +1873,13 @@ where
         let channel_outpoint = OutPoint::new(first_hop.funding_tx_hash.into(), 0);
         let fee_rate = {
             let graph = self.network_graph.read().await;
-            let channel_info = graph.get_channel(&channel_outpoint).ok_or_else(|| {
-                Error::SendPaymentError(format!(
-                    "Trampoline forwarding channel not found: {:?}",
-                    channel_outpoint
-                ))
-            })?;
-            let update = if channel_info.node1 == source {
-                channel_info.update_of_node1.as_ref()
-            } else if channel_info.node2 == source {
-                channel_info.update_of_node2.as_ref()
-            } else {
-                None
-            }
-            .ok_or_else(|| {
-                Error::SendPaymentError(format!(
-                    "Trampoline forwarding channel update missing: {:?}",
-                    channel_outpoint
-                ))
-            })?;
+            let (Some(_info), Some(update)) =
+                graph.get_outbound_channel_info_and_update(&channel_outpoint, source)
+            else {
+                return Err(Error::SendPaymentError(
+                    "get outbound info failed".to_string(),
+                ));
+            };
             update.fee_rate
         };
 
@@ -1931,20 +1891,20 @@ where
                 ))
             })?;
 
-        let fee_budget = max_fee.ok_or_else(|| {
+        let cur_max_fee = max_fee.ok_or_else(|| {
             Error::SendPaymentError("Trampoline forwarding requires max_fee_amount".to_string())
         })?;
-        if fee_budget < local_fee {
+        if cur_max_fee < local_fee {
             session.last_error_code = Some(TlcErrorCode::FeeInsufficient);
             error!(
                 "not enough fee budget for trampoline forwarding: budget {}, required {}",
-                fee_budget, local_fee
+                cur_max_fee, local_fee
             );
             return Err(Error::SendPaymentError(
                 "Trampoline forwarding fee insufficient".to_string(),
             ));
         }
-        *max_fee = Some(fee_budget - local_fee);
+        *max_fee = Some(cur_max_fee - local_fee);
         Ok(())
     }
 

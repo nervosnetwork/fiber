@@ -3788,7 +3788,7 @@ pub enum TrampolineHopPayload {
         ///
         /// This is computed during the initial router build (trampoline onion construction), so
         /// trampoline forwarding does not need to re-derive fee allocation.
-        build_max_fee_amount: Option<u128>,
+        build_max_fee_amount: u128,
         /// TLC expiry delta required at `next_node_id` to complete the remaining payment.
         ///
         /// For the final recipient this is the invoice's `final_tlc_expiry_delta`. For trampoline

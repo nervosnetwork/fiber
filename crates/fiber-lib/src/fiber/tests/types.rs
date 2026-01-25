@@ -282,7 +282,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
         TrampolineHopPayload::Forward {
             next_node_id: t2.pubkey(),
             amount_to_forward: 50_000,
-            build_max_fee_amount: None,
+            build_max_fee_amount: 0,
             tlc_expiry_delta: 1234,
             max_parts: None,
             hash_algorithm: HashAlgorithm::Sha256,
@@ -291,7 +291,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
         TrampolineHopPayload::Forward {
             next_node_id: final_node.pubkey(),
             amount_to_forward: 50_000,
-            build_max_fee_amount: None,
+            build_max_fee_amount: 0,
             tlc_expiry_delta: 1234,
             max_parts: None,
             hash_algorithm: HashAlgorithm::Sha256,

@@ -738,6 +738,22 @@ impl NetworkNode {
             .expect("insert success");
     }
 
+    pub fn build_basic_invoice(&self, amount: u128, preimage: Hash256) -> CkbInvoice {
+        InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(self.get_public_key().into())
+            .build()
+            .expect("build invoice")
+    }
+
+    pub fn gen_basic_invoice(&self, amount: u128) -> (CkbInvoice, Hash256) {
+        let preimage = gen_rand_sha256_hash();
+        let invoice = self.build_basic_invoice(amount, preimage);
+        self.insert_invoice(invoice.clone(), Some(preimage));
+        (invoice, preimage)
+    }
+
     pub fn get_invoice_status(&self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
         self.store.get_invoice_status(payment_hash)
     }

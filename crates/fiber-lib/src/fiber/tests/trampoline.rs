@@ -47,14 +47,7 @@ async fn test_trampoline_routing_basic() {
     // ================================================================
     // Create an invoice on C.
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -92,14 +85,7 @@ async fn test_one_way_channel_rejects_reverse_payment() {
     let [node_a, node_b] = nodes.try_into().expect("2 nodes");
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_a.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_a.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_a.gen_basic_invoice(amount);
 
     let res = node_b
         .send_payment(SendPaymentCommand {
@@ -113,14 +99,7 @@ async fn test_one_way_channel_rejects_reverse_payment() {
     assert!(error.contains("Failed to build route"));
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_b.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_b.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_b.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -451,14 +430,7 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
 
     // Create an invoice on C.
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     // Without explicit trampoline hops, routing should fail.
     let res = node_a
@@ -474,14 +446,7 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
     // ================================================================
     // With explicit trampoline hops, routing should succeed.
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     node_a
         .assert_send_payment_success(SendPaymentCommand {
@@ -495,14 +460,7 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
     // ================================================================
     // Disable trampoline capability on B, then routing should fail.
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
     // disable trampoline capability on B.
     let mut features = FeatureVector::default();
     features.unset_trampoline_routing_required();
@@ -561,14 +519,7 @@ async fn test_trampoline_routing_with_two_networks() {
     // no direct connection between node_b and node_d
     // ---------------------------------------------------------------
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_f.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_f.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_f.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -603,14 +554,7 @@ async fn test_trampoline_routing_with_two_networks() {
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_f.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_f.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_f.gen_basic_invoice(amount);
 
     let res = node_b
         .send_payment(SendPaymentCommand {
@@ -650,14 +594,7 @@ async fn test_trampoline_routing_multi_trampoline_hops() {
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -700,14 +637,7 @@ async fn test_trampoline_routing_four_private_trampoline_hops_payment_success() 
     wait_until_node_has_public_channels_at_least(&node_a, 1).await;
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -774,14 +704,7 @@ async fn test_trampoline_routing_max_trampoline_hops_success_and_each_hop_pathfi
     reset_find_path_call_count_for_tests();
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -863,14 +786,7 @@ async fn test_trampoline_routing_single_trampoline_hop_succeeds_with_long_public
     .await;
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -979,14 +895,7 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
     wait_until_node_has_public_channels_at_least(&node_t3, 2).await;
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
     let res = node_a
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
@@ -1050,14 +959,7 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
     }
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     // first try without specifying right trampoline hops
     let res = node_a
@@ -1146,14 +1048,7 @@ async fn test_trampoline_forwarding_prefers_better_channel_private_vs_public() {
 
     // Create an invoice on C that explicitly allows trampoline routing.
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     // Snapshot balances on both candidate T1->C channels so we can assert which one was used.
     let public_local_before = node_t1.get_local_balance_from_channel(channel_t1_c_public);
@@ -1321,14 +1216,7 @@ async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
     wait_until_graph_channel_has_update(&node_a, &node_a, &node_t1).await;
 
     let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     // Tight limit: large enough for payer's trampoline slack (final + 1*DEFAULT), but too small
     // for T1 to reach C over 2 hops (final + 2*DEFAULT).
@@ -1380,12 +1268,7 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
     // recipient (beyond the trampoline boundary) and must be wrapped for the payer.
     let amount: u128 = 1000;
     let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
+    let invoice = node_c.build_basic_invoice(amount, preimage);
     // don't insert invoice on node_c
     // node_c.insert_invoice(invoice.clone(), Some(preimage));
 
@@ -1445,14 +1328,7 @@ async fn test_trampoline_forwarding_fee_insufficient_due_to_rate_cap() {
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
 
     let amount: u128 = 2000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -1499,7 +1375,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     let forward_payload = TrampolineHopPayload::Forward {
         next_node_id: final_target,
         amount_to_forward: 1000,
-        build_max_fee_amount: Some(0),
+        build_max_fee_amount: 0,
         tlc_expiry_delta: 144,
         tlc_expiry_limit: 5000,
         max_parts: None,
@@ -1595,7 +1471,7 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     let forward_payload = TrampolineHopPayload::Forward {
         next_node_id: final_target,
         amount_to_forward: 1000,
-        build_max_fee_amount: Some(0),
+        build_max_fee_amount: 0,
         tlc_expiry_delta: 144,
         tlc_expiry_limit: 5000,
         max_parts: None,
@@ -1693,15 +1569,7 @@ async fn test_trampoline_routing_loop_failure_insufficient_fee() {
     wait_until_node_supports_trampoline_routing(&node_a, &node_e).await;
 
     let amount = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_e.get_public_key().into())
-        .build()
-        .expect("build invoice");
-
-    node_e.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_e.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -1805,14 +1673,7 @@ async fn test_trampoline_routing_retry_with_intermediate_failure() {
     // Drain P1 -> C
     let drain_amount = usable_cap - 1000;
 
-    let preimage_drain = gen_rand_sha256_hash();
-    let invoice_drain = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(drain_amount))
-        .payment_preimage(preimage_drain)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("drain invoice");
-    node_c.insert_invoice(invoice_drain.clone(), Some(preimage_drain));
+    let (invoice_drain, _preimage_drain) = node_c.gen_basic_invoice(drain_amount);
 
     let res = node_p1
         .send_payment(SendPaymentCommand {
@@ -1828,14 +1689,7 @@ async fn test_trampoline_routing_retry_with_intermediate_failure() {
     // B should try B->P1->C first (cost 0), fail, then retry B->P2->C.
 
     let amount_expr = 2000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount_expr))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .expect("expr invoice");
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount_expr);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -1987,14 +1841,7 @@ async fn test_trampoline_routing_two_hops_both_retry_success() {
 
     // Drain P1->T2
     {
-        let preimage = gen_rand_sha256_hash();
-        let invoice = InvoiceBuilder::new(Currency::Fibd)
-            .amount(Some(drain_amount))
-            .payment_preimage(preimage)
-            .payee_pub_key(node_t2.get_public_key().into())
-            .build()
-            .unwrap();
-        node_t2.insert_invoice(invoice.clone(), Some(preimage));
+        let (invoice, _preimage) = node_t2.gen_basic_invoice(drain_amount);
         let res = node_p1
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice.to_string()),
@@ -2007,14 +1854,7 @@ async fn test_trampoline_routing_two_hops_both_retry_success() {
 
     // Drain Q1->C (T2 -> Q1 -> C path)
     {
-        let preimage = gen_rand_sha256_hash();
-        let invoice = InvoiceBuilder::new(Currency::Fibd)
-            .amount(Some(drain_amount))
-            .payment_preimage(preimage)
-            .payee_pub_key(node_c.get_public_key().into())
-            .build()
-            .unwrap();
-        node_c.insert_invoice(invoice.clone(), Some(preimage));
+        let (invoice, _preimage) = node_c.gen_basic_invoice(drain_amount);
         let res = node_q1
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice.to_string()),
@@ -2034,14 +1874,7 @@ async fn test_trampoline_routing_two_hops_both_retry_success() {
     // T2 should retry T2->Q2->C. works.
 
     let amount = 2000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .unwrap();
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -2150,14 +1983,7 @@ async fn test_trampoline_routing_mid_failure_propagates_back() {
     // Drain Q1->C
     {
         let drain_amount = usable_cap - 1000;
-        let preimage = gen_rand_sha256_hash();
-        let invoice = InvoiceBuilder::new(Currency::Fibd)
-            .amount(Some(drain_amount))
-            .payment_preimage(preimage)
-            .payee_pub_key(node_c.get_public_key().into())
-            .build()
-            .unwrap();
-        node_c.insert_invoice(invoice.clone(), Some(preimage));
+        let (invoice, _preimage) = node_c.gen_basic_invoice(drain_amount);
         let res = node_q1
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice.to_string()),
@@ -2171,14 +1997,7 @@ async fn test_trampoline_routing_mid_failure_propagates_back() {
     // Drain Q2->C
     {
         let drain_amount = usable_cap - 1000;
-        let preimage = gen_rand_sha256_hash();
-        let invoice = InvoiceBuilder::new(Currency::Fibd)
-            .amount(Some(drain_amount))
-            .payment_preimage(preimage)
-            .payee_pub_key(node_c.get_public_key().into())
-            .build()
-            .unwrap();
-        node_c.insert_invoice(invoice.clone(), Some(preimage));
+        let (invoice, _preimage) = node_c.gen_basic_invoice(drain_amount);
         let res = node_q2
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice.to_string()),
@@ -2194,14 +2013,7 @@ async fn test_trampoline_routing_mid_failure_propagates_back() {
     // T2 should report error back to T1, T1 back to A.
 
     let amount = 2000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .unwrap();
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -2283,25 +2095,11 @@ async fn test_trampoline_routing_concurrent_payments() {
 
     // Prepare Payment 1: A -> T -> B
     let amount1 = 1000;
-    let preimage1 = gen_rand_sha256_hash();
-    let invoice1 = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount1))
-        .payment_preimage(preimage1)
-        .payee_pub_key(node_b.get_public_key().into())
-        .build()
-        .unwrap();
-    node_b.insert_invoice(invoice1.clone(), Some(preimage1));
+    let (invoice1, _preimage1) = node_b.gen_basic_invoice(amount1);
 
     // Prepare Payment 2: C -> T -> D
     let amount2 = 2000;
-    let preimage2 = gen_rand_sha256_hash();
-    let invoice2 = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount2))
-        .payment_preimage(preimage2)
-        .payee_pub_key(node_d.get_public_key().into())
-        .build()
-        .unwrap();
-    node_d.insert_invoice(invoice2.clone(), Some(preimage2));
+    let (invoice2, _preimage2) = node_d.gen_basic_invoice(amount2);
 
     // Execute concurrently
     let pay1_fut = node_a.send_payment(SendPaymentCommand {
@@ -2360,16 +2158,7 @@ async fn test_trampoline_routing_no_path_found() {
     wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
 
     let amount = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_b.get_public_key().into())
-        .build()
-        .unwrap();
-    // Don't insert invoice on B? Actually B doesn't need to be online for T to fail pathfinding.
-    // But if we want to be correct, B can have it.
-    node_b.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_b.gen_basic_invoice(amount);
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -2433,14 +2222,7 @@ async fn test_trampoline_routing_race_same_invoice() {
 
     // C creates invoice
     let amount = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .build()
-        .unwrap();
-    node_c.insert_invoice(invoice.clone(), Some(preimage));
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
     let invoice_str = invoice.to_string();
 
     debug!("Invoice created: {}", invoice_str);
@@ -2739,7 +2521,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     let hop_data = TrampolineHopPayload::Forward {
         next_node_id: next_node_pubkey,
         amount_to_forward: 1000,
-        build_max_fee_amount: Some(1000),
+        build_max_fee_amount: 1000,
         tlc_expiry_delta: 100,
         tlc_expiry_limit: 5000,
         max_parts: None,
@@ -2830,7 +2612,7 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     let hop_data = TrampolineHopPayload::Forward {
         next_node_id: next_node_pubkey,
         amount_to_forward: 1000,
-        build_max_fee_amount: Some(1000),
+        build_max_fee_amount: 1000,
         tlc_expiry_delta: 100,
         tlc_expiry_limit: 5000,
         max_parts: None,

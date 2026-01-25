@@ -938,7 +938,7 @@ where
         })
     }
 
-    fn get_outbound_channel_info_and_update(
+    pub(crate) fn get_outbound_channel_info_and_update(
         &self,
         outpoint: &OutPoint,
         from: Pubkey,
@@ -1407,12 +1407,10 @@ where
                 &hops[(idx + 1)..]
             };
 
-            let build_max_fee_amount = Some(fees[idx]);
-            let amount_to_forward = final_amount + (fees[idx + 1..].iter().sum::<u128>());
             payloads.push(TrampolineHopPayload::Forward {
                 next_node_id,
-                amount_to_forward,
-                build_max_fee_amount,
+                amount_to_forward: final_amount + (fees[idx + 1..].iter().sum::<u128>()),
+                build_max_fee_amount: fees[idx],
                 hash_algorithm: payment_data.hash_algorithm(),
                 tlc_expiry_delta: self.trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,
