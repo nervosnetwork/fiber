@@ -1350,6 +1350,103 @@ async fn test_trampoline_forwarding_fee_insufficient_due_to_rate_cap() {
 }
 
 #[tokio::test]
+async fn test_trampoline_multi_hops_fee_insufficient_then_success() {
+    init_tracing();
+
+    // A --(public, cheap)--> T1 --(public, expensive)--> T2 --(private, expensive)--> C
+    // Multiple trampoline hops; low fee rates should fail with FeeInsufficient, higher rate succeeds.
+    let usable_cap = 20_000_000;
+    let common_funding = MIN_RESERVED_CKB + usable_cap;
+
+    let channels_params = vec![
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(10000),
+                ..Default::default()
+            },
+        ),
+        (
+            (2, 3),
+            ChannelParameters {
+                public: false,
+                node_a_funding_amount: common_funding,
+                node_b_funding_amount: common_funding,
+                a_tlc_fee_proportional_millionths: Some(10000),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 4, None).await;
+    let [node_a, node_t1, node_t2, node_c] = nodes.try_into().expect("4 nodes");
+
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+    wait_until_node_has_public_channels_at_least(&node_a, 2).await;
+    wait_until_node_has_public_channels_at_least(&node_t1, 2).await;
+
+    let amount: u128 = 2000;
+    let attempts = [1, 5];
+
+    for max_fee_rate in attempts {
+        let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
+        let res = node_a
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                trampoline_hops: Some(vec![node_t1.get_public_key(), node_t2.get_public_key()]),
+                max_fee_amount: Some(10_000_000),
+                max_fee_rate: Some(max_fee_rate),
+                ..Default::default()
+            })
+            .await;
+
+        match res {
+            Ok(payment) => {
+                let payment_hash = payment.payment_hash;
+                node_a.wait_until_failed(payment_hash).await;
+                let payment_res = node_a.get_payment_result(payment_hash).await;
+                let failed_error = payment_res.failed_error.unwrap_or_default();
+                debug!("Payment failed error (rate={max_fee_rate}): {failed_error}");
+                assert!(failed_error.contains("FeeInsufficient"));
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                debug!("Payment send error (rate={max_fee_rate}): {err_msg}");
+                assert!(err_msg.to_lowercase().contains("fee"));
+            }
+        }
+    }
+
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![node_t1.get_public_key(), node_t2.get_public_key()]),
+            max_fee_amount: Some(10_000_000),
+            max_fee_rate: Some(1000),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok(), "send_payment should succeed with high fee");
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     init_tracing();
     // A -- B. We test B.
