@@ -120,8 +120,6 @@ fn create_fake_node_announcement_message() -> NodeAnnouncement {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_send_payment_data_trampoline_hops_validation_errors() {
-    use crate::fiber::payment::TrampolineHop;
-
     let target = gen_rand_fiber_public_key();
     let payment_hash = gen_rand_sha256_hash();
 
@@ -156,7 +154,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     // Too many hops.
     // MAX_TRAMPOLINE_HOPS_LIMIT is currently 5; 6 should exceed it.
     let too_many = (0..6)
-        .map(|_| TrampolineHop::new(gen_rand_fiber_public_key()))
+        .map(|_| gen_rand_fiber_public_key())
         .collect::<Vec<_>>();
     let err = SendPaymentData::new(SendPaymentCommand {
         trampoline_hops: Some(too_many),
@@ -167,7 +165,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
 
     // Must not contain target.
     let err = SendPaymentData::new(SendPaymentCommand {
-        trampoline_hops: Some(vec![TrampolineHop::new(target)]),
+        trampoline_hops: Some(vec![target]),
         ..base.clone()
     })
     .unwrap_err();
@@ -176,7 +174,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     // No duplicates.
     let hop = gen_rand_fiber_public_key();
     let err = SendPaymentData::new(SendPaymentCommand {
-        trampoline_hops: Some(vec![TrampolineHop::new(hop), TrampolineHop::new(hop)]),
+        trampoline_hops: Some(vec![hop, hop]),
         ..base
     })
     .unwrap_err();

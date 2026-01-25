@@ -3,8 +3,8 @@ use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMI
 use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::PathFindError;
+use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{SendPaymentData, SendPaymentDataBuilder};
-use crate::fiber::payment::{SessionRoute, TrampolineHop};
 use crate::fiber::types::{
     ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey, TrampolineOnionPacket,
 };
@@ -662,9 +662,7 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
         .is_err());
 
     // With trampoline: should succeed by routing to C only.
-    payment_data.trampoline_hops = Some(vec![crate::fiber::payment::TrampolineHop::new(
-        trampoline.into(),
-    )]);
+    payment_data.trampoline_hops = Some(vec![trampoline.into()]);
     let route = network
         .graph
         .build_route(payment_data.amount, None, None, &payment_data)
@@ -759,11 +757,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
         .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
         .max_fee_amount(Some(500))
-        .trampoline_hops(Some(vec![
-            crate::fiber::payment::TrampolineHop::new(t1.into()),
-            crate::fiber::payment::TrampolineHop::new(t2.into()),
-            crate::fiber::payment::TrampolineHop::new(t3.into()),
-        ]))
+        .trampoline_hops(Some(vec![t1.into(), t2.into(), t3.into()]))
         .build()
         .expect("valid payment_data");
 
@@ -862,7 +856,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
     assert!(peeled_final.next.is_none());
 
     // sanity: shortening trampoline_hops should shorten the chain (t1->final).
-    payment_data.trampoline_hops = Some(vec![crate::fiber::payment::TrampolineHop::new(t1.into())]);
+    payment_data.trampoline_hops = Some(vec![t1.into()]);
     let route_short = network
         .graph
         .build_route(payment_data.amount, None, None, &payment_data)
@@ -918,11 +912,7 @@ fn test_graph_trampoline_routing_tlc_expiry_limit_too_small_fails() {
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(too_small_limit)
             .max_fee_amount(Some(500))
-            .trampoline_hops(Some(vec![
-                crate::fiber::payment::TrampolineHop::new(t1.into()),
-                crate::fiber::payment::TrampolineHop::new(t2.into()),
-                crate::fiber::payment::TrampolineHop::new(t3.into()),
-            ]))
+            .trampoline_hops(Some(vec![t1.into(), t2.into(), t3.into()]))
             .build()
             .expect("valid payment_data");
 
@@ -955,7 +945,7 @@ fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
 
     network.add_edge(1, 2, Some(10_000), Some(0));
 
-    let hop = crate::fiber::payment::TrampolineHop::new(t1.into());
+    let hop: Pubkey = t1.into();
 
     let payment_data =
         SendPaymentDataBuilder::new(final_recipient.into(), 1000, Hash256::default())
@@ -999,7 +989,7 @@ fn test_graph_trampoline_routing_fee_rate_explicit_zero_allows_zero_fee_budget()
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(0))
-            .trampoline_hops(Some(vec![TrampolineHop::new(t1.into())]))
+            .trampoline_hops(Some(vec![t1.into()]))
             .build()
             .expect("valid payment_data");
 
@@ -1040,16 +1030,16 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let final_amount: u128 = 1000;
     let max_fee_amount: u128 = 15;
 
-    let h1 = crate::fiber::payment::TrampolineHop::new(t1.into());
-    let h2 = crate::fiber::payment::TrampolineHop::new(t2.into());
-    let h3 = crate::fiber::payment::TrampolineHop::new(t3.into());
+    let h1: Pubkey = t1.into();
+    let h2: Pubkey = t2.into();
+    let h3: Pubkey = t3.into();
 
     let payment_data =
         SendPaymentDataBuilder::new(final_recipient.into(), final_amount, payment_hash)
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(max_fee_amount))
-            .trampoline_hops(Some(vec![h1.clone(), h2.clone(), h3.clone()]))
+            .trampoline_hops(Some(vec![h1, h2, h3]))
             .build()
             .expect("valid payment_data");
 

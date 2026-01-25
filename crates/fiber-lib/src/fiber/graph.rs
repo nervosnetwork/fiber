@@ -20,7 +20,7 @@ use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
-use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus, TrampolineHop};
+use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
@@ -1304,7 +1304,7 @@ where
             return Err(PathFindError::NoPathFound);
         };
 
-        let first = hops[0].pubkey;
+        let first = hops[0];
         if first == source || first == target {
             return Err(PathFindError::FeatureNotEnabled(
                 "invalid trampoline_hops: first hop must not be source/target".to_string(),
@@ -1313,7 +1313,7 @@ where
         if !self.is_node_support_trampoline_routing(&first)
             || hops
                 .iter()
-                .any(|n| !self.is_node_support_trampoline_routing(&n.pubkey))
+                .any(|n| !self.is_node_support_trampoline_routing(n))
         {
             return Err(PathFindError::FeatureNotEnabled(
                 "invalid trampoline_hops: a hop does not support trampoline routing".to_string(),
@@ -1397,7 +1397,7 @@ where
             let next_node_id = if is_last_trampoline {
                 target
             } else {
-                hops[idx + 1].pubkey
+                hops[idx + 1]
             };
 
             // The next hop (if it is a trampoline) still needs slack for forwarding further.
@@ -1432,7 +1432,7 @@ where
         });
 
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-        let mut trampoline_path: Vec<Pubkey> = hops.iter().map(|h| h.pubkey).collect();
+        let mut trampoline_path: Vec<Pubkey> = hops.to_vec();
         let secp = Secp256k1::new();
 
         trampoline_path.push(target);
@@ -1463,7 +1463,7 @@ where
         &self,
         final_amount: u128,
         forward_hops_num: usize,
-        hops: &[TrampolineHop],
+        hops: &[Pubkey],
     ) -> Result<u128, PathFindError> {
         let mut forward_amounts = vec![0u128; hops.len()];
         let mut next_amount_to_forward = final_amount;
@@ -1486,7 +1486,7 @@ where
     fn trampoline_forward_expiry_delta(
         &self,
         base_final: u64,
-        remaining_trampoline_hops: &[TrampolineHop],
+        remaining_trampoline_hops: &[Pubkey],
         tlc_expiry_limit: u64,
     ) -> Result<u64, PathFindError> {
         let slack = remaining_trampoline_hops

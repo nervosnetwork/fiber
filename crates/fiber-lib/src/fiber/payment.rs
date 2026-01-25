@@ -173,7 +173,7 @@ pub struct SendPaymentData {
     ///
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
-    pub trampoline_hops: Option<Vec<TrampolineHop>>,
+    pub trampoline_hops: Option<Vec<Pubkey>>,
     #[serde(default)]
     pub trampoline_context: Option<TrampolineContext>,
     #[serde(skip)]
@@ -200,7 +200,7 @@ pub struct SendPaymentDataBuilder {
     router: Vec<RouterHop>,
     allow_mpp: bool,
     dry_run: bool,
-    trampoline_hops: Option<Vec<TrampolineHop>>,
+    trampoline_hops: Option<Vec<Pubkey>>,
     trampoline_context: Option<TrampolineContext>,
     channel_stats: GraphChannelStat,
 }
@@ -308,7 +308,7 @@ impl SendPaymentDataBuilder {
         self
     }
 
-    pub fn trampoline_hops(mut self, trampoline_hops: Option<Vec<TrampolineHop>>) -> Self {
+    pub fn trampoline_hops(mut self, trampoline_hops: Option<Vec<Pubkey>>) -> Self {
         self.trampoline_hops = trampoline_hops;
         self
     }
@@ -372,10 +372,10 @@ impl SendPaymentDataBuilder {
                     MAX_TRAMPOLINE_HOPS_LIMIT
                 ));
             }
-            if hops.iter().any(|h| h.pubkey == target_pubkey) {
+            if hops.iter().any(|h| *h == target_pubkey) {
                 return Err("trampoline_hops must not contain target_pubkey".to_string());
             }
-            let mut uniq = hops.iter().map(|h| h.pubkey).collect::<Vec<_>>();
+            let mut uniq = hops.clone();
             uniq.sort();
             uniq.dedup();
             if uniq.len() != hops.len() {
@@ -645,7 +645,7 @@ impl SendPaymentData {
             .is_some_and(|hops| !hops.is_empty())
     }
 
-    pub fn trampoline_hops(&self) -> Option<&[TrampolineHop]> {
+    pub fn trampoline_hops(&self) -> Option<&[Pubkey]> {
         self.trampoline_hops.as_deref()
     }
 
@@ -1184,7 +1184,7 @@ pub struct SendPaymentCommand {
     ///
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
-    pub trampoline_hops: Option<Vec<TrampolineHop>>,
+    pub trampoline_hops: Option<Vec<Pubkey>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
