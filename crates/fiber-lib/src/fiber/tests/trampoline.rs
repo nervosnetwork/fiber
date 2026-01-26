@@ -169,6 +169,221 @@ async fn test_trampoline_routing_with_sync_disabled_on_sender() {
 }
 
 #[tokio::test]
+async fn test_trampoline_routing_udt_private_last_will_success() {
+    init_tracing();
+
+    use ckb_types::packed::Script;
+    use ckb_types::prelude::*;
+
+    // A --(CKB)--> B --(UDT)--> C --(CKB)--> D
+    //                      \--(UDT private)--> D
+    let udt_script = Script::new_builder().args([1u8; 53].pack()).build();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    funding_udt_type_script: Some(udt_script.clone()),
+                    ..Default::default()
+                },
+            ),
+            (
+                (2, 3),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (2, 3),
+                ChannelParameters {
+                    public: false,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    funding_udt_type_script: Some(udt_script.clone()),
+                    ..Default::default()
+                },
+            ),
+        ],
+        4,
+        None,
+    )
+    .await;
+
+    let [_node_a, node_b, node_c, node_d] = nodes.try_into().expect("4 nodes");
+
+    // Ensure B learns C supports trampoline routing.
+    wait_until_node_supports_trampoline_routing(&node_b, &node_c).await;
+
+    let amount: u128 = 1000;
+
+    // send_payment(B, C, UDT) -> success
+    let preimage_bc = gen_rand_sha256_hash();
+    let invoice_bc = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage_bc)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .udt_type_script(udt_script.clone())
+        .payee_pub_key(node_c.get_public_key().into())
+        .build()
+        .expect("build invoice");
+    node_c.insert_invoice(invoice_bc.clone(), Some(preimage_bc));
+    node_b
+        .assert_send_payment_success(SendPaymentCommand {
+            invoice: Some(invoice_bc.to_string()),
+            udt_type_script: Some(udt_script.clone()),
+            max_fee_amount: Some(5_000),
+            ..Default::default()
+        })
+        .await;
+
+    // send_payment(C, D, UDT) -> success
+    let preimage_cd = gen_rand_sha256_hash();
+    let invoice_cd = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage_cd)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .udt_type_script(udt_script.clone())
+        .payee_pub_key(node_d.get_public_key().into())
+        .build()
+        .expect("build invoice");
+    node_d.insert_invoice(invoice_cd.clone(), Some(preimage_cd));
+    node_c
+        .assert_send_payment_success(SendPaymentCommand {
+            invoice: Some(invoice_cd.to_string()),
+            udt_type_script: Some(udt_script.clone()),
+            max_fee_amount: Some(5_000),
+            ..Default::default()
+        })
+        .await;
+
+    // send_payment(B, D, trampoline_hops=[C], UDT) -> success
+    let preimage_bd = gen_rand_sha256_hash();
+    let invoice_bd = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage_bd)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .udt_type_script(udt_script.clone())
+        .payee_pub_key(node_d.get_public_key().into())
+        .build()
+        .expect("build invoice");
+    node_d.insert_invoice(invoice_bd.clone(), Some(preimage_bd));
+
+    let res = node_b
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_bd.to_string()),
+            udt_type_script: Some(udt_script.clone()),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![node_c.get_public_key()]),
+            ..Default::default()
+        })
+        .await;
+    let payment_hash = res.unwrap().payment_hash;
+    node_b.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_routing_udt_to_ckb_private_last_hop_no_path() {
+    init_tracing();
+
+    use ckb_types::packed::Script;
+    use ckb_types::prelude::*;
+
+    // A --(UDT)--> B --(UDT)--> C --(CKB private)--> D
+    // A uses C as trampoline hop but cannot pay D in UDT.
+    let udt_script = Script::new_builder().args([2u8; 53].pack()).build();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    funding_udt_type_script: Some(udt_script.clone()),
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    funding_udt_type_script: Some(udt_script.clone()),
+                    ..Default::default()
+                },
+            ),
+            (
+                (2, 3),
+                ChannelParameters {
+                    public: false,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+        ],
+        4,
+        None,
+    )
+    .await;
+
+    let [node_a, _node_b, node_c, node_d] = nodes.try_into().expect("4 nodes");
+
+    // Ensure A learns C supports trampoline routing and has public path to C.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_c).await;
+    wait_until_node_has_public_channels_at_least(&node_a, 2).await;
+
+    let amount: u128 = 1000;
+    let preimage_ad = gen_rand_sha256_hash();
+    let invoice_ad = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage_ad)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .udt_type_script(udt_script.clone())
+        .payee_pub_key(node_d.get_public_key().into())
+        .build()
+        .expect("build invoice");
+    node_d.insert_invoice(invoice_ad.clone(), Some(preimage_ad));
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_ad.to_string()),
+            udt_type_script: Some(udt_script.clone()),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![node_c.get_public_key()]),
+            ..Default::default()
+        })
+        .await;
+
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_failed(payment_hash).await;
+    let res = node_a.get_payment_result(payment_hash).await;
+    error!("Payment failed as expected: {:?}", res.failed_error);
+    assert_eq!(
+        res.failed_error.unwrap(),
+        "TemporaryNodeFailure".to_string()
+    );
+}
+
+#[tokio::test]
 async fn test_one_way_channel_rejects_reverse_payment() {
     init_tracing();
 
