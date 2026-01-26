@@ -64,6 +64,111 @@ async fn test_trampoline_routing_basic() {
 }
 
 #[tokio::test]
+async fn test_trampoline_routing_with_sync_disabled_on_sender() {
+    init_tracing();
+
+    // A --(public)--> B --(private)--> C
+    // D is an extra node to verify A's gossip messages are not propagated.
+    // A disables gossip sync but should still route to B using its direct channel.
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(4, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("test-fnn-node-{}-", i));
+        if i == 0 {
+            builder = builder.fiber_config_updater(|config| {
+                config.sync_network_graph = Some(false);
+            });
+        }
+        builder.build()
+    })
+    .await;
+
+    let [mut node_a, mut node_b, mut node_c, node_d] = nodes.try_into().expect("4 nodes");
+
+    let (channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: MIN_RESERVED_CKB + 100000,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    establish_channel_between_nodes(
+        &mut node_b,
+        &mut node_c,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount: MIN_RESERVED_CKB + 100000,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    wait_until_async_timeout(|| async { !node_a.get_network_graph_channels().await.is_empty() })
+        .await;
+
+    let channel_outpoint = node_a
+        .get_channel_outpoint(&channel_id)
+        .expect("channel outpoint");
+    let node_a_pubkey = node_a.get_public_key();
+
+    // Verify other nodes do not receive A's gossip messages (node announcement/channel updates)
+    // within a short window.
+    for _ in 0..20 {
+        assert!(
+            node_c
+                .get_network_graph_node(&node_a_pubkey)
+                .await
+                .is_none(),
+            "node_c should not receive node announcement from node_a"
+        );
+        assert!(
+            node_d
+                .get_network_graph_node(&node_a_pubkey)
+                .await
+                .is_none(),
+            "node_d should not receive node announcement from node_a"
+        );
+        assert!(
+            node_c
+                .get_network_graph_channel(&channel_outpoint)
+                .await
+                .is_none(),
+            "node_c should not receive channel announcement/update from node_a"
+        );
+        assert!(
+            node_d
+                .get_network_graph_channel(&channel_outpoint)
+                .await
+                .is_none(),
+            "node_d should not receive channel announcement/update from node_a"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    let amount: u128 = 1000;
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
+
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(500),
+            trampoline_hops: Some(vec![node_b.get_public_key()]),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    node_a.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_one_way_channel_rejects_reverse_payment() {
     init_tracing();
 

@@ -255,7 +255,7 @@ pub struct NetworkNode {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub chain_client: MockCkbChainClient,
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
-    pub gossip_actor: ActorRef<GossipActorMessage>,
+    pub gossip_actor: Option<ActorRef<GossipActorMessage>>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
@@ -1579,9 +1579,8 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
-        let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
-            .expect("gossip actor should have been started")
-            .into();
+        let gossip_actor =
+            ractor::registry::where_is(get_gossip_actor_name(&peer_id)).map(Into::into);
         #[cfg(not(target_arch = "wasm32"))]
         let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
@@ -1941,6 +1940,8 @@ impl NetworkNode {
 
     pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
         self.gossip_actor
+            .as_ref()
+            .expect("gossip actor should have been started")
             .send_message(message)
             .expect("send message to gossip actor");
     }
