@@ -5,7 +5,7 @@ This document provides essential guidelines for AI coding agents working on the 
 ## Build System & Commands
 
 ### Primary Language & Toolchain
-- **Language**: Rust 1.85.0 (specified in `rust-toolchain.toml`)
+- **Language**: Rust 1.93.0 (specified in `rust-toolchain.toml`)
 - **Build System**: Cargo workspace with 5 member crates
 - **Test Runner**: cargo-nextest (preferred over `cargo test`)
 
