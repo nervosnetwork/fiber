@@ -16,6 +16,7 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::invoice::PreimageStore;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
