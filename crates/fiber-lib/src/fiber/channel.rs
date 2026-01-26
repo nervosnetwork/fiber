@@ -1971,8 +1971,7 @@ where
                         .cloned()
                         .collect()
                 };
-                let removed_count =
-                    state.retryable_tlc_operations.len() - unique_ops.len();
+                let removed_count = state.retryable_tlc_operations.len() - unique_ops.len();
                 if removed_count > 0 {
                     warn!(
                         "Removed {} duplicate operations from retryable queue during processing",
@@ -6994,7 +6993,10 @@ impl ChannelActorState {
                     // peer need ACK, I need to resend my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
-                    self.send_revoke_and_ack_message(true)?;
+                    //
+                    // IMPORTANT: Send commitment_signed BEFORE revoke_and_ack to avoid
+                    // the receiver processing revoke_and_ack first, which would update
+                    // TLC state and cause BadSignature when verifying commitment_signed.
                     if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
                         self.set_waiting_ack(myself, false);
@@ -7004,6 +7006,7 @@ impl ChannelActorState {
                             self.reestablish_syncing = true;
                         }
                     }
+                    self.send_revoke_and_ack_message(true)?;
                 } else if my_waiting_ack
                     && my_local_commitment_number == peer_remote_commitment_number
                 {
@@ -7048,7 +7051,10 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn resend_tlcs_on_reestablish(&self, send_commitment_signed: bool) -> Result<bool, ProcessingChannelError> {
+    fn resend_tlcs_on_reestablish(
+        &self,
+        send_commitment_signed: bool,
+    ) -> Result<bool, ProcessingChannelError> {
         let network = self.network();
         let mut need_commitment_signed = false;
         for info in self.tlc_state.all_tlcs() {
@@ -7100,8 +7106,7 @@ impl ChannelActorState {
         let will_send_commitment_signed = send_commitment_signed
             && (need_commitment_signed || self.tlc_state.need_another_commitment_signed());
 
-        if will_send_commitment_signed
-        {
+        if will_send_commitment_signed {
             debug!(
                 "resend_tlcs_on_reestablish: sending CommitmentSigned, commitment_numbers={:?} tlc_state={}",
                 self.get_current_commitment_numbers(),
