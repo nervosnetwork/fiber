@@ -5412,6 +5412,307 @@ async fn test_send_payment_with_mixed_channel_hops() {
 }
 
 #[tokio::test]
+async fn test_ckb_with_udt_mixed_routes_fail() {
+    init_tracing();
+
+    use ckb_types::prelude::*;
+
+    let udt1_script = Script::new_builder().args([1u8; 53].pack()).build();
+    let udt2_script = Script::new_builder().args([2u8; 53].pack()).build();
+
+    // A --(CKB)--> B --(CKB)--> C --(CKB)--> A
+    // A --(UDT1)--> B --(UDT1)--> C --(UDT1)--> A
+    // A --(UDT2)--> B --(UDT2)--> C --(UDT2)--> A
+    let channels_params = vec![
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (2, 0),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt1_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt1_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (2, 0),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt1_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt2_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt2_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (2, 0),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt2_script.clone()),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, channels) = create_n_nodes_network_with_params(&channels_params, 3, None).await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+
+    let small_ckb_router = node_a
+        .build_router(BuildRouterCommand {
+            amount: Some(1),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_b.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_c.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_a.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: small_ckb_router.router_hops.clone(),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    let error = res.unwrap_err();
+    assert!(error.contains("max_fee_amount is too low for selected route"));
+
+    let amount: u128 = 1000;
+
+    let ckb_router = node_a
+        .build_router(BuildRouterCommand {
+            amount: Some(amount),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_b.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_c.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_a.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    let udt1_router = node_a
+        .build_router(BuildRouterCommand {
+            amount: Some(amount),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_b.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_c.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_a.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: Some(udt1_script.clone()),
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    let udt2_router = node_a
+        .build_router(BuildRouterCommand {
+            amount: Some(amount),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_b.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_c.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_a.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: Some(udt2_script.clone()),
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    let udt2_channels = vec![channels[6], channels[7], channels[8]];
+    let before_udt2_balances = capture_balances(&[&node_a, &node_b, &node_c], &udt2_channels);
+
+    for _ in 0..3 {
+        let res = node_a
+            .send_payment_with_router(SendPaymentWithRouterCommand {
+                router: ckb_router.router_hops.clone(),
+                keysend: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        node_a.wait_until_success(res.payment_hash).await;
+
+        let res = node_a
+            .send_payment_with_router(SendPaymentWithRouterCommand {
+                router: udt1_router.router_hops.clone(),
+                keysend: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        node_a.wait_until_success(res.payment_hash).await;
+    }
+
+    let after_udt2_balances = capture_balances(&[&node_a, &node_b, &node_c], &udt2_channels);
+    assert_eq!(
+        before_udt2_balances, after_udt2_balances,
+        "UDT2 balances should remain unchanged"
+    );
+
+    let mixed_router = vec![
+        ckb_router.router_hops[0].clone(),
+        udt1_router.router_hops[1].clone(),
+        udt2_router.router_hops[2].clone(),
+    ];
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: mixed_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    node_a.wait_until_failed(res.payment_hash).await;
+
+    let mixed_router = vec![
+        udt1_router.router_hops[0].clone(),
+        udt1_router.router_hops[1].clone(),
+        udt2_router.router_hops[2].clone(),
+    ];
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: mixed_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    node_a.wait_until_failed(res.payment_hash).await;
+
+    let mixed_router = vec![
+        ckb_router.router_hops[0].clone(),
+        udt1_router.router_hops[1].clone(),
+        ckb_router.router_hops[2].clone(),
+    ];
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: mixed_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    node_a.wait_until_failed(res.payment_hash).await;
+
+    let mixed_router = vec![
+        udt1_router.router_hops[0].clone(),
+        udt2_router.router_hops[1].clone(),
+        udt1_router.router_hops[2].clone(),
+    ];
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: mixed_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    node_a.wait_until_failed(res.payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_send_payment_with_first_channel_retry_will_be_ok() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();

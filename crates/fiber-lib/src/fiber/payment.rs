@@ -1830,9 +1830,19 @@ where
                     }
                     let current_amount = session_route.receiver_amount();
                     if session.request.use_trampoline_routing() {
-                        remain_amount -= target_amount;
+                        remain_amount =
+                            remain_amount.checked_sub(target_amount).ok_or_else(|| {
+                                Error::SendPaymentError(
+                                    "Trampoline route amount exceeds remaining amount".to_string(),
+                                )
+                            })?;
                     } else {
-                        remain_amount -= current_amount;
+                        remain_amount =
+                            remain_amount.checked_sub(current_amount).ok_or_else(|| {
+                                Error::SendPaymentError(
+                                    "Route amount exceeds remaining amount".to_string(),
+                                )
+                            })?;
                     }
                     target_amount = if let Some(single) = single_path_max {
                         single.min(remain_amount)
@@ -1840,7 +1850,11 @@ where
                         remain_amount
                     };
                     if let Some(fee) = max_fee {
-                        max_fee = Some(fee - session_route.fee());
+                        max_fee = Some(fee.checked_sub(session_route.fee()).ok_or_else(|| {
+                            Error::SendPaymentError(
+                                "max_fee_amount is too low for selected route".to_string(),
+                            )
+                        })?);
                     }
                     result.push(attempt);
                     if remain_amount > 0
