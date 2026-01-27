@@ -471,7 +471,7 @@ pub struct NetworkGraph<S> {
     #[cfg(test)]
     pub(crate) add_rand_expiry_delta: bool,
 
-    #[cfg(any(feature = "metrics", test))]
+    #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub(crate) payment_find_path_stats: Arc<Mutex<HashMap<Hash256, u128>>>,
 }
 
@@ -541,7 +541,7 @@ where
             announce_private_addr,
             #[cfg(test)]
             add_rand_expiry_delta: true,
-            #[cfg(any(feature = "metrics", test))]
+            #[cfg(any(feature = "metrics", test, feature = "bench"))]
             payment_find_path_stats: Default::default(),
         };
         network_graph.load_from_store();
@@ -663,8 +663,8 @@ where
     // can be added to the store earlier than messages with smaller timestamp,
     // It is possible in regular load_from_store may skip some messages.
     // We use this method to reset the cursor and load all messages from start.
-    #[cfg(test)]
-    pub(crate) fn reload_from_store(&mut self) {
+    #[cfg(any(test, feature = "bench"))]
+    pub fn reload_from_store(&mut self) {
         self.reset();
         self.load_from_store();
     }
@@ -1008,6 +1008,8 @@ where
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        let len = self.channels.len();
+        //eprintln!("get_node_inbounds len: {:?}", len);
         let mut channels: Vec<_> = self
             .channels
             .values()
@@ -1144,7 +1146,7 @@ where
     }
 
     /// Get the number of find_path calls for a specific payment_hash
-    #[cfg(any(feature = "metrics", test))]
+    #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub fn get_payment_find_path_count(&self, payment_hash: &Hash256) -> u128 {
         self.payment_find_path_stats
             .lock()
@@ -1154,7 +1156,7 @@ where
     }
 
     /// Remove the find_path stats for a specific payment_hash
-    #[cfg(any(feature = "metrics", test))]
+    #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub fn remove_payment_find_path_stats(&self, payment_hash: &Hash256) {
         self.payment_find_path_stats.lock().remove(payment_hash);
     }
@@ -2020,6 +2022,12 @@ where
                 "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
                 source, target, amount, max_fee_amount
             );
+            eprintln!(
+                "get_route failed: nodes visited: {}, edges expanded: {}, time: {:?}",
+                nodes_visited,
+                edges_expanded,
+                started_time.elapsed(),
+            );
             return Err(PathFindError::NoPathFound);
         }
         if let Some(edge) = last_edge {
@@ -2032,7 +2040,7 @@ where
             return Err(PathFindError::TlcMinValue(max_min_tlc_value));
         }
 
-        info!(
+        eprintln!(
             "get_route: nodes visited: {}, edges expanded: {}, time: {:?} \nresult: {:?}",
             nodes_visited,
             edges_expanded,

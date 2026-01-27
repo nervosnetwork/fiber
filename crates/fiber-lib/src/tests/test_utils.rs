@@ -601,7 +601,7 @@ pub(crate) async fn create_n_nodes_network_with_params(
     let mut nodes = NetworkNode::new_interconnected_nodes(n, rpc_config).await;
     let mut channels = vec![];
 
-    for ((i, j), channel_params) in amounts.iter() {
+    for (idx, ((i, j), channel_params)) in amounts.iter().enumerate() {
         let (channel_id, funding_tx) = {
             let (node_a, node_b) = {
                 // avoid borrow nodes as mutable more than once
@@ -630,6 +630,7 @@ pub(crate) async fn create_n_nodes_network_with_params(
             node.add_channel_tx(channel_id, funding_tx.hash().into());
             assert!(matches!(res, TxStatus::Committed(..)));
         }
+        debug!("finished add channel idx: {:?}", idx);
     }
     wait_for_network_graph_update(&nodes[0], amounts.len()).await;
     (nodes, channels)
@@ -1851,6 +1852,15 @@ impl NetworkNode {
         f(&mut graph)
     }
 
+    #[cfg(any(test, feature = "bench"))]
+    pub async fn mark_channel_failed_for_test(&self, channel_id: Hash256) {
+        let Some(outpoint) = self.get_channel_outpoint(&channel_id) else {
+            return;
+        };
+        self.with_network_graph_mut(|graph| graph.mark_channel_failed(&outpoint))
+            .await;
+    }
+
     pub async fn get_network_graph_nodes(&self) -> Vec<NodeInfo> {
         self.with_network_graph(|graph| graph.nodes().cloned().collect())
             .await
@@ -1902,10 +1912,16 @@ pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
 
 pub async fn wait_for_network_graph_update(node: &NetworkNode, channels: usize) {
     // sleep for a while to make sure network graph is updated
-    for _ in 0..50 {
+    for _ in 0..500 {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        if node.get_network_graph_channels().await.len() >= channels {
+        let len = node.get_network_graph_channels().await.len();
+        if len >= channels {
             break;
+        } else {
+            debug!(
+                "wait_for_network_graph_update current channels: {} expect: {:?}",
+                len, channels
+            );
         }
     }
     let graph_channels = node.get_network_graph_channels().await;
