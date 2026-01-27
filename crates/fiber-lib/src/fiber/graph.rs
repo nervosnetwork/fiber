@@ -446,6 +446,9 @@ pub struct NetworkGraph<S> {
     source: Pubkey,
     // All the channels in the network.
     pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
+    // Index: node_id -> set of channel outpoints involving this node
+    // This accelerates queries like get_node_inbounds/get_channels_by_peer
+    node_channels: HashMap<Pubkey, HashSet<OutPoint>>,
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
 
@@ -533,6 +536,7 @@ where
             always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
+            node_channels: HashMap::new(),
             channel_stats: Default::default(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
@@ -626,10 +630,28 @@ where
                 // so we can just overwrite the old channel info.
                 self.history
                     .remove_channel_history(&channel_info.channel_outpoint);
+                // Update node_channels index
+                self.node_channels
+                    .entry(channel_info.node1())
+                    .or_default()
+                    .insert(channel_info.channel_outpoint.clone());
+                self.node_channels
+                    .entry(channel_info.node2())
+                    .or_default()
+                    .insert(channel_info.channel_outpoint.clone());
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
+                // Remove from node_channels index
+                if let Some(channel) = self.channels.get(&channel_outpoint) {
+                    if let Some(set) = self.node_channels.get_mut(&channel.node1()) {
+                        set.remove(&channel_outpoint);
+                    }
+                    if let Some(set) = self.node_channels.get_mut(&channel.node2()) {
+                        set.remove(&channel_outpoint);
+                    }
+                }
                 self.channels.remove(&channel_outpoint);
                 self.channel_stats.lock().remove_channel(&channel_outpoint);
             }
@@ -753,6 +775,15 @@ where
                     .add_node_channel_map(channel_info.node1, channel_info.out_point().clone());
                 self.history
                     .add_node_channel_map(channel_info.node2, channel_info.out_point().clone());
+                // Update node_channels index
+                self.node_channels
+                    .entry(channel_info.node1)
+                    .or_default()
+                    .insert(channel_info.channel_outpoint.clone());
+                self.node_channels
+                    .entry(channel_info.node2)
+                    .or_default()
+                    .insert(channel_info.channel_outpoint.clone());
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
                 return Some(cursor);
@@ -963,27 +994,25 @@ where
     }
 
     pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {
-        self.channels
-            .values()
-            .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
-    }
-
-    pub fn get_mut_channels_by_peer(
-        &mut self,
-        node_id: Pubkey,
-    ) -> impl Iterator<Item = &mut ChannelInfo> {
-        self.channels
-            .values_mut()
-            .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
+        // Use index to avoid iterating all channels
+        self.node_channels
+            .get(&node_id)
+            .into_iter()
+            .flat_map(|outpoints| outpoints.iter())
+            .filter_map(move |outpoint| self.channels.get(outpoint))
     }
 
     pub fn get_node_outbounds(
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        // Use index to avoid iterating all channels
         let channels: Vec<_> = self
-            .channels
-            .values()
+            .node_channels
+            .get(&node_id)
+            .into_iter()
+            .flat_map(|outpoints| outpoints.iter())
+            .filter_map(move |outpoint| self.channels.get(outpoint))
             .filter_map(move |channel| {
                 match channel.update_of_node1.as_ref() {
                     Some(info) if node_id == channel.node1() && info.enabled => {
@@ -1008,9 +1037,13 @@ where
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        // Use index to avoid iterating all channels
         let mut channels: Vec<_> = self
-            .channels
-            .values()
+            .node_channels
+            .get(&node_id)
+            .into_iter()
+            .flat_map(|outpoints| outpoints.iter())
+            .filter_map(move |outpoint| self.channels.get(outpoint))
             .filter_map(move |channel| {
                 match channel.update_of_node1.as_ref() {
                     Some(info) if node_id == channel.node2() && info.enabled => {
@@ -1071,13 +1104,23 @@ where
     }
 
     pub(crate) fn mark_node_failed(&mut self, node_id: Pubkey) {
-        for channel in self.get_mut_channels_by_peer(node_id) {
-            if channel.node1() == node_id {
-                if let Some(info) = channel.update_of_node2.as_mut() {
+        // Use index to get relevant channel outpoints
+        let outpoints: Vec<_> = self
+            .node_channels
+            .get(&node_id)
+            .into_iter()
+            .flat_map(|set| set.iter().cloned())
+            .collect();
+
+        for outpoint in outpoints {
+            if let Some(channel) = self.channels.get_mut(&outpoint) {
+                if channel.node1() == node_id {
+                    if let Some(info) = channel.update_of_node2.as_mut() {
+                        info.enabled = false;
+                    }
+                } else if let Some(info) = channel.update_of_node1.as_mut() {
                     info.enabled = false;
                 }
-            } else if let Some(info) = channel.update_of_node1.as_mut() {
-                info.enabled = false;
             }
         }
     }
@@ -1134,6 +1177,7 @@ where
     pub fn reset(&mut self) {
         self.latest_cursor = Cursor::default();
         self.channels.clear();
+        self.node_channels.clear();
         self.nodes.clear();
         self.history.reset();
     }
