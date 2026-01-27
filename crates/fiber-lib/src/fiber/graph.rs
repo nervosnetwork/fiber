@@ -1008,8 +1008,6 @@ where
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
-        let len = self.channels.len();
-        //eprintln!("get_node_inbounds len: {:?}", len);
         let mut channels: Vec<_> = self
             .channels
             .values()

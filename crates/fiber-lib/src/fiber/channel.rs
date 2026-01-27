@@ -1038,8 +1038,11 @@ where
                     )
                     .without_shared_secret());
                 }
-                // allow test code to manually add tlc without onion packet
-                true
+                #[cfg(debug_assertions)]
+                {
+                    // allow test code to manually add tlc without onion packet
+                    true
+                }
             }
         };
 
