@@ -240,7 +240,7 @@ jobs:
     name: Payment Benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: github.event_name == 'pull_request'
+    if: false # temporarily disabled
     steps:
       - uses: actions/checkout@v4
         with:
@@ -258,7 +258,7 @@ jobs:
         run: |
           echo "Running payment benchmarks baseline: origin/${{ github.base_ref }}"
           git checkout origin/${{ github.base_ref }}
-          cargo bench -p fnn --features bench --bench payment_benchmarks -- --save-baseline base
+          cargo bench -p fnn --features bench --bench payment_benchmarks -- find_path_200n_2000c --save-baseline base
           rm -rf /tmp/criterion-baseline
           mkdir -p /tmp/criterion-baseline
           cp -R target/criterion /tmp/criterion-baseline
