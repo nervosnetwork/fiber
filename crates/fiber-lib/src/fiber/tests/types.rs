@@ -38,8 +38,9 @@ fn test_serde_public_key() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
     let public_key = Pubkey::from(sk.public_key(secp256k1_instance()));
     let pk_str = serde_json::to_string(&public_key).unwrap();
+    // Now Pubkey uses SliceHex which adds "0x" prefix
     assert_eq!(
-        "\"035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"",
+        "\"0x035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"",
         &pk_str
     );
     let pubkey: Pubkey = serde_json::from_str(&pk_str).unwrap();
@@ -317,12 +318,20 @@ fn test_tlc_err_packet_encryption() {
         "027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007",
     ]
     .iter()
-    .map(|s| Pubkey(PublicKey::from_str(s).expect("valid public key")))
+    .map(|s| {
+        let pk = PublicKey::from_str(s).expect("valid public key");
+        Pubkey(pk.serialize())
+    })
     .collect::<Vec<_>>();
 
     let session_key = SecretKey::from_slice(&[0x41; 32]).expect("32 bytes, within curve order");
+    // Convert [u8; 33] back to PublicKey for OnionSharedSecretIter
+    let hops_pubkeys: Vec<PublicKey> = hops_path
+        .iter()
+        .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
+        .collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp).collect();
+        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, &secp).collect();
 
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     {
