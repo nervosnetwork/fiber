@@ -1,5 +1,5 @@
 use crate::fiber::channel::{TLCId, TlcStatus};
-use crate::fiber::serde_utils::EntityHex;
+use crate::fiber::serde_utils::{EntityHex, SliceHex};
 use crate::fiber::{
     channel::{
         AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
@@ -7,13 +7,16 @@ use crate::fiber::{
         CollaboratingFundingTxFlags, NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags,
         SigningCommitmentFlags, UpdateCommand,
     },
-    network::{AcceptChannelCommand, OpenChannelCommand},
+    network::{
+        AcceptChannelCommand, OpenChannelCommand, OpenChannelSignCommand,
+        OpenChannelSubmitSignatureCommand,
+    },
     serde_utils::{U128Hex, U64Hex},
     types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
-use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
+use ckb_jsonrpc_types::{EpochNumberWithFraction, Script, Transaction};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
     packed::OutPoint,
@@ -96,6 +99,76 @@ pub struct OpenChannelParams {
 pub struct OpenChannelResult {
     /// The temporary channel ID of the channel being opened
     pub temporary_channel_id: Hash256,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OpenChannelSignParams {
+    /// The channel ID to sign the funding transaction for
+    pub channel_id: Hash256,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OpenChannelSignResult {
+    /// The channel ID for this signing request
+    pub channel_id: Hash256,
+    /// The peer ID of the channel counterparty
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+    /// Funding transaction to be signed
+    pub funding_tx: Transaction,
+    /// Funding transaction hash (without witnesses)
+    pub funding_tx_hash: Hash256,
+    /// Funding cell lock script
+    pub funding_lock_script: Script,
+    /// UDT type script for the funding cell, if any
+    pub funding_udt_type_script: Option<Script>,
+    /// Local funding amount for the channel
+    #[serde_as(as = "U128Hex")]
+    pub local_amount: u128,
+    /// Remote funding amount for the channel
+    #[serde_as(as = "U128Hex")]
+    pub remote_amount: u128,
+    /// Local reserved CKB amount
+    #[serde_as(as = "U64Hex")]
+    pub local_reserved_ckb_amount: u64,
+    /// Remote reserved CKB amount
+    #[serde_as(as = "U64Hex")]
+    pub remote_reserved_ckb_amount: u64,
+    /// Funding fee rate (shannons per KB)
+    #[serde_as(as = "U64Hex")]
+    pub funding_fee_rate: u64,
+    /// Commitment fee rate (shannons per KB)
+    #[serde_as(as = "U64Hex")]
+    pub commitment_fee_rate: u64,
+    /// Commitment delay epoch
+    pub commitment_delay_epoch: EpochNumberWithFraction,
+    /// TLC expiry delta
+    #[serde_as(as = "U64Hex")]
+    pub tlc_expiry_delta: u64,
+    /// TLC minimum value
+    #[serde_as(as = "U128Hex")]
+    pub tlc_min_value: u128,
+    /// TLC fee proportional millionths
+    #[serde_as(as = "U128Hex")]
+    pub tlc_fee_proportional_millionths: u128,
+    /// Max TLC value in flight
+    #[serde_as(as = "U128Hex")]
+    pub max_tlc_value_in_flight: u128,
+    /// Max TLC number in flight
+    #[serde_as(as = "U64Hex")]
+    pub max_tlc_number_in_flight: u64,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OpenChannelSubmitSignatureParams {
+    /// The channel ID to submit funding signatures for
+    pub channel_id: Hash256,
+    /// Witnesses for the funding transaction, hex-encoded
+    #[serde_as(as = "Vec<SliceHex>")]
+    pub witnesses: Vec<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -349,6 +422,22 @@ trait ChannelRpc {
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned>;
 
+    /// Retrieves the funding transaction and metadata for external signing.
+    /// The node will fallback to local signing after timeout if no signature is submitted.
+    #[method(name = "open_channel_sign")]
+    async fn open_channel_sign(
+        &self,
+        params: OpenChannelSignParams,
+    ) -> Result<OpenChannelSignResult, ErrorObjectOwned>;
+
+    /// Submits externally signed funding transaction witnesses.
+    /// The provided witnesses should match the full transaction witness list.
+    #[method(name = "open_channel_submit_signature")]
+    async fn open_channel_submit_signature(
+        &self,
+        params: OpenChannelSubmitSignatureParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
     /// Accepts a channel opening request from a peer.
     #[method(name = "accept_channel")]
     async fn accept_channel(
@@ -400,6 +489,22 @@ where
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
         self.open_channel(params).await
+    }
+
+    /// Retrieves the funding transaction and metadata for external signing.
+    async fn open_channel_sign(
+        &self,
+        params: OpenChannelSignParams,
+    ) -> Result<OpenChannelSignResult, ErrorObjectOwned> {
+        self.open_channel_sign(params).await
+    }
+
+    /// Submits externally signed funding transaction witnesses.
+    async fn open_channel_submit_signature(
+        &self,
+        params: OpenChannelSubmitSignatureParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.open_channel_submit_signature(params).await
     }
 
     /// Accepts a channel opening request from a peer.
@@ -473,6 +578,58 @@ where
         handle_actor_call!(self.actor, message, params).map(|response| OpenChannelResult {
             temporary_channel_id: response.channel_id,
         })
+    }
+
+    pub async fn open_channel_sign(
+        &self,
+        params: OpenChannelSignParams,
+    ) -> Result<OpenChannelSignResult, ErrorObjectOwned> {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannelSign(
+                OpenChannelSignCommand {
+                    channel_id: params.channel_id,
+                },
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| OpenChannelSignResult {
+            channel_id: response.channel_id,
+            peer_id: response.peer_id,
+            funding_tx: response.funding_tx.into(),
+            funding_tx_hash: response.funding_tx_hash,
+            funding_lock_script: response.funding_lock_script.into(),
+            funding_udt_type_script: response.funding_udt_type_script.map(Into::into),
+            local_amount: response.local_amount,
+            remote_amount: response.remote_amount,
+            local_reserved_ckb_amount: response.local_reserved_ckb_amount,
+            remote_reserved_ckb_amount: response.remote_reserved_ckb_amount,
+            funding_fee_rate: response.funding_fee_rate,
+            commitment_fee_rate: response.commitment_fee_rate,
+            commitment_delay_epoch: EpochNumberWithFraction::from(
+                EpochNumberWithFractionCore::from_full_value(response.commitment_delay_epoch),
+            ),
+            tlc_expiry_delta: response.tlc_expiry_delta,
+            tlc_min_value: response.tlc_min_value,
+            tlc_fee_proportional_millionths: response.tlc_fee_proportional_millionths,
+            max_tlc_value_in_flight: response.max_tlc_value_in_flight,
+            max_tlc_number_in_flight: response.max_tlc_number_in_flight,
+        })
+    }
+
+    pub async fn open_channel_submit_signature(
+        &self,
+        params: OpenChannelSubmitSignatureParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannelSubmitSignature(
+                OpenChannelSubmitSignatureCommand {
+                    channel_id: params.channel_id,
+                    witnesses: params.witnesses.clone(),
+                },
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params)
     }
 
     pub async fn accept_channel(

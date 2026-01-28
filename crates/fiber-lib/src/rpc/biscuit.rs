@@ -80,6 +80,8 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("get_cch_order", r#"allow if read("cch");"#);
     // channels
     b.rule("open_channel", r#"allow if write("channels");"#);
+    b.rule("open_channel_sign", r#"allow if write("channels");"#);
+    b.rule("open_channel_submit_signature", r#"allow if write("channels");"#);
     b.rule("accept_channel", r#"allow if write("channels");"#);
     b.rule("abandon_channel", r#"allow if write("channels");"#);
     b.rule("list_channels", r#"allow if read("channels");"#);

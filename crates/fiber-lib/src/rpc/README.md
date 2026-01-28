@@ -20,6 +20,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `get_cch_order`](#cch-get_cch_order)
     * [Module Channel](#module-channel)
         * [Method `open_channel`](#channel-open_channel)
+        * [Method `open_channel_sign`](#channel-open_channel_sign)
+        * [Method `open_channel_submit_signature`](#channel-open_channel_submit_signature)
         * [Method `accept_channel`](#channel-accept_channel)
         * [Method `abandon_channel`](#channel-abandon_channel)
         * [Method `list_channels`](#channel-list_channels)
@@ -233,6 +235,58 @@ Attempts to open a channel with a peer.
 
 ---
 
+
+
+<a id="channel-open_channel_sign"></a>
+#### Method `open_channel_sign`
+
+Retrieves the funding transaction and metadata for external signing. If no
+signature is submitted before the timeout, the node will fallback to local signing.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID to sign the funding transaction for
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID for this signing request
+* `peer_id` - <em>`PeerId`</em>, The peer ID of the channel counterparty
+* `funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, Funding transaction to be signed
+* `funding_tx_hash` - <em>[Hash256](#type-hash256)</em>, Funding transaction hash (without witnesses)
+* `funding_lock_script` - <em>`ckb_jsonrpc_types::Script`</em>, Funding cell lock script
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, UDT type script for the funding cell, if any
+* `local_amount` - <em>`u128`</em>, Local funding amount for the channel
+* `remote_amount` - <em>`u128`</em>, Remote funding amount for the channel
+* `local_reserved_ckb_amount` - <em>`u64`</em>, Local reserved CKB amount
+* `remote_reserved_ckb_amount` - <em>`u64`</em>, Remote reserved CKB amount
+* `funding_fee_rate` - <em>`u64`</em>, Funding fee rate (shannons per KB)
+* `commitment_fee_rate` - <em>`u64`</em>, Commitment fee rate (shannons per KB)
+* `commitment_delay_epoch` - <em>`EpochNumberWithFraction`</em>, Commitment delay epoch
+* `tlc_expiry_delta` - <em>`u64`</em>, TLC expiry delta
+* `tlc_min_value` - <em>`u128`</em>, TLC minimum value
+* `tlc_fee_proportional_millionths` - <em>`u128`</em>, TLC fee proportional millionths
+* `max_tlc_value_in_flight` - <em>`u128`</em>, Max TLC value in flight
+* `max_tlc_number_in_flight` - <em>`u64`</em>, Max TLC number in flight
+
+---
+
+
+<a id="channel-open_channel_submit_signature"></a>
+#### Method `open_channel_submit_signature`
+
+Submits externally signed funding transaction witnesses. The witnesses should
+match the full witness list of the funding transaction.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID to submit funding signatures for
+* `witnesses` - <em>`Vec<Bytes>`</em>, Witnesses for the funding transaction, hex-encoded
+
+##### Returns
+
+* None
+
+---
 
 
 <a id="channel-accept_channel"></a>

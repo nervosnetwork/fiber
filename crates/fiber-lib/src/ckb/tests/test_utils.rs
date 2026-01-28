@@ -530,6 +530,9 @@ impl Actor for MockChainActor {
                     );
                 }
             }
+            CalculateFundingTxFee(_, reply_port) => {
+                let _ = reply_port.send(Ok(0));
+            }
             SendTx(tx, reply_port) => {
                 const MAX_CYCLES: u64 = 100_000_000;
                 let f = || {

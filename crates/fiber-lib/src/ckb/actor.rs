@@ -1,5 +1,9 @@
 use ckb_sdk::RpcError;
-use ckb_types::{core::TransactionView, packed, prelude::IntoTransactionView as _};
+use ckb_types::{
+    core::TransactionView,
+    packed,
+    prelude::{IntoTransactionView as _, Unpack},
+};
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -13,6 +17,7 @@ use crate::{
 };
 
 use super::{
+    config::new_ckb_rpc_async_client,
     funding::{FundingContext, LiveCellsExclusionMap},
     tx_tracing_actor::{
         CkbTxTracer, CkbTxTracingActor, CkbTxTracingArguments, CkbTxTracingMessage,
@@ -56,6 +61,7 @@ pub enum CkbChainMessage {
     /// CommitFundingTx(tx_hash, commit_block_number),
     CommitFundingTx(Hash256, u64),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
+    CalculateFundingTxFee(TransactionView, RpcReplyPort<Result<u64, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     CreateTxTracer(CkbTxTracer),
     RemoveTxTracers(Hash256),
@@ -161,6 +167,35 @@ impl Actor for CkbChainActor {
                         // ignore error
                         let _ = reply_port.send(result);
                     }
+                }
+            }
+            CkbChainMessage::CalculateFundingTxFee(tx, reply_port) => {
+                if !reply_port.is_closed() {
+                    let ckb_client = new_ckb_rpc_async_client(&state.config.rpc_url);
+                    let mut input_capacity: u64 = 0;
+                    for input in tx.input_pts_iter() {
+                        let live_cell = ckb_client.get_live_cell(input.into(), false).await?;
+                        let Some(cell) = live_cell.cell else {
+                            let _ = reply_port.send(Err(FundingError::DeadCell));
+                            return Ok(());
+                        };
+                        let output: packed::CellOutput = cell.output.into();
+                        let capacity: u64 = output.capacity().unpack();
+                        input_capacity = input_capacity
+                            .checked_add(capacity)
+                            .ok_or(FundingError::OverflowError)?;
+                    }
+                    let output_capacity: u64 = tx
+                        .outputs()
+                        .into_iter()
+                        .map(|output| -> u64 { output.capacity().unpack() })
+                        .sum();
+                    if input_capacity < output_capacity {
+                        let _ = reply_port.send(Err(FundingError::OverflowError));
+                        return Ok(());
+                    }
+                    let fee = input_capacity - output_capacity;
+                    let _ = reply_port.send(Ok(fee));
                 }
             }
             CkbChainMessage::SendTx(tx, reply_port) => {

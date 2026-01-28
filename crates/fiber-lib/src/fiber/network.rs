@@ -1,6 +1,6 @@
 use ckb_hash::blake2b_256;
 use ckb_types::core::tx_pool::TxStatus;
-use ckb_types::core::{EpochNumberWithFraction, TransactionView};
+use ckb_types::core::{EpochNumberWithFraction, FeeRate, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
@@ -50,7 +50,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
-    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
+    ChannelActorState, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
     ChannelInitializationParameter, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
     PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
     RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
@@ -79,7 +79,7 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelEphemeralConfig,
     ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
     TxUpdateCommand,
 };
@@ -116,6 +116,7 @@ pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 
 pub const DEFAULT_PAYMENT_TRY_LIMIT: u32 = 5;
 pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
+const DEFAULT_EXTERNAL_SIGN_TIMEOUT_SECONDS: u64 = 10 * 60;
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
@@ -264,6 +265,39 @@ pub struct SendOnionPacketCommand {
     pub attempt_id: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct OpenChannelSignCommand {
+    pub channel_id: Hash256,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenChannelSubmitSignatureCommand {
+    pub channel_id: Hash256,
+    pub witnesses: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenChannelSignResponse {
+    pub channel_id: Hash256,
+    pub peer_id: PeerId,
+    pub funding_tx: Transaction,
+    pub funding_tx_hash: Hash256,
+    pub funding_lock_script: Script,
+    pub funding_udt_type_script: Option<Script>,
+    pub local_amount: u128,
+    pub remote_amount: u128,
+    pub local_reserved_ckb_amount: u64,
+    pub remote_reserved_ckb_amount: u64,
+    pub funding_fee_rate: u64,
+    pub commitment_fee_rate: u64,
+    pub commitment_delay_epoch: u64,
+    pub tlc_expiry_delta: u64,
+    pub tlc_min_value: u128,
+    pub tlc_fee_proportional_millionths: u128,
+    pub max_tlc_value_in_flight: u128,
+    pub max_tlc_number_in_flight: u64,
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
@@ -317,6 +351,15 @@ pub enum NetworkActorCommand {
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     SignFundingTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
+    OpenChannelSign(
+        OpenChannelSignCommand,
+        RpcReplyPort<Result<OpenChannelSignResponse, String>>,
+    ),
+    OpenChannelSubmitSignature(
+        OpenChannelSubmitSignatureCommand,
+        RpcReplyPort<Result<(), String>>,
+    ),
+    ExternalSignTimeout(Hash256),
     NotifyFundingTx(Transaction),
     CheckChannelsShutdown,
     CheckChannelShutdown(Hash256),
@@ -646,6 +689,13 @@ pub struct NetworkActor<S, C> {
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalFundingTxSignSession {
+    peer_id: PeerId,
+    funding_tx: Transaction,
+    partial_witnesses: Option<Vec<Vec<u8>>>,
 }
 
 impl<S, C> NetworkActor<S, C>
@@ -1835,137 +1885,288 @@ where
                 funding_tx,
                 partial_witnesses,
             ) => {
-                let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
-
-                // Check if we have partial witnesses before moving them
-                let has_partial_witnesses = partial_witnesses.is_some();
-
-                // Prepare funding transaction with partial witnesses if provided
-                let funding_tx = match partial_witnesses {
-                    Some(partial_witnesses) => {
-                        debug!(
-                            "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
-                            &funding_tx,
-                            partial_witnesses
-                                .iter()
-                                .map(hex::encode)
-                                .collect::<Vec<_>>()
-                        );
-                        funding_tx
-                            .into_view()
-                            .as_advanced_builder()
-                            .set_witnesses(
-                                partial_witnesses.into_iter().map(|x| x.pack()).collect(),
+                if let Some(session) = state.pending_funding_tx_signing.get_mut(channel_id) {
+                    let signing_tx = Self::apply_partial_witnesses(
+                        funding_tx,
+                        partial_witnesses.clone(),
+                    );
+                    session.funding_tx = signing_tx.data();
+                    session.partial_witnesses = partial_witnesses;
+                    debug!(
+                        "Waiting for external funding tx signature for channel {:?}",
+                        channel_id
+                    );
+                } else {
+                    let has_partial_witnesses = partial_witnesses.is_some();
+                    let signing_tx = Self::apply_partial_witnesses(funding_tx, partial_witnesses);
+                    match self.sign_funding_tx_via_chain(signing_tx).await {
+                        Ok(signed_tx) => {
+                            self.finalize_signed_funding_tx(
+                                myself.clone(),
+                                state,
+                                peer_id.clone(),
+                                *channel_id,
+                                signed_tx,
+                                has_partial_witnesses,
                             )
-                            .build()
-                    }
-                    None => {
-                        debug!(
-                            "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
-                            &funding_tx,
-                        );
-                        funding_tx.into_view()
-                    }
-                };
-
-                // Sign the funding transaction
-                let mut signed_funding_tx = match call_t!(
-                    self.chain_actor,
-                    CkbChainMessage::Sign,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    funding_tx.into()
-                )
-                .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-                {
-                    Ok(funding_tx) => funding_tx,
-                    Err(err) => {
-                        error!("Failed to sign funding transaction: {}", err);
-                        // Send TxAbort message to peer
-                        let abort_msg = FiberMessageWithPeerId {
-                            peer_id: peer_id.clone(),
-                            message: FiberMessage::ChannelNormalOperation(
-                                FiberChannelMessage::TxAbort(TxAbort {
-                                    channel_id: *channel_id,
-                                    message: format!("Failed to sign funding transaction: {}", err)
+                            .await?;
+                        }
+                        Err(err) => {
+                            error!("Failed to sign funding transaction: {}", err);
+                            let abort_msg = FiberMessageWithPeerId {
+                                peer_id: peer_id.clone(),
+                                message: FiberMessage::ChannelNormalOperation(
+                                    FiberChannelMessage::TxAbort(TxAbort {
+                                        channel_id: *channel_id,
+                                        message: format!(
+                                            "Failed to sign funding transaction: {}",
+                                            err
+                                        )
                                         .as_bytes()
                                         .to_vec(),
-                                }),
-                            ),
-                        };
-                        myself
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(abort_msg),
-                            ))
-                            .expect("network actor alive");
-                        // Abort funding and close the channel
-                        state.abort_funding(Either::Left(*channel_id)).await;
-                        return Ok(());
+                                    }),
+                                ),
+                            };
+                            myself
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::SendFiberMessage(abort_msg),
+                                ))
+                                .expect("network actor alive");
+                            state.abort_funding(Either::Left(*channel_id)).await;
+                            return Ok(());
+                        }
                     }
-                };
-                debug!("Funding transaction signed: {:?}", &signed_funding_tx);
-
-                // Extract signed transaction and witnesses
-                let funding_tx = signed_funding_tx.take().expect("take tx");
-                let witnesses = funding_tx.witnesses();
-
-                // If we received partial witnesses, the transaction is fully signed
-                // and we should notify that it's pending confirmation
-                if has_partial_witnesses {
-                    let outpoint = funding_tx
-                        .output_pts_iter()
-                        .next()
-                        .expect("funding tx output exists");
-
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::FundingTransactionPending(
-                                funding_tx.data(),
-                                outpoint,
-                                *channel_id,
-                            ),
-                        ))
-                        .expect("network actor alive");
-                    debug!("Fully signed funding tx {:?}", &funding_tx);
-                } else {
-                    debug!("Partially signed funding tx {:?}", &funding_tx);
                 }
-
-                // Create the message to send to peer
-                let msg = FiberMessageWithPeerId {
-                    peer_id: peer_id.clone(),
-                    message: FiberMessage::ChannelNormalOperation(
-                        FiberChannelMessage::TxSignatures(TxSignatures {
-                            channel_id: *channel_id,
-                            witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                        }),
-                    ),
-                };
-
-                // Before sending the signatures to the peer, start tracing the tx
-                // It should be the first time to trace the tx
-                state
-                    .trace_tx(tx_hash, InFlightCkbTxKind::Funding(*channel_id))
-                    .await?;
-
-                // Notify channel actor to save the signatures
-                if let Err(err) = state
-                    .send_command_to_channel(
-                        *channel_id,
-                        ChannelCommand::FundingTxSigned(funding_tx.data()),
-                    )
-                    .await
+            }
+            NetworkActorCommand::OpenChannelSign(command, reply) => {
+                let result = if let Some(channel_state) =
+                    self.store.get_channel_actor_state(&command.channel_id)
                 {
-                    error!(
-                        "Failed to update signed funding tx {:?}: {}",
-                        channel_id, err
+                    match channel_state.state {
+                        ChannelState::AwaitingTxSignatures(flags)
+                            if !flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
+                        {
+                            let peer_id = channel_state.get_remote_peer_id();
+                            (|| {
+                                let funding_tx = channel_state
+                                    .funding_tx
+                                    .clone()
+                                    .ok_or_else(|| {
+                                        "Funding transaction is not present".to_string()
+                                    })?;
+                                let existing_session =
+                                    state.pending_funding_tx_signing.get(&command.channel_id);
+                                let signing_tx = if let Some(session) = existing_session {
+                                    session.funding_tx.clone()
+                                } else {
+                                    funding_tx.clone()
+                                };
+                                if existing_session.is_none() {
+                                    let timeout_seconds = DEFAULT_EXTERNAL_SIGN_TIMEOUT_SECONDS;
+                                    let session = ExternalFundingTxSignSession {
+                                        peer_id: peer_id.clone(),
+                                        funding_tx: signing_tx.clone(),
+                                        partial_witnesses: None,
+                                    };
+                                    let is_new = state
+                                        .pending_funding_tx_signing
+                                        .insert(command.channel_id, session)
+                                        .is_none();
+                                    if is_new {
+                                        let channel_id = command.channel_id;
+                                        myself.send_after(
+                                            Duration::from_secs(timeout_seconds),
+                                            move || {
+                                                NetworkActorMessage::new_command(
+                                                    NetworkActorCommand::ExternalSignTimeout(
+                                                        channel_id,
+                                                    ),
+                                                )
+                                            },
+                                        );
+                                    }
+                                }
+                                let signing_tx_view = signing_tx.clone().into_view();
+                                if let Err(err) = self.validate_funding_tx_against_channel_state(
+                                    &channel_state,
+                                    &signing_tx_view,
+                                ) {
+                                    return Err(err);
+                                }
+                                let response = self.build_open_channel_sign_response(
+                                    &channel_state,
+                                    peer_id,
+                                    signing_tx,
+                                );
+                                Ok(response)
+                            })()
+                        }
+                        _ => Err("Channel is not ready for funding tx signature".to_string()),
+                    }
+                } else {
+                    Err("Channel not found".to_string())
+                };
+                let _ = reply.send(result);
+            }
+            NetworkActorCommand::OpenChannelSubmitSignature(command, reply) => {
+                let result = if let Some(session) = state
+                    .pending_funding_tx_signing
+                    .get(&command.channel_id)
+                    .cloned()
+                {
+                    (async {
+                        let channel_state = self
+                            .store
+                            .get_channel_actor_state(&command.channel_id)
+                            .ok_or_else(|| "Channel not found".to_string())?;
+                        match channel_state.state {
+                            ChannelState::AwaitingTxSignatures(flags)
+                                if !flags
+                                    .contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
+                            {
+                                let stored_tx = channel_state.funding_tx.clone().ok_or_else(
+                                    || "Funding transaction is not present".to_string(),
+                                )?;
+                                let stored_tx_hash: Hash256 = stored_tx.calc_tx_hash().into();
+                                let session_tx_hash: Hash256 =
+                                    session.funding_tx.calc_tx_hash().into();
+                                if stored_tx_hash != session_tx_hash {
+                                    state.pending_funding_tx_signing.remove(&command.channel_id);
+                                    state
+                                        .abort_funding(Either::Left(command.channel_id))
+                                        .await;
+                                    return Err(
+                                        "Funding transaction hash mismatch".to_string()
+                                    );
+                                }
+                                if let Err(err) = self.validate_funding_tx_against_channel_state(
+                                    &channel_state,
+                                    &stored_tx.clone().into_view(),
+                                ) {
+                                    state.pending_funding_tx_signing.remove(&command.channel_id);
+                                    state
+                                        .abort_funding(Either::Left(command.channel_id))
+                                        .await;
+                                    return Err(err);
+                                }
+                                if let Err(err) = self
+                                    .validate_funding_fee_rate(
+                                        stored_tx.clone(),
+                                        channel_state.funding_fee_rate,
+                                    )
+                                    .await
+                                {
+                                    if !err.is_temporary() {
+                                        state.pending_funding_tx_signing
+                                            .remove(&command.channel_id);
+                                        state
+                                            .abort_funding(Either::Left(command.channel_id))
+                                            .await;
+                                    }
+                                    return Err(format!(
+                                        "Funding transaction fee validation failed: {}",
+                                        err
+                                    ));
+                                }
+                                if command.witnesses.len() != stored_tx.witnesses().len() {
+                                    state.pending_funding_tx_signing.remove(&command.channel_id);
+                                    state
+                                        .abort_funding(Either::Left(command.channel_id))
+                                        .await;
+                                    return Err(
+                                        "Funding transaction witnesses count mismatch"
+                                            .to_string(),
+                                    );
+                                }
+                                let signed_tx = stored_tx
+                                    .into_view()
+                                    .as_advanced_builder()
+                                    .set_witnesses(
+                                        command
+                                            .witnesses
+                                            .into_iter()
+                                            .map(|x| x.pack())
+                                            .collect(),
+                                    )
+                                    .build();
+                                if let Err(err) = self
+                                    .finalize_signed_funding_tx(
+                                        myself.clone(),
+                                        state,
+                                        session.peer_id.clone(),
+                                        command.channel_id,
+                                        signed_tx,
+                                        session.partial_witnesses.is_some(),
+                                    )
+                                    .await
+                                {
+                                    return Err(format!(
+                                        "Failed to finalize signed funding tx: {}",
+                                        err
+                                    ));
+                                }
+                                state.pending_funding_tx_signing.remove(&command.channel_id);
+                                Ok(())
+                            }
+                            _ => Err("Channel is not ready for funding tx signature".to_string()),
+                        }
+                    })
+                    .await
+                } else {
+                    Err("No pending external funding signature request".to_string())
+                };
+                let _ = reply.send(result);
+            }
+            NetworkActorCommand::ExternalSignTimeout(channel_id) => {
+                if let Some(session) = state.pending_funding_tx_signing.remove(&channel_id) {
+                    let signing_tx = Self::apply_partial_witnesses(
+                        session.funding_tx.clone(),
+                        session.partial_witnesses.clone(),
                     );
+                    match self.sign_funding_tx_via_chain(signing_tx).await {
+                        Ok(signed_tx) => {
+                            if let Err(err) = self
+                                .finalize_signed_funding_tx(
+                                    myself.clone(),
+                                    state,
+                                    session.peer_id,
+                                    channel_id,
+                                    signed_tx,
+                                    session.partial_witnesses.is_some(),
+                                )
+                                .await
+                            {
+                                error!(
+                                    "Failed to finalize funding tx after external sign timeout: {}",
+                                    err
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            error!("Failed to sign funding tx after timeout: {}", err);
+                            let abort_msg = FiberMessageWithPeerId {
+                                peer_id: session.peer_id,
+                                message: FiberMessage::ChannelNormalOperation(
+                                    FiberChannelMessage::TxAbort(TxAbort {
+                                        channel_id,
+                                        message: format!(
+                                            "Failed to sign funding transaction: {}",
+                                            err
+                                        )
+                                        .as_bytes()
+                                        .to_vec(),
+                                    }),
+                                ),
+                            };
+                            myself
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::SendFiberMessage(abort_msg),
+                                ))
+                                .expect("network actor alive");
+                            state.abort_funding(Either::Left(channel_id)).await;
+                        }
+                    }
                 }
-
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(msg),
-                    ))
-                    .expect("network actor alive");
             }
             NetworkActorCommand::CheckChannelShutdown(channel_id) => {
                 if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
@@ -2646,6 +2847,202 @@ where
             request
         )?
     }
+
+    fn apply_partial_witnesses(
+        funding_tx: Transaction,
+        partial_witnesses: Option<Vec<Vec<u8>>>,
+    ) -> TransactionView {
+        match partial_witnesses {
+            Some(witnesses) => funding_tx
+                .into_view()
+                .as_advanced_builder()
+                .set_witnesses(witnesses.into_iter().map(|x| x.pack()).collect())
+                .build(),
+            None => funding_tx.into_view(),
+        }
+    }
+
+    fn build_open_channel_sign_response(
+        &self,
+        channel_state: &ChannelActorState,
+        peer_id: PeerId,
+        funding_tx: Transaction,
+    ) -> OpenChannelSignResponse {
+        OpenChannelSignResponse {
+            channel_id: channel_state.get_id(),
+            peer_id,
+            funding_tx_hash: funding_tx.calc_tx_hash().into(),
+            funding_tx,
+            funding_lock_script: channel_state.get_funding_lock_script(),
+            funding_udt_type_script: channel_state.funding_udt_type_script.clone(),
+            local_amount: channel_state.to_local_amount,
+            remote_amount: channel_state.to_remote_amount,
+            local_reserved_ckb_amount: channel_state.local_reserved_ckb_amount,
+            remote_reserved_ckb_amount: channel_state.remote_reserved_ckb_amount,
+            funding_fee_rate: channel_state.funding_fee_rate,
+            commitment_fee_rate: channel_state.commitment_fee_rate,
+            commitment_delay_epoch: channel_state.commitment_delay_epoch,
+            tlc_expiry_delta: channel_state.local_tlc_info.tlc_expiry_delta,
+            tlc_min_value: channel_state.local_tlc_info.tlc_minimum_value,
+            tlc_fee_proportional_millionths: channel_state
+                .local_tlc_info
+                .tlc_fee_proportional_millionths,
+            max_tlc_value_in_flight: channel_state.local_constraints.max_tlc_value_in_flight,
+            max_tlc_number_in_flight: channel_state.local_constraints.max_tlc_number_in_flight,
+        }
+    }
+
+    fn validate_funding_tx_against_channel_state(
+        &self,
+        channel_state: &ChannelActorState,
+        funding_tx: &TransactionView,
+    ) -> Result<(), String> {
+        let Some((output, output_data)) = funding_tx.output_with_data(0) else {
+            return Err("Funding transaction should have at least one output".to_string());
+        };
+        if output.lock() != channel_state.get_funding_lock_script() {
+            return Err("Funding transaction lock script mismatch".to_string());
+        }
+        if output.type_().to_opt() != channel_state.funding_udt_type_script {
+            return Err("Funding transaction type script mismatch".to_string());
+        }
+        let output_capacity: u64 = output.capacity().unpack();
+        let expected_ckb_capacity = channel_state.local_reserved_ckb_amount
+            + channel_state.remote_reserved_ckb_amount
+            + if channel_state.funding_udt_type_script.is_some() {
+                0
+            } else {
+                channel_state.to_local_amount as u64 + channel_state.to_remote_amount as u64
+            };
+        if output_capacity != expected_ckb_capacity {
+            return Err(format!(
+                "Funding transaction capacity mismatch: expected {}, got {}",
+                expected_ckb_capacity, output_capacity
+            ));
+        }
+        if let Some(_) = channel_state.funding_udt_type_script {
+            if output_data.as_ref().len() < 16 {
+                return Err("Funding transaction UDT output data too short".to_string());
+            }
+            let mut amount_bytes = [0u8; 16];
+            amount_bytes.copy_from_slice(&output_data.as_ref()[0..16]);
+            let udt_amount = u128::from_le_bytes(amount_bytes);
+            let expected_udt_amount = channel_state.to_local_amount + channel_state.to_remote_amount;
+            if udt_amount != expected_udt_amount {
+                return Err(format!(
+                    "Funding transaction UDT amount mismatch: expected {}, got {}",
+                    expected_udt_amount, udt_amount
+                ));
+            }
+        } else if !output_data.as_ref().is_empty() {
+            return Err("Funding transaction output data must be empty for CKB channel".to_string());
+        }
+        Ok(())
+    }
+
+    async fn validate_funding_fee_rate(
+        &self,
+        funding_tx: Transaction,
+        expected_fee_rate: u64,
+    ) -> Result<(), FundingError> {
+        let tx_size = funding_tx
+            .clone()
+            .into_view()
+            .data()
+            .serialized_size_in_block() as u64;
+        let fee = call_t!(
+            self.chain_actor.clone(),
+            CkbChainMessage::CalculateFundingTxFee,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            funding_tx.clone().into_view()
+        )
+        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+        ?;
+        let expected_fee = FeeRate::from_u64(expected_fee_rate).fee(tx_size).as_u64();
+        if fee != expected_fee {
+            return Err(FundingError::InvalidPeerFundingTx);
+        }
+        Ok(())
+    }
+
+    async fn sign_funding_tx_via_chain(
+        &self,
+        funding_tx: TransactionView,
+    ) -> Result<TransactionView, FundingError> {
+        let mut signed_funding_tx = call_t!(
+            self.chain_actor.clone(),
+            CkbChainMessage::Sign,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            FundingTx::from(funding_tx)
+        )
+        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)?;
+        let signed_funding_tx = signed_funding_tx.take().expect("take tx");
+        Ok(signed_funding_tx)
+    }
+
+    async fn finalize_signed_funding_tx(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S, C>,
+        peer_id: PeerId,
+        channel_id: Hash256,
+        signed_funding_tx: TransactionView,
+        has_partial_witnesses: bool,
+    ) -> crate::Result<()> {
+        let tx_hash: Hash256 = signed_funding_tx.hash().into();
+        let funding_tx = signed_funding_tx.data();
+        let witnesses = signed_funding_tx.witnesses();
+
+        if has_partial_witnesses {
+            let outpoint = signed_funding_tx
+                .output_pts_iter()
+                .next()
+                .expect("funding tx output exists");
+            myself
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::FundingTransactionPending(
+                        funding_tx.clone(),
+                        outpoint,
+                        channel_id,
+                    ),
+                ))
+                .expect("network actor alive");
+            debug!("Fully signed funding tx {:?}", &signed_funding_tx);
+        } else {
+            debug!("Partially signed funding tx {:?}", &signed_funding_tx);
+        }
+
+        let msg = FiberMessageWithPeerId {
+            peer_id: peer_id.clone(),
+            message: FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(
+                TxSignatures {
+                    channel_id,
+                    witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
+                },
+            )),
+        };
+
+        state
+            .trace_tx(tx_hash, InFlightCkbTxKind::Funding(channel_id))
+            .await?;
+
+        if let Err(err) = state
+            .send_command_to_channel(channel_id, ChannelCommand::FundingTxSigned(funding_tx))
+            .await
+        {
+            error!(
+                "Failed to update signed funding tx {:?}: {}",
+                channel_id, err
+            );
+        }
+
+        myself
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(msg),
+            ))
+            .expect("network actor alive");
+        Ok(())
+    }
 }
 
 pub struct NetworkActorState<S, C> {
@@ -2696,6 +3093,8 @@ pub struct NetworkActorState<S, C> {
     tlc_min_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u128,
+    // Pending external funding tx signing sessions.
+    pending_funding_tx_signing: HashMap<Hash256, ExternalFundingTxSignSession>,
     // The gossip messages actor to process and send gossip messages.
     // None if gossip is disabled via sync_network_graph config.
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
@@ -3344,6 +3743,7 @@ where
                 }
             },
         };
+        self.pending_funding_tx_signing.remove(&channel_id);
 
         self.send_message_to_channel_actor(
             channel_id,
@@ -3860,6 +4260,7 @@ where
         // all check passed, now begin to remove from memory and DB
         self.channels.remove(&channel_id);
         self.channels_funding_lock_script_cache.remove(&channel_id);
+        self.pending_funding_tx_signing.remove(&channel_id);
         for (_peer_id, connected_peer) in self.peer_session_map.iter() {
             if let Some(session_channels) = self
                 .session_channels_map
@@ -4381,6 +4782,7 @@ where
             tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
+            pending_funding_tx_signing: Default::default(),
             gossip_actor,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
