@@ -235,3 +235,97 @@ jobs:
             echo "This might indicate a benchmark execution failure."
             exit 1
           fi
+
+  payment-benchmark:
+    name: Payment Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: payment-bench-${{ runner.os }}
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Run payment benchmarks baseline
+        run: |
+          echo "Running payment benchmarks baseline: origin/${{ github.base_ref }}"
+          git checkout origin/${{ github.base_ref }}
+          cargo bench -p fnn --features bench --bench payment_benchmarks -- --save-baseline base
+          rm -rf /tmp/criterion-baseline
+          mkdir -p /tmp/criterion-baseline
+          cp -R target/criterion /tmp/criterion-baseline
+
+      - name: Run payment benchmarks current
+        run: |
+          echo "Running payment benchmarks on current PR commit: ${{ github.sha }}"
+          git checkout ${{ github.sha }}
+          cargo bench -p fnn --features bench --bench payment_benchmarks
+          rm -rf /tmp/criterion-current
+          mkdir -p /tmp/criterion-current
+          cp -R target/criterion /tmp/criterion-current
+
+      - name: Check payment benchmark regression
+        run: |
+          set -euo pipefail
+          base_dir=/tmp/criterion-baseline
+          cur_dir=/tmp/criterion-current
+          max_reg=0
+          worst_case=""
+          while IFS= read -r base; do
+            rel=${base#"$base_dir"/}
+            cur=${rel%/base/estimates.json}/new/estimates.json
+            cur="$cur_dir/$cur"
+            if [[ ! -f "$cur" ]]; then
+              echo "Missing current estimate for $rel"
+              exit 1
+            fi
+            base_mean=$(jq -r '.mean.point_estimate' "$base")
+            cur_mean=$(jq -r '.mean.point_estimate' "$cur")
+            if [[ "$base_mean" == "0" ]]; then
+              continue
+            fi
+            reg=$(awk -v b="$base_mean" -v c="$cur_mean" 'BEGIN { printf "%.6f", ((c-b)/b)*100 }')
+            dir="flat"
+            if awk -v r="$reg" 'BEGIN { exit !(r > 0.5) }'; then
+              dir="down"
+            elif awk -v r="$reg" 'BEGIN { exit !(r < -0.5) }'; then
+              dir="up"
+            fi
+            if [[ "$dir" == "down" ]]; then
+              emoji="🔻"
+            elif [[ "$dir" == "up" ]]; then
+              emoji="👍"
+            else
+              emoji="🟰"
+            fi
+            echo "$emoji Result: $rel baseline=$base_mean current=$cur_mean change=${reg}% ($dir)"
+            if awk -v r="$reg" 'BEGIN { exit !(r > 5.0) }'; then
+              echo "🚨 Regression > 5%: $rel (baseline=$base_mean current=$cur_mean, ${reg}% )"
+              if awk -v r="$reg" -v m="$max_reg" 'BEGIN { exit !(r > m) }'; then
+                max_reg=$reg
+                worst_case=$rel
+              fi
+            fi
+          done < <(find "$base_dir" -path "*/base/estimates.json" -type f | sort)
+
+          if awk -v m="$max_reg" 'BEGIN { exit !(m > 5.0) }'; then
+            echo "❌ Payment benchmark regression detected: $worst_case (${max_reg}%)"
+            exit 1
+          fi
+          echo "✅ Payment benchmark regression within 5% threshold"
+
+      - name: Upload payment benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: payment-benchmark-results
+          path: |
+            /tmp/criterion-baseline
+            /tmp/criterion-current

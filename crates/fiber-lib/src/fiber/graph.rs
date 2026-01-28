@@ -2064,7 +2064,7 @@ where
                 "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
                 source, target, amount, max_fee_amount
             );
-            eprintln!(
+            debug!(
                 "get_route failed: nodes visited: {}, edges expanded: {}, time: {:?}",
                 nodes_visited,
                 edges_expanded,
@@ -2082,7 +2082,7 @@ where
             return Err(PathFindError::TlcMinValue(max_min_tlc_value));
         }
 
-        eprintln!(
+        debug!(
             "get_route: nodes visited: {}, edges expanded: {}, time: {:?} \nresult: {:?}",
             nodes_visited,
             edges_expanded,

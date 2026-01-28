@@ -19,7 +19,7 @@ use fnn::MIN_RESERVED_CKB;
 use fnn::{gen_rand_secp256k1_keypair_tuple, generate_store, now_timestamp_as_millis_u64};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
+use secp256k1::{PublicKey, XOnlyPublicKey};
 use std::collections::HashSet;
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -31,7 +31,7 @@ fn bench_payment_path_finding(c: &mut Criterion) {
     // Create a benchmark group with minimal/no warmup
     let mut group = c.benchmark_group("payment_path_finding");
 
-    for num_channels in [1, 2, 4, 8] {
+    for num_channels in [1, 4, 8] {
         // Add throughput measurement based on the number of paths
         group.throughput(Throughput::Elements(num_channels as u64));
 
@@ -93,160 +93,15 @@ fn bench_payment_path_finding(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_payment_path_finding_basic_mpp(c: &mut Criterion) {
-    // Create a runtime for async functions
-    let rt = Runtime::new().unwrap();
-
-    let mut group = c.benchmark_group("payment_path_finding_basic_mpp");
-
-    // Use many parallel channels between sender and receiver (a known-good basic MPP setup),
-    // and also add extra nodes/channels to make the graph larger.
-    for parallel_channels in [2_usize, 4, 8, 16] {
-        group.throughput(Throughput::Elements(parallel_channels as u64));
-
-        group.bench_function(BenchmarkId::new("basic_mpp", parallel_channels), |b| {
-            b.iter_custom(|iters| {
-                rt.block_on(async move {
-                    const PART_AMOUNT: u128 = 10_000_000_000;
-                    const EXTRA_NODES: usize = 30;
-
-                    let sender = 0;
-                    let receiver = 1;
-                    let node_count = std::cmp::max(EXTRA_NODES, 2);
-                    let max_parts = std::cmp::min(parallel_channels, 4) as u64;
-                    let payment_amount = (max_parts as u128) * PART_AMOUNT;
-
-                    let mut channel_configs = Vec::new();
-
-                    // Parallel channels between sender and receiver so MPP must split.
-                    for _ in 0..parallel_channels {
-                        channel_configs.push((
-                            (sender, receiver),
-                            (MIN_RESERVED_CKB + PART_AMOUNT, MIN_RESERVED_CKB),
-                        ));
-                    }
-
-                    // Add extra channels among other nodes to enlarge the graph.
-                    for i in 2..(node_count - 1) {
-                        channel_configs.push((
-                            (i, i + 1),
-                            (MIN_RESERVED_CKB + PART_AMOUNT, MIN_RESERVED_CKB),
-                        ));
-                        if i + 2 < node_count {
-                            channel_configs.push((
-                                (i, i + 2),
-                                (MIN_RESERVED_CKB + PART_AMOUNT, MIN_RESERVED_CKB),
-                            ));
-                        }
-                    }
-
-                    let (nodes, _channels) =
-                        create_n_nodes_network(&channel_configs, node_count).await;
-
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    let start = std::time::Instant::now();
-
-                    for _ in 0..iters {
-                        let res = nodes[sender]
-                            .send_mpp_payment(&nodes[receiver], payment_amount, Some(max_parts))
-                            .await
-                            .unwrap();
-                        nodes[sender].wait_until_success(res.payment_hash).await;
-                    }
-
-                    start.elapsed()
-                })
-            });
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_build_payment_routes_large_graph(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("payment_build_routes_large_graph");
-
-    group.bench_function(BenchmarkId::new("mpp_dry_run", "200n_2000c"), |b| {
-        b.iter_custom(|iters| {
-            rt.block_on(async move {
-                let start = std::time::Instant::now();
-                for _ in 0..iters {
-                    let node_count = 200usize;
-                    let channel_count = 2000usize;
-                    let mut edges: Vec<((usize, usize), (u128, u128))> =
-                        Vec::with_capacity(channel_count);
-                    let mut used_pairs: HashSet<(usize, usize)> =
-                        HashSet::with_capacity(channel_count * 2);
-
-                    for i in 0..(node_count - 1) {
-                        let pair = (i, i + 1);
-                        used_pairs.insert(pair);
-                        edges.push((pair, (MIN_RESERVED_CKB + 1_000_000, MIN_RESERVED_CKB)));
-                    }
-                    let last_pair = (0, node_count - 1);
-                    if used_pairs.insert(last_pair) {
-                        edges.push((last_pair, (MIN_RESERVED_CKB + 1_000_000, MIN_RESERVED_CKB)));
-                    }
-
-                    let mut rng = StdRng::seed_from_u64(42);
-                    while edges.len() < channel_count {
-                        let mut a = rng.gen_range(0..node_count);
-                        let mut b = rng.gen_range(0..node_count);
-                        if a == b {
-                            continue;
-                        }
-                        if a > b {
-                            std::mem::swap(&mut a, &mut b);
-                        }
-                        let pair = (a, b);
-                        if used_pairs.insert(pair) {
-                            edges.push((pair, (MIN_RESERVED_CKB + 1_000_000, MIN_RESERVED_CKB)));
-                        }
-                    }
-
-                    let (nodes, _channels) = create_n_nodes_network(&edges, node_count).await;
-                    let source_node = &nodes[0];
-                    let target_node = &nodes[node_count - 1];
-
-                    let amount: u128 = 100_000_000;
-                    let max_parts = Some(16);
-
-                    let res = source_node
-                        .send_mpp_payment_with_dry_run_option(target_node, amount, max_parts, true)
-                        .await;
-
-                    if let Ok(res) = res {
-                        let payment_hash = res.payment_hash;
-                        let _ = source_node
-                            .with_network_graph(|graph| {
-                                graph.get_payment_find_path_count(&payment_hash)
-                            })
-                            .await;
-                    }
-                }
-                start.elapsed()
-            })
-        });
-    });
-
-    group.finish();
-}
-
-fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
-    let mut keys = vec![];
-    for _ in 0..num {
-        keys.push(gen_rand_secp256k1_keypair_tuple());
-    }
-    keys
-}
-
 fn build_graph_for_find_path_bench(
     node_count: usize,
     channel_count: usize,
 ) -> (NetworkGraph<Store>, Vec<PublicKey>) {
     let (store, _dir) = generate_store();
-    let keypairs = generate_key_pairs(node_count);
+    let mut keypairs = vec![];
+    for _ in 0..node_count {
+        keypairs.push(gen_rand_secp256k1_keypair_tuple());
+    }
 
     for (i, (sk, _pk)) in keypairs.iter().enumerate() {
         store.save_node_announcement(NodeAnnouncement::new(
@@ -498,74 +353,12 @@ fn bench_find_path_single_call_large_graph(c: &mut Criterion) {
     group.finish();
 }
 
-async fn run_mpp_find_path_counts(channel_closed: bool) -> u128 {
-    let high_capacity = MIN_RESERVED_CKB + 5_000;
-    let low_capacity = MIN_RESERVED_CKB + 1_100;
-    let channel_configs = vec![
-        ((0, 1), (high_capacity, high_capacity)),
-        ((1, 3), (high_capacity, high_capacity)),
-        ((0, 2), (low_capacity, low_capacity)),
-        ((2, 3), (low_capacity, low_capacity)),
-    ];
-
-    let (nodes, channels) = create_n_nodes_network(&channel_configs, 4).await;
-    let source_node = &nodes[0];
-    let target_node = &nodes[3];
-
-    if channel_closed {
-        source_node.mark_channel_failed_for_test(channels[0]).await;
-    }
-
-    let amount: u128 = 2020;
-    let max_parts = Some(4);
-    let res = source_node
-        .send_mpp_payment_with_dry_run_option(target_node, amount, max_parts, true)
-        .await;
-
-    let payment_hash = res
-        .expect("dry-run should return a payment hash")
-        .payment_hash;
-    source_node
-        .with_network_graph(|graph| graph.get_payment_find_path_count(&payment_hash))
-        .await
-}
-
-fn bench_mpp_closed_channel_find_path_iterates(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("payment_mpp_closed_channel");
-
-    group.bench_function(BenchmarkId::new("find_path_iters", "amount_2020"), |b| {
-        b.iter_custom(|iters| {
-            rt.block_on(async move {
-                let start = std::time::Instant::now();
-                for _ in 0..iters {
-                    let open_count = run_mpp_find_path_counts(false).await;
-                    let closed_count = run_mpp_find_path_counts(true).await;
-                    assert!(
-                        closed_count >= open_count,
-                        "expected closed channel to increase find_path iterations: open={}, closed={}",
-                        open_count,
-                        closed_count
-                    );
-                }
-                start.elapsed()
-            })
-        });
-    });
-
-    group.finish();
-}
-
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(std::time::Duration::from_millis(1500))
         .measurement_time(std::time::Duration::from_secs(300))
         .sample_size(10);
-    targets = bench_payment_path_finding,
-        bench_payment_path_finding_basic_mpp,
-        bench_build_payment_routes_large_graph,
-        bench_mpp_closed_channel_find_path_iterates,
-        bench_find_path_single_call_large_graph
+    targets = bench_payment_path_finding, bench_find_path_single_call_large_graph
 }
 criterion_main!(benches);
