@@ -6162,6 +6162,52 @@ async fn test_funding_timeout() {
 }
 
 #[tokio::test]
+async fn test_auto_accept_fails_debug_event() {
+    let funding_amount: u128 = 100000000000;
+    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("test-fnn-node-{}-", i))
+            .fiber_config_updater(move |config| {
+                if i == 1 {
+                    // Node 1 (receiver) requires more funding than what node 0 will send
+                    config.open_channel_auto_accept_min_ckb_funding_amount = Some(100000000001);
+                }
+            })
+            .build()
+    })
+    .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: nodes[1].peer_id.clone(),
+                public: false,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                one_way: false,
+            },
+            rpc_reply,
+        ))
+    };
+    call!(nodes[0].network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    // Verify debug event is triggered when auto-accept fails
+    nodes[1].expect_debug_event("ChannelAutoAcceptFailed").await;
+}
+
+#[tokio::test]
 async fn test_channel_one_peer_check_active_fail() {
     init_tracing();
 

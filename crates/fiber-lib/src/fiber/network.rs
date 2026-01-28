@@ -75,7 +75,9 @@ use super::{
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::config::UdtCfgInfos;
-use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
+use crate::ckb::contracts::{
+    check_udt_script, get_udt_info, get_udt_whitelist, is_udt_type_auto_accept,
+};
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
     tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
@@ -696,6 +698,7 @@ where
             FiberMessage::ChannelInitialization(open_channel) => {
                 state.check_feature_compatibility(&peer_id)?;
                 let temp_channel_id = open_channel.channel_id;
+                let peer_id_for_logging = peer_id.clone();
                 match state
                     .on_open_channel_msg(peer_id, open_channel.clone())
                     .await
@@ -726,6 +729,14 @@ where
                                 tlc_expiry_delta: None,
                             };
                             state.create_inbound_channel(accept_channel).await?;
+                        } else {
+                            // Log warning when auto-accept fails
+                            state.log_receiver_auto_accept_failure(
+                                &peer_id_for_logging,
+                                &open_channel,
+                                temp_channel_id,
+                            );
+                            debug_event!(myself, "ChannelAutoAcceptFailed");
                         }
                     }
                     Err(err) => {
@@ -1696,7 +1707,11 @@ where
                 }
             }
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
-                match state.create_outbound_channel(open_channel).await {
+                let network_graph = self.network_graph.clone();
+                match state
+                    .create_outbound_channel(open_channel, network_graph)
+                    .await
+                {
                     Ok((_, channel_id)) => {
                         let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
                     }
@@ -3022,9 +3037,199 @@ where
         result
     }
 
+    /// Check peer's node announcement and log warnings if funding amount is insufficient for auto-accept
+    fn check_and_log_peer_auto_accept_requirements(
+        node_info: &super::graph::NodeInfo,
+        peer_id: &PeerId,
+        funding_amount: u128,
+        funding_udt_type_script: &Option<Script>,
+    ) {
+        if !tracing::enabled!(tracing::Level::WARN) {
+            return;
+        }
+        if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
+            Self::log_sender_udt_funding_warning(
+                node_info,
+                peer_id,
+                funding_amount,
+                udt_type_script,
+            );
+        } else {
+            Self::log_sender_ckb_funding_warning(node_info, peer_id, funding_amount);
+        }
+    }
+
+    /// Log warning when opening channel with UDT funding amount is insufficient for peer's auto-accept
+    fn log_sender_udt_funding_warning(
+        node_info: &super::graph::NodeInfo,
+        peer_id: &PeerId,
+        funding_amount: u128,
+        udt_type_script: &Script,
+    ) {
+        if !tracing::enabled!(tracing::Level::WARN) {
+            return;
+        }
+        if let Some(udt_cfg_info) = node_info.udt_cfg_infos.find_matching_udt(udt_type_script) {
+            if let Some(auto_accept_amount) = udt_cfg_info.auto_accept_amount {
+                if funding_amount < auto_accept_amount {
+                    warn!(
+                        "Opening channel to peer {:?} (node: {:?}) with UDT {:?} (name: {:?}) funding amount {} is less than peer's announced auto-accept minimum {}. The channel may not be auto-accepted.",
+                        peer_id,
+                        node_info.node_name,
+                        udt_type_script,
+                        udt_cfg_info.name,
+                        funding_amount,
+                        auto_accept_amount
+                    );
+                }
+            } else {
+                warn!(
+                    "Opening channel to peer {:?} (node: {:?}) with UDT {:?} (name: {:?}). Peer has this UDT configured but auto-accept is not enabled. The channel may not be auto-accepted.",
+                    peer_id,
+                    node_info.node_name,
+                    udt_type_script,
+                    udt_cfg_info.name
+                );
+            }
+        } else {
+            warn!(
+                "Opening channel to peer {:?} (node: {:?}) with UDT {:?}. UDT type not found in peer's udt_cfg_infos. The channel may not be auto-accepted.",
+                peer_id,
+                node_info.node_name,
+                udt_type_script
+            );
+        }
+    }
+
+    /// Log warning when opening channel with CKB funding amount is insufficient for peer's auto-accept
+    fn log_sender_ckb_funding_warning(
+        node_info: &super::graph::NodeInfo,
+        peer_id: &PeerId,
+        funding_amount: u128,
+    ) {
+        if !tracing::enabled!(tracing::Level::WARN) {
+            return;
+        }
+        if node_info.auto_accept_min_ckb_funding_amount == 0 {
+            warn!(
+                "Opening channel to peer {:?} (node: {:?}) with CKB funding amount {}. Auto-accept is disabled (auto_accept_min_ckb_funding_amount is 0). The channel may not be auto-accepted.",
+                peer_id,
+                node_info.node_name,
+                funding_amount
+            );
+        } else if funding_amount < node_info.auto_accept_min_ckb_funding_amount as u128 {
+            warn!(
+                "Opening channel to peer {:?} (node: {:?}) with CKB funding amount {} is less than peer's announced auto-accept minimum {}. The channel may not be auto-accepted.",
+                peer_id,
+                node_info.node_name,
+                funding_amount,
+                node_info.auto_accept_min_ckb_funding_amount
+            );
+        }
+    }
+
+    /// Log warning when auto-accept fails for a received OpenChannel request
+    fn log_receiver_auto_accept_failure(
+        &self,
+        peer_id: &PeerId,
+        open_channel: &OpenChannel,
+        temp_channel_id: Hash256,
+    ) {
+        if !tracing::enabled!(tracing::Level::WARN) {
+            return;
+        }
+        if let Some(udt_type_script) = open_channel.funding_udt_type_script.as_ref() {
+            Self::log_receiver_udt_auto_accept_failure(
+                peer_id,
+                udt_type_script,
+                open_channel.funding_amount,
+                temp_channel_id,
+            );
+        } else {
+            Self::log_receiver_ckb_auto_accept_failure(
+                peer_id,
+                open_channel.funding_amount,
+                temp_channel_id,
+                self.auto_accept_channel_ckb_funding_amount,
+                self.open_channel_auto_accept_min_ckb_funding_amount,
+            );
+        }
+    }
+
+    /// Log warning when auto-accept fails for UDT channel
+    fn log_receiver_udt_auto_accept_failure(
+        peer_id: &PeerId,
+        udt_type_script: &Script,
+        funding_amount: u128,
+        temp_channel_id: Hash256,
+    ) {
+        if !tracing::enabled!(tracing::Level::WARN) {
+            return;
+        }
+        // Find matching UDT in local whitelist
+        if let Some(udt_info) = get_udt_info(udt_type_script) {
+            if let Some(auto_accept_amount) = udt_info.auto_accept_amount {
+                warn!(
+                    "Received OpenChannel request from peer {:?} with UDT {:?} (name: {:?}) funding amount {} is less than required auto-accept minimum {}. Channel {:?} will not be auto-accepted and is pending manual acceptance.",
+                    peer_id,
+                    udt_type_script,
+                    udt_info.name,
+                    funding_amount,
+                    auto_accept_amount,
+                    temp_channel_id
+                );
+            } else {
+                warn!(
+                    "Received OpenChannel request from peer {:?} with UDT {:?} (name: {:?}). Auto-accept is not enabled for this UDT. Channel {:?} will not be auto-accepted and is pending manual acceptance.",
+                    peer_id,
+                    udt_type_script,
+                    udt_info.name,
+                    temp_channel_id
+                );
+            }
+        } else {
+            warn!(
+                "Received OpenChannel request from peer {:?} with UDT {:?} that is not configured for auto-accept. Channel {:?} will not be auto-accepted and is pending manual acceptance.",
+                peer_id,
+                udt_type_script,
+                temp_channel_id
+            );
+        }
+    }
+
+    /// Log warning when auto-accept fails for CKB channel
+    fn log_receiver_ckb_auto_accept_failure(
+        peer_id: &PeerId,
+        funding_amount: u128,
+        temp_channel_id: Hash256,
+        auto_accept_channel_ckb_funding_amount: u64,
+        open_channel_auto_accept_min_ckb_funding_amount: u64,
+    ) {
+        if !tracing::enabled!(tracing::Level::WARN) {
+            return;
+        }
+        if auto_accept_channel_ckb_funding_amount == 0 {
+            warn!(
+                "Received OpenChannel request from peer {:?} with CKB funding amount {}. Auto-accept is disabled (auto_accept_channel_ckb_funding_amount is 0). Channel {:?} will not be auto-accepted and is pending manual acceptance.",
+                peer_id,
+                funding_amount,
+                temp_channel_id
+            );
+        } else {
+            warn!(
+                "Received OpenChannel request from peer {:?} with CKB funding amount {} is less than required auto-accept minimum {}. Channel {:?} will not be auto-accepted and is pending manual acceptance.",
+                peer_id,
+                funding_amount,
+                open_channel_auto_accept_min_ckb_funding_amount,
+                temp_channel_id
+            );
+        }
+    }
+
     pub async fn create_outbound_channel(
         &mut self,
         open_channel: OpenChannelCommand,
+        network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256), ProcessingChannelError> {
         let store = self.store.clone();
         let network = self.network.clone();
@@ -3059,6 +3264,18 @@ where
                     "Peer {:?} pubkey not found",
                     &peer_id
                 )))?;
+
+        // Check peer's node announcement for auto-accept requirements
+        let graph = network_graph.read().await;
+        if let Some(node_info) = graph.get_node(&remote_pubkey) {
+            Self::check_and_log_peer_auto_accept_requirements(
+                node_info,
+                &peer_id,
+                funding_amount,
+                &funding_udt_type_script,
+            );
+        }
+        drop(graph);
 
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {

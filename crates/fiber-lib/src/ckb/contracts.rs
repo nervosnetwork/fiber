@@ -5,7 +5,6 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack, PackVec},
 };
 use once_cell::sync::OnceCell;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, vec};
 use thiserror::Error;
@@ -377,20 +376,7 @@ impl ContractsContext {
     }
 
     pub(crate) fn get_udt_info(&self, udt_script: &Script) -> Option<&UdtArgInfo> {
-        for udt in &self.get_udt_whitelist().0 {
-            if let Ok(_type) = udt_script.hash_type().try_into() {
-                if udt.script.code_hash.pack() == udt_script.code_hash()
-                    && udt.script.hash_type == _type
-                {
-                    let args = format!("0x{:x}", udt_script.args().raw_data());
-                    let pattern = Regex::new(&udt.script.args).expect("invalid expression");
-                    if pattern.is_match(&args) {
-                        return Some(udt);
-                    }
-                }
-            }
-        }
-        None
+        self.get_udt_whitelist().find_matching_udt(udt_script)
     }
 }
 
@@ -445,7 +431,7 @@ pub fn get_cell_deps_count_by_contracts(contracts: Vec<Contract>) -> usize {
     get_contracts_context().get_cell_deps_count(contracts)
 }
 
-fn get_udt_info(script: &Script) -> Option<UdtArgInfo> {
+pub fn get_udt_info(script: &Script) -> Option<UdtArgInfo> {
     get_contracts_context().get_udt_info(script).cloned()
 }
 

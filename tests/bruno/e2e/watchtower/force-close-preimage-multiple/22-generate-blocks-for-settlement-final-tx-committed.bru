@@ -20,12 +20,18 @@ body:json {
     "id": 42,
     "jsonrpc": "2.0",
     "method": "generate_epochs",
-    "params": ["0x5"]
+    "params": ["0xa"]
   }
 }
 
 assert {
   res.status: eq 200
+}
+
+script:pre-request {
+  // Give watchtower a chance to push the final settlement tx into the pool
+  // before mining the final blocks.
+  await new Promise(r => setTimeout(r, 5000));
 }
 
 script:post-response {
