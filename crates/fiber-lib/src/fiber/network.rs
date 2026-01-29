@@ -78,8 +78,8 @@ use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_aut
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
     tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
-    TxUpdateCommand,
+    ChannelInitializationOperation, OpenChannelWithExternalFundingParameter, RetryableTlcOperation,
+    ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::channel::{
     AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
@@ -358,6 +358,19 @@ pub enum NetworkActorCommand {
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
     ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
 
+    // Open a channel with external funding - the funding transaction will be returned
+    // for the user to sign with their own wallet.
+    OpenChannelWithExternalFunding(
+        OpenChannelWithExternalFundingCommand,
+        RpcReplyPort<Result<OpenChannelWithExternalFundingResponse, String>>,
+    ),
+    // Submit a signed funding transaction for external funding.
+    SubmitSignedFundingTx {
+        channel_id: Hash256,
+        signed_tx: Transaction,
+        reply: RpcReplyPort<Result<Hash256, String>>,
+    },
+
     #[cfg(any(debug_assertions, feature = "bench"))]
     UpdateFeatures(FeatureVector),
 }
@@ -377,6 +390,29 @@ pub struct OpenChannelCommand {
     pub funding_amount: u128,
     pub public: bool,
     pub shutdown_script: Option<Script>,
+    pub funding_udt_type_script: Option<Script>,
+    pub commitment_fee_rate: Option<u64>,
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
+    pub funding_fee_rate: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
+    pub tlc_min_value: Option<u128>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
+    pub max_tlc_value_in_flight: Option<u128>,
+    pub max_tlc_number_in_flight: Option<u64>,
+}
+
+/// Command to open a channel with external funding.
+/// Similar to OpenChannelCommand, but the user will sign the funding transaction
+/// with their own wallet instead of having the node sign automatically.
+#[derive(Debug)]
+pub struct OpenChannelWithExternalFundingCommand {
+    pub peer_id: PeerId,
+    pub funding_amount: u128,
+    pub public: bool,
+    /// Required for external funding - the script to receive funds when channel closes.
+    pub shutdown_script: Script,
+    /// The lock script that controls the funding cells (user's wallet lock script).
+    pub funding_lock_script: Script,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -427,6 +463,15 @@ pub struct AcceptChannelCommand {
     pub min_tlc_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub tlc_expiry_delta: Option<u64>,
+}
+
+/// Response for opening a channel with external funding.
+#[derive(Debug, Clone)]
+pub struct OpenChannelWithExternalFundingResponse {
+    /// The temporary channel ID.
+    pub channel_id: Hash256,
+    /// The unsigned funding transaction for the user to sign.
+    pub unsigned_funding_tx: Transaction,
 }
 
 impl NetworkActorMessage {
@@ -548,6 +593,23 @@ pub enum NetworkActorEvent {
         u64,
         u64,
     ),
+    /// A channel with external funding has been accepted.
+    /// This is used when the user wants to sign the funding transaction themselves.
+    ChannelAcceptedForExternalFunding {
+        peer_id: PeerId,
+        new_channel_id: Hash256,
+        old_channel_id: Hash256,
+        funding_amount: u128,
+        remote_funding_amount: u128,
+        /// The lock script of the user's wallet, used to collect input cells.
+        funding_source_lock_script: Script,
+        /// The 2-of-2 multisig lock script for the funding cell output.
+        funding_cell_lock_script: Script,
+        funding_udt_type_script: Option<Script>,
+        local_reserved_ckb_amount: u64,
+        remote_reserved_ckb_amount: u64,
+        funding_fee_rate: u64,
+    },
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId, OutPoint),
     /// A channel is going to be closed, waiting the closing transaction to be broadcasted and confirmed.
@@ -1006,6 +1068,159 @@ where
                         self.store.insert_channel_actor_state(actor_state);
                         info!("Channel {channel_id:?} on-chain settlement completed");
                     }
+                }
+            }
+            NetworkActorEvent::ChannelAcceptedForExternalFunding {
+                peer_id,
+                new_channel_id,
+                old_channel_id,
+                funding_amount,
+                remote_funding_amount,
+                funding_source_lock_script,
+                funding_cell_lock_script,
+                funding_udt_type_script,
+                local_reserved_ckb_amount,
+                remote_reserved_ckb_amount,
+                funding_fee_rate,
+            } => {
+                assert_ne!(
+                    new_channel_id, old_channel_id,
+                    "new and old channel id must be different"
+                );
+
+                // Update channel mapping
+                if let Some(session) = state.get_peer_session(&peer_id) {
+                    if let Some(channel) = state.channels.remove(&old_channel_id) {
+                        debug!(
+                            "Channel accepted for external funding: {:?} -> {:?}",
+                            old_channel_id, new_channel_id
+                        );
+                        state.channels.insert(new_channel_id, channel);
+                        if let Some(set) = state.session_channels_map.get_mut(&session) {
+                            set.remove(&old_channel_id);
+                            set.insert(new_channel_id);
+                        }
+                    }
+                }
+
+                // Get the pending reply - it could be under old_channel_id or new_channel_id
+                let reply = state
+                    .pending_external_funding_replies
+                    .remove(&old_channel_id)
+                    .or_else(|| {
+                        state
+                            .pending_external_funding_replies
+                            .remove(&new_channel_id)
+                    });
+
+                if let Some(reply) = reply {
+                    // Build the unsigned funding transaction
+                    let request = FundingRequest {
+                        script: funding_source_lock_script.clone(),
+                        udt_type_script: funding_udt_type_script,
+                        local_amount: funding_amount,
+                        remote_amount: remote_funding_amount,
+                        funding_fee_rate,
+                        local_reserved_ckb_amount,
+                        remote_reserved_ckb_amount,
+                    };
+
+                    let funding_tx = FundingTx::new();
+
+                    // Create a oneshot channel for the reply
+                    let (send, recv) = oneshot::channel::<Result<FundingTx, FundingError>>();
+                    let rpc_reply = RpcReplyPort::from(send);
+
+                    // Send the message to build the unsigned funding tx
+                    let _ =
+                        state
+                            .chain_actor
+                            .send_message(CkbChainMessage::BuildUnsignedFundingTx {
+                                funding_tx,
+                                request,
+                                funding_source_lock_script: funding_source_lock_script.into(),
+                                funding_cell_lock_script: funding_cell_lock_script.into(),
+                                reply: rpc_reply,
+                            });
+
+                    // Wait for the result
+                    match tokio::time::timeout(
+                        Duration::from_millis(DEFAULT_CHAIN_ACTOR_TIMEOUT),
+                        recv,
+                    )
+                    .await
+                    {
+                        Ok(Ok(Ok(built_tx))) => {
+                            if let Some(tx) = built_tx.into_inner() {
+                                debug!(
+                                    "Built unsigned funding tx for external funding channel {:?}: {:?}",
+                                    new_channel_id,
+                                    tx.hash()
+                                );
+
+                                // Store the unsigned tx in the channel actor state
+                                if let Err(e) = state
+                                    .send_command_to_channel(
+                                        new_channel_id,
+                                        ChannelCommand::SetUnsignedFundingTx(tx.data()),
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        "Failed to store unsigned funding tx in channel: {:?}",
+                                        e
+                                    );
+                                    let _ = reply.send(Err(format!(
+                                        "Failed to store unsigned funding tx: {}",
+                                        e
+                                    )));
+                                    return Ok(());
+                                }
+
+                                // Send the response
+                                let _ = reply.send(Ok(OpenChannelWithExternalFundingResponse {
+                                    channel_id: new_channel_id,
+                                    unsigned_funding_tx: tx.data(),
+                                }));
+                            } else {
+                                error!(
+                                    "Built funding tx is empty for channel {:?}",
+                                    new_channel_id
+                                );
+                                let _ = reply
+                                    .send(Err("Failed to build unsigned funding tx: empty result"
+                                        .to_string()));
+                            }
+                        }
+                        Ok(Ok(Err(e))) => {
+                            error!(
+                                "Failed to build unsigned funding tx for channel {:?}: {:?}",
+                                new_channel_id, e
+                            );
+                            let _ = reply
+                                .send(Err(format!("Failed to build unsigned funding tx: {}", e)));
+                        }
+                        Ok(Err(e)) => {
+                            error!(
+                                "Channel recv error for channel {:?}: {:?}",
+                                new_channel_id, e
+                            );
+                            let _ = reply.send(Err(format!("Channel recv error: {}", e)));
+                        }
+                        Err(_) => {
+                            error!(
+                                "Timeout waiting for unsigned funding tx for channel {:?}",
+                                new_channel_id
+                            );
+                            let _ = reply
+                                .send(Err("Timeout waiting for unsigned funding tx".to_string()));
+                        }
+                    }
+                } else {
+                    warn!(
+                        "No pending reply found for external funding channel {:?} (old: {:?})",
+                        new_channel_id, old_channel_id
+                    );
                 }
             }
         }
@@ -2109,6 +2324,59 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
+            NetworkActorCommand::OpenChannelWithExternalFunding(open_channel, reply) => {
+                debug!(
+                    "OpenChannelWithExternalFunding request: peer_id={:?}, funding_amount={:?}",
+                    open_channel.peer_id, open_channel.funding_amount
+                );
+                match state
+                    .create_outbound_channel_with_external_funding(open_channel)
+                    .await
+                {
+                    Ok((_channel_actor, temp_channel_id)) => {
+                        // Channel is now in NegotiatingFunding state waiting for AcceptChannel.
+                        // Store the reply port - we'll send the response when the peer accepts
+                        // and we build the unsigned funding tx.
+                        state
+                            .pending_external_funding_replies
+                            .insert(temp_channel_id, reply);
+                        debug!(
+                            "Stored pending reply for external funding channel {:?}",
+                            temp_channel_id
+                        );
+                    }
+                    Err(err) => {
+                        error!("Failed to create channel with external funding: {:?}", err);
+                        let _ = reply.send(Err(err.to_string()));
+                    }
+                }
+            }
+            NetworkActorCommand::SubmitSignedFundingTx {
+                channel_id,
+                signed_tx,
+                reply,
+            } => {
+                debug!(
+                    "SubmitSignedFundingTx request: channel_id={:?}, tx_hash={:?}",
+                    channel_id,
+                    signed_tx.calc_tx_hash()
+                );
+
+                // Forward the command to the channel actor
+                if let Err(e) = state
+                    .send_command_to_channel(
+                        channel_id,
+                        ChannelCommand::SubmitExternalFundingTx(signed_tx, reply),
+                    )
+                    .await
+                {
+                    error!(
+                        "Failed to send SubmitExternalFundingTx command to channel {:?}: {:?}",
+                        channel_id, e
+                    );
+                    // Note: reply is already moved to the channel command, can't send error here
+                }
+            }
         };
         Ok(())
     }
@@ -2688,6 +2956,12 @@ pub struct NetworkActorState<S, C> {
 
     // Inflight payment actors
     inflight_payments: HashMap<Hash256, ActorRef<PaymentActorMessage>>,
+
+    // Pending replies for external funding channel requests.
+    // When a user requests to open a channel with external funding, we store the reply port here
+    // until the peer accepts the channel and we build the unsigned funding tx.
+    pending_external_funding_replies:
+        HashMap<Hash256, RpcReplyPort<Result<OpenChannelWithExternalFundingResponse, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2935,6 +3209,107 @@ where
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                 }),
+                ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
+            },
+            network.clone().get_cell(),
+        )
+        .await
+        .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
+        .0;
+        let temp_channel_id = rx.await.expect("msg received");
+        self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
+        Ok((channel, temp_channel_id))
+    }
+
+    /// Create an outbound channel with external funding.
+    /// Similar to create_outbound_channel, but the user will sign the funding transaction
+    /// with their own wallet.
+    pub async fn create_outbound_channel_with_external_funding(
+        &mut self,
+        command: OpenChannelWithExternalFundingCommand,
+    ) -> Result<(ActorRef<ChannelActorMessage>, Hash256), ProcessingChannelError> {
+        let store = self.store.clone();
+        let network = self.network.clone();
+        let OpenChannelWithExternalFundingCommand {
+            peer_id,
+            funding_amount,
+            public,
+            shutdown_script,
+            funding_lock_script,
+            funding_udt_type_script,
+            commitment_fee_rate,
+            commitment_delay_epoch,
+            funding_fee_rate,
+            tlc_expiry_delta,
+            tlc_min_value,
+            tlc_fee_proportional_millionths,
+            max_tlc_value_in_flight,
+            max_tlc_number_in_flight,
+        } = command;
+
+        self.check_feature_compatibility(&peer_id)?;
+
+        let remote_pubkey =
+            self.get_peer_pubkey(&peer_id)
+                .ok_or(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} pubkey not found",
+                    &peer_id
+                )))?;
+
+        if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
+            if !check_udt_script(udt_type_script) {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Invalid UDT type script".to_string(),
+                ));
+            }
+        }
+
+        if tlc_expiry_delta.is_some_and(|d| d < MIN_TLC_EXPIRY_DELTA) {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "TLC expiry delta is too small, expect larger than {}, got {}",
+                MIN_TLC_EXPIRY_DELTA,
+                tlc_expiry_delta.unwrap()
+            )));
+        }
+
+        let tlc_expiry_delta = tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta);
+        let commitment_delay_epochs = commitment_delay_epoch.map_or_else(
+            || EpochNumberWithFraction::new(DEFAULT_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+            |epochs| epochs.full_value(),
+        );
+        check_tlc_delta_with_epochs(tlc_expiry_delta, commitment_delay_epochs)?;
+
+        let seed = self.generate_channel_seed();
+        let (tx, rx) = oneshot::channel::<Hash256>();
+        let channel = Actor::spawn_linked(
+            Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
+            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
+                    OpenChannelWithExternalFundingParameter {
+                        funding_amount,
+                        seed,
+                        tlc_info: ChannelTlcInfo::new(
+                            tlc_min_value.unwrap_or(self.tlc_min_value),
+                            tlc_expiry_delta,
+                            tlc_fee_proportional_millionths
+                                .unwrap_or(self.tlc_fee_proportional_millionths),
+                        ),
+                        public_channel_info: public.then_some(PublicChannelInfo::new()),
+                        funding_udt_type_script,
+                        shutdown_script,
+                        funding_lock_script,
+                        channel_id_sender: tx,
+                        commitment_fee_rate,
+                        commitment_delay_epoch,
+                        funding_fee_rate,
+                        max_tlc_value_in_flight: max_tlc_value_in_flight
+                            .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
+                        max_tlc_number_in_flight: max_tlc_number_in_flight
+                            .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                    },
+                ),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
             },
@@ -4148,6 +4523,7 @@ where
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
             inflight_payments: Default::default(),
+            pending_external_funding_replies: Default::default(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();

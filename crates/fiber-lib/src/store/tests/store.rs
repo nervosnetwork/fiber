@@ -559,6 +559,9 @@ fn test_channel_actor_state_store() {
         pending_notify_settle_tlcs: vec![],
         ephemeral_config: Default::default(),
         private_key: None,
+        external_funding: false,
+        external_funding_lock_script: None,
+        unsigned_funding_tx: None,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -681,6 +684,9 @@ fn test_serde_channel_actor_state_ciborium() {
         pending_notify_settle_tlcs: vec![],
         ephemeral_config: Default::default(),
         private_key: None,
+        external_funding: false,
+        external_funding_lock_script: None,
+        unsigned_funding_tx: None,
     };
 
     let mut serialized = Vec::new();

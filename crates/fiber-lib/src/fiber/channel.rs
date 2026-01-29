@@ -177,6 +177,12 @@ pub enum ChannelCommand {
     BroadcastChannelUpdate(),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     NotifyEvent(ChannelEvent),
+    /// Set the unsigned funding transaction for external funding channels.
+    /// This is called after the peer accepts the channel.
+    SetUnsignedFundingTx(Transaction),
+    /// Submit the signed funding transaction for external funding channels.
+    /// The user has signed the transaction with their wallet.
+    SubmitExternalFundingTx(Transaction, RpcReplyPort<Result<Hash256, String>>),
     #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
 }
@@ -193,6 +199,8 @@ impl Display for ChannelCommand {
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::NotifyEvent(event) => write!(f, "NotifyEvent [{:?}]", event),
+            ChannelCommand::SetUnsignedFundingTx(_) => write!(f, "SetUnsignedFundingTx"),
+            ChannelCommand::SubmitExternalFundingTx(_, _) => write!(f, "SubmitExternalFundingTx"),
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -332,6 +340,25 @@ pub struct AcceptChannelParameter {
     pub max_tlc_number_in_flight: u64,
 }
 
+/// Parameters for opening a channel with external funding.
+/// The user will sign the funding transaction with their own wallet.
+pub struct OpenChannelWithExternalFundingParameter {
+    pub funding_amount: u128,
+    pub seed: [u8; 32],
+    pub tlc_info: ChannelTlcInfo,
+    pub public_channel_info: Option<PublicChannelInfo>,
+    pub funding_udt_type_script: Option<Script>,
+    pub shutdown_script: Script,
+    /// The lock script that controls the funding cells (user's wallet lock script).
+    pub funding_lock_script: Script,
+    pub channel_id_sender: oneshot::Sender<Hash256>,
+    pub commitment_fee_rate: Option<u64>,
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
+    pub funding_fee_rate: Option<u64>,
+    pub max_tlc_value_in_flight: u128,
+    pub max_tlc_number_in_flight: u64,
+}
+
 // Ephemeral config for channel which does not need to persist.
 #[derive(Clone, Debug)]
 pub struct ChannelEphemeralConfig {
@@ -359,6 +386,9 @@ pub enum ChannelInitializationOperation {
     AcceptChannel(AcceptChannelParameter),
     /// Reestablish a channel with given channel id.
     ReestablishChannel(Hash256),
+    /// To open a new channel with external funding - the user will sign
+    /// the funding transaction with their own wallet instead of the node.
+    OpenChannelWithExternalFunding(OpenChannelWithExternalFundingParameter),
 }
 
 pub struct ChannelInitializationParameter {
@@ -468,22 +498,48 @@ where
                 state.handle_accept_channel_message(accept_channel)?;
                 let old_id = state.get_id();
                 state.fill_in_channel_id();
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ChannelAccepted(
-                            state.get_remote_peer_id(),
-                            state.get_id(),
-                            old_id,
-                            state.to_local_amount,
-                            state.to_remote_amount,
-                            state.get_funding_lock_script(),
-                            state.funding_udt_type_script.clone(),
-                            state.local_reserved_ckb_amount,
-                            state.remote_reserved_ckb_amount,
-                            state.funding_fee_rate,
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                if state.external_funding {
+                    // For external funding, send a different event and transition to AwaitingExternalFunding
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::ChannelAcceptedForExternalFunding {
+                                peer_id: state.get_remote_peer_id(),
+                                new_channel_id: state.get_id(),
+                                old_channel_id: old_id,
+                                funding_amount: state.to_local_amount,
+                                remote_funding_amount: state.to_remote_amount,
+                                funding_source_lock_script: state
+                                    .external_funding_lock_script
+                                    .clone()
+                                    .expect("external_funding_lock_script should be set"),
+                                funding_cell_lock_script: state.get_funding_lock_script(),
+                                funding_udt_type_script: state.funding_udt_type_script.clone(),
+                                local_reserved_ckb_amount: state.local_reserved_ckb_amount,
+                                remote_reserved_ckb_amount: state.remote_reserved_ckb_amount,
+                                funding_fee_rate: state.funding_fee_rate,
+                            },
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                } else {
+                    // Normal flow: send ChannelAccepted to start funding collaboration
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::ChannelAccepted(
+                                state.get_remote_peer_id(),
+                                state.get_id(),
+                                old_id,
+                                state.to_local_amount,
+                                state.to_remote_amount,
+                                state.get_funding_lock_script(),
+                                state.funding_udt_type_script.clone(),
+                                state.local_reserved_ckb_amount,
+                                state.remote_reserved_ckb_amount,
+                                state.funding_fee_rate,
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
                 Ok(())
             }
             FiberChannelMessage::TxUpdate(tx) => {
@@ -2148,6 +2204,40 @@ where
                 Ok(())
             }
             ChannelCommand::NotifyEvent(event) => self.handle_event(myself, state, event).await,
+            ChannelCommand::SetUnsignedFundingTx(tx) => {
+                // Store the unsigned funding transaction for external funding channels.
+                // This is called when the peer accepts the channel.
+                if !state.external_funding {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "SetUnsignedFundingTx can only be used for external funding channels"
+                            .to_string(),
+                    ));
+                }
+                debug!(
+                    "Storing unsigned funding tx for external funding channel {:?}: {:?}",
+                    state.get_id(),
+                    tx.calc_tx_hash()
+                );
+                state.unsigned_funding_tx = Some(tx);
+                // Transition to AwaitingExternalFunding state
+                state.update_state(ChannelState::AwaitingExternalFunding);
+                Ok(())
+            }
+            ChannelCommand::SubmitExternalFundingTx(signed_tx, reply) => {
+                match self
+                    .handle_submit_external_funding_tx(myself, state, signed_tx)
+                    .await
+                {
+                    Ok(tx_hash) => {
+                        let _ = reply.send(Ok(tx_hash));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let _ = reply.send(Err(err.to_string()));
+                        Err(err)
+                    }
+                }
+            }
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(reload_params) => {
                 let private_key = state.private_key.clone();
@@ -2164,6 +2254,133 @@ where
                 Ok(())
             }
         }
+    }
+
+    /// Handle the submission of a signed funding transaction for external funding channels.
+    /// This validates the signed tx, stores it, and initiates the commitment exchange with the peer.
+    async fn handle_submit_external_funding_tx(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        signed_tx: Transaction,
+    ) -> Result<Hash256, ProcessingChannelError> {
+        // Validate channel is in AwaitingExternalFunding state
+        if state.state != ChannelState::AwaitingExternalFunding {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Expected channel in AwaitingExternalFunding state, but got {:?}",
+                state.state
+            )));
+        }
+
+        // Validate the channel is using external funding
+        if !state.external_funding {
+            return Err(ProcessingChannelError::InvalidState(
+                "Channel is not configured for external funding".to_string(),
+            ));
+        }
+
+        // Get the unsigned funding tx for comparison
+        let unsigned_tx = state.unsigned_funding_tx.as_ref().ok_or_else(|| {
+            ProcessingChannelError::InvalidState(
+                "Unsigned funding transaction not found".to_string(),
+            )
+        })?;
+
+        // Validate that the signed tx has the same structure as the unsigned tx
+        // (same inputs and outputs, just with witnesses added)
+        let unsigned_view = unsigned_tx.clone().into_view();
+        let signed_view = signed_tx.clone().into_view();
+
+        // Check inputs match
+        if unsigned_view.inputs().len() != signed_view.inputs().len() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Input count mismatch: unsigned has {}, signed has {}",
+                unsigned_view.inputs().len(),
+                signed_view.inputs().len()
+            )));
+        }
+
+        for (i, (unsigned_input, signed_input)) in unsigned_view
+            .inputs()
+            .into_iter()
+            .zip(signed_view.inputs().into_iter())
+            .enumerate()
+        {
+            if unsigned_input.previous_output() != signed_input.previous_output() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Input {} previous_output mismatch",
+                    i
+                )));
+            }
+        }
+
+        // Check outputs match
+        if unsigned_view.outputs().len() != signed_view.outputs().len() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Output count mismatch: unsigned has {}, signed has {}",
+                unsigned_view.outputs().len(),
+                signed_view.outputs().len()
+            )));
+        }
+
+        for (i, (unsigned_output, signed_output)) in unsigned_view
+            .outputs()
+            .into_iter()
+            .zip(signed_view.outputs().into_iter())
+            .enumerate()
+        {
+            if unsigned_output.as_slice() != signed_output.as_slice() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Output {} mismatch",
+                    i
+                )));
+            }
+        }
+
+        // Check outputs_data match
+        if unsigned_view.outputs_data().len() != signed_view.outputs_data().len() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Outputs data count mismatch: unsigned has {}, signed has {}",
+                unsigned_view.outputs_data().len(),
+                signed_view.outputs_data().len()
+            )));
+        }
+
+        for (i, (unsigned_data, signed_data)) in unsigned_view
+            .outputs_data()
+            .into_iter()
+            .zip(signed_view.outputs_data().into_iter())
+            .enumerate()
+        {
+            if unsigned_data.as_slice() != signed_data.as_slice() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Output data {} mismatch",
+                    i
+                )));
+            }
+        }
+
+        let tx_hash: Hash256 = signed_view.hash().into();
+        debug!(
+            "Validated signed funding tx for external funding channel {:?}: {:?}",
+            state.get_id(),
+            tx_hash
+        );
+
+        // Store the signed funding tx
+        state.funding_tx = Some(signed_tx);
+
+        // Transition to CollaboratingFundingTx state with COLLABORATION_COMPLETED flag
+        // since we already have the complete funding tx from external signing
+        state.update_state(ChannelState::CollaboratingFundingTx(
+            CollaboratingFundingTxFlags::COLLABORATION_COMPLETED,
+        ));
+
+        // Increment commitment number and start the commitment signed exchange
+        state.increment_local_commitment_number();
+        self.handle_commitment_signed_command(myself, state).await?;
+
+        Ok(tx_hash)
     }
 
     pub async fn handle_event(
@@ -2659,6 +2876,144 @@ where
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
+                channel
+            }
+            ChannelInitializationOperation::OpenChannelWithExternalFunding(
+                OpenChannelWithExternalFundingParameter {
+                    funding_amount,
+                    seed,
+                    tlc_info,
+                    public_channel_info,
+                    funding_udt_type_script,
+                    shutdown_script,
+                    funding_lock_script,
+                    channel_id_sender,
+                    commitment_fee_rate,
+                    commitment_delay_epoch,
+                    funding_fee_rate,
+                    max_tlc_number_in_flight,
+                    max_tlc_value_in_flight,
+                },
+            ) => {
+                let public = public_channel_info.is_some();
+                let peer_id = self.get_remote_peer_id();
+                info!(
+                    "Trying to open a channel with external funding to {:?}",
+                    &peer_id
+                );
+
+                let commitment_fee_rate =
+                    commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
+                let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
+
+                let (to_local_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
+                    funding_amount,
+                    &shutdown_script,
+                    &funding_udt_type_script,
+                )?;
+
+                let mut channel = ChannelActorState::new_outbound_channel(
+                    public_channel_info,
+                    &seed,
+                    self.get_local_pubkey(),
+                    self.get_remote_pubkey(),
+                    to_local_amount,
+                    reserved_ckb_amount,
+                    commitment_fee_rate,
+                    commitment_delay_epoch
+                        .unwrap_or(EpochNumberWithFraction::new(
+                            DEFAULT_COMMITMENT_DELAY_EPOCHS,
+                            0,
+                            1,
+                        ))
+                        .full_value(),
+                    funding_fee_rate,
+                    funding_udt_type_script.clone(),
+                    shutdown_script.clone(),
+                    max_tlc_value_in_flight,
+                    max_tlc_number_in_flight,
+                    tlc_info,
+                    self.network.clone(),
+                    args.private_key.clone(),
+                );
+
+                // Mark this channel as using external funding
+                channel.external_funding = true;
+                channel.external_funding_lock_script = Some(funding_lock_script);
+
+                check_open_channel_parameters(
+                    &channel.funding_udt_type_script,
+                    &channel.local_shutdown_script,
+                    channel.local_reserved_ckb_amount,
+                    channel.funding_fee_rate,
+                    channel.commitment_fee_rate,
+                    channel.commitment_delay_epoch,
+                    channel.local_constraints.max_tlc_number_in_flight,
+                )?;
+
+                let channel_flags = if public {
+                    ChannelFlags::PUBLIC
+                } else {
+                    ChannelFlags::empty()
+                };
+                let channel_announcement_nonce = if public {
+                    Some(channel.get_channel_announcement_musig2_pubnonce())
+                } else {
+                    None
+                };
+                let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
+                let message = FiberMessage::ChannelInitialization(OpenChannel {
+                    chain_hash: get_chain_hash(),
+                    channel_id: channel.get_id(),
+                    funding_udt_type_script,
+                    funding_amount: channel.to_local_amount,
+                    shutdown_script,
+                    reserved_ckb_amount: channel.local_reserved_ckb_amount,
+                    funding_fee_rate,
+                    commitment_fee_rate,
+                    commitment_delay_epoch: channel.commitment_delay_epoch,
+                    max_tlc_value_in_flight: channel.local_constraints.max_tlc_value_in_flight,
+                    max_tlc_number_in_flight: channel.local_constraints.max_tlc_number_in_flight,
+                    channel_flags,
+                    first_per_commitment_point: channel
+                        .signer
+                        .get_commitment_point(commitment_number),
+                    second_per_commitment_point: channel
+                        .signer
+                        .get_commitment_point(commitment_number + 1),
+                    funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
+                    tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
+                    next_commitment_nonce: channel.get_commitment_nonce(),
+                    next_revocation_nonce: channel.get_init_revocation_nonce(),
+                    channel_announcement_nonce,
+                });
+
+                debug!(
+                    "Created OpenChannel message (external funding) to {:?}: {:?}",
+                    &peer_id, &message
+                );
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
+                            peer_id: peer_id.clone(),
+                            message,
+                        }),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                // Same initial state as regular OpenChannel - we're still negotiating
+                channel.update_state(ChannelState::NegotiatingFunding(
+                    NegotiatingFundingFlags::OUR_INIT_SENT,
+                ));
+                debug!(
+                    "Channel with external funding to peer {:?} with id {:?} created",
+                    &peer_id,
+                    &channel.get_id()
+                );
+
+                channel_id_sender
+                    .send(channel.get_id())
+                    .expect("Receive not dropped");
                 channel
             }
         };
@@ -3725,6 +4080,17 @@ pub struct ChannelActorState {
     // signing key
     #[serde(skip)]
     pub private_key: Option<Privkey>,
+
+    // Whether this channel uses external funding (user signs funding tx with their own wallet)
+    pub external_funding: bool,
+
+    // The lock script used for external funding (user's wallet lock script)
+    #[serde_as(as = "Option<EntityHex>")]
+    pub external_funding_lock_script: Option<Script>,
+
+    // The unsigned funding transaction for external funding (before user signs it)
+    #[serde_as(as = "Option<EntityHex>")]
+    pub unsigned_funding_tx: Option<Transaction>,
 }
 
 #[serde_as]
@@ -4018,6 +4384,9 @@ enum CommitmentSignedFlags {
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(NegotiatingFundingFlags),
+    /// We're waiting for the user to sign and submit the funding transaction externally.
+    /// This state is used when the channel is opened with external funding.
+    AwaitingExternalFunding,
     /// We're collaborating with the other party on the funding transaction.
     CollaboratingFundingTx(CollaboratingFundingTxFlags),
     /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
@@ -4050,6 +4419,7 @@ impl ChannelState {
     fn can_abort_funding(&self) -> bool {
         match self {
             ChannelState::NegotiatingFunding(_)
+            | ChannelState::AwaitingExternalFunding
             | ChannelState::CollaboratingFundingTx(_)
             | ChannelState::SigningCommitment(_) => true,
             ChannelState::AwaitingTxSignatures(flags)
@@ -4647,6 +5017,9 @@ impl ChannelActorState {
             pending_notify_settle_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
+            external_funding: false,
+            external_funding_lock_script: None,
+            unsigned_funding_tx: None,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4729,6 +5102,9 @@ impl ChannelActorState {
             pending_notify_settle_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
+            external_funding: false,
+            external_funding_lock_script: None,
+            unsigned_funding_tx: None,
         };
         state.log_ack_state("[ack] new_outbound_channel");
         state
@@ -6771,7 +7147,8 @@ impl ChannelActorState {
         match self.state {
             ChannelState::NegotiatingFunding(_)
             | ChannelState::CollaboratingFundingTx(_)
-            | ChannelState::SigningCommitment(_) => {
+            | ChannelState::SigningCommitment(_)
+            | ChannelState::AwaitingExternalFunding => {
                 // Abort funding. It's better to resume the funding workflow, but it will make the code more complex.
                 // Consider refactoring the code to better support restarting in the future.
                 myself
@@ -7622,7 +7999,8 @@ impl ChannelActorState {
         match self.state {
             ChannelState::NegotiatingFunding(_)
             | ChannelState::CollaboratingFundingTx(_)
-            | ChannelState::SigningCommitment(_) => true,
+            | ChannelState::SigningCommitment(_)
+            | ChannelState::AwaitingExternalFunding => true,
             // Once we have sent the signature, the peer may succeed to submit
             // the funding tx on-chain.The best solution is waiting for the
             // confirmations or spending any input of the funding tx.

@@ -655,6 +655,13 @@ impl Actor for MockChainActor {
                 }
             }
 
+            BuildUnsignedFundingTx { reply, .. } => {
+                // Mock implementation: return an error for now as this is for external funding
+                let _ = reply.send(Err(FundingError::CkbTxBuilderError(TxBuilderError::Other(
+                    anyhow!("BuildUnsignedFundingTx not implemented in mock"),
+                ))));
+            }
+
             Stop => {
                 myself.stop(Some("stop received".to_string()));
             }
