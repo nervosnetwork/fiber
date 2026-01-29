@@ -2865,7 +2865,6 @@ async fn do_test_add_tlc_with_number_limit() {
             ))
         })
         .expect("source node alive");
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if i == node_a_max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result.unwrap_err();
@@ -2873,11 +2872,12 @@ async fn do_test_add_tlc_with_number_limit() {
         } else {
             dbg!(&add_tlc_result);
             assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
         }
     }
 
     // B -> A can still add tlc
-    for _ in 1..=node_a_max_tlc_number + 1 {
+    for i in 1..=node_a_max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
@@ -2897,9 +2897,9 @@ async fn do_test_add_tlc_with_number_limit() {
             ))
         })
         .expect("source node alive");
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         dbg!(&add_tlc_result);
         assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
     }
 }
 
@@ -2946,7 +2946,6 @@ async fn do_test_add_tlc_number_limit_reverse() {
             ))
         })
         .expect("source node alive");
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if i == node_b_max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result.unwrap_err();
@@ -2954,11 +2953,12 @@ async fn do_test_add_tlc_number_limit_reverse() {
         } else {
             dbg!(&add_tlc_result);
             assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
         }
     }
 
     // A -> B can still add tlc
-    for _ in 1..=node_b_max_tlc_number + 1 {
+    for i in 1..=node_b_max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
@@ -2978,9 +2978,9 @@ async fn do_test_add_tlc_number_limit_reverse() {
             ))
         })
         .expect("source node alive");
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         dbg!(&add_tlc_result);
         assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
     }
 }
 
@@ -3028,8 +3028,6 @@ async fn do_test_add_tlc_value_limit() {
             ))
         })
         .expect("node_b alive");
-        // sleep for a while to make sure the AddTlc processed by both party
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if i == max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result.unwrap_err();
@@ -3037,11 +3035,12 @@ async fn do_test_add_tlc_value_limit() {
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
         }
     }
 
     // B -> A can still add tlc
-    for _ in 1..=max_tlc_number + 1 {
+    for i in 1..=max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
@@ -3061,9 +3060,8 @@ async fn do_test_add_tlc_value_limit() {
             ))
         })
         .expect("node_b alive");
-        // sleep for a while to make sure the AddTlc processed by both party
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
     }
 }
 
