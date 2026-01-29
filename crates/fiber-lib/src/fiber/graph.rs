@@ -647,9 +647,15 @@ where
                 if let Some(channel) = self.channels.get(&channel_outpoint) {
                     if let Some(set) = self.node_channels.get_mut(&channel.node1()) {
                         set.remove(&channel_outpoint);
+                        if set.is_empty() {
+                            self.node_channels.remove(&channel.node1());
+                        }
                     }
                     if let Some(set) = self.node_channels.get_mut(&channel.node2()) {
                         set.remove(&channel_outpoint);
+                        if set.is_empty() {
+                            self.node_channels.remove(&channel.node2());
+                        }
                     }
                 }
                 self.channels.remove(&channel_outpoint);
@@ -1007,30 +1013,29 @@ where
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
         // Use index to avoid iterating all channels
-        let channels: Vec<_> = self
-            .node_channels
+        self.node_channels
             .get(&node_id)
-            .into_iter()
-            .flat_map(|outpoints| outpoints.iter())
-            .filter_map(move |outpoint| self.channels.get(outpoint))
-            .filter_map(move |channel| {
-                match channel.update_of_node1.as_ref() {
-                    Some(info) if node_id == channel.node1() && info.enabled => {
-                        return Some((channel.node2(), channel, info));
-                    }
-                    _ => {}
-                }
-                match channel.update_of_node2.as_ref() {
-                    Some(info) if node_id == channel.node2() && info.enabled => {
-                        return Some((channel.node1(), channel, info));
-                    }
-                    _ => {}
-                }
-                None
+            .map(|outpoints| {
+                outpoints.iter().filter_map(move |outpoint| {
+                    self.channels.get(outpoint).and_then(|channel| {
+                        match channel.update_of_node1.as_ref() {
+                            Some(info) if node_id == channel.node1() && info.enabled => {
+                                return Some((channel.node2(), channel, info));
+                            }
+                            _ => {}
+                        }
+                        match channel.update_of_node2.as_ref() {
+                            Some(info) if node_id == channel.node2() && info.enabled => {
+                                return Some((channel.node1(), channel, info));
+                            }
+                            _ => {}
+                        }
+                        None
+                    })
+                })
             })
-            .collect();
-
-        channels.into_iter()
+            .into_iter()
+            .flatten()
     }
 
     pub fn get_node_inbounds(
@@ -1041,24 +1046,27 @@ where
         let mut channels: Vec<_> = self
             .node_channels
             .get(&node_id)
-            .into_iter()
-            .flat_map(|outpoints| outpoints.iter())
-            .filter_map(move |outpoint| self.channels.get(outpoint))
-            .filter_map(move |channel| {
-                match channel.update_of_node1.as_ref() {
-                    Some(info) if node_id == channel.node2() && info.enabled => {
-                        return Some((channel.node1(), channel.node2(), channel, info));
-                    }
-                    _ => {}
-                }
-                match channel.update_of_node2.as_ref() {
-                    Some(info) if node_id == channel.node1() && info.enabled => {
-                        return Some((channel.node2(), channel.node1(), channel, info));
-                    }
-                    _ => {}
-                }
-                None
+            .map(|outpoints| {
+                outpoints.iter().filter_map(move |outpoint| {
+                    self.channels.get(outpoint).and_then(|channel| {
+                        match channel.update_of_node1.as_ref() {
+                            Some(info) if node_id == channel.node2() && info.enabled => {
+                                return Some((channel.node1(), channel.node2(), channel, info));
+                            }
+                            _ => {}
+                        }
+                        match channel.update_of_node2.as_ref() {
+                            Some(info) if node_id == channel.node1() && info.enabled => {
+                                return Some((channel.node2(), channel.node1(), channel, info));
+                            }
+                            _ => {}
+                        }
+                        None
+                    })
+                })
             })
+            .into_iter()
+            .flatten()
             .collect();
 
         // Iterating over HashMap's values is not guaranteed to be in order,
