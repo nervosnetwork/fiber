@@ -1954,6 +1954,23 @@ pub async fn wait_until<F: Fn() -> bool>(f: F) {
     wait_until_timeout(MAX_WAIT_TIME, f).await;
 }
 
+pub async fn wait_for_tlc_sync(
+    sender: &NetworkNode,
+    receiver: &NetworkNode,
+    channel_id: Hash256,
+    expected_offered: usize,
+) {
+    wait_until(|| {
+        let sender_state = sender.get_channel_actor_state(channel_id);
+        let receiver_state = receiver.get_channel_actor_state(channel_id);
+
+        !sender_state.tlc_state.waiting_ack
+            && sender_state.tlc_state.offered_tlcs.tlcs.len() == expected_offered
+            && receiver_state.tlc_state.received_tlcs.tlcs.len() == expected_offered
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn test_connect_to_other_node() {
     let mut node_a = NetworkNode::new().await;
