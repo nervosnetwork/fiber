@@ -329,8 +329,8 @@ impl Privkey {
 }
 
 /// The public key for a Node
-/// Now stores the serialized form ([u8; 33]) directly for fast comparison and hashing
-/// Uses SliceHex for human-readable formats (JSON), Pubkey33Bytes for bincode (compatible with old secp256k1::PublicKey format)
+/// It stores the serialized form ([u8; 33]) directly for fast comparison and hashing
+/// and uses SliceHex for human-readable formats (JSON), Pubkey33Bytes for bincode
 #[serde_as]
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHex, Pubkey33Bytes>")] pub [u8; 33]);
