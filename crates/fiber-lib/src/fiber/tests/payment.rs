@@ -28,14 +28,10 @@ use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
 use secp256k1::Secp256k1;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic;
-use std::time::Duration;
-use std::time::SystemTime;
-use tracing::debug;
-use tracing::error;
-use tracing::info;
+use std::time::{Duration, SystemTime};
+use tracing::{debug, error, info};
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {
