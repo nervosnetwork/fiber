@@ -46,6 +46,29 @@ fn test_serde_public_key() {
     assert_eq!(pubkey, public_key)
 }
 
+/// Test that Pubkey can be deserialized from hex strings without "0x" prefix
+/// for backward compatibility with secp256k1::PublicKey's serde format
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_serde_public_key_without_0x_prefix() {
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    let expected_pubkey = Pubkey::from(sk.public_key(secp256k1_instance()));
+
+    // Old secp256k1::PublicKey format without "0x" prefix
+    let pk_str_without_prefix =
+        "\"035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"";
+    let pubkey: Pubkey =
+        serde_json::from_str(pk_str_without_prefix).expect("should accept hex without 0x prefix");
+    assert_eq!(pubkey, expected_pubkey);
+
+    // Also verify "0x" prefixed still works
+    let pk_str_with_prefix =
+        "\"0x035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"";
+    let pubkey2: Pubkey =
+        serde_json::from_str(pk_str_with_prefix).expect("should accept hex with 0x prefix");
+    assert_eq!(pubkey2, expected_pubkey);
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_pubkey_debug_format() {
