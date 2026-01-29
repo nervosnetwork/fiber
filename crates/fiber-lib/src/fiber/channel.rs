@@ -937,8 +937,7 @@ where
                             // Use the default expiry for mpp
                             Some(now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT)
                         } else {
-                            // Use 0 to indicate to not create HoldTLC for single path payment
-                            // with preimage.
+                            // Do not hold this TLC for a single path payment with preimage.
                             None
                         }
                     } else {
