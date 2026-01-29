@@ -9,10 +9,12 @@ use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
+use super::serde_utils::Pubkey33Bytes;
 use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::payment::{PaymentCustomRecords, USER_CUSTOM_RECORDS_MAX_INDEX};
+use serde_with::IfIsHumanReadable;
 
 use anyhow::anyhow;
 use bitcoin::hashes::Hash;
@@ -328,9 +330,17 @@ impl Privkey {
 
 /// The public key for a Node
 /// Now stores the serialized form ([u8; 33]) directly for fast comparison and hashing
+/// Uses SliceHex for human-readable formats (JSON), Pubkey33Bytes for bincode (compatible with old secp256k1::PublicKey format)
 #[serde_as]
-#[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Pubkey(#[serde_as(as = "SliceHex")] pub [u8; 33]);
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHex, Pubkey33Bytes>")] pub [u8; 33]);
+
+impl std::fmt::Debug for Pubkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Display as 33-byte compressed public key hex (matches JSON format and internal storage)
+        write!(f, "Pubkey({})", hex::encode(self.0))
+    }
+}
 
 impl From<Pubkey> for Point {
     fn from(val: Pubkey) -> Self {
