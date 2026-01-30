@@ -316,9 +316,8 @@ impl Privkey {
         let message = secp256k1::Message::from_digest(message);
         let sig = secp256k1_instance.sign_schnorr(&message, &keypair);
         trace!(
-            "Schnorr signing message {:?} with private key {:?} (pub key {:?}), Signature: {:?}",
+            "Schnorr signing message {:?} (pub key {:?}), Signature: {:?}",
             message,
-            keypair.secret_key(),
             keypair.public_key(),
             &sig
         );

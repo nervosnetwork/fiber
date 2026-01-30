@@ -38,23 +38,21 @@ use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
 use musig2::SecNonce;
-use secp256k1::SecretKey;
+use crate::ckb::signer::LocalSigner;
 use secp256k1::{Keypair, Secp256k1};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tentacle::secio::PeerId;
 
-fn gen_rand_key_pair() -> Keypair {
+fn gen_rand_local_signer() -> LocalSigner {
     let secp = Secp256k1::new();
-    Keypair::new(&secp, &mut rand::thread_rng())
-}
-
-fn gen_rand_private_key() -> SecretKey {
-    gen_rand_key_pair().secret_key()
+    let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+    LocalSigner::new(keypair.secret_key())
 }
 
 fn mock_node() -> (Privkey, NodeAnnouncement) {
-    let sk: Privkey = gen_rand_private_key().into();
+    let signer = gen_rand_local_signer();
+    let sk: Privkey = (*signer.secret_key()).into();
     (
         sk.clone(),
         NodeAnnouncement::new(
@@ -69,14 +67,16 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
 }
 
 fn mock_channel() -> ChannelAnnouncement {
-    let sk1: Privkey = gen_rand_private_key().into();
-    let sk2: Privkey = gen_rand_private_key().into();
-    let keypair = gen_rand_key_pair();
-    let (xonly, _parity) = keypair.x_only_public_key();
+    let signer1 = gen_rand_local_signer();
+    let signer2 = gen_rand_local_signer();
+    let signer3 = gen_rand_local_signer();
+    let xonly = signer3.x_only_pub_key();
     let rand_hash256 = gen_rand_sha256_hash();
+    let pubkey1: Pubkey = (*signer1.pubkey()).into();
+    let pubkey2: Pubkey = (*signer2.pubkey()).into();
     ChannelAnnouncement::new_unsigned(
-        &sk1.pubkey(),
-        &sk2.pubkey(),
+        &pubkey1,
+        &pubkey2,
         OutPoint::new_builder()
             .tx_hash(rand_hash256.into())
             .index(0u32.pack())
