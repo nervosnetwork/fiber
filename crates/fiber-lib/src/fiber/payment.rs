@@ -55,8 +55,7 @@ pub enum PaymentStatus {
     Created,
     /// The first hop AddTlc is sent successfully and waiting for the response.
     ///
-    /// > **MPP Logic**: Status remains `Inflight` even if some attempts are settled,
-    /// > until the total aggregate amount is fulfilled.
+    /// > **MPP Logic**: Status `Inflight` means at least one attempt is still not in `Success`, payment needs more retrying or waiting for HTLC settlement.
     Inflight,
     /// The payment is finished. All related HTLCs are successfully settled,
     /// and the aggregate amount equals the total requested amount.
