@@ -111,18 +111,20 @@ RPC module for cross chain hub demonstration.
 <a id="cch-send_btc"></a>
 #### Method `send_btc`
 
-Send BTC to a address.
+Creates a CCH order for a BTC Lightning payee.
 
 ##### Params
 
-* `btc_pay_req` - <em>`String`</em>, Bitcoin payment request string
+* `btc_pay_req` - <em>`String`</em>, Payment request string for the BTC Lightning payee.
+
+ The invoice should not be expired soon. The remaining expiry time should be greater than the CCH config
+ `min_incoming_invoice_expiry_delta_seconds`.
 * `currency` - <em>[Currency](#type-currency)</em>, Request currency
 
 ##### Returns
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
@@ -138,17 +140,19 @@ Send BTC to a address.
 <a id="cch-receive_btc"></a>
 #### Method `receive_btc`
 
-Receive BTC from a payment hash.
+Creates a CCH order for a CKB Fiber payee.
 
 ##### Params
 
-* `fiber_pay_req` - <em>`String`</em>, Fiber payment request string
+* `fiber_pay_req` - <em>`String`</em>, Payment request string for the CKB Fiber payee.
+
+ The invoice should not be expired soon. The remaining expiry time should be greater than the CCH config
+ `min_incoming_invoice_expiry_delta_seconds`.
 
 ##### Returns
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
@@ -164,7 +168,7 @@ Receive BTC from a payment hash.
 <a id="cch-get_cch_order"></a>
 #### Method `get_cch_order`
 
-Get receive BTC order by payment hash.
+Get a CCH order by payment hash.
 
 ##### Params
 
@@ -173,8 +177,7 @@ Get receive BTC order by payment hash.
 ##### Returns
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry` - <em>`u64`</em>, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry_delta` - <em>`u64`</em>, The minimal expiry in seconds of the final TLC in the CKB network
+* `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
 * `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
@@ -657,7 +660,9 @@ Sends a payment to a peer.
  this is also the default value for the payment if this parameter is not provided
 * `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
 * `timeout` - <em>`Option<u64>`</em>, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
-* `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay
+* `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay,
+ default is 0.5% * amount
+* `max_fee_rate` - <em>`Option<u64>`</em>, the maximum fee rate per thousand (‰), default is 5 (0.5%)
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
@@ -1084,10 +1089,10 @@ The status of a cross-chain hub order, will update as the order progresses.
 
 #### Enum with values of
 
-* `Pending` - Order is created and has not received the incoming payment
-* `IncomingAccepted` - HTLC in the incoming payment is accepted.
-* `OutgoingInFlight` - There's an outgoing payment in flight.
-* `OutgoingSettled` - The outgoing payment is settled.
+* `Pending` - Order is created and waiting for the incoming invoice to collect enough TLCs.
+* `IncomingAccepted` - The incoming invoice collected the required TLCs and is ready to send outgoing payment to obtain the preimage.
+* `OutgoingInFlight` - The outgoing payment is in flight.
+* `OutgoingSucceeded` - The outgoing payment is settled and preimage has been obtained.
 * `Succeeded` - Both payments are settled and the order succeeds.
 * `Failed` - Order is failed.
 ---

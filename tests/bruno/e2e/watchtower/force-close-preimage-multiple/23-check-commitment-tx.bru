@@ -30,10 +30,27 @@ body:json {
   }
 }
 
-assert {
-  res.body.result.status: eq "unknown"
+script:pre-request {
+  if (bru.getVar("settlement_poll_iteration") === undefined) {
+    bru.setVar("settlement_poll_iteration", 0);
+  }
+  if (bru.getVar("settlement_poll_max") === undefined) {
+    bru.setVar("settlement_poll_max", 8);
+  }
 }
 
 script:post-response {
   console.log("generated result: ", res.body);
+  const status = res.body?.result?.status;
+  if (status !== "unknown") {
+    const iteration = bru.getVar("settlement_poll_iteration");
+    const max = bru.getVar("settlement_poll_max");
+    if (iteration >= max) {
+      throw new Error(`Settlement tx not committed after ${max} polling attempts, status=${status}`);
+    }
+    bru.setVar("settlement_poll_iteration", iteration + 1);
+    bru.setNextRequest("generate a few blocks for final settlement tx committed");
+  } else {
+    bru.setVar("settlement_poll_iteration", undefined);
+  }
 }

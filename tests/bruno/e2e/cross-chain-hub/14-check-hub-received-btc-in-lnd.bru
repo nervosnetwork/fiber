@@ -1,7 +1,7 @@
 meta {
-  name: 08-check-btc-received
+  name: 14-check-hub-received-btc-in-lnd
   type: http
-  seq: 8
+  seq: 14
 }
 
 get {
@@ -30,16 +30,18 @@ script:post-response {
   if (i < n) {
     console.log(`Try ${i+1}/${n}`);
   }
-
-  if (parseInt(res.body.local_balance.sat, 10) > 0) {
-    console.log("Bob has received the payment");
+  
+  const before = parseInt(bru.getVar("LND_BOB_BALANCE"), 10);
+  if (parseInt(res.body.remote_balance.sat, 10) - before === 50000) {
+    console.log("Hub has received the payment");
+    await new Promise(r => setTimeout(r, 1000));
     bru.setVar("iteration", 0);
   } else if (i+1 < n) {
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 500));
     bru.setVar("iteration", i + 1);
-    bru.setNextRequest("08-check-btc-received");
+    bru.setNextRequest("14-check-hub-received-btc-in-lnd");
   } else {
     bru.setVar("iteration", 0);
-    throw new Error("Bob has not received the payment");
+    throw new Error("Hub has not received the payment");
   }
 }

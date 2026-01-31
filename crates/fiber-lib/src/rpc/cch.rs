@@ -1,14 +1,11 @@
-#[cfg(not(target_arch = "wasm32"))]
-use crate::cch::{CchMessage, CchOrder, CchOrderStatus};
 use crate::{
-    cch::CchInvoice,
+    cch::{CchInvoice, CchMessage, CchOrder, CchOrderStatus},
     fiber::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
     },
     invoice::Currency,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::{
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
@@ -19,7 +16,10 @@ use serde_with::serde_as;
 
 #[derive(Serialize, Deserialize)]
 pub struct SendBTCParams {
-    /// Bitcoin payment request string
+    /// Payment request string for the BTC Lightning payee.
+    ///
+    /// The invoice should not be expired soon. The remaining expiry time should be greater than the CCH config
+    /// `min_incoming_invoice_expiry_delta_seconds`.
     pub btc_pay_req: String,
     /// Request currency
     pub currency: Currency,
@@ -31,12 +31,9 @@ pub struct CchOrderResponse {
     /// Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
-    /// Seconds after timestamp that the order expires
+    /// Relative expiry time in seconds from `created_at` that the order expires
     #[serde_as(as = "U64Hex")]
-    pub expiry: u64,
-    /// The minimal expiry in seconds of the final TLC in the CKB network
-    #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry_delta: u64,
+    pub expiry_delta_seconds: u64,
 
     /// Wrapped BTC type script
     pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
@@ -60,7 +57,10 @@ pub struct CchOrderResponse {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct ReceiveBTCParams {
-    /// Fiber payment request string
+    /// Payment request string for the CKB Fiber payee.
+    ///
+    /// The invoice should not be expired soon. The remaining expiry time should be greater than the CCH config
+    /// `min_incoming_invoice_expiry_delta_seconds`.
     pub fiber_pay_req: String,
 }
 
@@ -71,22 +71,20 @@ pub struct GetCchOrderParams {
 }
 
 /// RPC module for cross chain hub demonstration.
-// #[rpc(server)]
-#[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
 trait CchRpc {
-    /// Send BTC to a address.
+    /// Creates a CCH order for a BTC Lightning payee.
     #[method(name = "send_btc")]
     async fn send_btc(&self, params: SendBTCParams) -> Result<CchOrderResponse, ErrorObjectOwned>;
 
-    /// Receive BTC from a payment hash.
+    /// Creates a CCH order for a CKB Fiber payee.
     #[method(name = "receive_btc")]
     async fn receive_btc(
         &self,
         params: ReceiveBTCParams,
     ) -> Result<CchOrderResponse, ErrorObjectOwned>;
 
-    /// Get receive BTC order by payment hash.
+    /// Get a CCH order by payment hash.
     #[method(name = "get_cch_order")]
     async fn get_cch_order(
         &self,
@@ -105,7 +103,6 @@ impl CchRpcServerImpl {
 }
 
 const TIMEOUT: u64 = 1000;
-#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl CchRpcServer for CchRpcServerImpl {
     /// Send BTC to a address.
@@ -203,8 +200,7 @@ impl From<CchOrder> for CchOrderResponse {
     fn from(value: CchOrder) -> Self {
         Self {
             timestamp: value.created_at,
-            expiry: value.expires_after,
-            ckb_final_tlc_expiry_delta: value.ckb_final_tlc_expiry_delta,
+            expiry_delta_seconds: value.expiry_delta_seconds,
             wrapped_btc_type_script: value.wrapped_btc_type_script,
             outgoing_pay_req: value.outgoing_pay_req,
             incoming_invoice: value.incoming_invoice,

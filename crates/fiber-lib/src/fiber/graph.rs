@@ -446,6 +446,9 @@ pub struct NetworkGraph<S> {
     source: Pubkey,
     // All the channels in the network.
     pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
+    // Index: node_id -> set of channel outpoints involving this node
+    // This accelerates queries like get_node_inbounds/get_channels_by_peer
+    node_channels: HashMap<Pubkey, HashSet<OutPoint>>,
     // All the nodes in the network.
     nodes: HashMap<Pubkey, NodeInfo>,
 
@@ -471,7 +474,7 @@ pub struct NetworkGraph<S> {
     #[cfg(test)]
     pub(crate) add_rand_expiry_delta: bool,
 
-    #[cfg(any(feature = "metrics", test))]
+    #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub(crate) payment_find_path_stats: Arc<Mutex<HashMap<Hash256, u128>>>,
 }
 
@@ -533,6 +536,7 @@ where
             always_process_gossip_message: false,
             source,
             channels: HashMap::new(),
+            node_channels: HashMap::new(),
             channel_stats: Default::default(),
             nodes: HashMap::new(),
             latest_cursor: Cursor::default(),
@@ -541,7 +545,7 @@ where
             announce_private_addr,
             #[cfg(test)]
             add_rand_expiry_delta: true,
-            #[cfg(any(feature = "metrics", test))]
+            #[cfg(any(feature = "metrics", test, feature = "bench"))]
             payment_find_path_stats: Default::default(),
         };
         network_graph.load_from_store();
@@ -626,10 +630,34 @@ where
                 // so we can just overwrite the old channel info.
                 self.history
                     .remove_channel_history(&channel_info.channel_outpoint);
+                // Update node_channels index
+                self.node_channels
+                    .entry(channel_info.node1())
+                    .or_default()
+                    .insert(channel_info.channel_outpoint.clone());
+                self.node_channels
+                    .entry(channel_info.node2())
+                    .or_default()
+                    .insert(channel_info.channel_outpoint.clone());
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
             }
             OwnedChannelUpdateEvent::Down(channel_outpoint) => {
+                // Remove from node_channels index
+                if let Some(channel) = self.channels.get(&channel_outpoint) {
+                    if let Some(set) = self.node_channels.get_mut(&channel.node1()) {
+                        set.remove(&channel_outpoint);
+                        if set.is_empty() {
+                            self.node_channels.remove(&channel.node1());
+                        }
+                    }
+                    if let Some(set) = self.node_channels.get_mut(&channel.node2()) {
+                        set.remove(&channel_outpoint);
+                        if set.is_empty() {
+                            self.node_channels.remove(&channel.node2());
+                        }
+                    }
+                }
                 self.channels.remove(&channel_outpoint);
                 self.channel_stats.lock().remove_channel(&channel_outpoint);
             }
@@ -663,8 +691,8 @@ where
     // can be added to the store earlier than messages with smaller timestamp,
     // It is possible in regular load_from_store may skip some messages.
     // We use this method to reset the cursor and load all messages from start.
-    #[cfg(test)]
-    pub(crate) fn reload_from_store(&mut self) {
+    #[cfg(any(test, feature = "bench"))]
+    pub fn reload_from_store(&mut self) {
         self.reset();
         self.load_from_store();
     }
@@ -753,6 +781,15 @@ where
                     .add_node_channel_map(channel_info.node1, channel_info.out_point().clone());
                 self.history
                     .add_node_channel_map(channel_info.node2, channel_info.out_point().clone());
+                // Update node_channels index
+                self.node_channels
+                    .entry(channel_info.node1)
+                    .or_default()
+                    .insert(channel_info.channel_outpoint.clone());
+                self.node_channels
+                    .entry(channel_info.node2)
+                    .or_default()
+                    .insert(channel_info.channel_outpoint.clone());
                 self.channels
                     .insert(channel_info.channel_outpoint.clone(), channel_info);
                 return Some(cursor);
@@ -963,69 +1000,73 @@ where
     }
 
     pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {
-        self.channels
-            .values()
-            .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
-    }
-
-    pub fn get_mut_channels_by_peer(
-        &mut self,
-        node_id: Pubkey,
-    ) -> impl Iterator<Item = &mut ChannelInfo> {
-        self.channels
-            .values_mut()
-            .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
+        // Use index to avoid iterating all channels
+        self.node_channels
+            .get(&node_id)
+            .into_iter()
+            .flat_map(|outpoints| outpoints.iter())
+            .filter_map(move |outpoint| self.channels.get(outpoint))
     }
 
     pub fn get_node_outbounds(
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
-        let channels: Vec<_> = self
-            .channels
-            .values()
-            .filter_map(move |channel| {
-                match channel.update_of_node1.as_ref() {
-                    Some(info) if node_id == channel.node1() && info.enabled => {
-                        return Some((channel.node2(), channel, info));
-                    }
-                    _ => {}
-                }
-                match channel.update_of_node2.as_ref() {
-                    Some(info) if node_id == channel.node2() && info.enabled => {
-                        return Some((channel.node1(), channel, info));
-                    }
-                    _ => {}
-                }
-                None
+        // Use index to avoid iterating all channels
+        self.node_channels
+            .get(&node_id)
+            .map(|outpoints| {
+                outpoints.iter().filter_map(move |outpoint| {
+                    self.channels.get(outpoint).and_then(|channel| {
+                        match channel.update_of_node1.as_ref() {
+                            Some(info) if node_id == channel.node1() && info.enabled => {
+                                return Some((channel.node2(), channel, info));
+                            }
+                            _ => {}
+                        }
+                        match channel.update_of_node2.as_ref() {
+                            Some(info) if node_id == channel.node2() && info.enabled => {
+                                return Some((channel.node1(), channel, info));
+                            }
+                            _ => {}
+                        }
+                        None
+                    })
+                })
             })
-            .collect();
-
-        channels.into_iter()
+            .into_iter()
+            .flatten()
     }
 
     pub fn get_node_inbounds(
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        // Use index to avoid iterating all channels
         let mut channels: Vec<_> = self
-            .channels
-            .values()
-            .filter_map(move |channel| {
-                match channel.update_of_node1.as_ref() {
-                    Some(info) if node_id == channel.node2() && info.enabled => {
-                        return Some((channel.node1(), channel.node2(), channel, info));
-                    }
-                    _ => {}
-                }
-                match channel.update_of_node2.as_ref() {
-                    Some(info) if node_id == channel.node1() && info.enabled => {
-                        return Some((channel.node2(), channel.node1(), channel, info));
-                    }
-                    _ => {}
-                }
-                None
+            .node_channels
+            .get(&node_id)
+            .map(|outpoints| {
+                outpoints.iter().filter_map(move |outpoint| {
+                    self.channels.get(outpoint).and_then(|channel| {
+                        match channel.update_of_node1.as_ref() {
+                            Some(info) if node_id == channel.node2() && info.enabled => {
+                                return Some((channel.node1(), channel.node2(), channel, info));
+                            }
+                            _ => {}
+                        }
+                        match channel.update_of_node2.as_ref() {
+                            Some(info) if node_id == channel.node1() && info.enabled => {
+                                return Some((channel.node2(), channel.node1(), channel, info));
+                            }
+                            _ => {}
+                        }
+                        None
+                    })
+                })
             })
+            .into_iter()
+            .flatten()
             .collect();
 
         // Iterating over HashMap's values is not guaranteed to be in order,
@@ -1071,13 +1112,23 @@ where
     }
 
     pub(crate) fn mark_node_failed(&mut self, node_id: Pubkey) {
-        for channel in self.get_mut_channels_by_peer(node_id) {
-            if channel.node1() == node_id {
-                if let Some(info) = channel.update_of_node2.as_mut() {
+        // Use index to get relevant channel outpoints
+        let outpoints: Vec<_> = self
+            .node_channels
+            .get(&node_id)
+            .into_iter()
+            .flat_map(|set| set.iter().cloned())
+            .collect();
+
+        for outpoint in outpoints {
+            if let Some(channel) = self.channels.get_mut(&outpoint) {
+                if channel.node1() == node_id {
+                    if let Some(info) = channel.update_of_node2.as_mut() {
+                        info.enabled = false;
+                    }
+                } else if let Some(info) = channel.update_of_node1.as_mut() {
                     info.enabled = false;
                 }
-            } else if let Some(info) = channel.update_of_node1.as_mut() {
-                info.enabled = false;
             }
         }
     }
@@ -1134,6 +1185,7 @@ where
     pub fn reset(&mut self) {
         self.latest_cursor = Cursor::default();
         self.channels.clear();
+        self.node_channels.clear();
         self.nodes.clear();
         self.history.reset();
     }
@@ -1144,7 +1196,7 @@ where
     }
 
     /// Get the number of find_path calls for a specific payment_hash
-    #[cfg(any(feature = "metrics", test))]
+    #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub fn get_payment_find_path_count(&self, payment_hash: &Hash256) -> u128 {
         self.payment_find_path_stats
             .lock()
@@ -1154,7 +1206,7 @@ where
     }
 
     /// Remove the find_path stats for a specific payment_hash
-    #[cfg(any(feature = "metrics", test))]
+    #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub fn remove_payment_find_path_stats(&self, payment_hash: &Hash256) {
         self.payment_find_path_stats.lock().remove(payment_hash);
     }
@@ -1481,7 +1533,7 @@ where
             .saturating_sub(route.first().map(|r| r.incoming_tlc_expiry).unwrap_or(0))
             / DEFAULT_TLC_EXPIRY_DELTA;
 
-        thread_rng().gen_range(0..max_rand_expiry_num.max(1)) * DEFAULT_TLC_EXPIRY_DELTA
+        thread_rng().gen_range(1..max_rand_expiry_num.max(2)) * DEFAULT_TLC_EXPIRY_DELTA
     }
 
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.
@@ -2017,8 +2069,14 @@ where
             // this can help us early return if the payment is not possible to be sent
             // otherwise when PathFind error is returned, we need to retry with half amount
             error!(
-                "no path found from {:?} to {:?} for amount: {:?}",
-                source, target, amount
+                "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
+                source, target, amount, max_fee_amount
+            );
+            debug!(
+                "get_route failed: nodes visited: {}, edges expanded: {}, time: {:?}",
+                nodes_visited,
+                edges_expanded,
+                started_time.elapsed(),
             );
             return Err(PathFindError::NoPathFound);
         }
@@ -2032,7 +2090,7 @@ where
             return Err(PathFindError::TlcMinValue(max_min_tlc_value));
         }
 
-        info!(
+        debug!(
             "get_route: nodes visited: {}, edges expanded: {}, time: {:?} \nresult: {:?}",
             nodes_visited,
             edges_expanded,
