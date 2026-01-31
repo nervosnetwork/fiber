@@ -1360,16 +1360,22 @@ The custom records to be included in the payment.
 <a id="#type-paymentstatus"></a>
 ### Type `PaymentStatus`
 
-The status of a payment, will update as the payment progresses.
- The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
+The status of a payment session, which dynamically updates as the payment progresses. 
+The state transition path is `Created -> Inflight -> Success | Failed`.
+
+#### Multi-Path Payment (MPP) Context
+A single payment session may involve multiple payment attempts to fulfill the total amount.
+
+#### Enum Values
+
+* `Created`: Initial status. The payment session is initialized, but no HTLC (Hashed Time Lock Contract) has been dispatched.
+* `Inflight`: One or more payment attempts are active. 
+    * **Note**: In MPP, the status remains `Inflight` even if some attempts have been successfully settled, as long as the total settled amount has not yet reached the target payment amount.
+* `Success`: The payment is finished. The sum of all successfully settled payment attempts equals the total requested amount.
+* `Failed`: The payment session has terminated without fulfilling the target amount. This happens when all retry attempts are exhausted or a terminal routing error occurs.
 
 
-#### Enum with values of
 
-* `Created` - initial status, a payment session is created, no HTLC is sent
-* `Inflight` - the first hop AddTlc is sent successfully and waiting for the response
-* `Success` - related HTLC is successfully settled
-* `Failed` - related HTLC is failed
 ---
 
 <a id="#type-peerinfo"></a>
