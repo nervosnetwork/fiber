@@ -1365,8 +1365,8 @@ The custom records to be included in the payment.
 <a id="#type-paymentstatus"></a>
 ### Type `PaymentStatus`
 
-The status of a payment session, which updates as the payment progresses.
- State transition: `Created -> Inflight -> Success | Failed`.
+The status of a payment, will update as the payment progresses.
+ The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 
  **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
 
