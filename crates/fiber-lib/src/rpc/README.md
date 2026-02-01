@@ -1368,13 +1368,19 @@ The custom records to be included in the payment.
 The status of a payment, will update as the payment progresses.
  The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 
+ **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
+
 
 #### Enum with values of
 
-* `Created` - initial status, a payment session is created, no HTLC is sent
-* `Inflight` - the first hop AddTlc is sent successfully and waiting for the response
-* `Success` - related HTLC is successfully settled
-* `Failed` - related HTLC is failed
+* `Created` - Initial status. A payment session is created, but no HTLC has been dispatched.
+* `Inflight` - The first hop AddTlc is sent successfully and waiting for the response.
+
+ > **MPP Logic**: Status `Inflight` means at least one attempt is still not in `Success`, payment needs more retrying or waiting for HTLC settlement.
+* `Success` - The payment is finished. All related HTLCs are successfully settled,
+ and the aggregate amount equals the total requested amount.
+* `Failed` - The payment session has terminated. HTLCs have failed and the target
+ amount cannot be fulfilled after exhausting all retries.
 ---
 
 <a id="#type-peerinfo"></a>
