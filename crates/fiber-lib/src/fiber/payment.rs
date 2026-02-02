@@ -383,7 +383,7 @@ impl SendPaymentDataBuilder {
                     "trampoline_hops must contain only one hop when MPP is enabled".to_string(),
                 );
             }
-            if hops.iter().any(|h| *h == target_pubkey) {
+            if hops.contains(&target_pubkey) {
                 return Err("trampoline_hops must not contain target_pubkey".to_string());
             }
             if self.max_fee_amount.is_none() {

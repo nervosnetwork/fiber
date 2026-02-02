@@ -1430,7 +1430,7 @@ where
             *fee = fee.saturating_add(1);
         }
 
-        if fees.iter().any(|&f| f == 0) {
+        if fees.contains(&0) {
             return Err(PathFindError::Other(
                 "max_fee_amount is too low for trampoline routing: fee for a trampoline hop is zero"
                     .to_string(),
