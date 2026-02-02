@@ -313,7 +313,6 @@ impl Privkey {
         let secp256k1_instance = secp256k1_instance();
         let secret_key = self.0;
         let keypair = secp256k1::Keypair::from_secret_key(secp256k1_instance, &secret_key);
-        let message = secp256k1::Message::from_digest(message);
         let sig = secp256k1_instance.sign_schnorr(&message, &keypair);
         trace!(
             "Schnorr signing message {:?} (pub key {:?}), Signature: {:?}",
@@ -331,13 +330,13 @@ pub struct Pubkey(pub PublicKey);
 
 impl From<Pubkey> for Point {
     fn from(val: Pubkey) -> Self {
-        PublicKey::from(val).into()
+        val.0.into()
     }
 }
 
 impl From<&Pubkey> for Point {
     fn from(val: &Pubkey) -> Self {
-        (*val).into()
+        val.0.into()
     }
 }
 
@@ -398,7 +397,8 @@ impl Pubkey {
         let scalar = Scalar::from_slice(&scalar)
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         let result = Point::from(self) + scalar.base_point_mul();
-        PublicKey::from(result.not_inf().expect("valid public key")).into()
+        let point = result.not_inf().expect("valid public key");
+        PublicKey::from(point).into()
     }
 
     pub fn tentacle_peer_id(&self) -> PeerId {
@@ -539,7 +539,7 @@ impl From<SchnorrSignature> for molecule_gossip::SchnorrSignature {
         molecule_gossip::SchnorrSignature::new_builder()
             .set(
                 signature
-                    .serialize()
+                    .to_byte_array()
                     .into_iter()
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
