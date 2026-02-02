@@ -3179,12 +3179,12 @@ pub struct TlcInfo {
     ///   forwarding_tlc relations:
     ///
     ///   - Node B:
-    ///       inbound  tlc_1.forwarding_tlc = Some((channel_BC, tlc2_id))
-    ///       outbound tlc_2.forwarding_tlc = Some((channel_AB, tlc1_id))
+    ///     - inbound: tlc_1.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///     - outbound: tlc_2.forwarding_tlc = Some((channel_AB, tlc1_id))
     ///
     ///   - Node C:
-    ///       inbound  tlc_2.forwarding_tlc = Some((channel_CD, tlc3_id))
-    ///       outbound tlc_3.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///     - inbound: tlc_2.forwarding_tlc = Some((channel_CD, tlc3_id))
+    ///     - outbound: tlc_3.forwarding_tlc = Some((channel_BC, tlc2_id))
     ///
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
@@ -6202,14 +6202,13 @@ impl ChannelActorState {
             let shutdown_tx = self.build_shutdown_tx().await?;
             let sign_ctx = self.get_funding_sign_context();
 
-            let local_shutdown_info = self
-                .local_shutdown_info
-                .as_mut()
-                .expect("local shutdown info exists");
-            let remote_shutdown_info = self
-                .remote_shutdown_info
-                .as_ref()
-                .expect("remote shutdown info exists");
+            let (Some(local_shutdown_info), Some(remote_shutdown_info)) = (
+                self.local_shutdown_info.as_mut(),
+                self.remote_shutdown_info.as_ref(),
+            ) else {
+                unreachable!("shutdown info checked above")
+            };
+
             let shutdown_scripts = (
                 local_shutdown_info.close_script.clone(),
                 remote_shutdown_info.close_script.clone(),

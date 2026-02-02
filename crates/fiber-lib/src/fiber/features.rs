@@ -167,7 +167,7 @@ impl FeatureVector {
     }
 
     pub fn requires_feature(&self, bit: FeatureBit) -> bool {
-        self.is_set(bit) && bit % 2 == 0
+        self.is_set(bit) && bit.is_multiple_of(2)
     }
 
     pub fn supports_feature(&self, bit: FeatureBit) -> bool {
