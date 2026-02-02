@@ -82,7 +82,7 @@ impl Store {
             })
             .unwrap()
         {
-            DbCommandResponse::Delete {} => {}
+            DbCommandResponse::Delete => {}
             _ => unreachable!(),
         };
     }
@@ -97,7 +97,7 @@ impl Store {
             })
             .unwrap()
         {
-            DbCommandResponse::Put {} => {}
+            DbCommandResponse::Put => {}
             _ => unreachable!(),
         };
     }

@@ -1,16 +1,21 @@
 use ckb_sdk::RpcError;
 use ckb_types::{core::TransactionView, packed, prelude::IntoTransactionView as _};
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use strum::AsRefStr;
 use tracing::debug;
 
 use crate::{
     ckb::contracts::{get_script_by_contract, Contract},
-    fiber::{serde_utils::EntityHex, types::Hash256},
+    fiber::types::Hash256,
     utils::actor::ActorHandleLogGuard,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fiber::serde_utils::EntityHex;
+#[cfg(not(target_arch = "wasm32"))]
+use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use serde_with::serde_as;
 
 use super::{
     funding::{FundingContext, LiveCellsExclusionMap},
@@ -240,6 +245,7 @@ impl CkbChainState {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[serde_as]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct FundingTxShellBuilderInput {

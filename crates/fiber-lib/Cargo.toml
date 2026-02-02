@@ -152,6 +152,7 @@ large-enum-variant = "allow"
 mutable-key-type = "allow"
 needless-return = "allow"
 upper-case-acronyms = "allow"
+result_large_err = "allow"
 
 [package.metadata.cargo-shear]
 ignored = ["getrandom"]
