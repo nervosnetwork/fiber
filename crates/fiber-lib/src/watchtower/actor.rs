@@ -1511,7 +1511,7 @@ fn sign_tx_with_settlement(
     let (recov_id, data) = signature.serialize_compact();
     let mut signature_bytes = [0u8; 65];
     signature_bytes[0..64].copy_from_slice(&data[0..64]);
-    signature_bytes[64] = recov_id.to_i32() as u8;
+    signature_bytes[64] = i32::from(recov_id) as u8;
     let mut settlement_witness = tx
         .witnesses()
         .get(0)

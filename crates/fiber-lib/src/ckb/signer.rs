@@ -72,7 +72,7 @@ impl LocalSigner {
 
         let mut signature_bytes = [0u8; 65];
         signature_bytes[0..64].copy_from_slice(&data[0..64]);
-        signature_bytes[64] = recov_id.to_i32() as u8;
+        signature_bytes[64] = i32::from(recov_id) as u8;
         signature_bytes
     }
 
@@ -85,21 +85,7 @@ impl LocalSigner {
         mut tx: FundingTx,
         rpc_url: String,
     ) -> Result<FundingTx, FundingError> {
-        // Convert between different versions of secp256k1.
-        // This app requires 0.28 because of:
-        // ```
-        // #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
-        // pub struct Signature(pub Secp256k1Signature);
-        // ```
-        //
-        // However, ckb-sdk-rust still uses 0.30 .
-        //
-        // It's complex to use map_err and return an error as well because secp256k1 used by ckb sdk is not public.
-        // Expect is OK here since the secret key is valid and can be parsed in both versions.
-        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![std::str::FromStr::from_str(
-            hex::encode(self.secret_key.as_ref()).as_ref(),
-        )
-        .expect("convert secret key between different secp256k1 versions")]);
+        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![self.secret_key]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
         let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
         let mut unlockers = HashMap::default();
@@ -200,7 +186,7 @@ mod tests {
         let (recov_id, data) = direct_sig.serialize_compact();
         let mut direct_sig_bytes = [0u8; 65];
         direct_sig_bytes[0..64].copy_from_slice(&data[0..64]);
-        direct_sig_bytes[64] = recov_id.to_i32() as u8;
+        direct_sig_bytes[64] = i32::from(recov_id) as u8;
 
         // They should be identical
         assert_eq!(signer_sig, direct_sig_bytes);
