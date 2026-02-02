@@ -21,7 +21,7 @@ use ckb_types::{
 };
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Message, Secp256k1, SecretKey};
 use strum::AsRefStr;
 use tracing::{debug, error, info, warn};
 
@@ -29,6 +29,7 @@ use crate::{
     ckb::{
         config::{new_default_cell_collector, CKB_RPC_TIMEOUT},
         contracts::{get_cell_deps_sync, get_script_by_contract, Contract},
+        signer::LocalSigner,
         CkbConfig,
     },
     fiber::{
@@ -82,7 +83,7 @@ pub enum WatchtowerMessage {
 
 pub struct WatchtowerState {
     config: CkbConfig,
-    secret_key: SecretKey,
+    signer: LocalSigner,
     /// is periodic check running
     periodic_check_running: Arc<AtomicBool>,
 }
@@ -102,9 +103,10 @@ where
         config: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let secret_key = config.read_secret_key()?;
+        let signer = LocalSigner::new(secret_key);
         Ok(Self::State {
             config,
-            secret_key,
+            signer,
             periodic_check_running: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -191,15 +193,15 @@ where
                 // Spawn the periodic check task
                 let store = self.store.clone();
                 let node_id = self.node_id.clone();
-                let secret_key = state.secret_key;
                 let rpc_url = state.config.rpc_url.clone();
                 let periodic_check_running = state.periodic_check_running.clone();
+                let signer = state.signer.clone();
                 tokio::task::spawn_blocking(move || {
                     // Use RAII guard to ensure flag is reset even on panic
                     let _guard = PeriodicCheckGuard(periodic_check_running);
                     info!("PeriodicCheck started");
                     let start = now_timestamp_as_millis_u64();
-                    run_periodic_check(store, node_id, secret_key, rpc_url);
+                    run_periodic_check(store, node_id, signer, rpc_url);
                     let elapsed = now_timestamp_as_millis_u64().saturating_sub(start);
                     info!("PeriodicCheck finished elapsed: {}ms", elapsed);
                 });
@@ -218,7 +220,7 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
-fn run_periodic_check<S>(store: S, node_id: NodeId, secret_key: SecretKey, rpc_url: String)
+fn run_periodic_check<S>(store: S, node_id: NodeId, signer: LocalSigner, rpc_url: String)
 where
     S: WatchtowerStore + Send + Sync + 'static,
 {
@@ -294,7 +296,7 @@ where
                                                                                     first_commitment_tx_out_point,
                                                                                     revocation_data,
                                                                                     x_only_aggregated_pubkey,
-                                                                                    secret_key,
+                                                                                    &signer,
                                                                                     &mut cell_collector,
                                                                                 ) {
                                                                                     Ok(tx) => {
@@ -330,7 +332,7 @@ where
                                                                 ckb_client,
                                                                 channel_data,
                                                                 true,
-                                                                secret_key,
+                                                                &signer,
                                                                 &mut cell_collector,
                                                                 &store,
                                                                 node_id.clone(),
@@ -344,7 +346,7 @@ where
                                                         ckb_client,
                                                         channel_data,
                                                         false,
-                                                        secret_key,
+                                                        &signer,
                                                         &mut cell_collector,
                                                         &store,
                                                         node_id.clone(),
@@ -387,7 +389,7 @@ fn build_revocation_tx(
     commitment_tx_out_point: OutPoint,
     revocation_data: RevocationData,
     x_only_aggregated_pubkey: [u8; 32],
-    secret_key: SecretKey,
+    signer: &LocalSigner,
     cell_collector: &mut DefaultCellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
     let witness = [
@@ -399,9 +401,8 @@ fn build_revocation_tx(
     ]
     .concat();
 
-    let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
-    let args = blake160(pubkey.serialize().as_ref());
-    let fee_provider_lock_script = get_script_by_contract(Contract::Secp256k1Lock, args.as_bytes());
+    let args = signer.pubkey_hash();
+    let fee_provider_lock_script = get_script_by_contract(Contract::Secp256k1Lock, args);
 
     let change_output = CellOutput::new_builder()
         .lock(fee_provider_lock_script.clone())
@@ -466,7 +467,7 @@ fn build_revocation_tx(
                 .set_outputs(vec![revocation_data.output, new_change_output])
                 .build();
 
-            let tx = sign_tx(tx, secret_key)?;
+            let tx = sign_tx(tx, signer)?;
             return Ok(tx);
         }
     }
@@ -481,7 +482,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     ckb_client: CkbRpcClient,
     channel_data: ChannelData,
     for_remote: bool,
-    secret_key: SecretKey,
+    signer: &LocalSigner,
     cell_collector: &mut DefaultCellCollector,
     store: &S,
     self_node_id: NodeId,
@@ -630,7 +631,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         for_remote,
                         channel_data.clone(),
                         settlement_witness,
-                        secret_key,
+                        signer,
                         cell_collector,
                         store,
                     ) {
@@ -792,7 +793,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
     for_remote: bool,
     channel_data: ChannelData,
     settlement_witness: Option<SettlementWitness>,
-    secret_key: SecretKey,
+    signer: &LocalSigner,
     cell_collector: &mut DefaultCellCollector,
     store: &S,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
@@ -842,9 +843,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
         channel_data.local_settlement_data.clone()
     };
 
-    let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
-    let args = blake160(pubkey.serialize().as_ref());
-    let fee_provider_lock_script = get_script_by_contract(Contract::Secp256k1Lock, args.as_bytes());
+    let fee_provider_lock_script =
+        get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
     let change_output = CellOutput::new_builder()
         .lock(fee_provider_lock_script.clone())
         .build();
@@ -1276,8 +1276,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     vec![new_commitment_output, adjusted_settlement_output]
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
-                let tx =
-                    sign_tx_with_settlement(tx, secret_key, unlock_key.0, unlock.with_preimage)?;
+                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
                 return Ok(Some(tx));
             }
         }
@@ -1462,8 +1461,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .set_outputs(outputs)
                     .set_outputs_data(outputs_data)
                     .build();
-                let tx =
-                    sign_tx_with_settlement(tx, secret_key, unlock_key.0, unlock.with_preimage)?;
+                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
                 return Ok(Some(tx));
             }
         }
@@ -1474,7 +1472,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
 fn sign_tx(
     tx: TransactionView,
-    secret_key: SecretKey,
+    signer: &LocalSigner,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
     let tx = tx.data();
     let witness = tx.witnesses().get(1).expect("get witness at index 1");
@@ -1482,15 +1480,10 @@ fn sign_tx(
     blake2b.update(tx.calc_tx_hash().as_slice());
     blake2b.update(&(witness.item_count() as u64).to_le_bytes());
     blake2b.update(&witness.raw_data());
-    let mut message = vec![0u8; 32];
+    let mut message = [0u8; 32];
     blake2b.finalize(&mut message);
-    let secp256k1_message = Message::from_digest_slice(&message)?;
-    let secp256k1 = Secp256k1::new();
-    let signature = secp256k1.sign_ecdsa_recoverable(&secp256k1_message, &secret_key);
-    let (recov_id, data) = signature.serialize_compact();
-    let mut signature_bytes = [0u8; 65];
-    signature_bytes[0..64].copy_from_slice(&data[0..64]);
-    signature_bytes[64] = recov_id.to_i32() as u8;
+
+    let signature_bytes = signer.sign_recoverable(&message);
 
     let witness = WitnessArgs::new_builder()
         .lock(Some(ckb_types::bytes::Bytes::from(signature_bytes.to_vec())).pack())
@@ -1505,7 +1498,7 @@ fn sign_tx(
 
 fn sign_tx_with_settlement(
     tx: TransactionView,
-    change_secret_key: SecretKey,
+    change_signer: &LocalSigner,
     settlement_secret_key: SecretKey,
     with_preimage: bool,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
@@ -1539,15 +1532,9 @@ fn sign_tx_with_settlement(
     blake2b.update(tx.hash().as_slice());
     blake2b.update(&(witness.item_count() as u64).to_le_bytes());
     blake2b.update(&witness.raw_data());
-    let mut message = vec![0u8; 32];
+    let mut message = [0u8; 32];
     blake2b.finalize(&mut message);
-    let secp256k1_message = Message::from_digest_slice(&message)?;
-    let secp256k1 = Secp256k1::new();
-    let signature = secp256k1.sign_ecdsa_recoverable(&secp256k1_message, &change_secret_key);
-    let (recov_id, data) = signature.serialize_compact();
-    let mut signature_bytes = [0u8; 65];
-    signature_bytes[0..64].copy_from_slice(&data[0..64]);
-    signature_bytes[64] = recov_id.to_i32() as u8;
+    let signature_bytes = change_signer.sign_recoverable(&message);
     let change_witness = WitnessArgs::new_builder()
         .lock(Some(ckb_types::bytes::Bytes::from(signature_bytes.to_vec())).pack())
         .build()

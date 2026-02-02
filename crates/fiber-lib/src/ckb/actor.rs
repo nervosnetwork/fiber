@@ -19,6 +19,7 @@ use serde_with::serde_as;
 
 use super::{
     funding::{FundingContext, LiveCellsExclusionMap},
+    signer::LocalSigner,
     tx_tracing_actor::{
         CkbTxTracer, CkbTxTracingActor, CkbTxTracingArguments, CkbTxTracingMessage,
     },
@@ -33,7 +34,7 @@ const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 pub struct CkbChainState {
     config: CkbConfig,
     ckb_tx_tracing_actor: ActorRef<CkbTxTracingMessage>,
-    secret_key: secp256k1::SecretKey,
+    signer: LocalSigner,
     funding_source_lock_script: packed::Script,
     live_cells_exclusion_map: LiveCellsExclusionMap,
 }
@@ -81,11 +82,9 @@ impl Actor for CkbChainActor {
         config: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let secret_key = config.read_secret_key()?;
-        let secp = secp256k1::Secp256k1::new();
-        let pub_key = secret_key.public_key(&secp);
-        let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
+        let signer = LocalSigner::new(secret_key);
         let funding_source_lock_script =
-            get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
+            get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
         let ckb_tx_tracing_actor = Actor::spawn_linked(
             Some(format!(
                 "{}/ckb-tx-tracing",
@@ -102,7 +101,7 @@ impl Actor for CkbChainActor {
         .0;
         Ok(CkbChainState {
             config,
-            secret_key,
+            signer,
             funding_source_lock_script,
             ckb_tx_tracing_actor,
             live_cells_exclusion_map: Default::default(),
@@ -159,9 +158,8 @@ impl Actor for CkbChainActor {
             }
             CkbChainMessage::Sign(tx, reply_port) => {
                 if !reply_port.is_closed() {
-                    let secret_key = state.secret_key;
                     let rpc_url = state.config.rpc_url.clone();
-                    let result = tx.sign(secret_key, rpc_url).await;
+                    let result = state.signer.sign_funding_tx(tx, rpc_url).await;
                     if !reply_port.is_closed() {
                         // ignore error
                         let _ = reply_port.send(result);
@@ -237,7 +235,7 @@ impl Actor for CkbChainActor {
 impl CkbChainState {
     fn build_funding_context(&self, funding_cell_lock_script: packed::Script) -> FundingContext {
         FundingContext {
-            secret_key: self.secret_key,
+            signer: self.signer.clone(),
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
             funding_cell_lock_script,
