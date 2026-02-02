@@ -2700,4 +2700,6 @@ pub trait NetworkGraphStateStore {
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     fn delete_attempts(&self, payment_hash: Hash256);
     fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt>;
+    /// Returns (payment_hash, attempt_id) pairs for attempts using this channel as first hop
+    fn get_attempts_by_channel_outpoint(&self, channel_outpoint: &OutPoint) -> Vec<(Hash256, u64)>;
 }

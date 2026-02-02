@@ -1107,11 +1107,13 @@ impl Attempt {
     }
 
     pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
-        self.route
-            .nodes
-            .first()
-            .map(|x| x.channel_outpoint.eq(out_point))
+        self.first_hop_channel_outpoint()
+            .map(|x| x.eq(out_point))
             .unwrap_or_default()
+    }
+
+    pub fn first_hop_channel_outpoint(&self) -> Option<&OutPoint> {
+        self.route.nodes.first().map(|x| &x.channel_outpoint)
     }
 
     pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
