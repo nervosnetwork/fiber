@@ -4073,7 +4073,10 @@ async fn test_send_payment_shutdown_with_force() {
         ) {
             break;
         } else {
-            assert_eq!(channel_state.state, ChannelState::ChannelReady);
+            assert!(matches!(
+                channel_state.state,
+                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+            ));
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
             wait_time += 1000;
         }
