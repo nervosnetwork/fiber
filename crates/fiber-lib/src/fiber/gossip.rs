@@ -16,7 +16,6 @@ use ractor::{
     call, call_t, concurrency::JoinHandle, Actor, ActorCell, ActorProcessingErr, ActorRef,
     ActorRuntime, MessagingErr, OutputPort, RpcReplyPort, SupervisionEvent,
 };
-use secp256k1::Message;
 use tentacle::{
     async_trait as tasync_trait,
     builder::MetaBuilder,
@@ -2252,11 +2251,9 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
         }
     }
 
-    if let Err(err) = secp256k1_instance().verify_schnorr(
-        ckb_signature,
-        &Message::from_digest(message),
-        &channel_announcement.ckb_key,
-    ) {
+    if let Err(err) =
+        secp256k1_instance().verify_schnorr(ckb_signature, &message, &channel_announcement.ckb_key)
+    {
         return Err(Error::InvalidParameter(format!(
             "Channel announcement message signature verification failed for ckb: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}, error: {:?}",
             &channel_announcement,

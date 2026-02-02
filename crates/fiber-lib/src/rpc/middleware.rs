@@ -195,6 +195,7 @@ where
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct IdentityLayer;
 
 impl<S> tower::Layer<S> for IdentityLayer
@@ -209,6 +210,7 @@ where
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Identity<S>(pub S);
 
 impl<S> RpcServiceT for Identity<S>

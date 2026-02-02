@@ -411,7 +411,7 @@ impl ToBase32 for InvoiceSignature {
         let mut converter = BytesToBase32::new(writer);
         let (recovery_id, signature) = self.0.serialize_compact();
         converter.append(&signature[..])?;
-        converter.append_u8(recovery_id.to_i32() as u8)?;
+        converter.append_u8(i32::from(recovery_id) as u8)?;
         converter.finalize()
     }
 }
@@ -426,7 +426,7 @@ impl InvoiceSignature {
         let recoverable_signature_bytes =
             Vec::<u8>::from_base32(signature).expect("bytes from base32");
         let signature = &recoverable_signature_bytes[0..64];
-        let recovery_id = RecoveryId::from_i32(recoverable_signature_bytes[64] as i32)
+        let recovery_id = RecoveryId::try_from(recoverable_signature_bytes[64] as i32)
             .expect("Recovery ID from i32");
 
         Ok(InvoiceSignature(

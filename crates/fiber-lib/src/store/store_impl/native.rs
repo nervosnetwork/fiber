@@ -61,7 +61,7 @@ impl Store {
         &self,
         lower_bound: Option<K>,
         upper_bound: Option<K>,
-    ) -> DBIterator {
+    ) -> DBIterator<'_> {
         assert!(lower_bound.is_some() || upper_bound.is_some());
         let mut read_options = ReadOptions::default();
         if let Some(lower_bound) = lower_bound {
