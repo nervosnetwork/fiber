@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    funding::{ExternalFundingContext, FundingContext, LiveCellsExclusionMap},
+    funding::{FundingContext, LiveCellsExclusionMap},
     tx_tracing_actor::{
         CkbTxTracer, CkbTxTracingActor, CkbTxTracingArguments, CkbTxTracingMessage,
     },
@@ -40,12 +40,12 @@ pub enum CkbChainMessage {
         FundingRequest,
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
-    /// Build an unsigned funding transaction for external signing.
-    /// The user will sign this transaction with their own wallet.
-    BuildUnsignedFundingTx {
+    /// Build a funding transaction from an external wallet's transaction.
+    /// The external wallet (e.g., CCC) provides a transaction with inputs and cell_deps.
+    /// Fiber adds the funding cell output to complete the transaction.
+    BuildFundingTxFromExternal {
         funding_tx: FundingTx,
         request: FundingRequest,
-        funding_source_lock_script: packed::Script,
         funding_cell_lock_script: packed::Script,
         reply: RpcReplyPort<Result<FundingTx, FundingError>>,
     },
@@ -136,22 +136,17 @@ impl Actor for CkbChainActor {
                 };
                 let _ = reply_port.send(result);
             }
-            CkbChainMessage::BuildUnsignedFundingTx {
+            CkbChainMessage::BuildFundingTxFromExternal {
                 funding_tx,
                 request,
-                funding_source_lock_script,
                 funding_cell_lock_script,
                 reply,
             } => {
-                let context = ExternalFundingContext {
-                    rpc_url: state.config.rpc_url.clone(),
-                    funding_source_lock_script,
-                    funding_cell_lock_script,
-                };
+                // Build the funding output and add it to the transaction
                 let result = funding_tx
-                    .build_unsigned_for_external_funding(
+                    .add_funding_output(
                         request,
-                        context,
+                        funding_cell_lock_script,
                         &mut state.live_cells_exclusion_map,
                     )
                     .await;

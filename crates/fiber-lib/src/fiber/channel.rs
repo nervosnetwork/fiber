@@ -349,8 +349,9 @@ pub struct OpenChannelWithExternalFundingParameter {
     pub public_channel_info: Option<PublicChannelInfo>,
     pub funding_udt_type_script: Option<Script>,
     pub shutdown_script: Script,
-    /// The lock script that controls the funding cells (user's wallet lock script).
-    pub funding_lock_script: Script,
+    /// A partially constructed transaction from the external wallet (e.g., CCC).
+    /// Contains inputs and cell_deps, Fiber will add the funding cell output.
+    pub funding_tx: Transaction,
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -509,10 +510,10 @@ where
                                 old_channel_id: old_id,
                                 funding_amount: state.to_local_amount,
                                 remote_funding_amount: state.to_remote_amount,
-                                funding_source_lock_script: state
-                                    .external_funding_lock_script
+                                funding_tx: state
+                                    .external_funding_tx
                                     .clone()
-                                    .expect("external_funding_lock_script should be set"),
+                                    .expect("external_funding_tx should be set"),
                                 funding_cell_lock_script: state.get_funding_lock_script(),
                                 funding_udt_type_script: state.funding_udt_type_script.clone(),
                                 local_reserved_ckb_amount: state.local_reserved_ckb_amount,
@@ -2886,7 +2887,7 @@ where
                     public_channel_info,
                     funding_udt_type_script,
                     shutdown_script,
-                    funding_lock_script,
+                    funding_tx,
                     channel_id_sender,
                     commitment_fee_rate,
                     commitment_delay_epoch,
@@ -2939,7 +2940,7 @@ where
 
                 // Mark this channel as using external funding
                 channel.external_funding = true;
-                channel.external_funding_lock_script = Some(funding_lock_script);
+                channel.external_funding_tx = Some(funding_tx);
 
                 check_open_channel_parameters(
                     &channel.funding_udt_type_script,
@@ -4084,9 +4085,10 @@ pub struct ChannelActorState {
     // Whether this channel uses external funding (user signs funding tx with their own wallet)
     pub external_funding: bool,
 
-    // The lock script used for external funding (user's wallet lock script)
-    #[serde_as(as = "Option<EntityHex>")]
-    pub external_funding_lock_script: Option<Script>,
+    // The pre-built funding transaction from external wallet (e.g., CCC)
+    // Contains inputs, cell_deps - Fiber adds the funding cell output
+    #[serde(skip)]
+    pub external_funding_tx: Option<Transaction>,
 
     // The unsigned funding transaction for external funding (before user signs it)
     #[serde_as(as = "Option<EntityHex>")]
@@ -5018,7 +5020,7 @@ impl ChannelActorState {
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
             external_funding: false,
-            external_funding_lock_script: None,
+            external_funding_tx: None,
             unsigned_funding_tx: None,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
@@ -5103,7 +5105,7 @@ impl ChannelActorState {
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
             external_funding: false,
-            external_funding_lock_script: None,
+            external_funding_tx: None,
             unsigned_funding_tx: None,
         };
         state.log_ack_state("[ack] new_outbound_channel");

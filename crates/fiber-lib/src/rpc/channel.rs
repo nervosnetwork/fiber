@@ -1,5 +1,4 @@
 use crate::fiber::channel::{TLCId, TlcStatus};
-use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
         AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
@@ -13,10 +12,10 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
-use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
+use ckb_jsonrpc_types::{EpochNumberWithFraction, OutPoint, Script};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
-    packed::{self, OutPoint},
+    packed,
     prelude::{IntoTransactionView, Unpack},
     H256,
 };
@@ -234,7 +233,6 @@ pub struct Channel {
     pub channel_id: Hash256,
     /// Whether the channel is public
     pub is_public: bool,
-    #[serde_as(as = "Option<EntityHex>")]
     /// The outpoint of the channel
     pub channel_outpoint: Option<OutPoint>,
     /// The peer ID of the channel
@@ -364,9 +362,21 @@ pub struct OpenChannelWithExternalFundingParams {
     /// The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
     pub shutdown_script: Script,
 
-    /// The lock script that controls the funding cells. The node will collect cells with this lock script
-    /// to build the funding transaction. The user must be able to sign for this lock script.
-    pub funding_lock_script: Script,
+    /// A partially constructed transaction from the external wallet (e.g., CCC).
+    /// This transaction should contain:
+    /// - inputs: The cells to be used for funding (will be consumed)
+    /// - cell_deps: The dependencies required to unlock the input cells
+    /// - outputs: Can be empty or contain change outputs
+    /// 
+    /// Fiber will add the funding cell output to this transaction and return
+    /// the complete unsigned transaction for the wallet to sign.
+    /// 
+    /// Example workflow with CCC:
+    /// 1. CCC creates a transaction with inputs/cell_deps using `completeInputsByCapacity`
+    /// 2. Pass that transaction here as `funding_tx`
+    /// 3. Fiber adds the funding cell output and returns the complete tx
+    /// 4. CCC signs the transaction and submits it via `submit_signed_funding_tx`
+    pub funding_tx: ckb_jsonrpc_types::Transaction,
 
     /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -675,7 +685,7 @@ where
                     .map(|state| Channel {
                         channel_id,
                         is_public: state.is_public(),
-                        channel_outpoint: state.get_funding_transaction_outpoint(),
+                        channel_outpoint: state.get_funding_transaction_outpoint().map(Into::into),
                         peer_id,
                         funding_udt_type_script: state
                             .funding_udt_type_script
@@ -789,6 +799,9 @@ where
         &self,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
+        // Convert the funding transaction from JSON-RPC format to packed format
+        let funding_tx: packed::Transaction = params.funding_tx.clone().into();
+
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
                 OpenChannelWithExternalFundingCommand {
@@ -796,7 +809,7 @@ where
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(true),
                     shutdown_script: params.shutdown_script.clone().into(),
-                    funding_lock_script: params.funding_lock_script.clone().into(),
+                    funding_tx: funding_tx.clone(),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch
                         .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),

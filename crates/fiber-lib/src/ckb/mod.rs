@@ -9,7 +9,7 @@ pub use actor::{CkbChainActor, CkbChainMessage};
 pub use client::{GetCellsResponse, GetShutdownTxResponse, GetTxResponse};
 pub use config::{CkbConfig, DEFAULT_CKB_BASE_DIR_NAME};
 pub use error::{CkbChainError, FundingError};
-pub use funding::{FundingRequest, FundingTx};
+pub use funding::{ExternalCellDep, ExternalFundingCell, FundingRequest, FundingTx};
 pub use tx_tracing_actor::{CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult};
 
 pub mod client;

@@ -560,7 +560,7 @@ fn test_channel_actor_state_store() {
         ephemeral_config: Default::default(),
         private_key: None,
         external_funding: false,
-        external_funding_lock_script: None,
+        external_funding_tx: None,
         unsigned_funding_tx: None,
     };
 
@@ -685,7 +685,7 @@ fn test_serde_channel_actor_state_ciborium() {
         ephemeral_config: Default::default(),
         private_key: None,
         external_funding: false,
-        external_funding_lock_script: None,
+        external_funding_tx: None,
         unsigned_funding_tx: None,
     };
 

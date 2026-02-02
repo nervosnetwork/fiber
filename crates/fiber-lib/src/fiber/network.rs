@@ -411,8 +411,9 @@ pub struct OpenChannelWithExternalFundingCommand {
     pub public: bool,
     /// Required for external funding - the script to receive funds when channel closes.
     pub shutdown_script: Script,
-    /// The lock script that controls the funding cells (user's wallet lock script).
-    pub funding_lock_script: Script,
+    /// A partially constructed transaction from the external wallet (e.g., CCC).
+    /// Contains inputs and cell_deps, Fiber will add the funding cell output.
+    pub funding_tx: Transaction,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -601,8 +602,8 @@ pub enum NetworkActorEvent {
         old_channel_id: Hash256,
         funding_amount: u128,
         remote_funding_amount: u128,
-        /// The lock script of the user's wallet, used to collect input cells.
-        funding_source_lock_script: Script,
+        /// The partially constructed transaction from external wallet.
+        funding_tx: Transaction,
         /// The 2-of-2 multisig lock script for the funding cell output.
         funding_cell_lock_script: Script,
         funding_udt_type_script: Option<Script>,
@@ -1076,7 +1077,7 @@ where
                 old_channel_id,
                 funding_amount,
                 remote_funding_amount,
-                funding_source_lock_script,
+                funding_tx,
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 local_reserved_ckb_amount,
@@ -1114,9 +1115,13 @@ where
                     });
 
                 if let Some(reply) = reply {
-                    // Build the unsigned funding transaction
+                    // Build the funding cell output based on the channel parameters
+                    let funding_tx_view = funding_tx.into_view();
+                    
+                    // Build the unsigned funding transaction by adding the funding output
+                    // to the transaction provided by the external wallet
                     let request = FundingRequest {
-                        script: funding_source_lock_script.clone(),
+                        script: funding_cell_lock_script.clone(),
                         udt_type_script: funding_udt_type_script,
                         local_amount: funding_amount,
                         remote_amount: remote_funding_amount,
@@ -1125,7 +1130,7 @@ where
                         remote_reserved_ckb_amount,
                     };
 
-                    let funding_tx = FundingTx::new();
+                    let fiber_funding_tx = FundingTx::from(funding_tx_view);
 
                     // Create a oneshot channel for the reply
                     let (send, recv) = oneshot::channel::<Result<FundingTx, FundingError>>();
@@ -1135,10 +1140,9 @@ where
                     let _ =
                         state
                             .chain_actor
-                            .send_message(CkbChainMessage::BuildUnsignedFundingTx {
-                                funding_tx,
+                            .send_message(CkbChainMessage::BuildFundingTxFromExternal {
+                                funding_tx: fiber_funding_tx,
                                 request,
-                                funding_source_lock_script: funding_source_lock_script.into(),
                                 funding_cell_lock_script: funding_cell_lock_script.into(),
                                 reply: rpc_reply,
                             });
@@ -3236,7 +3240,7 @@ where
             funding_amount,
             public,
             shutdown_script,
-            funding_lock_script,
+            funding_tx,
             funding_udt_type_script,
             commitment_fee_rate,
             commitment_delay_epoch,
@@ -3265,6 +3269,13 @@ where
             }
         }
 
+        // Validate that the funding transaction has at least one input
+        if funding_tx.raw().inputs().is_empty() {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Funding transaction must have at least one input".to_string(),
+            ));
+        }
+
         if tlc_expiry_delta.is_some_and(|d| d < MIN_TLC_EXPIRY_DELTA) {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "TLC expiry delta is too small, expect larger than {}, got {}",
@@ -3286,7 +3297,7 @@ where
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
             ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
             ChannelInitializationParameter {
-                operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
+                operation:                 ChannelInitializationOperation::OpenChannelWithExternalFunding(
                     OpenChannelWithExternalFundingParameter {
                         funding_amount,
                         seed,
@@ -3299,7 +3310,7 @@ where
                         public_channel_info: public.then_some(PublicChannelInfo::new()),
                         funding_udt_type_script,
                         shutdown_script,
-                        funding_lock_script,
+                        funding_tx,
                         channel_id_sender: tx,
                         commitment_fee_rate,
                         commitment_delay_epoch,
