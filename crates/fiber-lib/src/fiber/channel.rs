@@ -968,7 +968,6 @@ where
             }
         };
 
-        error!("hello remove_reason: {:?}", remove_reason);
         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason);
     }
 

@@ -4366,7 +4366,6 @@ fn unpack_len_prefixed_payload(buf: &[u8]) -> Option<&[u8]> {
     buf.get(HOP_DATA_HEAD_LEN..len)
 }
 
-/// TODO: when JSON is replaced, this function may return `data` directly.
 pub(crate) fn pack_hop_data(hop_data: &PaymentHopData) -> Vec<u8> {
     pack_len_prefixed(hop_data.serialize())
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
@@ -385,10 +385,7 @@ impl SendPaymentDataBuilder {
                     "max_fee_amount must be set when trampoline_hops is provided".to_string(),
                 );
             }
-            let mut uniq = hops.clone();
-            uniq.sort();
-            uniq.dedup();
-            if uniq.len() != hops.len() {
+            if hops.iter().collect::<HashSet<_>>().len() != hops.len() {
                 return Err("trampoline_hops must not contain duplicates".to_string());
             }
         }

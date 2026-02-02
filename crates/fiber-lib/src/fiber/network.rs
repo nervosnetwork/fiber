@@ -2375,8 +2375,6 @@ where
             attempt_id,
         } = command;
 
-        let trampoline_outer_shared_secret: Option<[u8; 32]> = None;
-
         // Trampoline forwarding: the onion for this node is the last hop, but contains an
         // encrypted payload telling us the real final recipient and parameters.
         if let Some(trampoline_bytes) = peeled_onion_packet.current.trampoline_onion.as_deref() {
@@ -2386,7 +2384,6 @@ where
                     trampoline_bytes,
                     previous_tlc,
                     payment_hash,
-                    trampoline_outer_shared_secret,
                     peeled_onion_packet.current.amount,
                 )
                 .await;
@@ -2456,7 +2453,6 @@ where
         trampoline_bytes: &[u8],
         previous_tlc: Option<PrevTlcInfo>,
         payment_hash: Hash256,
-        trampoline_outer_shared_secret: Option<[u8; 32]>,
         incoming_amount: u128,
     ) -> Result<(), TlcErr> {
         if !state.features.supports_trampoline_routing() {
@@ -2517,7 +2513,7 @@ where
                     ));
                 }
 
-                let (Some(remaining_trampoline_onion), Some(mut prev_tlc)) =
+                let (Some(remaining_trampoline_onion), Some(prev_tlc)) =
                     (peeled_trampoline.next.map(|p| p.into_bytes()), previous_tlc)
                 else {
                     return Err(TlcErr::new_node_fail(
@@ -2526,9 +2522,6 @@ where
                     ));
                 };
 
-                if let Some(shared_secret) = trampoline_outer_shared_secret {
-                    prev_tlc.shared_secret = Some(shared_secret);
-                }
                 let payment_data =
                     SendPaymentDataBuilder::new(next_node_id, amount_to_forward, payment_hash)
                         .final_tlc_expiry_delta(tlc_expiry_delta)
