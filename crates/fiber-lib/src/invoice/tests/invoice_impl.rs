@@ -552,7 +552,7 @@ fn test_check_signature_should_not_panic() {
 
     // create a recoverable signature with invalid recovery id
     let raw_signature = [0u8; 64];
-    let recovery_id = RecoveryId::from_i32(0).expect("valid recovery id");
+    let recovery_id = RecoveryId::try_from(0).expect("valid recovery id");
     let recoverable_signature = RecoverableSignature::from_compact(&raw_signature, recovery_id)
         .expect("signature from compact");
     invoice.signature = Some(InvoiceSignature(recoverable_signature));

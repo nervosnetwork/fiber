@@ -194,50 +194,6 @@ where
     }
 }
 
-#[derive(Clone)]
-pub struct IdentityLayer;
-
-impl<S> tower::Layer<S> for IdentityLayer
-where
-    S: RpcServiceT + Send + Sync + Clone + 'static,
-{
-    type Service = Identity<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        Identity(inner)
-    }
-}
-
-#[derive(Clone)]
-pub struct Identity<S>(pub S);
-
-impl<S> RpcServiceT for Identity<S>
-where
-    S: RpcServiceT + Send + Sync + Clone + 'static,
-{
-    type MethodResponse = S::MethodResponse;
-    type BatchResponse = S::BatchResponse;
-    type NotificationResponse = S::NotificationResponse;
-
-    fn batch<'a>(&self, batch: Batch<'a>) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
-        self.0.batch(batch)
-    }
-
-    fn call<'a>(
-        &self,
-        request: Request<'a>,
-    ) -> impl Future<Output = Self::MethodResponse> + Send + 'a {
-        self.0.call(request)
-    }
-
-    fn notification<'a>(
-        &self,
-        n: Notification<'a>,
-    ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
-        self.0.notification(n)
-    }
-}
-
 fn auth_reject_error() -> ErrorObjectOwned {
     ErrorObject::owned(-32999, "Unauthorized", None::<()>)
 }

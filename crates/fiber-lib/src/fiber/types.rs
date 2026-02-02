@@ -315,12 +315,10 @@ impl Privkey {
         let secp256k1_instance = secp256k1_instance();
         let secret_key = self.0;
         let keypair = secp256k1::Keypair::from_secret_key(secp256k1_instance, &secret_key);
-        let message = secp256k1::Message::from_digest(message);
         let sig = secp256k1_instance.sign_schnorr(&message, &keypair);
         trace!(
-            "Schnorr signing message {:?} with private key {:?} (pub key {:?}), Signature: {:?}",
+            "Schnorr signing message {:?} (pub key {:?}), Signature: {:?}",
             message,
-            keypair.secret_key(),
             keypair.public_key(),
             &sig
         );
@@ -344,16 +342,15 @@ impl std::fmt::Debug for Pubkey {
 
 impl From<Pubkey> for Point {
     fn from(val: Pubkey) -> Self {
-        // Deserialize from bytes to PublicKey, then to Point
-        PublicKey::from_slice(&val.0)
-            .expect("Pubkey should always contain valid serialized public key")
-            .into()
+        let pk: PublicKey = val.into();
+        pk.into()
     }
 }
 
 impl From<&Pubkey> for Point {
     fn from(val: &Pubkey) -> Self {
-        (*val).into()
+        let pk: PublicKey = val.into();
+        pk.into()
     }
 }
 
@@ -421,8 +418,8 @@ impl Pubkey {
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         // Convert to Point, perform operation, then serialize back
         let result = Point::from(self) + scalar.base_point_mul();
-        let pk = PublicKey::from(result.not_inf().expect("valid public key"));
-        Pubkey(pk.serialize())
+        let point = result.not_inf().expect("valid public key");
+        PublicKey::from(point).into()
     }
 
     pub fn tentacle_peer_id(&self) -> PeerId {
@@ -565,7 +562,7 @@ impl From<SchnorrSignature> for molecule_gossip::SchnorrSignature {
         molecule_gossip::SchnorrSignature::new_builder()
             .set(
                 signature
-                    .serialize()
+                    .to_byte_array()
                     .into_iter()
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
@@ -3995,7 +3992,7 @@ impl PaymentOnionPacket {
 
 impl PeeledPaymentOnionPacket {
     /// - `hops_info`: the first is the instruction for the origin node itself.
-    ///                Remaining elements are for each node to receive the packet.
+    ///   Remaining elements are for each node to receive the packet.
     pub fn create<C: Signing>(
         session_key: Privkey,
         mut hops_infos: Vec<PaymentHopData>,

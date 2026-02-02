@@ -47,15 +47,21 @@ const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
+///
+/// **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PaymentStatus {
-    /// initial status, a payment session is created, no HTLC is sent
+    /// Initial status. A payment session is created, but no HTLC has been dispatched.
     Created,
-    /// the first hop AddTlc is sent successfully and waiting for the response
+    /// The first hop AddTlc is sent successfully and waiting for the response.
+    ///
+    /// > **MPP Logic**: Status `Inflight` means at least one attempt is still not in `Success`, payment needs more retrying or waiting for HTLC settlement.
     Inflight,
-    /// related HTLC is successfully settled
+    /// The payment is finished. All related HTLCs are successfully settled,
+    /// and the aggregate amount equals the total requested amount.
     Success,
-    /// related HTLC is failed
+    /// The payment session has terminated. HTLCs have failed and the target
+    /// amount cannot be fulfilled after exhausting all retries.
     Failed,
 }
 
