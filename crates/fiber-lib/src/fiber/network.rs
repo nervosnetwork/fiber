@@ -1997,11 +1997,10 @@ where
             payment_hash, channel_id, tlc_id
         );
 
-        if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
-            && self.store.get_preimage(&payment_hash).is_some()
-        {
-            // When invoice is marked as received and preimage is available, we only timeout when
-            // the TLC itself has expired.
+        if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received) {
+            // When invoice is marked as received, we ignore the hold TLC timeout and only
+            // remove the TLC when it actually expires. Expired TLCs are removed in the
+            // CheckChannels routine (see NetworkActorCommand::CheckChannels handler).
             return;
         }
 

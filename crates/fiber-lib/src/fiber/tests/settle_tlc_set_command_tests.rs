@@ -971,6 +971,96 @@ fn test_received_invoice_not_updated() {
 }
 
 #[test]
+fn test_received_invoice_can_be_settled_after_invoice_expiry() {
+    // When an invoice is in Received status, it should still be settleable
+    // even after the invoice expiry time has passed. This is because the TLCs
+    // have already arrived and are held - we should still allow settlement
+    // as long as the TLCs themselves haven't expired.
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+
+    // Create invoice with 1 second expiry
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .payment_hash(payment_hash)
+        .amount(Some(1000))
+        .expiry_time(std::time::Duration::from_secs(1))
+        .build()
+        .expect("build invoice");
+
+    // Wait for invoice to expire
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(invoice.is_expired(), "Invoice should be expired");
+
+    let channel_id = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(invoice, CkbInvoiceStatus::Received)
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ));
+
+    let channel_tlc_ids = vec![(channel_id, 0)];
+
+    let command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &store);
+    let settlements = command.run();
+
+    // Should still succeed with fulfill (not fail)
+    assert_eq!(settlements.len(), 1);
+    assert!(is_fulfill_settlement(&settlements[0]));
+}
+
+#[test]
+fn test_open_invoice_with_expired_expiry_rejects_tlcs() {
+    // When an invoice is still in Open status but its expiry time has passed,
+    // all TLCs should be rejected with InvoiceExpired error.
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+
+    // Create invoice with 1 second expiry
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .payment_hash(payment_hash)
+        .amount(Some(1000))
+        .expiry_time(std::time::Duration::from_secs(1))
+        .build()
+        .expect("build invoice");
+
+    // Wait for invoice to expire
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(invoice.is_expired(), "Invoice should be expired");
+
+    let channel_id = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(invoice, CkbInvoiceStatus::Open) // Still Open, not Received
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ));
+
+    let channel_tlc_ids = vec![(channel_id, 0)];
+
+    let command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &store);
+    let settlements = command.run();
+
+    // Should reject with InvoiceExpired
+    assert_eq!(settlements.len(), 1);
+    assert!(!is_fulfill_settlement(&settlements[0]));
+    assert_eq!(
+        get_error_code(&settlements[0]),
+        Some(TlcErrorCode::InvoiceExpired)
+    );
+}
+
+#[test]
 fn test_empty_tlcs_returns_empty() {
     let payment_hash = gen_rand_sha256_hash();
     let invoice = create_test_invoice(payment_hash, Some(1000), false);

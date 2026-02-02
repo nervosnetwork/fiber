@@ -189,14 +189,28 @@ where
         invoice: &CkbInvoice,
         invoice_status: &CkbInvoiceStatus,
     ) -> Result<(), TlcErrorCode> {
-        self.verify_invoice_status(invoice_status)?;
+        self.verify_invoice_status(invoice, invoice_status)?;
         self.verify_mpp_tlcs_have_consistent_total_amount(invoice)?;
         Ok(())
     }
 
-    fn verify_invoice_status(&self, invoice_status: &CkbInvoiceStatus) -> Result<(), TlcErrorCode> {
+    fn verify_invoice_status(
+        &self,
+        invoice: &CkbInvoice,
+        invoice_status: &CkbInvoiceStatus,
+    ) -> Result<(), TlcErrorCode> {
         match invoice_status {
-            CkbInvoiceStatus::Open | CkbInvoiceStatus::Received => Ok(()),
+            CkbInvoiceStatus::Open => {
+                // Check if Open invoice is expired by its expiry field.
+                if invoice.is_expired() {
+                    Err(TlcErrorCode::InvoiceExpired)
+                } else {
+                    Ok(())
+                }
+            }
+            // Received invoices are allowed regardless of invoice expiry - the TLCs
+            // have already arrived and we should still allow settlement.
+            CkbInvoiceStatus::Received => Ok(()),
             CkbInvoiceStatus::Expired => Err(TlcErrorCode::InvoiceExpired),
             CkbInvoiceStatus::Cancelled => Err(TlcErrorCode::InvoiceCancelled),
             // When invoice is paid, TLCs will eventually timeout, so we reject them now with the same reason.
