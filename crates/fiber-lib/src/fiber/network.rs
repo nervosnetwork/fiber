@@ -161,6 +161,8 @@ const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
 
+const MAX_RETRY_ATTEMPTS_WHEN_CHANNEL_READY: usize = 256;
+
 static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
 
 pub fn init_chain_hash(chain_hash: Hash256) {
@@ -864,20 +866,21 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
                 // Retry payment attempts whose first hop uses this channel
-                for (payment_hash, attempt_id) in self
-                    .store
-                    .get_attempts_by_channel_outpoint(&channel_outpoint)
-                {
+                // Limit to avoid overwhelming the system with too many retries at once
+                for attempt in self.store.get_last_pending_attempts_by_channel_outpoint(
+                    &channel_outpoint,
+                    MAX_RETRY_ATTEMPTS_WHEN_CHANNEL_READY,
+                ) {
                     debug!(
                         "Retrying payment attempt {:?} for channel {:?} reestablished",
-                        payment_hash, channel_outpoint
+                        attempt.payment_hash, channel_outpoint
                     );
                     if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::RetrySendPayment(payment_hash, Some(attempt_id)),
+                        NetworkActorEvent::RetrySendPayment(attempt.payment_hash, Some(attempt.id)),
                     )) {
                         debug!(
                             "Failed to register payment retry for {:?}: {:?}",
-                            payment_hash, err
+                            attempt.payment_hash, err
                         );
                     }
                 }
