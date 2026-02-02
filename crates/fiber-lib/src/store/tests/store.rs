@@ -1,3 +1,4 @@
+use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::features::FeatureVector;
@@ -38,7 +39,6 @@ use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
 use musig2::SecNonce;
-use crate::ckb::signer::LocalSigner;
 use secp256k1::{Keypair, Secp256k1};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]

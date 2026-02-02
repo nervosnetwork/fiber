@@ -92,7 +92,7 @@ impl LocalSigner {
         // pub struct Signature(pub Secp256k1Signature);
         // ```
         //
-        // However, ckb-sdk-rust still uses 0.24.
+        // However, ckb-sdk-rust still uses 0.30 .
         //
         // It's complex to use map_err and return an error as well because secp256k1 used by ckb sdk is not public.
         // Expect is OK here since the secret key is valid and can be parsed in both versions.

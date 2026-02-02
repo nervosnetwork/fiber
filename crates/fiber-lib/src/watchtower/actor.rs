@@ -1276,12 +1276,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     vec![new_commitment_output, adjusted_settlement_output]
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
-                let tx = sign_tx_with_settlement(
-                    tx,
-                    signer,
-                    unlock_key.0,
-                    unlock.with_preimage,
-                )?;
+                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
                 return Ok(Some(tx));
             }
         }
@@ -1466,12 +1461,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .set_outputs(outputs)
                     .set_outputs_data(outputs_data)
                     .build();
-                let tx = sign_tx_with_settlement(
-                    tx,
-                    signer,
-                    unlock_key.0,
-                    unlock.with_preimage,
-                )?;
+                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
                 return Ok(Some(tx));
             }
         }
