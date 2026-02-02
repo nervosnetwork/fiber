@@ -1,6 +1,5 @@
 use clap::Parser;
-use fiber::store::db_migrate::DbMigrate;
-use fiber::store::Store;
+use fiber_v061::store::{db_migrate::DbMigrate, Store};
 use fnn_migrate::migrations::*;
 use fnn_migrate::util::prompt;
 use std::path::Path;
