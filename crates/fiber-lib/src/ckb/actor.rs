@@ -236,6 +236,7 @@ impl CkbChainState {
 
 #[serde_as]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct FundingTxShellBuilderInput {
     tx: ckb_jsonrpc_types::Transaction,
     request: FundingRequest,

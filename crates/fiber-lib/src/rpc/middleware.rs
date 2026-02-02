@@ -194,6 +194,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct IdentityLayer;
 

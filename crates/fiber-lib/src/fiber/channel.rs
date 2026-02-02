@@ -3041,12 +3041,12 @@ pub struct TlcInfo {
     ///   forwarding_tlc relations:
     ///
     ///   - Node B:
-    ///       inbound  tlc_1.forwarding_tlc = Some((channel_BC, tlc2_id))
-    ///       outbound tlc_2.forwarding_tlc = Some((channel_AB, tlc1_id))
+    ///     inbound  tlc_1.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///     outbound tlc_2.forwarding_tlc = Some((channel_AB, tlc1_id))
     ///
     ///   - Node C:
-    ///       inbound  tlc_2.forwarding_tlc = Some((channel_CD, tlc3_id))
-    ///       outbound tlc_3.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///     inbound  tlc_2.forwarding_tlc = Some((channel_CD, tlc3_id))
+    ///     outbound tlc_3.forwarding_tlc = Some((channel_BC, tlc2_id))
     ///
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
@@ -5987,40 +5987,48 @@ impl ChannelActorState {
             let shutdown_tx = self.build_shutdown_tx().await?;
             let sign_ctx = self.get_funding_sign_context();
 
-            let local_shutdown_info = self
-                .local_shutdown_info
-                .as_mut()
-                .expect("local shutdown info exists");
-            let remote_shutdown_info = self
-                .remote_shutdown_info
-                .as_ref()
-                .expect("remote shutdown info exists");
-            let shutdown_scripts = (
-                local_shutdown_info.close_script.clone(),
-                remote_shutdown_info.close_script.clone(),
-            );
-            let local_shutdown_signature = match local_shutdown_info.signature {
-                Some(signature) => signature,
-                None => {
-                    let signature = sign_ctx.sign(&compute_tx_message(&shutdown_tx))?;
-                    local_shutdown_info.signature = Some(signature);
-
-                    self.network()
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                self.get_remote_peer_id(),
-                                FiberMessage::closing_signed(ClosingSigned {
-                                    partial_signature: signature,
-                                    channel_id: self.get_id(),
-                                }),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    signature
-                }
+            let (shutdown_scripts, remote_shutdown_signature) = match (
+                self.local_shutdown_info.as_ref(),
+                self.remote_shutdown_info.as_ref(),
+            ) {
+                (Some(local_shutdown_info), Some(remote_shutdown_info)) => (
+                    (
+                        local_shutdown_info.close_script.clone(),
+                        remote_shutdown_info.close_script.clone(),
+                    ),
+                    remote_shutdown_info.signature,
+                ),
+                _ => return Ok(()),
             };
 
-            if let Some(remote_shutdown_signature) = remote_shutdown_info.signature {
+            let local_shutdown_signature = if let Some(local_shutdown_info) =
+                self.local_shutdown_info.as_mut()
+            {
+                match local_shutdown_info.signature {
+                    Some(signature) => signature,
+                    None => {
+                        let signature = sign_ctx.sign(&compute_tx_message(&shutdown_tx))?;
+                        local_shutdown_info.signature = Some(signature);
+
+                        self.network()
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                    self.get_remote_peer_id(),
+                                    FiberMessage::closing_signed(ClosingSigned {
+                                        partial_signature: signature,
+                                        channel_id: self.get_id(),
+                                    }),
+                                )),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        signature
+                    }
+                }
+            } else {
+                return Ok(());
+            };
+
+            if let Some(remote_shutdown_signature) = remote_shutdown_signature {
                 let tx: TransactionView = self
                     .aggregate_partial_signatures_to_consume_funding_cell(
                         &sign_ctx.common_ctx,
