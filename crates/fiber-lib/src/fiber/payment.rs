@@ -394,6 +394,11 @@ impl SendPaymentDataBuilder {
             if hops.iter().collect::<HashSet<_>>().len() != hops.len() {
                 return Err("trampoline_hops must not contain duplicates".to_string());
             }
+            if self.allow_self_payment {
+                return Err(
+                    "allow_self_payment cannot be enabled with trampoline routing".to_string(),
+                );
+            }
         }
 
         if self.udt_type_script.is_none() && amount >= u64::MAX as u128 {

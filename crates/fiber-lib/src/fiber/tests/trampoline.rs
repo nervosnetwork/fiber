@@ -3779,3 +3779,43 @@ async fn test_trampoline_mpp_with_oneway() {
     run_with_hash_algo(&node1, &node2, &node4, HashAlgorithm::CkbHash).await;
     run_with_hash_algo(&node1, &node2, &node4, HashAlgorithm::Sha256).await;
 }
+
+#[tokio::test]
+async fn test_trampoline_routing_with_self_payment_should_fail() {
+    init_tracing();
+
+    // Create a simple network with 2 nodes
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+
+    let [node_a, node_b] = nodes.try_into().expect("2 nodes");
+
+    // Wait until A learns B supports trampoline routing.
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    let amount: u128 = 1000;
+
+    // Try to send payment to self with trampoline routing enabled
+    // This should fail with validation error
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_a.get_public_key()),
+            amount: Some(amount),
+            allow_self_payment: true,
+            trampoline_hops: Some(vec![node_b.get_public_key()]),
+            max_fee_amount: Some(500),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    let err_msg = res.err().unwrap();
+    assert!(
+        err_msg.contains("allow_self_payment cannot be enabled with trampoline routing"),
+        "Expected error, got: {}",
+        err_msg
+    );
+}
