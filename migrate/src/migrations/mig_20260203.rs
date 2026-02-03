@@ -1,5 +1,10 @@
 use crate::util::convert;
-use fiber::{
+use fiber_v061::fiber::channel::{
+    ChannelActorState as OldChannelActorState, TlcInfo as OldTlcInfo, TlcState as OldTlcState,
+};
+use fiber_v061::fiber::payment::PaymentSession as OldPaymentSession;
+use fiber_v061::fiber::payment::SendPaymentData as OldSendPaymentData;
+use fiber_v070::{
     fiber::channel::{
         ChannelActorState as NewChannelActorState, PendingTlcs as NewPendingTlcs,
         TlcInfo as NewTlcInfo, TlcState as NewTlcState,
@@ -8,11 +13,6 @@ use fiber::{
     store::{migration::Migration, Store},
     Error,
 };
-use fiber_v061::fiber::channel::{
-    ChannelActorState as OldChannelActorState, TlcInfo as OldTlcInfo, TlcState as OldTlcState,
-};
-use fiber_v061::fiber::network::SendPaymentData as OldSendPaymentData;
-use fiber_v061::fiber::payment::PaymentSession as OldPaymentSession;
 use indicatif::ProgressBar;
 use std::sync::Arc;
 use tracing::info;
