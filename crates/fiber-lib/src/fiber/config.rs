@@ -90,6 +90,9 @@ pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 /// Funding timeout in seconds since the channel is created.
 pub const DEFAULT_FUNDING_TIMEOUT_SECONDS: u64 = 60 * 60 * 24; // 1 day
 
+/// External funding timeout in seconds (how long to wait for user to submit signed funding tx).
+pub const DEFAULT_EXTERNAL_FUNDING_TIMEOUT_SECONDS: u64 = 60 * 5; // 5 minutes
+
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
