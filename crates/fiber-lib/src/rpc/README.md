@@ -25,6 +25,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `list_channels`](#channel-list_channels)
         * [Method `shutdown_channel`](#channel-shutdown_channel)
         * [Method `update_channel`](#channel-update_channel)
+        * [Method `open_channel_with_external_funding`](#channel-open_channel_with_external_funding)
+        * [Method `submit_signed_funding_tx`](#channel-submit_signed_funding_tx)
     * [Module Dev](#module-dev)
         * [Method `commitment_signed`](#dev-commitment_signed)
         * [Method `add_tlc`](#dev-add_tlc)
@@ -346,6 +348,80 @@ Updates a channel.
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="channel-open_channel_with_external_funding"></a>
+#### Method `open_channel_with_external_funding`
+
+Opens a channel with external funding. The node will negotiate the channel with the peer,
+ but the user must sign the funding transaction themselves using their own wallet.
+
+ This is useful when the user wants to fund a channel from an external wallet
+ rather than having the node sign with its internal key.
+
+ Returns an unsigned funding transaction that the user must sign and submit
+ using `submit_signed_funding_tx`.
+
+##### Params
+
+* `peer_id` - <em>`PeerId`</em>, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
+* `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
+* `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
+* `shutdown_script` - <em>`Script`</em>, The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
+* `funding_lock_script` - <em>`Script`</em>, The lock script that controls the funding cells. The node will collect cells with this lock script
+ to build the funding transaction. The user must be able to sign for this lock script.
+* `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
+* `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
+* `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.
+* `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 4 hours, which is 4 * 60 * 60 * 1000 milliseconds
+ Expect it >= 2/3 commitment_delay_epoch.
+ This parameter can be updated with rpc `update_channel` later.
+* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can send,
+ an optional parameter, default is 0, which means we can send any TLC is larger than 0.
+ This parameter can be updated with rpc `update_channel` later.
+* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+ The unit is millionths of the amount. default is 1000 which means 0.1%.
+ This parameter can be updated with rpc `update_channel` later.
+* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum value in flight for TLCs, an optional parameter.
+ This parameter can not be updated after channel is opened.
+* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+ This parameter can not be updated after channel is opened.
+
+##### Returns
+
+* `temporary_channel_id` - <em>[Hash256](#type-hash256)</em>, The temporary channel ID of the channel being opened.
+ Use this ID to submit the signed funding transaction.
+* `unsigned_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The unsigned funding transaction that needs to be signed.
+ The user should sign this transaction with their wallet and submit it
+ using `submit_signed_funding_tx`.
+
+---
+
+
+
+<a id="channel-submit_signed_funding_tx"></a>
+#### Method `submit_signed_funding_tx`
+
+Submits a signed funding transaction for an externally funded channel.
+
+ After calling `open_channel_with_external_funding`, the user signs the returned
+ unsigned transaction with their wallet and submits it here.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The temporary channel ID returned from `open_channel_with_external_funding`.
+* `signed_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The signed funding transaction. This must be the same transaction structure
+ that was returned from `open_channel_with_external_funding`, but with valid
+ witnesses (signatures) added.
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID (may be updated from temporary to final after peer exchange).
+* `funding_tx_hash` - <em>`H256`</em>, The hash of the funding transaction that was submitted.
 
 ---
 
@@ -1169,6 +1245,7 @@ The state of a channel
 #### Enum with values of
 
 * `NegotiatingFunding` - <em>`NegotiatingFundingFlags`</em>, We are negotiating the parameters required for the channel prior to funding it.
+* `AwaitingExternalFunding` - We're waiting for the user to sign and submit the funding transaction externally.
 * `CollaboratingFundingTx` - <em>`CollaboratingFundingTxFlags`</em>, We're collaborating with the other party on the funding transaction.
 * `SigningCommitment` - <em>`SigningCommitmentFlags`</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
 * `AwaitingTxSignatures` - <em>`AwaitingTxSignaturesFlags`</em>, We've received and sent `commitment_signed` and are now waiting for both
