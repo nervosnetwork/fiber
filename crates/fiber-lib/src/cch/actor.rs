@@ -58,6 +58,14 @@ pub enum CchMessage {
 
     TrackingEvent(CchTrackingEvent),
 
+    /// Schedule a retry for an action with backoff after a transient failure.
+    ActionRetry {
+        payment_hash: Hash256,
+        action: CchOrderAction,
+        retry_count: u32,
+        reason: String,
+    },
+
     ExecuteAction {
         payment_hash: Hash256,
         action: CchOrderAction,
@@ -291,6 +299,18 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 }
                 Ok(())
             }
+            CchMessage::ActionRetry {
+                payment_hash,
+                action,
+                retry_count,
+                reason,
+            } => {
+                if state.get_active_order_or_none(&payment_hash)?.is_none() {
+                    return Ok(());
+                }
+                schedule_action_retry(&myself, payment_hash, action, retry_count, &reason);
+                Ok(())
+            }
             CchMessage::ExecuteAction {
                 payment_hash,
                 action,
@@ -300,23 +320,16 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                     None => return Ok(()),
                     Some(order) => order,
                 };
-                if let Err(err) = ActionDispatcher::execute(state, &myself, &order, action).await {
-                    let delay = calculate_retry_delay(retry_count);
-                    tracing::error!(
-                        "failed to execute action {:?} (retry {}): {}, retrying in {:?}",
-                        action,
-                        retry_count,
-                        err,
-                        delay
-                    );
-                    // Retry the action later with exponential backoff. The action
-                    // executor will only cease retrying if it handles the error
-                    // internally and returns OK.
-                    myself.send_after(delay, move || CchMessage::ExecuteAction {
+                if let Err(err) =
+                    ActionDispatcher::execute(state, &myself, &order, action, retry_count).await
+                {
+                    schedule_action_retry(
+                        &myself,
                         payment_hash,
                         action,
-                        retry_count: retry_count.saturating_add(1),
-                    });
+                        retry_count,
+                        &err.to_string(),
+                    );
                 }
 
                 Ok(())
@@ -634,4 +647,29 @@ fn append_actions(
         })?;
     }
     Ok(())
+}
+
+fn schedule_action_retry(
+    myself: &ActorRef<CchMessage>,
+    payment_hash: Hash256,
+    action: CchOrderAction,
+    retry_count: u32,
+    reason: &str,
+) {
+    let delay = calculate_retry_delay(retry_count);
+    tracing::error!(
+        "action {:?} for payment hash {:x} failed (retry {}): {}. Retrying in {:?}",
+        action,
+        payment_hash,
+        retry_count,
+        reason,
+        delay
+    );
+    // Retry the action later with exponential backoff. The action executor will
+    // cease retrying only when it handles the error internally and returns OK.
+    myself.send_after(delay, move || CchMessage::ExecuteAction {
+        payment_hash,
+        action,
+        retry_count: retry_count.saturating_add(1),
+    });
 }
