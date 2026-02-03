@@ -280,10 +280,6 @@ fn test_peeled_large_onion_packet() {
     );
 }
 
-/// Tests for PeeledPaymentOnionPacket::deserialize malicious input handling.
-/// These tests were added after fuzz testing discovered an integer overflow.
-/// Bug: When the length header contains u64::MAX, adding HOP_DATA_HEAD_LEN overflows.
-
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_peeled_onion_packet_deserialize_u64_max_overflow() {
