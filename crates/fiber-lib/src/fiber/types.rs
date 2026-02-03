@@ -4037,14 +4037,15 @@ impl PeeledPaymentOnionPacket {
 
         // Ensure backward compatibility
         let mut shared_secret = NO_SHARED_SECRET;
-        if let (Some(rb_plus_32), Some(rb_plus_packet)) = (
-            read_bytes.checked_add(32),
-            read_bytes.checked_add(PACKET_DATA_LEN),
-        ) {
-            if data.len() >= rb_plus_32 && data.len() != rb_plus_packet {
-                shared_secret.copy_from_slice(&data[read_bytes..rb_plus_32]);
-                read_bytes = rb_plus_32;
-            }
+        let rb_plus_32 = read_bytes
+            .checked_add(32)
+            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
+        let rb_plus_packet = read_bytes
+            .checked_add(PACKET_DATA_LEN)
+            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
+        if data.len() >= rb_plus_32 && data.len() != rb_plus_packet {
+            shared_secret.copy_from_slice(&data[read_bytes..rb_plus_32]);
+            read_bytes = rb_plus_32;
         }
 
         let next = if read_bytes < data.len() {
