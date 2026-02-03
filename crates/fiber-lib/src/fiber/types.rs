@@ -455,6 +455,9 @@ pub enum OnionPacketError {
     #[error("Fail to deserialize the hop data")]
     InvalidHopData,
 
+    #[error("Unknown onion packet version: {0}")]
+    UnknownVersion(u8),
+
     #[error("Sphinx protocol error")]
     Sphinx(#[from] SphinxError),
 }
@@ -3939,10 +3942,18 @@ trait SphinxOnionCodec {
     type Current;
 
     const PACKET_DATA_LEN: usize;
+    /// The onion packet version used when creating new packets.
+    const CURRENT_VERSION: u8;
 
+    /// Packs the decoded data for transmission. Must use `CURRENT_VERSION` format.
     fn pack(decoded: &Self::Decoded) -> Vec<u8>;
-    fn unpack(buf: &[u8]) -> Option<Self::Decoded>;
+    /// Unpacks data received from the network. Must handle all versions allowed by `is_version_allowed`.
+    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded>;
     fn to_current(decoded: Self::Decoded) -> Self::Current;
+    /// Returns true if the given version is allowed for this codec.
+    fn is_version_allowed(version: u8) -> bool;
+    /// Returns the total length of hop data (including any headers) for the specified version.
+    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize>;
 }
 
 struct SphinxPeeled<Current> {
@@ -3959,13 +3970,21 @@ fn peel_sphinx_onion<C: Verification, Codec: SphinxOnionCodec>(
 ) -> Result<SphinxPeeled<Codec::Current>, Error> {
     let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(packet_bytes)
         .map_err(|err| Error::OnionPacket(err.into()))?;
+    let version = sphinx_packet.version;
+    if !Codec::is_version_allowed(version) {
+        return Err(Error::OnionPacket(OnionPacketError::UnknownVersion(
+            version,
+        )));
+    }
     let shared_secret = sphinx_packet.shared_secret(&peeler.0);
 
     let (new_current, new_next) = sphinx_packet
-        .peel(&peeler.0, assoc_data, secp_ctx, get_hop_data_len)
+        .peel(&peeler.0, assoc_data, secp_ctx, |buf| {
+            Codec::hop_data_len(version, buf)
+        })
         .map_err(|err| Error::OnionPacket(err.into()))?;
 
-    let decoded = Codec::unpack(&new_current)
+    let decoded = Codec::unpack(version, &new_current)
         .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
     let current = Codec::to_current(decoded);
 
@@ -4000,7 +4019,7 @@ fn create_sphinx_onion<C: Signing, Codec: SphinxOnionCodec>(
     let hops_path: Vec<PublicKey> = hops_path.into_iter().map(Into::into).collect();
     let hops_data = payloads.iter().map(Codec::pack).collect();
 
-    Ok(fiber_sphinx::OnionPacket::create(
+    let mut sphinx_packet = fiber_sphinx::OnionPacket::create(
         session_key.into(),
         hops_path,
         hops_data,
@@ -4008,8 +4027,10 @@ fn create_sphinx_onion<C: Signing, Codec: SphinxOnionCodec>(
         Codec::PACKET_DATA_LEN,
         secp_ctx,
     )
-    .map_err(|err| Error::OnionPacket(err.into()))?
-    .into_bytes())
+    .map_err(|err| Error::OnionPacket(err.into()))?;
+    // Set the version to indicate which hop data format is used
+    sphinx_packet.version = Codec::CURRENT_VERSION;
+    Ok(sphinx_packet.into_bytes())
 }
 
 struct TrampolineSphinxCodec;
@@ -4019,17 +4040,30 @@ impl SphinxOnionCodec for TrampolineSphinxCodec {
     type Current = TrampolineHopPayload;
 
     const PACKET_DATA_LEN: usize = TRAMPOLINE_PACKET_DATA_LEN;
+    // Trampoline uses bincode serialization, which requires v0 format with u64 length header
+    const CURRENT_VERSION: u8 = ONION_PACKET_VERSION_V0;
 
     fn pack(decoded: &Self::Decoded) -> Vec<u8> {
         pack_trampoline_hop_payload(decoded)
     }
 
-    fn unpack(buf: &[u8]) -> Option<Self::Decoded> {
+    fn unpack(_version: u8, buf: &[u8]) -> Option<Self::Decoded> {
+        // Trampoline always uses v0 format with length header
         unpack_trampoline_hop_payload(buf)
     }
 
     fn to_current(decoded: Self::Decoded) -> Self::Current {
         decoded
+    }
+
+    fn is_version_allowed(version: u8) -> bool {
+        // Trampoline only supports v0 (bincode with u64 length header)
+        version == ONION_PACKET_VERSION_V0
+    }
+
+    fn hop_data_len(_version: u8, buf: &[u8]) -> Option<usize> {
+        // Trampoline always uses v0 format: [u64 BE length][data]
+        len_with_u64_header(buf)
     }
 }
 
@@ -4271,33 +4305,78 @@ pub struct PaymentOnionPacket {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeeledPaymentOnionPacket {
-    // The decrypted hop data for the current hop
+    /// The decrypted hop data for the current hop.
     pub current: CurrentPaymentHopData,
-    // The shared secret for `current` used for returning error. Set to all zeros for the origin node
-    // who has no shared secret.
+    /// The shared secret for `current` used for returning error. Set to all zeros for the origin node
+    /// who has no shared secret.
     pub shared_secret: [u8; 32],
-    // The packet for the next hop
+    /// The packet for the next hop.
     pub next: Option<PaymentOnionPacket>,
 }
 
-struct PaymentSphinxCodec;
+pub(crate) struct PaymentSphinxCodec;
+
+impl PaymentSphinxCodec {
+    /// Packs hop data according to the specified onion packet version.
+    /// - Version 0: Prepends u64 BE length header before molecule data.
+    /// - Version 1: Returns molecule-serialized data directly (uses molecule's native u32 LE length).
+    pub(crate) fn pack_hop_data(version: u8, hop_data: &PaymentHopData) -> Vec<u8> {
+        match version {
+            ONION_PACKET_VERSION_V0 => pack_len_prefixed(hop_data.serialize()),
+            _ => hop_data.serialize(),
+        }
+    }
+
+    /// Unpacks hop data according to the specified onion packet version.
+    /// - Version 0: Skips u64 BE length header, deserializes molecule data.
+    /// - Version 1: Deserializes molecule data directly (using molecule's u32 LE length).
+    pub(crate) fn unpack_hop_data(version: u8, buf: &[u8]) -> Option<PaymentHopData> {
+        match version {
+            ONION_PACKET_VERSION_V0 => {
+                let payload = unpack_len_prefixed_payload(buf)?;
+                PaymentHopData::deserialize(payload)
+            }
+            _ => {
+                let len = molecule_data_len(buf)?;
+                if buf.len() < len {
+                    return None;
+                }
+                PaymentHopData::deserialize(&buf[..len])
+            }
+        }
+    }
+}
 
 impl SphinxOnionCodec for PaymentSphinxCodec {
     type Decoded = PaymentHopData;
     type Current = CurrentPaymentHopData;
 
     const PACKET_DATA_LEN: usize = PACKET_DATA_LEN;
+    // Send v1, accept both v0 and v1 for backward compatibility
+    const CURRENT_VERSION: u8 = ONION_PACKET_VERSION_V1;
 
     fn pack(decoded: &Self::Decoded) -> Vec<u8> {
-        pack_hop_data(decoded)
+        Self::pack_hop_data(Self::CURRENT_VERSION, decoded)
     }
 
-    fn unpack(buf: &[u8]) -> Option<Self::Decoded> {
-        unpack_hop_data(buf)
+    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded> {
+        Self::unpack_hop_data(version, buf)
     }
 
     fn to_current(decoded: Self::Decoded) -> Self::Current {
         decoded.into()
+    }
+
+    fn is_version_allowed(version: u8) -> bool {
+        // Accept both v0 and v1 for backward compatibility
+        version <= ONION_PACKET_VERSION_V1
+    }
+
+    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize> {
+        match version {
+            ONION_PACKET_VERSION_V0 => len_with_u64_header(buf),
+            _ => molecule_data_len(buf),
+        }
     }
 }
 
@@ -4402,77 +4481,36 @@ impl PeeledPaymentOnionPacket {
     pub fn is_last(&self) -> bool {
         self.next.is_none()
     }
-
-    pub fn serialize(&self) -> Vec<u8> {
-        let current = self.current.clone().into();
-        let mut res = pack_hop_data(&current);
-        res.extend(self.shared_secret);
-        if let Some(ref next) = self.next {
-            res.extend(&next.data[..]);
-        }
-        res
-    }
-
-    pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
-        let mut read_bytes = get_hop_data_len(data)
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-        let current = unpack_hop_data(data)
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-
-        // Ensure backward compatibility
-        let mut shared_secret = NO_SHARED_SECRET;
-        let rb_plus_32 = read_bytes
-            .checked_add(32)
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-        let rb_plus_packet = read_bytes
-            .checked_add(PACKET_DATA_LEN)
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-        if data.len() >= rb_plus_32 && data.len() != rb_plus_packet {
-            shared_secret.copy_from_slice(&data[read_bytes..rb_plus_32]);
-            read_bytes = rb_plus_32;
-        }
-
-        let next = if read_bytes < data.len() {
-            Some(PaymentOnionPacket::new(data[read_bytes..].to_vec()))
-        } else {
-            None
-        };
-        Ok(Self {
-            current: current.into(),
-            shared_secret,
-            next,
-        })
-    }
 }
 
+/// Onion packet version with u64 BE length header for hop data.
+pub const ONION_PACKET_VERSION_V0: u8 = 0;
+/// Onion packet version with molecule's native u32 LE length for hop data.
+pub const ONION_PACKET_VERSION_V1: u8 = 1;
+
+/// Length of the u64 BE header used in v0 hop data format.
 const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
 
+/// Packs data with u64 BE length header (v0 format).
+/// Used by Trampoline (bincode serialization) and v0 payment hop data.
 fn pack_len_prefixed(mut payload: Vec<u8>) -> Vec<u8> {
     let mut packed = (payload.len() as u64).to_be_bytes().to_vec();
     packed.append(&mut payload);
     packed
 }
 
+/// Unpacks length-prefixed payload (v0 format): [u64 BE length][data].
 fn unpack_len_prefixed_payload(buf: &[u8]) -> Option<&[u8]> {
-    let len = get_hop_data_len(buf)?;
+    let len = len_with_u64_header(buf)?;
     if buf.len() < len {
         return None;
     }
     buf.get(HOP_DATA_HEAD_LEN..len)
 }
 
-pub(crate) fn pack_hop_data(hop_data: &PaymentHopData) -> Vec<u8> {
-    pack_len_prefixed(hop_data.serialize())
-}
-
-/// TODO: when JSON is replaced, this function may return `data` directly.
-pub(crate) fn unpack_hop_data(buf: &[u8]) -> Option<PaymentHopData> {
-    let payload = unpack_len_prefixed_payload(buf)?;
-    PaymentHopData::deserialize(payload)
-}
-
-/// TODO: when JSON is replaced, this function may return `data` directly.
-fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
+/// Returns the total length with u64 BE header: [u64 BE length] + data.
+/// Used by v0 format (Trampoline and legacy payment hop data).
+fn len_with_u64_header(buf: &[u8]) -> Option<usize> {
     if buf.len() < HOP_DATA_HEAD_LEN {
         return None;
     }
@@ -4484,6 +4522,15 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
     // Safe conversion: check value fits in usize and addition won't overflow.
     // Note: Caller (fiber-sphinx) is responsible for validating len against packet bounds.
     usize::try_from(len).ok()?.checked_add(HOP_DATA_HEAD_LEN)
+}
+
+/// Returns the total length from molecule's native u32 LE header.
+/// Used by v1 format (current payment hop data).
+fn molecule_data_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() < molecule::NUMBER_SIZE {
+        return None;
+    }
+    Some(molecule::unpack_number(buf) as usize)
 }
 
 /// Used as identifier of node.

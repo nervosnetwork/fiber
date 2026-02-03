@@ -55,12 +55,15 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
 
 ## Solution
 
-### Fix 1: `get_hop_data_len` Function
+### Fix 1: `get_hop_data_len_v0` Function
 
-**Location**: `crates/fiber-lib/src/fiber/types.rs:4084-4096`
+**Location**: `crates/fiber-lib/src/fiber/types.rs:4172-4184`
+
+The function was refactored to support versioned hop data formats. The v0 format uses the original u64 BE length header:
 
 ```rust
-fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
+/// Returns the total length of v0 hop data: u64 BE length + HOP_DATA_HEAD_LEN.
+fn get_hop_data_len_v0(buf: &[u8]) -> Option<usize> {
     if buf.len() < HOP_DATA_HEAD_LEN {
         return None;
     }
@@ -83,7 +86,9 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
 
 ### Fix 2: `deserialize` Method
 
-**Location**: `crates/fiber-lib/src/fiber/types.rs:4037-4048`
+**Location**: `crates/fiber-lib/src/fiber/types.rs:4069-4079`
+
+The deserialize method now includes version validation and uses `checked_add` for overflow protection:
 
 ```rust
 // Ensure backward compatibility
@@ -103,31 +108,37 @@ if let (Some(rb_plus_32), Some(rb_plus_packet)) = (
 
 - Both `checked_add` calls must succeed before the block executes
 - Defense in depth: protects against edge cases even if `get_hop_data_len` passes
+- Unknown versions are now explicitly rejected before processing
 
 ### Test Coverage Added
 
-**Location**: `crates/fiber-lib/src/fiber/tests/types.rs:283-358`
+**Location**: `crates/fiber-lib/src/fiber/tests/types.rs:291-404`
 
-Six separate test functions for malicious input handling (one per scenario for independent failure tracking):
+Tests are now organized by version (v0/v1) with separate functions for independent failure tracking:
 
 | Test Function | Input | Expected |
 |---------------|-------|----------|
-| `test_peeled_onion_packet_deserialize_u64_max_overflow` | `[0xFF × 8, 0x00]` | Error (overflow) |
-| `test_peeled_onion_packet_deserialize_large_claimed_length` | 1000 bytes claimed, 16 available | Error (bounds) |
 | `test_peeled_onion_packet_deserialize_empty_input` | `[]` | Error (too short) |
-| `test_peeled_onion_packet_deserialize_short_header` | 7 bytes | Error (need 8) |
-| `test_peeled_onion_packet_deserialize_exceeds_buffer` | 6501 + 8 > 16 bytes | Error (bounds) |
-| `test_peeled_onion_packet_deserialize_near_max_overflow` | `usize::MAX - 7` | Error (overflow) |
+| `test_peeled_onion_packet_deserialize_v0_u64_max_overflow` | `[v0, 0xFF × 8, 0x00]` | Error (overflow) |
+| `test_peeled_onion_packet_deserialize_v0_large_claimed_length` | v0 + 1000 bytes claimed | Error (bounds) |
+| `test_peeled_onion_packet_deserialize_v0_short_header` | v0 + 7 bytes | Error (need 8) |
+| `test_peeled_onion_packet_deserialize_v0_exceeds_buffer` | v0 + 6501 claimed | Error (bounds) |
+| `test_peeled_onion_packet_deserialize_v0_near_max_overflow` | v0 + `usize::MAX - 7` | Error (overflow) |
+| `test_peeled_onion_packet_deserialize_v1_short_header` | v1 + 3 bytes | Error (need 4) |
+| `test_peeled_onion_packet_deserialize_v1_large_claimed_length` | v1 + 1000 bytes claimed | Error (bounds) |
+| `test_peeled_onion_packet_deserialize_unknown_version` | version=2 | Error (unknown) |
 
 ```rust
 #[test]
-fn test_peeled_onion_packet_deserialize_u64_max_overflow() {
-    let malicious_input = [255u8, 255, 255, 255, 255, 255, 255, 255, 0];
+fn test_peeled_onion_packet_deserialize_v0_u64_max_overflow() {
+    // v0 format: [version=0][u64 BE length header with u64::MAX]
+    let mut malicious_input = vec![ONION_PACKET_VERSION_V0];
+    malicious_input.extend([255u8, 255, 255, 255, 255, 255, 255, 255, 0]);
     let result = PeeledPaymentOnionPacket::deserialize(&malicious_input);
     assert!(result.is_err(), "Should reject input with overflow-causing length");
 }
 
-// ... 5 more separate test functions
+// ... additional version-specific test functions
 ```
 
 ## Prevention Guidelines
