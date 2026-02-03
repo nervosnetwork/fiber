@@ -1,28 +1,24 @@
+use crate::util::convert;
+use fiber_v061::fiber::channel::{
+    ChannelActorState as OldChannelActorState, TlcInfo as OldTlcInfo, TlcState as OldTlcState,
+};
+use fiber_v061::fiber::payment::PaymentSession as OldPaymentSession;
+use fiber_v061::fiber::payment::SendPaymentData as OldSendPaymentData;
 use fiber_v070::{
+    fiber::channel::{
+        ChannelActorState as NewChannelActorState, PendingTlcs as NewPendingTlcs,
+        TlcInfo as NewTlcInfo, TlcState as NewTlcState,
+    },
+    fiber::payment::{PaymentSession as NewPaymentSession, SendPaymentData as NewSendPaymentData},
     store::{migration::Migration, Store},
     Error,
 };
 use indicatif::ProgressBar;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::util::convert;
-
-use fiber_v060::fiber::channel::{
-    ChannelActorState as OldChannelActorState, ForwardTlc as OldForwardTlc, TLCId as OldTLCId,
-    TlcInfo as OldTlcInfo, TlcState as OldTlcState,
-};
-use fiber_v061::fiber::channel::{
-    ChannelActorState as NewChannelActorState, PendingTlcs as NewPendingTlcs, TLCId as NewTLCId,
-    TlcInfo as NewTlcInfo, TlcState as NewTlcState,
-};
-
-use fiber_v060::fiber::types::{Hash256, PeeledPaymentOnionPacket};
-
 // Remember to update the version number here, sample `20311116135521`
-const MIGRATION_DB_VERSION: &str = "20251219152333";
+const MIGRATION_DB_VERSION: &str = "20260203152333";
 
 pub struct MigrationObj {
     version: String,
@@ -66,6 +62,25 @@ impl Migration for MigrationObj {
             db.put(k, new_bytes);
         }
 
+        info!("migrate PaymentSession ...");
+        const PAYMENT_SESSION_PREFIX: u8 = 192;
+        let prefix = vec![PAYMENT_SESSION_PREFIX];
+        for (k, v) in db
+            .prefix_iterator(prefix.as_slice())
+            .take_while(|(col_key, _)| col_key.starts_with(prefix.as_slice()))
+        {
+            if bincode::deserialize::<NewPaymentSession>(&v).is_ok() {
+                continue;
+            }
+
+            let old: OldPaymentSession =
+                bincode::deserialize(&v).expect("deserialize to old payment session");
+            let new = migrate_payment_session(old);
+
+            let new_bytes = bincode::serialize(&new).expect("serialize to new payment session");
+            db.put(k, new_bytes);
+        }
+
         Ok(db)
     }
 
@@ -84,6 +99,8 @@ fn migrate_channel_state(old: OldChannelActorState) -> NewChannelActorState {
         funding_tx_confirmed_at: old.funding_tx_confirmed_at,
         funding_udt_type_script: old.funding_udt_type_script,
         is_acceptor: old.is_acceptor,
+        // New field: default to false for existing channels
+        is_one_way: false,
         to_local_amount: old.to_local_amount,
         to_remote_amount: old.to_remote_amount,
         local_reserved_ckb_amount: old.local_reserved_ckb_amount,
@@ -105,7 +122,7 @@ fn migrate_channel_state(old: OldChannelActorState) -> NewChannelActorState {
         remote_revocation_nonce_for_verify: old.remote_revocation_nonce_for_verify,
         retryable_tlc_operations: convert(old.retryable_tlc_operations),
         shutdown_transaction_hash: convert(old.shutdown_transaction_hash),
-        waiting_forward_tlc_tasks: migrate_waiting_forward_tlc_tasks(old.waiting_forward_tlc_tasks),
+        waiting_forward_tlc_tasks: convert(old.waiting_forward_tlc_tasks),
         latest_commitment_transaction: old.latest_commitment_transaction,
         remote_commitment_points: convert(old.remote_commitment_points),
         remote_channel_public_keys: convert(old.remote_channel_public_keys),
@@ -163,31 +180,54 @@ fn migrate_tlc_info(old: OldTlcInfo) -> NewTlcInfo {
         hash_algorithm: convert(old.hash_algorithm),
         onion_packet: convert(old.onion_packet),
         shared_secret: old.shared_secret,
+        // New field: default to false for existing TLCs
+        is_trampoline_hop: false,
         created_at: convert(old.created_at),
         removed_reason: convert(old.removed_reason),
-        forwarding_tlc: old.previous_tlc.map(|(channel_id, tlc_id)| {
-            let id = match tlc_id {
-                OldTLCId::Offered(id) => id,
-                OldTLCId::Received(id) => id,
-            };
-            (convert(channel_id), id)
-        }),
+        forwarding_tlc: old
+            .forwarding_tlc
+            .map(|(channel_id, tlc_id)| (convert(channel_id), tlc_id)),
         removed_confirmed_at: old.removed_confirmed_at,
         applied_flags: convert(old.applied_flags),
     }
 }
 
-fn migrate_waiting_forward_tlc_tasks(
-    old: HashMap<(Hash256, OldTLCId), OldForwardTlc>,
-) -> HashMap<NewTLCId, [u8; 32]> {
-    old.into_iter()
-        .map(|((_channel_id, tlc_id), old_forward_tlc)| {
-            let ForwardTlc(_, _, peeled, _) = convert(old_forward_tlc);
-            (convert(tlc_id), peeled.shared_secret)
-        })
-        .collect()
+fn migrate_payment_session(old: OldPaymentSession) -> NewPaymentSession {
+    NewPaymentSession {
+        request: migrate_send_payment_data(old.request),
+        last_error: old.last_error,
+        last_error_code: None,
+        try_limit: old.try_limit,
+        status: convert(old.status),
+        created_at: old.created_at,
+        last_updated_at: old.last_updated_at,
+        cached_attempts: vec![],
+    }
 }
 
-// v0.6.0 struct fields are private, have to create a new struct for migration
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
-struct ForwardTlc(Hash256, OldTLCId, PeeledPaymentOnionPacket, u128);
+fn migrate_send_payment_data(old: OldSendPaymentData) -> NewSendPaymentData {
+    NewSendPaymentData {
+        target_pubkey: convert(old.target_pubkey),
+        amount: old.amount,
+        payment_hash: convert(old.payment_hash),
+        invoice: old.invoice,
+        final_tlc_expiry_delta: old.final_tlc_expiry_delta,
+        tlc_expiry_limit: old.tlc_expiry_limit,
+        timeout: old.timeout,
+        max_fee_amount: old.max_fee_amount,
+        max_parts: old.max_parts,
+        keysend: old.keysend,
+        udt_type_script: old.udt_type_script,
+        preimage: convert(old.preimage),
+        custom_records: convert(old.custom_records),
+        allow_self_payment: old.allow_self_payment,
+        hop_hints: convert(old.hop_hints),
+        router: convert(old.router),
+        allow_mpp: old.allow_mpp,
+        dry_run: old.dry_run,
+        // New fields: default to None for existing payments
+        trampoline_hops: None,
+        trampoline_context: None,
+        channel_stats: Default::default(),
+    }
+}

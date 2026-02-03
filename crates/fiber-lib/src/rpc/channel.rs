@@ -44,6 +44,9 @@ pub struct OpenChannelParams {
     /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
     pub public: Option<bool>,
 
+    /// Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
+    pub one_way: Option<bool>,
+
     /// The type script of the UDT to fund the channel with, an optional parameter.
     pub funding_udt_type_script: Option<Script>,
 
@@ -231,6 +234,12 @@ pub struct Channel {
     pub channel_id: Hash256,
     /// Whether the channel is public
     pub is_public: bool,
+    /// Is this channel initially inbound?
+    /// An inbound channel is one where the counterparty is the funder of the channel.
+    pub is_acceptor: bool,
+    /// Is this channel one-way?
+    /// Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
+    pub is_one_way: bool,
     #[serde_as(as = "Option<EntityHex>")]
     /// The outpoint of the channel
     pub channel_outpoint: Option<OutPoint>,
@@ -451,6 +460,7 @@ where
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(true),
+                    one_way: params.one_way.unwrap_or(false),
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch
@@ -530,6 +540,8 @@ where
                     .map(|state| Channel {
                         channel_id,
                         is_public: state.is_public(),
+                        is_acceptor: state.is_acceptor,
+                        is_one_way: state.is_one_way,
                         channel_outpoint: state.get_funding_transaction_outpoint(),
                         peer_id,
                         funding_udt_type_script: state

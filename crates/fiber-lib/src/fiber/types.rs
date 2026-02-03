@@ -17,6 +17,7 @@ use crate::fiber::payment::{PaymentCustomRecords, USER_CUSTOM_RECORDS_MAX_INDEX}
 use anyhow::anyhow;
 use bitcoin::hashes::Hash;
 use ckb_jsonrpc_types::CellOutput;
+use ckb_types::packed::BytesOpt;
 use ckb_types::H256;
 use ckb_types::{
     core::FeeRate,
@@ -618,6 +619,10 @@ impl OpenChannel {
 
     pub fn is_public(&self) -> bool {
         self.channel_flags.contains(ChannelFlags::PUBLIC)
+    }
+
+    pub fn is_one_way(&self) -> bool {
+        self.channel_flags.contains(ChannelFlags::ONE_WAY)
     }
 
     pub fn mem_size(&self) -> usize {
@@ -1253,6 +1258,11 @@ pub enum TlcErrData {
     NodeFailed {
         node_id: Pubkey,
     },
+    TrampolineFailed {
+        node_id: Pubkey,
+        #[serde_as(as = "SliceHex")]
+        inner_error_packet: Vec<u8>,
+    },
 }
 
 #[serde_as]
@@ -1264,7 +1274,19 @@ pub struct TlcErr {
 
 impl Display for TlcErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error_code_as_str())
+        match &self.extra_data {
+            Some(TlcErrData::TrampolineFailed {
+                node_id,
+                inner_error_packet,
+            }) => write!(
+                f,
+                "{} (TrampolineFailed node_id={:?} inner_error_packet_len={})",
+                self.error_code_as_str(),
+                node_id,
+                inner_error_packet.len()
+            ),
+            _ => write!(f, "{}", self.error_code_as_str()),
+        }
     }
 }
 
@@ -1303,6 +1325,7 @@ impl TlcErr {
         match &self.extra_data {
             Some(TlcErrData::NodeFailed { node_id }) => Some(*node_id),
             Some(TlcErrData::ChannelFailed { node_id, .. }) => Some(*node_id),
+            Some(TlcErrData::TrampolineFailed { node_id, .. }) => Some(*node_id),
             _ => None,
         }
     }
@@ -1369,6 +1392,14 @@ impl TryFrom<TlcErrData> for molecule_fiber::TlcErrData {
                 .node_id(node_id.into())
                 .build()
                 .into()),
+            TlcErrData::TrampolineFailed {
+                node_id,
+                inner_error_packet,
+            } => Ok(molecule_fiber::TrampolineFailed::new_builder()
+                .node_id(node_id.into())
+                .inner_error_packet(inner_error_packet.pack())
+                .build()
+                .into()),
         }
     }
 }
@@ -1391,6 +1422,12 @@ impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
             molecule_fiber::TlcErrDataUnion::NodeFailed(node_failed) => {
                 Ok(TlcErrData::NodeFailed {
                     node_id: node_failed.node_id().try_into()?,
+                })
+            }
+            molecule_fiber::TlcErrDataUnion::TrampolineFailed(trampoline_failed) => {
+                Ok(TlcErrData::TrampolineFailed {
+                    node_id: trampoline_failed.node_id().try_into()?,
+                    inner_error_packet: trampoline_failed.inner_error_packet().unpack(),
                 })
             }
         }
@@ -1575,6 +1612,7 @@ pub enum TlcErrorCode {
     InvalidOnionPayload = PERM | 22,
     HoldTlcTimeout = PERM | 23,
     InvalidOnionError = BADONION | PERM | 25,
+    IncorrectTlcDirection = PERM | 26,
 }
 
 impl TlcErrorCode {
@@ -3731,8 +3769,247 @@ impl BasicMppPaymentData {
     }
 }
 
-#[serde_as]
+/// Trampoline onion hop payload.
+///
+/// This is carried inside the *inner* trampoline onion packet (which is itself embedded in the
+/// `trampoline_onion` field of the *outer* payment onion hop payload).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrampolineHopPayload {
+    /// Payload for a trampoline node.
+    Forward {
+        /// Next node in the trampoline route (could be another trampoline or the final recipient).
+        next_node_id: Pubkey,
+        /// Amount that should be forwarded to `next_node_id` (excluding this node's fee).
+        amount_to_forward: u128,
+        /// Hash algorighmm used for the payment.
+        hash_algorithm: HashAlgorithm,
+        /// Fee budget used when building the *outer* route from this trampoline node to `next_node_id`.
+        ///
+        /// This is computed during the initial router build (trampoline onion construction), so
+        /// trampoline forwarding does not need to re-derive fee allocation.
+        build_max_fee_amount: u128,
+        /// TLC expiry delta required at `next_node_id` to complete the remaining payment.
+        ///
+        /// For the final recipient this is the invoice's `final_tlc_expiry_delta`. For trampoline
+        /// hops it also includes additional slack so the trampoline can forward further.
+        tlc_expiry_delta: u64,
+
+        /// Upper bound on the TLC expiry delta used when the next trampoline hop builds its outer
+        /// route.
+        ///
+        /// This allows propagating the payer's expiry budget constraints across trampoline hops.
+        tlc_expiry_limit: u64,
+
+        /// whether trampoline node should use MPP when forwarding to next hop
+        max_parts: Option<u64>,
+    },
+    /// Payload for the final recipient.
+    Final {
+        /// Amount that the final recipient should receive.
+        final_amount: u128,
+        /// Final hop expiry delta required by the invoice.
+        final_tlc_expiry_delta: u64,
+        /// Optional payment preimage (keysend).
+        payment_preimage: Option<Hash256>,
+        /// Custom records that must reach the final recipient (e.g. MPP records).
+        custom_records: Option<PaymentCustomRecords>,
+    },
+}
+
+impl TrampolineHopPayload {
+    pub fn serialize(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("serialize TrampolineHopPayload")
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        bincode::deserialize(data).ok()
+    }
+}
+
+/// Inner trampoline onion packet bytes.
+///
+/// Uses the same Sphinx construction as the outer payment onion, but is intended to be smaller so
+/// it can be embedded inside the outer onion's hop payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TrampolineOnionPacket {
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeeledTrampolineOnionPacket {
+    pub current: TrampolineHopPayload,
+    pub shared_secret: [u8; 32],
+    pub next: Option<TrampolineOnionPacket>,
+}
+
+const TRAMPOLINE_PACKET_DATA_LEN: usize = 1300;
+
+trait SphinxOnionCodec {
+    type Decoded;
+    type Current;
+
+    const PACKET_DATA_LEN: usize;
+
+    fn pack(decoded: &Self::Decoded) -> Vec<u8>;
+    fn unpack(buf: &[u8]) -> Option<Self::Decoded>;
+    fn to_current(decoded: Self::Decoded) -> Self::Current;
+}
+
+struct SphinxPeeled<Current> {
+    current: Current,
+    shared_secret: [u8; 32],
+    next: Option<Vec<u8>>,
+}
+
+fn peel_sphinx_onion<C: Verification, Codec: SphinxOnionCodec>(
+    packet_bytes: Vec<u8>,
+    peeler: &Privkey,
+    assoc_data: Option<&[u8]>,
+    secp_ctx: &Secp256k1<C>,
+) -> Result<SphinxPeeled<Codec::Current>, Error> {
+    let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(packet_bytes)
+        .map_err(|err| Error::OnionPacket(err.into()))?;
+    let shared_secret = sphinx_packet.shared_secret(&peeler.0);
+
+    let (new_current, new_next) = sphinx_packet
+        .peel(&peeler.0, assoc_data, secp_ctx, get_hop_data_len)
+        .map_err(|err| Error::OnionPacket(err.into()))?;
+
+    let decoded = Codec::unpack(&new_current)
+        .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
+    let current = Codec::to_current(decoded);
+
+    // All zeros hmac indicates the last hop.
+    let next = new_next
+        .hmac
+        .iter()
+        .any(|b| *b != 0)
+        .then(|| new_next.into_bytes());
+
+    Ok(SphinxPeeled {
+        current,
+        shared_secret,
+        next,
+    })
+}
+
+fn create_sphinx_onion<C: Signing, Codec: SphinxOnionCodec>(
+    session_key: Privkey,
+    hops_path: Vec<Pubkey>,
+    payloads: Vec<Codec::Decoded>,
+    assoc_data: Option<Vec<u8>>,
+    secp_ctx: &Secp256k1<C>,
+) -> Result<Vec<u8>, Error> {
+    if hops_path.is_empty() {
+        return Err(Error::OnionPacket(SphinxError::HopsIsEmpty.into()));
+    }
+    if hops_path.len() != payloads.len() {
+        return Err(Error::OnionPacket(OnionPacketError::InvalidHopData));
+    }
+
+    let hops_path: Vec<PublicKey> = hops_path.into_iter().map(Into::into).collect();
+    let hops_data = payloads.iter().map(Codec::pack).collect();
+
+    Ok(fiber_sphinx::OnionPacket::create(
+        session_key.into(),
+        hops_path,
+        hops_data,
+        assoc_data,
+        Codec::PACKET_DATA_LEN,
+        secp_ctx,
+    )
+    .map_err(|err| Error::OnionPacket(err.into()))?
+    .into_bytes())
+}
+
+struct TrampolineSphinxCodec;
+
+impl SphinxOnionCodec for TrampolineSphinxCodec {
+    type Decoded = TrampolineHopPayload;
+    type Current = TrampolineHopPayload;
+
+    const PACKET_DATA_LEN: usize = TRAMPOLINE_PACKET_DATA_LEN;
+
+    fn pack(decoded: &Self::Decoded) -> Vec<u8> {
+        pack_trampoline_hop_payload(decoded)
+    }
+
+    fn unpack(buf: &[u8]) -> Option<Self::Decoded> {
+        unpack_trampoline_hop_payload(buf)
+    }
+
+    fn to_current(decoded: Self::Decoded) -> Self::Current {
+        decoded
+    }
+}
+
+impl TrampolineOnionPacket {
+    pub fn new(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+
+    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
+        fiber_sphinx::OnionPacket::from_bytes(self.data)
+            .map_err(|err| Error::OnionPacket(err.into()))
+    }
+
+    pub fn peel<C: Verification>(
+        self,
+        peeler: &Privkey,
+        assoc_data: Option<&[u8]>,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<PeeledTrampolineOnionPacket, Error> {
+        let peeled =
+            peel_sphinx_onion::<C, TrampolineSphinxCodec>(self.data, peeler, assoc_data, secp_ctx)?;
+        Ok(PeeledTrampolineOnionPacket {
+            current: peeled.current,
+            next: peeled.next.map(TrampolineOnionPacket::new),
+            shared_secret: peeled.shared_secret,
+        })
+    }
+
+    /// Create a trampoline onion destined to `hops_path[0]`.
+    ///
+    /// `hops_path.len()` must equal `payloads.len()` and must not be empty.
+    pub fn create<C: Signing>(
+        session_key: Privkey,
+        hops_path: Vec<Pubkey>,
+        payloads: Vec<TrampolineHopPayload>,
+        assoc_data: Option<Vec<u8>>,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<Self, Error> {
+        Ok(TrampolineOnionPacket::new(create_sphinx_onion::<
+            C,
+            TrampolineSphinxCodec,
+        >(
+            session_key,
+            hops_path,
+            payloads,
+            assoc_data,
+            secp_ctx,
+        )?))
+    }
+}
+
+pub(crate) fn pack_trampoline_hop_payload(payload: &TrampolineHopPayload) -> Vec<u8> {
+    pack_len_prefixed(payload.serialize())
+}
+
+pub(crate) fn unpack_trampoline_hop_payload(buf: &[u8]) -> Option<TrampolineHopPayload> {
+    let payload = unpack_len_prefixed_payload(buf)?;
+    TrampolineHopPayload::deserialize(payload)
+}
+
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PaymentHopData {
     /// The amount of the tlc, <= total amount
     pub amount: u128,
@@ -3742,6 +4019,7 @@ pub struct PaymentHopData {
     pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
     pub custom_records: Option<PaymentCustomRecords>,
+    pub trampoline_onion: Option<Vec<u8>>,
 }
 
 const PACKET_DATA_LEN: usize = 6500;
@@ -3755,6 +4033,7 @@ pub struct CurrentPaymentHopData {
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
     pub custom_records: Option<PaymentCustomRecords>,
+    pub trampoline_onion: Option<Vec<u8>>,
 }
 
 impl From<PaymentHopData> for CurrentPaymentHopData {
@@ -3766,6 +4045,7 @@ impl From<PaymentHopData> for CurrentPaymentHopData {
             hash_algorithm: hop.hash_algorithm,
             funding_tx_hash: hop.funding_tx_hash,
             custom_records: hop.custom_records,
+            trampoline_onion: hop.trampoline_onion,
         }
     }
 }
@@ -3780,6 +4060,7 @@ impl From<CurrentPaymentHopData> for PaymentHopData {
             funding_tx_hash: hop.funding_tx_hash,
             custom_records: hop.custom_records,
             next_hop: None,
+            trampoline_onion: hop.trampoline_onion,
         }
     }
 }
@@ -3855,6 +4136,11 @@ impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
                     .set(payment_hop_data.custom_records.map(|x| x.into()))
                     .build(),
             )
+            .trampoline_onion(
+                BytesOpt::new_builder()
+                    .set(payment_hop_data.trampoline_onion.map(|data| data.pack()))
+                    .build(),
+            )
             .build()
     }
 }
@@ -3879,6 +4165,10 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
                 .map(|x| x.try_into())
                 .and_then(Result::ok),
             custom_records: payment_hop_data.custom_records().to_opt().map(|x| x.into()),
+            trampoline_onion: payment_hop_data
+                .trampoline_onion()
+                .to_opt()
+                .map(|x| x.raw_data().into()),
         }
     }
 }
@@ -3898,6 +4188,27 @@ pub struct PeeledPaymentOnionPacket {
     pub shared_secret: [u8; 32],
     // The packet for the next hop
     pub next: Option<PaymentOnionPacket>,
+}
+
+struct PaymentSphinxCodec;
+
+impl SphinxOnionCodec for PaymentSphinxCodec {
+    type Decoded = PaymentHopData;
+    type Current = CurrentPaymentHopData;
+
+    const PACKET_DATA_LEN: usize = PACKET_DATA_LEN;
+
+    fn pack(decoded: &Self::Decoded) -> Vec<u8> {
+        pack_hop_data(decoded)
+    }
+
+    fn unpack(buf: &[u8]) -> Option<Self::Decoded> {
+        unpack_hop_data(buf)
+    }
+
+    fn to_current(decoded: Self::Decoded) -> Self::Current {
+        decoded.into()
+    }
 }
 
 impl PeeledPaymentOnionPacket {
@@ -3940,26 +4251,12 @@ impl PaymentOnionPacket {
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<PeeledPaymentOnionPacket, Error> {
-        let sphinx_packet = self.into_sphinx_onion_packet()?;
-        let shared_secret = sphinx_packet.shared_secret(&peeler.0);
-
-        let (new_current, new_next) = sphinx_packet
-            .peel(&peeler.0, assoc_data, secp_ctx, get_hop_data_len)
-            .map_err(|err| Error::OnionPacket(err.into()))?;
-
-        let current: PaymentHopData = unpack_hop_data(&new_current)
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-        // All zeros hmac indicates the last hop
-        let next = new_next
-            .hmac
-            .iter()
-            .any(|b| *b != 0)
-            .then(|| PaymentOnionPacket::new(new_next.into_bytes()));
-
+        let peeled =
+            peel_sphinx_onion::<C, PaymentSphinxCodec>(self.data, peeler, assoc_data, secp_ctx)?;
         Ok(PeeledPaymentOnionPacket {
-            current: current.into(),
-            next,
-            shared_secret,
+            current: peeled.current,
+            next: peeled.next.map(PaymentOnionPacket::new),
+            shared_secret: peeled.shared_secret,
         })
     }
 }
@@ -3977,31 +4274,28 @@ impl PeeledPaymentOnionPacket {
             return Err(Error::OnionPacket(SphinxError::HopsIsEmpty.into()));
         }
 
-        let hops_path: Vec<PublicKey> = hops_infos
+        let hops_path: Vec<Pubkey> = hops_infos
             .iter()
             .map(|h| h.next_hop())
             .take_while(Option::is_some)
-            .map(|opt| opt.expect("must be some").into())
+            .map(|opt| opt.expect("must be some"))
             .collect();
 
-        // Add length as the header
-        let hops_data = hops_infos.iter().skip(1).map(pack_hop_data).collect();
-
-        let current = hops_infos.swap_remove(0);
+        // Keep the original hop ordering for payloads.
+        let current = hops_infos.remove(0);
+        let payloads = hops_infos;
 
         let next = if !hops_path.is_empty() {
-            Some(PaymentOnionPacket::new(
-                fiber_sphinx::OnionPacket::create(
-                    session_key.into(),
-                    hops_path,
-                    hops_data,
-                    assoc_data,
-                    PACKET_DATA_LEN,
-                    secp_ctx,
-                )
-                .map_err(|err| Error::OnionPacket(err.into()))?
-                .into_bytes(),
-            ))
+            Some(PaymentOnionPacket::new(create_sphinx_onion::<
+                C,
+                PaymentSphinxCodec,
+            >(
+                session_key,
+                hops_path,
+                payloads,
+                assoc_data,
+                secp_ctx,
+            )?))
         } else {
             None
         };
@@ -4063,22 +4357,28 @@ impl PeeledPaymentOnionPacket {
 
 const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
 
-/// TODO: when JSON is replaced, this function may return `data` directly.
-pub(crate) fn pack_hop_data(hop_data: &PaymentHopData) -> Vec<u8> {
-    let mut serialized = hop_data.serialize();
-    // A temporary solution to prepend the length as the header
-    let mut packed = (serialized.len() as u64).to_be_bytes().to_vec();
-    packed.append(&mut serialized);
+fn pack_len_prefixed(mut payload: Vec<u8>) -> Vec<u8> {
+    let mut packed = (payload.len() as u64).to_be_bytes().to_vec();
+    packed.append(&mut payload);
     packed
 }
 
-/// TODO: when JSON is replaced, this function may return `data` directly.
-pub(crate) fn unpack_hop_data(buf: &[u8]) -> Option<PaymentHopData> {
+fn unpack_len_prefixed_payload(buf: &[u8]) -> Option<&[u8]> {
     let len = get_hop_data_len(buf)?;
     if buf.len() < len {
         return None;
     }
-    PaymentHopData::deserialize(&buf[HOP_DATA_HEAD_LEN..len])
+    buf.get(HOP_DATA_HEAD_LEN..len)
+}
+
+pub(crate) fn pack_hop_data(hop_data: &PaymentHopData) -> Vec<u8> {
+    pack_len_prefixed(hop_data.serialize())
+}
+
+/// TODO: when JSON is replaced, this function may return `data` directly.
+pub(crate) fn unpack_hop_data(buf: &[u8]) -> Option<PaymentHopData> {
+    let payload = unpack_len_prefixed_payload(buf)?;
+    PaymentHopData::deserialize(payload)
 }
 
 /// TODO: when JSON is replaced, this function may return `data` directly.

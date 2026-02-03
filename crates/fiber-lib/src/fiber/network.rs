@@ -12,6 +12,7 @@ use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
 use rand::seq::{IteratorRandom, SliceRandom};
+use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
@@ -93,11 +94,13 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
     AttemptStatus, PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords,
-    PaymentStatus, SendPaymentCommand, SendPaymentWithRouterCommand,
+    PaymentStatus, SendPaymentCommand, SendPaymentDataBuilder, SendPaymentWithRouterCommand,
+    TrampolineContext,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TxAbort, TxSignatures,
+    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineHopPayload,
+    TrampolineOnionPacket, TxAbort, TxSignatures,
 };
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
@@ -378,6 +381,7 @@ pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
     pub public: bool,
+    pub one_way: bool,
     pub shutdown_script: Option<Script>,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
@@ -2014,13 +2018,14 @@ where
                     }
                 };
 
-                self.start_payment_actor(
-                    myself,
-                    state,
-                    payment_request.payment_hash,
-                    PaymentActorMessage::SendPayment(payment_request, reply),
-                )
-                .await;
+                let _ = self
+                    .start_payment_actor(
+                        myself,
+                        state,
+                        payment_request.payment_hash,
+                        PaymentActorMessage::SendPayment(payment_request, reply),
+                    )
+                    .await;
             }
             NetworkActorCommand::SendPaymentWithRouter(payment_request, reply) => {
                 let source = self.network_graph.read().await.get_source_pubkey();
@@ -2032,13 +2037,14 @@ where
                         return Ok(());
                     }
                 };
-                self.start_payment_actor(
-                    myself,
-                    state,
-                    payment_request.payment_hash,
-                    PaymentActorMessage::SendPayment(payment_request, reply),
-                )
-                .await;
+                let _ = self
+                    .start_payment_actor(
+                        myself,
+                        state,
+                        payment_request.payment_hash,
+                        PaymentActorMessage::SendPayment(payment_request, reply),
+                    )
+                    .await;
             }
             NetworkActorCommand::BuildPaymentRouter(build_payment_router, reply) => {
                 match self.on_build_payment_router(build_payment_router).await {
@@ -2369,6 +2375,20 @@ where
             attempt_id,
         } = command;
 
+        // Trampoline forwarding: the onion for this node is the last hop, but contains an
+        // encrypted payload telling us the real final recipient and parameters.
+        if let Some(trampoline_bytes) = peeled_onion_packet.current.trampoline_onion.as_deref() {
+            return self
+                .forward_trampoline_packet(
+                    state,
+                    trampoline_bytes,
+                    previous_tlc,
+                    payment_hash,
+                    peeled_onion_packet.current.amount,
+                )
+                .await;
+        }
+
         let info = peeled_onion_packet.current.clone();
         let shared_secret = peeled_onion_packet.shared_secret;
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
@@ -2401,6 +2421,7 @@ where
                 hash_algorithm: info.hash_algorithm,
                 onion_packet: peeled_onion_packet.next.clone(),
                 shared_secret,
+                is_trampoline_hop: false,
                 previous_tlc,
             },
             rpc_reply,
@@ -2422,6 +2443,137 @@ where
                 );
                 let tlc_error = self.get_tlc_error(state, &err, &channel_outpoint);
                 return Err(tlc_error);
+            }
+        }
+    }
+
+    async fn forward_trampoline_packet(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        trampoline_bytes: &[u8],
+        previous_tlc: Option<PrevTlcInfo>,
+        payment_hash: Hash256,
+        incoming_amount: u128,
+    ) -> Result<(), TlcErr> {
+        if !state.features.supports_trampoline_routing() {
+            error!(
+                "Trampoline forwarding rejected: local node does not support trampoline routing"
+            );
+            return Err(TlcErr::new_node_fail(
+                TlcErrorCode::RequiredNodeFeatureMissing,
+                state.get_public_key(),
+            ));
+        }
+        let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
+        let prev_channel_state = self
+            .store
+            .get_channel_actor_state(&previous_tlc.expect("got previous tlc").prev_channel_id)
+            .ok_or_else(|| {
+                TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
+            })?;
+        let udt_type_script = prev_channel_state.funding_udt_type_script.clone();
+        let peeled_trampoline = trampoline_packet
+            .peel(
+                &state.private_key,
+                Some(payment_hash.as_ref()),
+                &Secp256k1::new(),
+            )
+            .map_err(|_| {
+                TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
+            })?;
+        match peeled_trampoline.current {
+            TrampolineHopPayload::Forward {
+                next_node_id,
+                amount_to_forward,
+                hash_algorithm,
+                build_max_fee_amount,
+                tlc_expiry_delta,
+                tlc_expiry_limit,
+                max_parts,
+            } => {
+                if incoming_amount <= amount_to_forward {
+                    error!(
+                        "Trampoline forwarding fee insufficient: incoming {}, forward {}",
+                        incoming_amount, amount_to_forward
+                    );
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::FeeInsufficient,
+                        state.get_public_key(),
+                    ));
+                }
+                let available_fee_amount = incoming_amount.saturating_sub(amount_to_forward);
+                if available_fee_amount != build_max_fee_amount {
+                    error!(
+                        "Trampoline forwarding fee mismatch: available {}, build max {}",
+                        available_fee_amount, build_max_fee_amount
+                    );
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::InvalidOnionPayload,
+                        state.get_public_key(),
+                    ));
+                }
+
+                let (Some(remaining_trampoline_onion), Some(prev_tlc)) =
+                    (peeled_trampoline.next.map(|p| p.into_bytes()), previous_tlc)
+                else {
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::InvalidOnionPayload,
+                        state.get_public_key(),
+                    ));
+                };
+
+                let payment_data =
+                    SendPaymentDataBuilder::new(next_node_id, amount_to_forward, payment_hash)
+                        .final_tlc_expiry_delta(tlc_expiry_delta)
+                        .tlc_expiry_limit(tlc_expiry_limit)
+                        .max_fee_amount(Some(build_max_fee_amount))
+                        .max_parts(max_parts)
+                        .udt_type_script(udt_type_script)
+                        .trampoline_context(Some(TrampolineContext {
+                            remaining_trampoline_onion,
+                            // currently we only support single previous tlc in trampoline forwarding,
+                            // maybe we need to support multiple previous tlcs in the future
+                            previous_tlcs: vec![prev_tlc],
+                            hash_algorithm,
+                        }))
+                        .allow_mpp(max_parts.is_some_and(|v| v > 1))
+                        .build()
+                        .map_err(|_| {
+                            TlcErr::new_node_fail(
+                                TlcErrorCode::TemporaryNodeFailure,
+                                state.get_public_key(),
+                            )
+                        })?;
+
+                let (send, _recv) = oneshot::channel();
+                let rpc_reply = RpcReplyPort::from(send);
+
+                match self
+                    .start_payment_actor(
+                        state.network.clone(),
+                        state,
+                        payment_hash,
+                        PaymentActorMessage::SendPayment(payment_data, rpc_reply),
+                    )
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        error!("Failed to start trampoline payment: {}", e);
+                        Err(TlcErr::new_node_fail(
+                            TlcErrorCode::TemporaryNodeFailure,
+                            state.get_public_key(),
+                        ))
+                    }
+                }
+            }
+            TrampolineHopPayload::Final { .. } => {
+                // The channel actor should directly settle when this node is the final recipient.
+                // This case should not happen.
+                Err(TlcErr::new_node_fail(
+                    TlcErrorCode::TemporaryNodeFailure,
+                    state.get_public_key(),
+                ))
             }
         }
     }
@@ -2559,8 +2711,12 @@ where
                 "Can't find inflight payment actor for {payment_hash:?}, start a new payment actor"
             );
 
-            self.start_payment_actor(myself, state, payment_hash, message)
-                .await;
+            if let Err(e) = self
+                .start_payment_actor(myself, state, payment_hash, message)
+                .await
+            {
+                warn!("Failed to resume payment actor: {}", e);
+            }
         }
     }
 
@@ -2570,16 +2726,18 @@ where
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
         init_command: PaymentActorMessage,
-    ) {
+    ) -> Result<(), String> {
         if state.inflight_payments.contains_key(&payment_hash) {
             error!("Already had a payment actor with the same hash {payment_hash:?}");
 
             if let PaymentActorMessage::SendPayment(_, reply) = init_command {
                 let _ = reply.send(Err(format!(
-                "Payment session already exists, stop start new payment actor for {payment_hash:?}"
-            )));
+                    "Payment session already exists, stop start new payment actor for {payment_hash:?}"
+                )));
             }
-            return;
+            return Err(format!(
+                "Payment session already exists for {payment_hash:?}"
+            ));
         }
 
         let args = PaymentActorArguments {
@@ -2605,9 +2763,11 @@ where
             Ok((actor, _handle)) => {
                 debug!("Payment actor start {payment_hash}");
                 state.inflight_payments.insert(payment_hash, actor);
+                Ok(())
             }
             Err(err) => {
                 error!("Failed to start payment actor: {:?}", err);
+                Err(format!("Failed to start payment actor: {:?}", err))
             }
         }
     }
@@ -3070,6 +3230,7 @@ where
             peer_id,
             funding_amount,
             public,
+            one_way,
             shutdown_script,
             funding_udt_type_script,
             commitment_fee_rate,
@@ -3083,6 +3244,12 @@ where
         } = open_channel;
 
         self.check_feature_compatibility(&peer_id)?;
+
+        if public && one_way {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "An one-way channel cannot be public".to_string(),
+            ));
+        }
 
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
@@ -3145,6 +3312,7 @@ where
                             .unwrap_or(self.tlc_fee_proportional_millionths),
                     ),
                     public_channel_info: public.then_some(PublicChannelInfo::new()),
+                    is_one_way: one_way,
                     funding_udt_type_script,
                     shutdown_script,
                     channel_id_sender: tx,
@@ -4053,6 +4221,79 @@ where
         debug!("Payment actor stopped {payment_hash}");
         if self.inflight_payments.remove(&payment_hash).is_none() {
             error!("Can't find inflight payment actor");
+        }
+
+        // If this payment has associated previous TLCs,
+        // meaning it's a trampoline forwarding payment,
+        // we need to resolve those upstream TLCs based on the payment outcome.
+        let Some(session) = self.store.get_payment_session(payment_hash) else {
+            return;
+        };
+        let trampoline_context = session.request.trampoline_context.as_ref();
+
+        if let Some(context) = trampoline_context {
+            match session.status {
+                PaymentStatus::Success => {
+                    let preimage = session
+                        .attempts()
+                        .find(|a| a.is_success())
+                        .and_then(|a| a.preimage);
+
+                    if let Some(preimage) = preimage {
+                        self.store.insert_preimage(payment_hash, preimage);
+                        for prev_tlc in &context.previous_tlcs {
+                            let (send, _recv) = oneshot::channel();
+                            let rpc_reply = RpcReplyPort::from(send);
+                            let command = ChannelCommand::RemoveTlc(
+                                RemoveTlcCommand {
+                                    id: prev_tlc.prev_tlc_id,
+                                    reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                        payment_preimage: preimage,
+                                    }),
+                                },
+                                rpc_reply,
+                            );
+                            if let Err(e) = self
+                                .send_command_to_channel(prev_tlc.prev_channel_id, command)
+                                .await
+                            {
+                                error!("Failed to send fulfillment to upstream channel: {:?}", e);
+                            }
+                        }
+                    } else {
+                        error!("Payment success but no preimage found for {payment_hash}");
+                    }
+                }
+                PaymentStatus::Failed => {
+                    let error_code = session
+                        .last_error_code
+                        .unwrap_or(TlcErrorCode::TemporaryNodeFailure);
+                    for prev_tlc in &context.previous_tlcs {
+                        let (send, _recv) = oneshot::channel();
+                        let rpc_reply = RpcReplyPort::from(send);
+                        let shared_secret = prev_tlc.shared_secret.unwrap_or([0u8; 32]);
+                        let command = ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: prev_tlc.prev_tlc_id,
+                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                    TlcErr::new(error_code),
+                                    &shared_secret,
+                                )),
+                            },
+                            rpc_reply,
+                        );
+                        if let Err(e) = self
+                            .send_command_to_channel(prev_tlc.prev_channel_id, command)
+                            .await
+                        {
+                            error!("Failed to send failure to upstream channel: {:?}", e);
+                        }
+                    }
+                }
+                _ => {
+                    warn!("Trampoline payment stopped with unknown state for {payment_hash}");
+                }
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::channel::CloseFlags;
+use crate::fiber::features::FeatureVector;
 use crate::fiber::network::PeerDisconnectReason;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
@@ -7,6 +8,7 @@ use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
 use crate::rpc::config::RpcConfig;
 use crate::rpc::info::NodeInfoResult;
+use crate::rpc::invoice::Attribute;
 use crate::tests::*;
 use crate::{
     fiber::types::Hash256,
@@ -99,6 +101,7 @@ async fn test_rpc_basic() {
         payment_hash: None,
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
+        allow_trampoline_routing: Some(true),
     };
 
     // node0 generate a invoice
@@ -111,6 +114,13 @@ async fn test_rpc_basic() {
     let invoice_payment_hash = ckb_invoice.data.payment_hash;
     let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
     assert!(internal_ckb_invoice.payment_secret().is_some());
+    assert!(ckb_invoice.data.attrs.iter().any(|attr| {
+        if let Attribute::Feature(fv) = attr {
+            *fv == ["BASIC_MPP_OPTIONAL", "TRAMPOLINE_ROUTING_OPTIONAL"]
+        } else {
+            false
+        }
+    }));
 
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
@@ -151,6 +161,7 @@ async fn test_rpc_basic() {
         payment_hash: None,
         hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
+        allow_trampoline_routing: Some(false),
     };
 
     // node0 generate a invoice
@@ -161,6 +172,13 @@ async fn test_rpc_basic() {
 
     let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
     assert!(internal_ckb_invoice.payment_secret().is_none());
+    assert!(internal_ckb_invoice.data.attrs.iter().any(|attr| {
+        if let crate::invoice::Attribute::Feature(fv) = attr {
+            fv.is_empty()
+        } else {
+            false
+        }
+    }));
 }
 
 #[tokio::test]
@@ -543,6 +561,7 @@ async fn test_rpc_basic_with_auth() {
                 payment_hash: None,
                 hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
                 allow_mpp: None,
+                allow_trampoline_routing: None,
             },
         )
         .await
@@ -771,4 +790,62 @@ async fn test_rpc_shutdown_following_disconnect() {
             break;
         }
     }
+}
+
+#[tokio::test]
+async fn test_rpc_feature_check() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    let invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: Some(900000 + 1234),
+        udt_type_script: Some(Script::default().into()),
+        payment_preimage: Some(Hash256::default()),
+        payment_hash: None,
+        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        allow_mpp: Some(true),
+        allow_trampoline_routing: Some(true),
+    };
+    let invoice_res: Result<InvoiceResult, String> = node_0
+        .send_rpc_request("new_invoice", invoice_params.clone())
+        .await;
+
+    assert!(invoice_res.is_ok());
+
+    let mut node_feature = FeatureVector::default();
+    node_feature.unset_basic_mpp_optional();
+    node_0.update_node_features(node_feature.clone()).await;
+
+    let invoice_res: Result<InvoiceResult, String> = node_0
+        .send_rpc_request("new_invoice", invoice_params.clone())
+        .await;
+
+    assert!(invoice_res.is_err());
+
+    node_feature.set_basic_mpp_required();
+    node_feature.unset_trampoline_routing_optional();
+    node_0.update_node_features(node_feature).await;
+    let invoice_res: Result<InvoiceResult, String> =
+        node_0.send_rpc_request("new_invoice", invoice_params).await;
+    assert!(invoice_res.is_err());
 }

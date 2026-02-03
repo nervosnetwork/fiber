@@ -1,6 +1,7 @@
 use super::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
 };
+use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -11,24 +12,8 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 use crate::fiber::network::DebugEvent;
 use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::TxSignatures;
-use crate::utils::actor::ActorHandleLogGuard;
-use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
-#[cfg(test)]
-use musig2::BinaryEncoding;
-use musig2::SecNonceBuilder;
-use secp256k1::{Secp256k1, XOnlyPublicKey};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::iter;
-#[cfg(test)]
-use std::{
-    backtrace::Backtrace,
-    sync::{LazyLock, Mutex},
-};
-use strum::AsRefStr;
-use tracing::{debug, error, info, trace, warn};
-
-use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 use crate::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::actor::ActorHandleLogGuard;
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{
     ckb::{
@@ -47,18 +32,20 @@ use crate::{
         network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
         serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
-            ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned, CommitmentSigned,
-            EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, HoldTlc, OpenChannel,
-            PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, Pubkey, ReestablishChannel,
-            RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, Shutdown, TlcErr,
-            TlcErrPacket, TlcErrorCode, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
+            AcceptChannel, AddTlc, AnnouncementSignatures, BasicMppPaymentData,
+            BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelReady, ChannelUpdate,
+            ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
+            Hash256, HoldTlc, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey,
+            Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
+            Shutdown, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
+            TrampolineOnionPacket, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
+use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{util::blake160, Since, SinceType};
@@ -72,6 +59,9 @@ use ckb_types::{
     H256,
 };
 use molecule::prelude::{Builder, Entity};
+#[cfg(test)]
+use musig2::BinaryEncoding;
+use musig2::SecNonceBuilder;
 use musig2::{
     aggregate_partial_signatures,
     errors::{RoundFinalizeError, SigningError, VerifyError},
@@ -84,15 +74,25 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort,
 };
+use secp256k1::{Secp256k1, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::iter;
+#[cfg(test)]
+use std::{
+    backtrace::Backtrace,
+    sync::{LazyLock, Mutex},
+};
 use std::{
     fmt::{self, Debug, Display},
     sync::Arc,
 };
+use strum::AsRefStr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tracing::{debug, error, info, trace, warn};
 
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
@@ -245,6 +245,13 @@ pub struct AddTlcCommand {
     /// Save it for outbound (offered) TLC to backward errors.
     /// Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
+    /// Whether this outbound TLC is the trampoline-boundary hop.
+    ///
+    /// When a downstream failure happens beyond a trampoline boundary, the error packet is
+    /// encrypted for the inner (trampoline-originated) route and becomes opaque to upstream
+    /// senders. We use this flag to decide whether to wrap downstream failures into
+    /// `TlcErrData::TrampolineFailed` using the *outer* shared secret for this hop.
+    pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
 }
 
@@ -256,6 +263,7 @@ impl Debug for AddTlcCommand {
             .field("attempt_id", &self.attempt_id)
             .field("expiry", &self.expiry)
             .field("hash_algorithm", &self.hash_algorithm)
+            .field("is_trampoline_hop", &self.is_trampoline_hop)
             .field("previous_tlc", &self.previous_tlc)
             .finish()
     }
@@ -309,6 +317,7 @@ pub struct OpenChannelParameter {
     pub seed: [u8; 32],
     pub tlc_info: ChannelTlcInfo,
     pub public_channel_info: Option<PublicChannelInfo>,
+    pub is_one_way: bool,
     pub funding_udt_type_script: Option<Script>,
     pub shutdown_script: Script,
     pub channel_id_sender: oneshot::Sender<Hash256>,
@@ -674,6 +683,7 @@ where
                 TlcErrorCode::FinalIncorrectTlcAmount
             }
             ProcessingChannelError::IncorrectTlcExpiry => TlcErrorCode::IncorrectTlcExpiry,
+            ProcessingChannelError::IncorrectTlcDirection => TlcErrorCode::IncorrectTlcDirection,
             ProcessingChannelError::IncorrectFinalTlcExpiry => {
                 TlcErrorCode::FinalIncorrectExpiryDelta
             }
@@ -912,7 +922,7 @@ where
                 if !is_mpp && !is_invoice_fulfilled(&invoice, std::iter::once(&tlc)) {
                     // Single path with insufficient amount
                     RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(TlcErrorCode::AmountBelowMinimum),
+                        TlcErr::new(TlcErrorCode::FinalIncorrectTlcAmount),
                         &tlc.shared_secret,
                     ))
                 } else {
@@ -1031,17 +1041,15 @@ where
                 // The TLC is with a NO_SHARED_SECRET and no onion packet.
                 // this may only happen in testing or development environment.
                 debug_assert!(add_tlc.onion_packet.is_none());
-                #[cfg(not(debug_assertions))]
-                {
+                if cfg!(debug_assertions) {
+                    warn!("Processing TLC with no onion packet, only for testing or development environment");
+                    // allow test code to manually add tlc without onion packet
+                    true
+                } else {
                     return Err(ProcessingChannelError::PeelingOnionPacketError(
                         "TLC with no onion packet is not supported".to_string(),
                     )
                     .without_shared_secret());
-                }
-                #[cfg(debug_assertions)]
-                {
-                    // allow test code to manually add tlc without onion packet
-                    true
                 }
             }
         };
@@ -1065,6 +1073,8 @@ where
     ) -> Result<bool, ProcessingChannelError> {
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
+        let invoice = self.store.get_invoice(&payment_hash);
+        let is_trampoline = peeled_onion_packet.current.trampoline_onion.is_some();
         let is_last = peeled_onion_packet.is_last();
 
         let tlc = state
@@ -1073,135 +1083,63 @@ where
             .expect("expect tlc");
         tlc.applied_flags = AppliedFlags::ADD;
 
-        if is_last {
-            if forward_amount != add_tlc.amount {
-                return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
-            }
+        debug!(
+            "is_trampoline: {:?} is_last: {:?}",
+            is_trampoline,
+            peeled_onion_packet.is_last()
+        );
 
-            if add_tlc.expiry < peeled_onion_packet.current.expiry {
-                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
-            }
-
-            let invoice = self.store.get_invoice(&payment_hash);
-            if let Some(ref invoice) = invoice {
-                if invoice.udt_type_script() != state.funding_udt_type_script.as_ref() {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        "UDT type script not match".to_string(),
-                    ));
-                }
-                let invoice_status = self.get_invoice_status(invoice);
-                if !matches!(invoice_status, CkbInvoiceStatus::Open) {
-                    return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
-                }
-
-                // ensure tlc expiry is large than the now + final_tlc_minimum_expiry_delta
-                if invoice.is_tlc_expire_too_soon(add_tlc.expiry) {
-                    error!(
-                        "final tlc expiry is too soon for payment hash {:?}: add_tlc.expiry {}",
-                        payment_hash, add_tlc.expiry
-                    );
-                    return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
-                }
-            }
-
-            let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) else {
-                return Err(ProcessingChannelError::InternalError(
-                    "TLC not found in state".to_string(),
-                ));
-            };
-
-            // extract MPP total payment fields from onion packet
-            match (&invoice, peeled_onion_packet.mpp_custom_records()) {
-                (Some(invoice), Some(record)) => {
-                    if record.total_amount < invoice.amount.unwrap_or_default() {
-                        error!(
-                            "total amount is less than invoice amount: {:?}",
-                            payment_hash
-                        );
-                        return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                            "total amount in records is less than invoice amount".to_string(),
-                        ));
-                    }
-
-                    let payment_secret = invoice.payment_secret();
-                    if payment_secret.is_some_and(|s| s != &record.payment_secret) {
-                        error!(
-                            "payment secret is not equal to invoice payment secret: {:?}",
-                            payment_hash
-                        );
-                        return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                            "payment secret mismatch".to_string(),
-                        ));
-                    }
-
-                    tlc.payment_secret = Some(record.payment_secret);
-                    tlc.total_amount = Some(record.total_amount);
-                }
-                (Some(invoice), None) => {
-                    if invoice.allow_mpp() {
-                        // FIXME: whether we allow MPP without MPP records in onion packet?
-                        // currently we allow it pay with enough amount
-                        // TODO: add a unit test of using single path payment pay MPP invoice successfully
-                        warn!(
-                            "invoice allows MPP but no MPP records in onion packet: {:?}",
-                            payment_hash
-                        );
-                    }
-                    if !is_invoice_fulfilled(invoice, std::iter::once(&*tlc)) {
-                        error!("invoice is not fulfilled for payment: {:?}", payment_hash);
-                        return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
-                    }
-                }
-                (None, Some(_record)) => {
-                    error!("invoice not found for MPP payment: {:?}", payment_hash);
-                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
-                        "invoice not found".to_string(),
-                    ));
-                }
-                _ => {
-                    // single path payment with keysend
-                }
-            }
-
-            // if this is the last hop, store the preimage.
-            // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
-            // here we can do error check early here for better error handling.
-            let preimage = peeled_onion_packet
+        let mut last_hop_inner_onion = None;
+        if is_last && is_trampoline {
+            // Trampoline-final: outer onion is last hop, but we must peel the inner trampoline onion
+            // to obtain the final recipient payload.
+            let trampoline_bytes = peeled_onion_packet
                 .current
-                .payment_preimage
-                .or_else(|| self.store.get_preimage(&add_tlc.payment_hash));
+                .trampoline_onion
+                .as_deref()
+                .expect("trampoline_onion present");
 
-            if let Some(preimage) = preimage {
-                let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
-                if add_tlc.payment_hash != filled_payment_hash {
-                    error!(
-                        "preimage is not matched for payment hash: {:?}",
-                        payment_hash
-                    );
-                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                }
+            let peeled_trampoline = TrampolineOnionPacket::new(trampoline_bytes.to_vec())
+                .peel(
+                    state.private_key(),
+                    Some(payment_hash.as_ref()),
+                    &Secp256k1::new(),
+                )
+                .map_err(|err| {
+                    ProcessingChannelError::PeelingOnionPacketError(format!(
+                        "Failed to peel trampoline onion packet: {err}"
+                    ))
+                })?;
 
-                if let Some(custom_records) = peeled_onion_packet.current.custom_records {
-                    self.store
-                        .insert_payment_custom_records(&payment_hash, custom_records);
-                }
-
-                // Don't call self.store_preimage here, because it will reveal the preimage to watchtower.
-                self.store.insert_preimage(payment_hash, preimage);
-            } else if invoice.is_none() {
-                // Preimage is required for TLC without associated invoice.
-                error!("preimage is not found for payment hash: {:?}", payment_hash);
-                return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+            if matches!(
+                peeled_trampoline.current,
+                TrampolineHopPayload::Final { .. }
+            ) {
+                last_hop_inner_onion = Some(peeled_trampoline.current.clone());
             }
-            // else: hold invoice, pass though to try_to_settle_down_tlc
+        }
+
+        if (is_last && !is_trampoline) || last_hop_inner_onion.is_some() {
+            self.apply_final_hop_tlc_onion_packet(
+                state,
+                add_tlc,
+                &invoice,
+                &peeled_onion_packet,
+                last_hop_inner_onion,
+            )?;
         } else {
             if add_tlc.expiry
                 < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
+                && !is_trampoline
             {
                 return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
 
             let received_amount = add_tlc.amount;
+            debug!(
+                "received_amount: {:?} forward amount: {:?}",
+                received_amount, forward_amount
+            );
             if received_amount < forward_amount {
                 return Err(ProcessingChannelError::InvalidParameter(
                     "received_amount is less than forward_amount".to_string(),
@@ -1210,6 +1148,7 @@ where
 
             // Next forwarding channel will get the forward_fee and check if it's enough.
             let forward_fee = received_amount.saturating_sub(forward_amount);
+            debug!("forward_fee: {:?}", forward_fee);
 
             // if this is not the last hop, forward TLC to next hop
             self.register_and_apply_forward_tlc(
@@ -1221,6 +1160,147 @@ where
             );
         }
         Ok(is_last)
+    }
+
+    fn apply_final_hop_tlc_onion_packet(
+        &self,
+        state: &mut ChannelActorState,
+        add_tlc: &TlcInfo,
+        invoice: &Option<CkbInvoice>,
+        peeled_onion_packet: &PeeledPaymentOnionPacket,
+        last_hop_inner_onion: Option<TrampolineHopPayload>,
+    ) -> ProcessingChannelResult {
+        let payment_hash = add_tlc.payment_hash;
+        let hash_algorithm = add_tlc.hash_algorithm;
+        let peeled_payment_expiry = peeled_onion_packet.current.expiry;
+        let forward_amount = peeled_onion_packet.current.amount;
+        let mut final_payment_preimage = peeled_onion_packet.current.payment_preimage;
+        let mut final_custom_records = peeled_onion_packet.current.custom_records.clone();
+        let mut mpp_record = peeled_onion_packet.mpp_custom_records();
+
+        if let Some(TrampolineHopPayload::Final {
+            final_amount,
+            final_tlc_expiry_delta: _,
+            payment_preimage,
+            custom_records,
+        }) = last_hop_inner_onion
+        {
+            if forward_amount != add_tlc.amount || forward_amount > final_amount {
+                error!(
+                    "final amount mismatch for trampoline final hop: {:?}, {:?}, {:?} add_tlc.amount: {:?}",
+                    payment_hash, forward_amount, final_amount, add_tlc.amount
+                );
+                return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+            }
+
+            final_payment_preimage = payment_preimage;
+            mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
+            final_custom_records = custom_records;
+        } else {
+            if forward_amount != add_tlc.amount {
+                return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+            }
+            if add_tlc.expiry < peeled_payment_expiry {
+                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+            }
+        }
+
+        if let Some(ref invoice) = invoice {
+            let invoice_status = self.get_invoice_status(invoice);
+            if !matches!(invoice_status, CkbInvoiceStatus::Open) {
+                return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
+            }
+
+            // ensure tlc expiry is large than the now + final_tlc_minimum_expiry_delta
+            if invoice.is_tlc_expire_too_soon(add_tlc.expiry) {
+                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+            }
+        }
+
+        let Some(tlc) = state.tlc_state.get_mut(&add_tlc.tlc_id) else {
+            return Err(ProcessingChannelError::InternalError(
+                "TLC not found in state".to_string(),
+            ));
+        };
+
+        match (invoice, mpp_record) {
+            (Some(invoice), Some(record)) => {
+                if record.total_amount < invoice.amount.unwrap_or_default() {
+                    error!(
+                        "total amount is less than invoice amount: {:?}",
+                        payment_hash
+                    );
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "total amount in records is less than invoice amount".to_string(),
+                    ));
+                }
+
+                let payment_secret = invoice.payment_secret();
+                if payment_secret.is_some_and(|s| s != &record.payment_secret) {
+                    error!(
+                        "payment secret is not equal to invoice payment secret: {:?}",
+                        payment_hash
+                    );
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "payment secret mismatch".to_string(),
+                    ));
+                }
+
+                tlc.payment_secret = Some(record.payment_secret);
+                tlc.total_amount = Some(record.total_amount);
+            }
+            (Some(invoice), None) => {
+                if invoice.allow_mpp() {
+                    // FIXME: whether we allow MPP without MPP records in onion packet?
+                    // currently we allow it pay with enough amount
+                    // TODO: add a unit test of using single path payment pay MPP invoice successfully
+                    warn!(
+                        "invoice allows MPP but no MPP records in onion packet: {:?}",
+                        payment_hash
+                    );
+                }
+                if !is_invoice_fulfilled(invoice, std::iter::once(&*tlc)) {
+                    error!("invoice is not fulfilled for payment: {:?}", payment_hash);
+                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                }
+            }
+            (None, Some(_)) => {
+                error!("invoice not found for MPP payment: {:?}", payment_hash);
+                return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                    "invoice not found".to_string(),
+                ));
+            }
+            _ => {
+                // single path payment with keysend
+            }
+        }
+
+        let preimage =
+            final_payment_preimage.or_else(|| self.store.get_preimage(&add_tlc.payment_hash));
+        if let Some(preimage) = preimage {
+            let filled_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
+            if add_tlc.payment_hash != filled_payment_hash {
+                error!(
+                    "preimage is not matched for payment hash: {:?}",
+                    payment_hash
+                );
+                return Err(ProcessingChannelError::FinalIncorrectPreimage);
+            }
+
+            if let Some(custom_records) = final_custom_records {
+                self.store
+                    .insert_payment_custom_records(&payment_hash, custom_records);
+            }
+
+            // Don't call self.store_preimage here, because it will reveal the preimage to watchtower.
+            self.store.insert_preimage(payment_hash, preimage);
+        } else if invoice.is_none() {
+            // Preimage is required for TLC without associated invoice.
+            error!("preimage is not found for payment hash: {:?}", payment_hash);
+            return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+        }
+
+        Ok(())
     }
 
     fn store_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
@@ -1240,7 +1320,9 @@ where
         // TODO: here we only check the error which sender didn't follow agreed rules,
         //       if any error happened here we need go to shutdown procedure
 
-        state.check_for_tlc_update(Some(add_tlc.amount), false, false)?;
+        state.check_for_tlc_update(TlcUpdateAction::AddTlcPeer {
+            amount: add_tlc.amount,
+        })?;
         let tlc_info = state.create_inbounding_tlc(add_tlc.clone())?;
         state.check_insert_tlc(&tlc_info)?;
         state.tlc_state.add_received_tlc(tlc_info);
@@ -1253,7 +1335,7 @@ where
         state: &mut ChannelActorState,
         remove_tlc: RemoveTlc,
     ) -> ProcessingChannelResult {
-        state.check_for_tlc_update(None, false, false)?;
+        state.check_for_tlc_update(TlcUpdateAction::RemoveTlcPeer)?;
         // TODO: here if we received a invalid remove tlc, it's maybe a malioucious peer,
         // maybe we need to go through shutdown process for this error
         state
@@ -1358,7 +1440,26 @@ where
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
-                let remove_reason = remove_reason.backward(&tlc_info.shared_secret);
+                // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
+                // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
+                // into a new error created with the *outer* shared secret (for this hop).
+                let remove_reason = match remove_reason.clone() {
+                    RemoveTlcReason::RemoveTlcFail(inner_error_packet)
+                        if tlc_info.is_trampoline_hop =>
+                    {
+                        let mut tlc_err = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
+                        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
+                            node_id: self.get_local_pubkey(),
+                            inner_error_packet: inner_error_packet.onion_packet,
+                        });
+                        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            tlc_err,
+                            &tlc_info.shared_secret,
+                        ))
+                    }
+                    other => other.backward(&tlc_info.shared_secret),
+                };
+
                 let _ = self.register_retryable_relay_tlc_remove(
                     TLCId::Received(previous_tlc_id),
                     previous_channel_id,
@@ -1496,7 +1597,9 @@ where
         state: &mut ChannelActorState,
         command: &AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
-        state.check_for_tlc_update(Some(command.amount), true, true)?;
+        state.check_for_tlc_update(TlcUpdateAction::AddTlcCommand {
+            amount: command.amount,
+        })?;
         state.check_tlc_expiry(command.expiry)?;
         state.check_tlc_forward_amount(
             command.amount,
@@ -1542,7 +1645,7 @@ where
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
-        state.check_for_tlc_update(None, true, false)?;
+        state.check_for_tlc_update(TlcUpdateAction::RemoveTlcCommand)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
         let payment_hash = state
             .tlc_state
@@ -2404,6 +2507,7 @@ where
 
                 let counterpart_pubkeys = (&open_channel).into();
                 let public = open_channel.is_public();
+                let is_one_way = open_channel.is_one_way();
                 let OpenChannel {
                     channel_id,
                     chain_hash,
@@ -2431,6 +2535,12 @@ where
                     ))));
                 }
 
+                if public && is_one_way {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "An one-way channel cannot be public".to_string(),
+                    )));
+                }
+
                 // TODO: we may reject the channel opening request here
                 // if the peer want to open a public channel, but we don't want to.
                 if public && (channel_announcement_nonce.is_none() || public_channel_info.is_none())
@@ -2451,6 +2561,7 @@ where
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     public_channel_info,
+                    is_one_way,
                     local_funding_amount,
                     local_reserved_ckb_amount,
                     *commitment_fee_rate,
@@ -2529,6 +2640,7 @@ where
                 seed,
                 tlc_info,
                 public_channel_info,
+                is_one_way,
                 funding_udt_type_script,
                 shutdown_script,
                 channel_id_sender,
@@ -2554,6 +2666,7 @@ where
 
                 let mut channel = ChannelActorState::new_outbound_channel(
                     public_channel_info,
+                    is_one_way,
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
@@ -2587,11 +2700,14 @@ where
                     channel.local_constraints.max_tlc_number_in_flight,
                 )?;
 
-                let channel_flags = if public {
+                let mut channel_flags = if public {
                     ChannelFlags::PUBLIC
                 } else {
                     ChannelFlags::empty()
                 };
+                if is_one_way {
+                    channel_flags.insert(ChannelFlags::ONE_WAY);
+                }
                 let channel_announcement_nonce = if public {
                     Some(channel.get_channel_announcement_musig2_pubnonce())
                 } else {
@@ -3040,6 +3156,8 @@ pub struct TlcInfo {
     ///
     /// Save it to backward errors. Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
+    #[serde(default)]
+    pub is_trampoline_hop: bool,
     pub created_at: CommitmentNumbers,
     pub removed_reason: Option<RemoveTlcReason>,
 
@@ -3081,6 +3199,7 @@ pub struct PrevTlcInfo {
     // The TLC is always a received TLC because we are forwarding it.
     pub(crate) prev_tlc_id: u64,
     pub(crate) forwarding_fee: u128,
+    pub(crate) shared_secret: Option<[u8; 32]>,
 }
 
 impl PrevTlcInfo {
@@ -3089,6 +3208,21 @@ impl PrevTlcInfo {
             prev_channel_id,
             prev_tlc_id,
             forwarding_fee,
+            shared_secret: None,
+        }
+    }
+
+    pub fn new_with_shared_secret(
+        prev_channel_id: Hash256,
+        prev_tlc_id: u64,
+        forwarding_fee: u128,
+        shared_secret: [u8; 32],
+    ) -> Self {
+        Self {
+            prev_channel_id,
+            prev_tlc_id,
+            forwarding_fee,
+            shared_secret: Some(shared_secret),
         }
     }
 }
@@ -3613,6 +3747,10 @@ pub struct ChannelActorState {
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
 
+    // Is this channel one-way?
+    // Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
+    pub is_one_way: bool,
+
     // TODO: consider transaction fee while building the commitment transaction.
     // The invariant here is that the sum of `to_local_amount` and `to_remote_amount`
     // should be equal to the total amount of the channel.
@@ -3872,6 +4010,8 @@ pub enum ProcessingChannelError {
     PeelingOnionPacketError(String),
     #[error("Forwarding node has tampered with the intended HTLC values or origin node has an obsolete cltv_expiry_delta")]
     IncorrectTlcExpiry,
+    #[error("One way channel cannot forward tlc in reverse direction")]
+    IncorrectTlcDirection,
     #[error("Upstream node set CLTV to less than the CLTV set by the sender")]
     IncorrectFinalTlcExpiry,
     #[error("The amount in the HTLC is not expected")]
@@ -3937,6 +4077,7 @@ bitflags! {
     #[serde(transparent)]
     pub struct ChannelFlags: u8 {
         const PUBLIC = 1;
+        const ONE_WAY = 1 << 1;
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -4176,6 +4317,14 @@ pub(crate) fn tlc_expiry_delay(delay_epoch: &EpochNumberWithFraction) -> u64 {
         * MILLI_SECONDS_PER_EPOCH as f64
         * 2.0
         / 3.0) as u64
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TlcUpdateAction {
+    AddTlcCommand { amount: u128 },
+    AddTlcPeer { amount: u128 },
+    RemoveTlcCommand,
+    RemoveTlcPeer,
 }
 
 // Constructors for the channel actor state.
@@ -4524,7 +4673,7 @@ impl ChannelActorState {
     }
 
     fn get_channel_update_channel_flags(&self) -> ChannelUpdateChannelFlags {
-        if self.is_tlc_forwarding_enabled() {
+        if self.is_tlc_forwarding_enabled() && self.can_be_tlc_sender() {
             ChannelUpdateChannelFlags::empty()
         } else {
             ChannelUpdateChannelFlags::DISABLED
@@ -4568,6 +4717,7 @@ impl ChannelActorState {
     pub fn new_inbound_channel(
         temp_channel_id: Hash256,
         public_channel_info: Option<PublicChannelInfo>,
+        is_one_way: bool,
         local_value: u128,
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
@@ -4618,6 +4768,7 @@ impl ChannelActorState {
             funding_tx: None,
             funding_tx_confirmed_at: None,
             is_acceptor: true,
+            is_one_way,
             funding_udt_type_script,
             to_local_amount: local_value,
             to_remote_amount: remote_value,
@@ -4676,6 +4827,7 @@ impl ChannelActorState {
     #[allow(clippy::too_many_arguments)]
     pub fn new_outbound_channel(
         public_channel_info: Option<PublicChannelInfo>,
+        is_one_way: bool,
         seed: &[u8],
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
@@ -4706,6 +4858,7 @@ impl ChannelActorState {
             funding_tx_confirmed_at: None,
             funding_udt_type_script,
             is_acceptor: false,
+            is_one_way,
             to_local_amount,
             to_remote_amount: 0,
             commitment_fee_rate,
@@ -5147,6 +5300,14 @@ impl ChannelActorState {
         self.id
     }
 
+    pub fn can_be_tlc_sender(&self) -> bool {
+        !self.is_one_way || !self.is_acceptor
+    }
+
+    pub fn can_be_tlc_receiver(&self) -> bool {
+        !self.is_one_way || self.is_acceptor
+    }
+
     pub fn get_local_pubkey(&self) -> Pubkey {
         self.local_pubkey
     }
@@ -5159,6 +5320,10 @@ impl ChannelActorState {
         let balance = self.get_local_balance();
         let mut info = ChannelUpdateInfo::from(&self.local_tlc_info);
         info.outbound_liquidity = Some(balance);
+        if self.is_one_way && self.is_acceptor {
+            // disable local tlc if one-way channel and we are not the tlc sender
+            info.enabled = false;
+        }
         info
     }
 
@@ -5175,6 +5340,10 @@ impl ChannelActorState {
         self.remote_tlc_info.as_ref().map(|tlc_info| {
             let mut info = ChannelUpdateInfo::from(tlc_info);
             info.outbound_liquidity = Some(balance);
+            if self.is_one_way && !self.is_acceptor {
+                // disable remote tlc if one-way channel and we are the tlc sender
+                info.enabled = false;
+            }
             info
         })
     }
@@ -5806,45 +5975,69 @@ impl ChannelActorState {
         }
     }
 
-    fn check_for_tlc_update(
-        &self,
-        add_tlc_amount: Option<u128>,
-        is_tlc_command_message: bool,
-        is_sent: bool,
-    ) -> ProcessingChannelResult {
+    fn check_for_tlc_update(&self, action: TlcUpdateAction) -> ProcessingChannelResult {
+        match action {
+            TlcUpdateAction::AddTlcCommand { amount: _ } | TlcUpdateAction::RemoveTlcPeer => {
+                if !self.can_be_tlc_sender() {
+                    return Err(ProcessingChannelError::IncorrectTlcDirection);
+                }
+            }
+            TlcUpdateAction::AddTlcPeer { amount: _ } | TlcUpdateAction::RemoveTlcCommand => {
+                if !self.can_be_tlc_receiver() {
+                    return Err(ProcessingChannelError::IncorrectTlcDirection);
+                }
+            }
+        }
         match self.state {
             ChannelState::ChannelReady => {}
             ChannelState::ShuttingDown(flags)
-                if add_tlc_amount.is_none()
-                    || (!is_sent && flags == ShuttingDownFlags::OUR_SHUTDOWN_SENT) =>
+                if matches!(
+                    action,
+                    TlcUpdateAction::RemoveTlcCommand | TlcUpdateAction::RemoveTlcPeer
+                ) || (matches!(action, TlcUpdateAction::AddTlcPeer { .. })
+                    && flags == ShuttingDownFlags::OUR_SHUTDOWN_SENT) =>
             {
                 // when we've sent out shutting down command,
                 // we can only remove tlc or process add_tlc peer message
             }
             _ => {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Invalid state {:?} for {} tlc",
-                    self.state,
-                    if add_tlc_amount.is_some() {
+                let action_str = match action {
+                    TlcUpdateAction::AddTlcCommand { .. } | TlcUpdateAction::AddTlcPeer { .. } => {
                         "adding"
-                    } else {
+                    }
+                    TlcUpdateAction::RemoveTlcCommand | TlcUpdateAction::RemoveTlcPeer => {
                         "removing"
                     }
-                )))
+                };
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Invalid state {:?} for {} tlc",
+                    self.state, action_str
+                )));
             }
         }
 
         // don't check whether channel is public,
         // since private channel could also forward tlc
-        if let Some(add_amount) = add_tlc_amount {
-            if is_tlc_command_message && !self.local_tlc_info.enabled {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "TLC forwarding is not enabled for channel {}",
-                    self.get_id()
-                )));
+        match action {
+            TlcUpdateAction::AddTlcCommand { amount } => {
+                if !self.local_tlc_info.enabled {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "TLC forwarding is not enabled for channel {}",
+                        self.get_id()
+                    )));
+                }
+                self.check_tlc_limits(amount, true)?;
             }
-            self.check_tlc_limits(add_amount, is_sent)?;
+            TlcUpdateAction::AddTlcPeer { amount } => {
+                self.check_tlc_limits(amount, false)?;
+            }
+            _ => {}
         }
+
+        let is_tlc_command_message = matches!(
+            action,
+            TlcUpdateAction::AddTlcCommand { .. } | TlcUpdateAction::RemoveTlcCommand
+        );
 
         if is_tlc_command_message && (self.is_waiting_tlc_ack() || self.reestablishing) {
             return Err(ProcessingChannelError::WaitingTlcAck);
@@ -5925,6 +6118,7 @@ impl ChannelActorState {
             removed_reason: None,
             onion_packet: command.onion_packet.clone(),
             shared_secret: command.shared_secret,
+            is_trampoline_hop: command.is_trampoline_hop,
             forwarding_tlc: command
                 .previous_tlc
                 .map(|prev_tlc| (prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id)),
@@ -5948,6 +6142,7 @@ impl ChannelActorState {
             onion_packet: message.onion_packet,
             // No need to save shared secret for inbound TLC.
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             created_at: self.get_current_commitment_numbers(),
             removed_reason: None,
             forwarding_tlc: None,

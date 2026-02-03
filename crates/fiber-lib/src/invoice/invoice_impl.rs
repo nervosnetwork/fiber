@@ -367,6 +367,13 @@ impl CkbInvoice {
             .iter()
             .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()))
     }
+
+    pub fn allow_trampoline_routing(&self) -> bool {
+        self.data
+            .attrs
+            .iter()
+            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_trampoline_routing()))
+    }
 }
 
 /// Recoverable signature
@@ -660,6 +667,21 @@ impl InvoiceBuilder {
         self
     }
 
+    pub fn update_attr(mut self, attr: Attribute) -> Self {
+        let mut found = false;
+        for existing_attr in self.attrs.iter_mut() {
+            if std::mem::discriminant(existing_attr) == std::mem::discriminant(&attr) {
+                *existing_attr = attr.clone();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            self.attrs.push(attr);
+        }
+        self
+    }
+
     /// The hash of the preimage. If hash is set, preimage must be absent.
     /// This condition indicates a 'hold invoice' for which the tlc must be
     /// accepted and held until the preimage becomes known.
@@ -690,7 +712,10 @@ impl InvoiceBuilder {
     attr_setter!(payment_secret, PaymentSecret, Hash256);
     attr_setter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 
-    pub fn allow_mpp(self, allow_mpp: bool) -> Self {
+    fn update_feature_vector<F>(self, f: F) -> Self
+    where
+        F: FnOnce(&mut FeatureVector),
+    {
         let mut feature_vector = self
             .attrs
             .iter()
@@ -703,12 +728,28 @@ impl InvoiceBuilder {
             })
             .unwrap_or_else(FeatureVector::new);
 
-        if allow_mpp {
-            feature_vector.set_basic_mpp_optional();
-        } else {
-            feature_vector.unset_basic_mpp_optional();
-        }
-        self.add_attr(Attribute::Feature(feature_vector))
+        f(&mut feature_vector);
+        self.update_attr(Attribute::Feature(feature_vector))
+    }
+
+    pub fn allow_mpp(self, allow_mpp: bool) -> Self {
+        self.update_feature_vector(|feature_vector| {
+            if allow_mpp {
+                feature_vector.set_basic_mpp_optional();
+            } else {
+                feature_vector.unset_basic_mpp_optional();
+            }
+        })
+    }
+
+    pub fn allow_trampoline_routing(self, allow: bool) -> Self {
+        self.update_feature_vector(|feature_vector| {
+            if allow {
+                feature_vector.set_trampoline_routing_optional();
+            } else {
+                feature_vector.unset_trampoline_routing_optional();
+            }
+        })
     }
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {

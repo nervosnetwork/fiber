@@ -102,3 +102,7 @@ update-migrate-check: install-migration-check
 .PHONY: benchmark-test
 benchmark-test:
 	cargo criterion --features bench
+
+.PHONY: wasm-test
+wasm-test:
+	export WORKING_DIR=$(shell pwd) && cd ./.github/wasm-test-runner && npm install && node ./index.js

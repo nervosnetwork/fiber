@@ -49,7 +49,9 @@ interface SendPaymentCommandParams {
     invoice?: string;
     timeout?: HexString;
     max_fee_amount?: HexString;
+    max_fee_rate?: HexString;
     max_parts?: HexString;
+    trampoline_hops?: string[];
     keysend?: boolean;
     udt_type_script?: Script;
     allow_self_payment?: boolean;
