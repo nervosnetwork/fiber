@@ -2029,7 +2029,8 @@ where
         if !session.is_dry_run() {
             self.store.insert_payment_session(session.clone());
             // Clean up channel index to prevent retries on channel ready
-            self.store.clear_attempts_channel_index(session.payment_hash());
+            self.store
+                .clear_attempts_channel_index(session.payment_hash());
         }
     }
 
@@ -2271,7 +2272,8 @@ where
                     self.store.insert_payment_session(session.clone());
                     // Clean up channel index to prevent retries on channel ready
                     if session.status.is_final() {
-                        self.store.clear_attempts_channel_index(session.payment_hash());
+                        self.store
+                            .clear_attempts_channel_index(session.payment_hash());
                     }
                 }
             }
