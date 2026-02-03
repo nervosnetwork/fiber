@@ -34,19 +34,20 @@ impl ActionDispatcher {
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
         action: CchOrderAction,
+        retry_count: u32,
     ) -> Option<Box<dyn ActionExecutor>> {
         match action {
             CchOrderAction::TrackIncomingInvoice => {
-                TrackIncomingInvoiceDispatcher::dispatch(state, cch_actor_ref, order)
+                TrackIncomingInvoiceDispatcher::dispatch(state, cch_actor_ref, order, retry_count)
             }
             CchOrderAction::SendOutgoingPayment => {
-                SendOutgoingPaymentDispatcher::dispatch(state, cch_actor_ref, order)
+                SendOutgoingPaymentDispatcher::dispatch(state, cch_actor_ref, order, retry_count)
             }
             CchOrderAction::TrackOutgoingPayment => {
-                TrackOutgoingPaymentDispatcher::dispatch(state, cch_actor_ref, order)
+                TrackOutgoingPaymentDispatcher::dispatch(state, cch_actor_ref, order, retry_count)
             }
             CchOrderAction::SettleIncomingInvoice => {
-                SettleIncomingInvoiceDispatcher::dispatch(state, cch_actor_ref, order)
+                SettleIncomingInvoiceDispatcher::dispatch(state, cch_actor_ref, order, retry_count)
             }
         }
     }
@@ -89,8 +90,9 @@ impl ActionDispatcher {
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
         action: CchOrderAction,
+        retry_count: u32,
     ) -> Result<()> {
-        if let Some(executor) = Self::dispatch(state, cch_actor_ref, order, action) {
+        if let Some(executor) = Self::dispatch(state, cch_actor_ref, order, action, retry_count) {
             return executor.execute().await;
         }
         Ok(())
