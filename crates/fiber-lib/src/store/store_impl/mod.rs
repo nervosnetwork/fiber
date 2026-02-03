@@ -831,20 +831,6 @@ impl NetworkGraphStateStore for Store {
             .collect()
     }
 
-    fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt> {
-        let prefix = [ATTEMPT_PREFIX];
-        self.prefix_iterator(&prefix)
-            .filter_map(|(_key, value)| {
-                let attempt: Attempt = deserialize_from(value.as_ref(), "Attempt");
-                if status.contains(&attempt.status) {
-                    Some(attempt)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     fn insert_payment_history_result(
         &mut self,
         channel_outpoint: OutPoint,
