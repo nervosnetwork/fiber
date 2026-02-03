@@ -734,18 +734,41 @@ impl NetworkGraphStateStore for Store {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
 
-        // Collect attempts to delete their index entries
+        // Get attempts to find their channel index entries
+        let attempts: Vec<_> = self
+            .prefix_iterator(&prefix)
+            .map(|(key, value)| (key, deserialize_from::<Attempt>(value.as_ref(), "Attempt")))
+            .collect();
+
+        // Delete both main records and channel index entries
+        for (key, attempt) in attempts {
+            batch.delete(key);
+            if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
+                let index_key = [
+                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                    outpoint.as_slice(),
+                    attempt.payment_hash.as_ref(),
+                    &attempt.id.to_le_bytes(),
+                ]
+                .concat();
+                batch.delete(index_key);
+            }
+        }
+
+        batch.commit();
+    }
+
+    fn clear_attempts_channel_index(&self, payment_hash: Hash256) {
+        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+
+        // Get attempts to find their channel index entries
         let attempts: Vec<Attempt> = self
             .prefix_iterator(&prefix)
             .map(|(_key, value)| deserialize_from(value.as_ref(), "Attempt"))
             .collect();
 
-        // Delete main records
-        for (key, _) in self.prefix_iterator(&prefix) {
-            batch.delete(key);
-        }
-
-        // Delete index entries for pending attempts
+        // Only delete channel index entries, keep the attempts themselves
         for attempt in attempts {
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
                 let index_key = [
@@ -762,60 +785,50 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
-    fn get_last_pending_attempts_by_channel_outpoint(
+    fn get_pending_attempts_by_channel_outpoint(
         &self,
         channel_outpoint: &OutPoint,
-        limit: usize,
     ) -> Vec<Attempt> {
         let prefix = [&[ATTEMPT_CHANNEL_INDEX_PREFIX], channel_outpoint.as_slice()].concat();
 
-        // Start from the end of the prefix range by appending 0xFF bytes
-        let mut start_key = prefix.clone();
-        start_key.extend_from_slice(&[0xFF; 40]); // 32 (hash) + 8 (id) bytes of 0xFF
+        self.prefix_iterator(&prefix)
+            .filter_map(|(key, _)| {
+                // Key format: [PREFIX, channel_outpoint(36 bytes), payment_hash(32 bytes), attempt_id(8 bytes)]
+                // Extract payment_hash and attempt_id from key
+                let key_slice = key.as_ref();
+                let outpoint_len = channel_outpoint.as_slice().len();
+                let prefix_and_outpoint_len = 1 + outpoint_len;
 
-        self.prefix_iterator_with_skip_while_and_start(
-            &prefix,
-            IteratorMode::From(&start_key, DbDirection::Reverse),
-            Box::new(|_| false),
-        )
-        .filter_map(|(key, _)| {
-            // Key format: [PREFIX, channel_outpoint(36 bytes), payment_hash(32 bytes), attempt_id(8 bytes)]
-            // Extract payment_hash and attempt_id from key
-            let key_slice = key.as_ref();
-            let outpoint_len = channel_outpoint.as_slice().len();
-            let prefix_and_outpoint_len = 1 + outpoint_len;
+                if key_slice.len() < prefix_and_outpoint_len + 32 + 8 {
+                    return None;
+                }
 
-            if key_slice.len() < prefix_and_outpoint_len + 32 + 8 {
-                return None;
-            }
+                let payment_hash_start = prefix_and_outpoint_len;
+                let payment_hash_end = payment_hash_start + 32;
+                let attempt_id_start = payment_hash_end;
+                let attempt_id_end = attempt_id_start + 8;
 
-            let payment_hash_start = prefix_and_outpoint_len;
-            let payment_hash_end = payment_hash_start + 32;
-            let attempt_id_start = payment_hash_end;
-            let attempt_id_end = attempt_id_start + 8;
-
-            let payment_hash: Hash256 = (&key_slice[payment_hash_start..payment_hash_end])
-                .try_into()
-                .ok()?;
-            let attempt_id = u64::from_le_bytes(
-                key_slice[attempt_id_start..attempt_id_end]
+                let payment_hash: Hash256 = (&key_slice[payment_hash_start..payment_hash_end])
                     .try_into()
-                    .ok()?,
-            );
+                    .ok()?;
+                let attempt_id = u64::from_le_bytes(
+                    key_slice[attempt_id_start..attempt_id_end]
+                        .try_into()
+                        .ok()?,
+                );
 
-            // Only return attempts that are pending (Created or Retrying)
-            let attempt = self.get_attempt(payment_hash, attempt_id)?;
-            if matches!(
-                attempt.status,
-                AttemptStatus::Created | AttemptStatus::Retrying
-            ) {
-                Some(attempt)
-            } else {
-                None
-            }
-        })
-        .take(limit)
-        .collect()
+                // Only return attempts that are pending (Created or Retrying)
+                let attempt = self.get_attempt(payment_hash, attempt_id)?;
+                if matches!(
+                    attempt.status,
+                    AttemptStatus::Created | AttemptStatus::Retrying
+                ) {
+                    Some(attempt)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt> {

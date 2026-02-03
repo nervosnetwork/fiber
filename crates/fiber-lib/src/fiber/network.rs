@@ -161,8 +161,6 @@ const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
 
-const MAX_RETRY_ATTEMPTS_WHEN_CHANNEL_READY: usize = 256;
-
 static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
 
 pub fn init_chain_hash(chain_hash: Hash256) {
@@ -866,11 +864,10 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
                 // Retry payment attempts whose first hop uses this channel
-                // Limit to avoid overwhelming the system with too many retries at once
-                for attempt in self.store.get_last_pending_attempts_by_channel_outpoint(
-                    &channel_outpoint,
-                    MAX_RETRY_ATTEMPTS_WHEN_CHANNEL_READY,
-                ) {
+                for attempt in self
+                    .store
+                    .get_pending_attempts_by_channel_outpoint(&channel_outpoint)
+                {
                     debug!(
                         "Retrying payment attempt {:?} for channel {:?} reestablished",
                         attempt.payment_hash, channel_outpoint
