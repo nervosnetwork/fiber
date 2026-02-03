@@ -4037,9 +4037,14 @@ impl PeeledPaymentOnionPacket {
 
         // Ensure backward compatibility
         let mut shared_secret = NO_SHARED_SECRET;
-        if data.len() >= read_bytes + 32 && data.len() != read_bytes + PACKET_DATA_LEN {
-            shared_secret.copy_from_slice(&data[read_bytes..read_bytes + 32]);
-            read_bytes += 32;
+        if let (Some(rb_plus_32), Some(rb_plus_packet)) = (
+            read_bytes.checked_add(32),
+            read_bytes.checked_add(PACKET_DATA_LEN),
+        ) {
+            if data.len() >= rb_plus_32 && data.len() != rb_plus_packet {
+                shared_secret.copy_from_slice(&data[read_bytes..rb_plus_32]);
+                read_bytes = rb_plus_32;
+            }
         }
 
         let next = if read_bytes < data.len() {
@@ -4080,14 +4085,14 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
     if buf.len() < HOP_DATA_HEAD_LEN {
         return None;
     }
-    Some(
-        u64::from_be_bytes(
-            buf[0..HOP_DATA_HEAD_LEN]
-                .try_into()
-                .expect("u64 from slice"),
-        ) as usize
-            + HOP_DATA_HEAD_LEN,
-    )
+    let len = u64::from_be_bytes(
+        buf[0..HOP_DATA_HEAD_LEN]
+            .try_into()
+            .expect("u64 from slice"),
+    );
+    // Safe conversion: check value fits in usize and addition won't overflow.
+    // Note: Caller (fiber-sphinx) is responsible for validating len against packet bounds.
+    usize::try_from(len).ok()?.checked_add(HOP_DATA_HEAD_LEN)
 }
 
 /// Used as identifier of node.

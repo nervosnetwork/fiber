@@ -280,6 +280,83 @@ fn test_peeled_large_onion_packet() {
     );
 }
 
+/// Tests for PeeledPaymentOnionPacket::deserialize malicious input handling.
+/// These tests were added after fuzz testing discovered an integer overflow.
+/// Bug: When the length header contains u64::MAX, adding HOP_DATA_HEAD_LEN overflows.
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_u64_max_overflow() {
+    // Length header is u64::MAX, which would cause overflow when adding HOP_DATA_HEAD_LEN
+    // Input: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
+    let malicious_input = [255u8, 255, 255, 255, 255, 255, 255, 255, 0];
+    let result = PeeledPaymentOnionPacket::deserialize(&malicious_input);
+    assert!(
+        result.is_err(),
+        "Should reject input with overflow-causing length"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_large_claimed_length() {
+    // Length header claims more data than available
+    let mut large_claim = vec![0u8; 16];
+    large_claim[..8].copy_from_slice(&(1000u64).to_be_bytes()); // Claims 1000 bytes
+    let result = PeeledPaymentOnionPacket::deserialize(&large_claim);
+    assert!(
+        result.is_err(),
+        "Should reject input claiming more data than available"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_empty_input() {
+    let result = PeeledPaymentOnionPacket::deserialize(&[]);
+    assert!(result.is_err(), "Should reject empty input");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_short_header() {
+    // Input too short for header (need 8 bytes, only 7 provided)
+    let result = PeeledPaymentOnionPacket::deserialize(&[1, 2, 3, 4, 5, 6, 7]);
+    assert!(
+        result.is_err(),
+        "Should reject input shorter than header length"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_exceeds_buffer() {
+    // Large length that exceeds buffer size
+    // Claimed length (6501 + 8 = 6509) far exceeds actual buffer (16 bytes)
+    let large_len: u64 = 6501;
+    let mut large_input = vec![0u8; 16];
+    large_input[..8].copy_from_slice(&large_len.to_be_bytes());
+    let result = PeeledPaymentOnionPacket::deserialize(&large_input);
+    assert!(
+        result.is_err(),
+        "Should reject when claimed length exceeds buffer"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_near_max_overflow() {
+    // Near-max value that would overflow with header addition
+    let near_max = (usize::MAX - 7) as u64; // Adding 8 would overflow
+    let mut near_max_input = vec![0u8; 16];
+    near_max_input[..8].copy_from_slice(&near_max.to_be_bytes());
+    let result = PeeledPaymentOnionPacket::deserialize(&near_max_input);
+    assert!(
+        result.is_err(),
+        "Should reject near-max length that overflows"
+    );
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_tlc_fail_error() {
