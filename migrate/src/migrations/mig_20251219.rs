@@ -1,4 +1,4 @@
-use fiber::{
+use fiber_v061::{
     store::{migration::Migration, Store},
     Error,
 };

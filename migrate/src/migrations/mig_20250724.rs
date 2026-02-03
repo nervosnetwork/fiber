@@ -1,4 +1,7 @@
-use fiber::{store::migration::Migration, Error};
+use fiber_v061::{
+    store::{migration::Migration, Store},
+    Error,
+};
 use indicatif::ProgressBar;
 use std::sync::Arc;
 
@@ -20,9 +23,9 @@ impl MigrationObj {
 impl Migration for MigrationObj {
     fn migrate<'a>(
         &self,
-        db: &'a fiber::store::Store,
+        db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a fiber::store::Store, Error> {
+    ) -> Result<&'a Store, Error> {
         eprintln!("MigrationObj::migrate .....{}....", MIGRATION_DB_VERSION);
         Ok(db)
     }
