@@ -206,7 +206,7 @@ impl From<H256> for Hash256 {
 
 impl From<lightning_invoice::Sha256> for Hash256 {
     fn from(value: lightning_invoice::Sha256) -> Self {
-        Hash256(value.0.to_byte_array())
+        Hash256(*value.0.as_byte_array())
     }
 }
 
