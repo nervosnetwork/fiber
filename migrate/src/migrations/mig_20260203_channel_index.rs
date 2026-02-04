@@ -1,5 +1,5 @@
 use ckb_types::prelude::Entity;
-use fiber_v061::{
+use fiber_v070::{
     fiber::payment::{Attempt, PaymentSession},
     store::{migration::Migration, Store},
     Error,

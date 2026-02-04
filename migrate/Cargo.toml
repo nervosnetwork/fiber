@@ -15,7 +15,7 @@ thiserror = "1.0.58"
 serde = { version = "1.0.197", features = ["derive"] }
 hex = "0.4.3"
 clap = { version = "4.0", features = ["derive"] }
-ckb-types = "0.202.0"
+ckb-types = "1"
 fiber_v060 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", branch = "migrate/v0.6.0" }
 fiber_v061 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", branch = "migrate/v0.6.1" }
 fiber_v070 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", branch = "quake/oneway-channel"}
