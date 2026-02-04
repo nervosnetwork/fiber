@@ -14290,6 +14290,7 @@ impl ::core::fmt::Display for PaymentHopData {
         write!(f, ", {}: {}", "funding_tx_hash", self.funding_tx_hash())?;
         write!(f, ", {}: {}", "next_hop", self.next_hop())?;
         write!(f, ", {}: {}", "custom_records", self.custom_records())?;
+        write!(f, ", {}: {}", "trampoline_onion", self.trampoline_onion())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -14304,13 +14305,13 @@ impl ::core::default::Default for PaymentHopData {
     }
 }
 impl PaymentHopData {
-    const DEFAULT_VALUE: [u8; 89] = [
-        89, 0, 0, 0, 32, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 56, 0, 0, 0, 57, 0, 0, 0, 89, 0, 0, 0,
-        89, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 93] = [
+        93, 0, 0, 0, 36, 0, 0, 0, 52, 0, 0, 0, 60, 0, 0, 0, 60, 0, 0, 0, 61, 0, 0, 0, 93, 0, 0, 0,
+        93, 0, 0, 0, 93, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0,
+        0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 7;
+    pub const FIELD_COUNT: usize = 8;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -14366,11 +14367,17 @@ impl PaymentHopData {
     pub fn custom_records(&self) -> CustomRecordsOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
+        let end = molecule::unpack_number(&slice[32..]) as usize;
+        CustomRecordsOpt::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn trampoline_onion(&self) -> BytesOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[32..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[32..]) as usize;
-            CustomRecordsOpt::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[36..]) as usize;
+            BytesOpt::new_unchecked(self.0.slice(start..end))
         } else {
-            CustomRecordsOpt::new_unchecked(self.0.slice(start..))
+            BytesOpt::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> PaymentHopDataReader<'r> {
@@ -14407,6 +14414,7 @@ impl molecule::prelude::Entity for PaymentHopData {
             .funding_tx_hash(self.funding_tx_hash())
             .next_hop(self.next_hop())
             .custom_records(self.custom_records())
+            .trampoline_onion(self.trampoline_onion())
     }
 }
 #[derive(Clone, Copy)]
@@ -14435,6 +14443,7 @@ impl<'r> ::core::fmt::Display for PaymentHopDataReader<'r> {
         write!(f, ", {}: {}", "funding_tx_hash", self.funding_tx_hash())?;
         write!(f, ", {}: {}", "next_hop", self.next_hop())?;
         write!(f, ", {}: {}", "custom_records", self.custom_records())?;
+        write!(f, ", {}: {}", "trampoline_onion", self.trampoline_onion())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -14443,7 +14452,7 @@ impl<'r> ::core::fmt::Display for PaymentHopDataReader<'r> {
     }
 }
 impl<'r> PaymentHopDataReader<'r> {
-    pub const FIELD_COUNT: usize = 7;
+    pub const FIELD_COUNT: usize = 8;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -14499,11 +14508,17 @@ impl<'r> PaymentHopDataReader<'r> {
     pub fn custom_records(&self) -> CustomRecordsOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
+        let end = molecule::unpack_number(&slice[32..]) as usize;
+        CustomRecordsOptReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn trampoline_onion(&self) -> BytesOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[32..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[32..]) as usize;
-            CustomRecordsOptReader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[36..]) as usize;
+            BytesOptReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            CustomRecordsOptReader::new_unchecked(&self.as_slice()[start..])
+            BytesOptReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -14560,6 +14575,7 @@ impl<'r> molecule::prelude::Reader<'r> for PaymentHopDataReader<'r> {
         Byte32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         PubkeyOptReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
         CustomRecordsOptReader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
+        BytesOptReader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
         Ok(())
     }
 }
@@ -14572,9 +14588,10 @@ pub struct PaymentHopDataBuilder {
     pub(crate) funding_tx_hash: Byte32,
     pub(crate) next_hop: PubkeyOpt,
     pub(crate) custom_records: CustomRecordsOpt,
+    pub(crate) trampoline_onion: BytesOpt,
 }
 impl PaymentHopDataBuilder {
-    pub const FIELD_COUNT: usize = 7;
+    pub const FIELD_COUNT: usize = 8;
     pub fn amount(mut self, v: Uint128) -> Self {
         self.amount = v;
         self
@@ -14603,6 +14620,10 @@ impl PaymentHopDataBuilder {
         self.custom_records = v;
         self
     }
+    pub fn trampoline_onion(mut self, v: BytesOpt) -> Self {
+        self.trampoline_onion = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for PaymentHopDataBuilder {
     type Entity = PaymentHopData;
@@ -14616,6 +14637,7 @@ impl molecule::prelude::Builder for PaymentHopDataBuilder {
             + self.funding_tx_hash.as_slice().len()
             + self.next_hop.as_slice().len()
             + self.custom_records.as_slice().len()
+            + self.trampoline_onion.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -14634,6 +14656,8 @@ impl molecule::prelude::Builder for PaymentHopDataBuilder {
         total_size += self.next_hop.as_slice().len();
         offsets.push(total_size);
         total_size += self.custom_records.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.trampoline_onion.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -14645,6 +14669,7 @@ impl molecule::prelude::Builder for PaymentHopDataBuilder {
         writer.write_all(self.funding_tx_hash.as_slice())?;
         writer.write_all(self.next_hop.as_slice())?;
         writer.write_all(self.custom_records.as_slice())?;
+        writer.write_all(self.trampoline_onion.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
@@ -14652,6 +14677,1075 @@ impl molecule::prelude::Builder for PaymentHopDataBuilder {
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
         PaymentHopData::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct TrampolineForwardPayload(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for TrampolineForwardPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for TrampolineForwardPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for TrampolineForwardPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "next_node_id", self.next_node_id())?;
+        write!(f, ", {}: {}", "amount_to_forward", self.amount_to_forward())?;
+        write!(f, ", {}: {}", "hash_algorithm", self.hash_algorithm())?;
+        write!(
+            f,
+            ", {}: {}",
+            "build_max_fee_amount",
+            self.build_max_fee_amount()
+        )?;
+        write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
+        write!(f, ", {}: {}", "tlc_expiry_limit", self.tlc_expiry_limit())?;
+        write!(f, ", {}: {}", "max_parts", self.max_parts())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for TrampolineForwardPayload {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        TrampolineForwardPayload::new_unchecked(v)
+    }
+}
+impl TrampolineForwardPayload {
+    const DEFAULT_VALUE: [u8; 114] = [
+        114, 0, 0, 0, 32, 0, 0, 0, 65, 0, 0, 0, 81, 0, 0, 0, 82, 0, 0, 0, 98, 0, 0, 0, 106, 0, 0,
+        0, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 7;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn next_node_id(&self) -> Pubkey {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Pubkey::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn amount_to_forward(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint128::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn hash_algorithm(&self) -> Byte {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let end = molecule::unpack_number(&slice[16..]) as usize;
+        Byte::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn build_max_fee_amount(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
+        let end = molecule::unpack_number(&slice[20..]) as usize;
+        Uint128::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn tlc_expiry_delta(&self) -> Uint64 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[20..]) as usize;
+        let end = molecule::unpack_number(&slice[24..]) as usize;
+        Uint64::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn tlc_expiry_limit(&self) -> Uint64 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[24..]) as usize;
+        let end = molecule::unpack_number(&slice[28..]) as usize;
+        Uint64::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn max_parts(&self) -> Uint64Opt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[28..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[32..]) as usize;
+            Uint64Opt::new_unchecked(self.0.slice(start..end))
+        } else {
+            Uint64Opt::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> TrampolineForwardPayloadReader<'r> {
+        TrampolineForwardPayloadReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for TrampolineForwardPayload {
+    type Builder = TrampolineForwardPayloadBuilder;
+    const NAME: &'static str = "TrampolineForwardPayload";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        TrampolineForwardPayload(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineForwardPayloadReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineForwardPayloadReader::from_compatible_slice(slice)
+            .map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .next_node_id(self.next_node_id())
+            .amount_to_forward(self.amount_to_forward())
+            .hash_algorithm(self.hash_algorithm())
+            .build_max_fee_amount(self.build_max_fee_amount())
+            .tlc_expiry_delta(self.tlc_expiry_delta())
+            .tlc_expiry_limit(self.tlc_expiry_limit())
+            .max_parts(self.max_parts())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct TrampolineForwardPayloadReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for TrampolineForwardPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for TrampolineForwardPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for TrampolineForwardPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "next_node_id", self.next_node_id())?;
+        write!(f, ", {}: {}", "amount_to_forward", self.amount_to_forward())?;
+        write!(f, ", {}: {}", "hash_algorithm", self.hash_algorithm())?;
+        write!(
+            f,
+            ", {}: {}",
+            "build_max_fee_amount",
+            self.build_max_fee_amount()
+        )?;
+        write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
+        write!(f, ", {}: {}", "tlc_expiry_limit", self.tlc_expiry_limit())?;
+        write!(f, ", {}: {}", "max_parts", self.max_parts())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> TrampolineForwardPayloadReader<'r> {
+    pub const FIELD_COUNT: usize = 7;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn next_node_id(&self) -> PubkeyReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn amount_to_forward(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn hash_algorithm(&self) -> ByteReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let end = molecule::unpack_number(&slice[16..]) as usize;
+        ByteReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn build_max_fee_amount(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
+        let end = molecule::unpack_number(&slice[20..]) as usize;
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn tlc_expiry_delta(&self) -> Uint64Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[20..]) as usize;
+        let end = molecule::unpack_number(&slice[24..]) as usize;
+        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn tlc_expiry_limit(&self) -> Uint64Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[24..]) as usize;
+        let end = molecule::unpack_number(&slice[28..]) as usize;
+        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn max_parts(&self) -> Uint64OptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[28..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[32..]) as usize;
+            Uint64OptReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            Uint64OptReader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for TrampolineForwardPayloadReader<'r> {
+    type Entity = TrampolineForwardPayload;
+    const NAME: &'static str = "TrampolineForwardPayloadReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        TrampolineForwardPayloadReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        PubkeyReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        ByteReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
+        Uint64OptReader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct TrampolineForwardPayloadBuilder {
+    pub(crate) next_node_id: Pubkey,
+    pub(crate) amount_to_forward: Uint128,
+    pub(crate) hash_algorithm: Byte,
+    pub(crate) build_max_fee_amount: Uint128,
+    pub(crate) tlc_expiry_delta: Uint64,
+    pub(crate) tlc_expiry_limit: Uint64,
+    pub(crate) max_parts: Uint64Opt,
+}
+impl TrampolineForwardPayloadBuilder {
+    pub const FIELD_COUNT: usize = 7;
+    pub fn next_node_id(mut self, v: Pubkey) -> Self {
+        self.next_node_id = v;
+        self
+    }
+    pub fn amount_to_forward(mut self, v: Uint128) -> Self {
+        self.amount_to_forward = v;
+        self
+    }
+    pub fn hash_algorithm(mut self, v: Byte) -> Self {
+        self.hash_algorithm = v;
+        self
+    }
+    pub fn build_max_fee_amount(mut self, v: Uint128) -> Self {
+        self.build_max_fee_amount = v;
+        self
+    }
+    pub fn tlc_expiry_delta(mut self, v: Uint64) -> Self {
+        self.tlc_expiry_delta = v;
+        self
+    }
+    pub fn tlc_expiry_limit(mut self, v: Uint64) -> Self {
+        self.tlc_expiry_limit = v;
+        self
+    }
+    pub fn max_parts(mut self, v: Uint64Opt) -> Self {
+        self.max_parts = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for TrampolineForwardPayloadBuilder {
+    type Entity = TrampolineForwardPayload;
+    const NAME: &'static str = "TrampolineForwardPayloadBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.next_node_id.as_slice().len()
+            + self.amount_to_forward.as_slice().len()
+            + self.hash_algorithm.as_slice().len()
+            + self.build_max_fee_amount.as_slice().len()
+            + self.tlc_expiry_delta.as_slice().len()
+            + self.tlc_expiry_limit.as_slice().len()
+            + self.max_parts.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.next_node_id.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.amount_to_forward.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.hash_algorithm.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.build_max_fee_amount.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.tlc_expiry_delta.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.tlc_expiry_limit.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.max_parts.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.next_node_id.as_slice())?;
+        writer.write_all(self.amount_to_forward.as_slice())?;
+        writer.write_all(self.hash_algorithm.as_slice())?;
+        writer.write_all(self.build_max_fee_amount.as_slice())?;
+        writer.write_all(self.tlc_expiry_delta.as_slice())?;
+        writer.write_all(self.tlc_expiry_limit.as_slice())?;
+        writer.write_all(self.max_parts.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        TrampolineForwardPayload::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct TrampolineFinalPayload(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for TrampolineFinalPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for TrampolineFinalPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for TrampolineFinalPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "final_amount", self.final_amount())?;
+        write!(
+            f,
+            ", {}: {}",
+            "final_tlc_expiry_delta",
+            self.final_tlc_expiry_delta()
+        )?;
+        write!(f, ", {}: {}", "payment_preimage", self.payment_preimage())?;
+        write!(f, ", {}: {}", "custom_records", self.custom_records())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for TrampolineFinalPayload {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        TrampolineFinalPayload::new_unchecked(v)
+    }
+}
+impl TrampolineFinalPayload {
+    const DEFAULT_VALUE: [u8; 44] = [
+        44, 0, 0, 0, 20, 0, 0, 0, 36, 0, 0, 0, 44, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 4;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn final_amount(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Uint128::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn final_tlc_expiry_delta(&self) -> Uint64 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint64::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn payment_preimage(&self) -> PaymentPreimageOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let end = molecule::unpack_number(&slice[16..]) as usize;
+        PaymentPreimageOpt::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn custom_records(&self) -> CustomRecordsOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[20..]) as usize;
+            CustomRecordsOpt::new_unchecked(self.0.slice(start..end))
+        } else {
+            CustomRecordsOpt::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> TrampolineFinalPayloadReader<'r> {
+        TrampolineFinalPayloadReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for TrampolineFinalPayload {
+    type Builder = TrampolineFinalPayloadBuilder;
+    const NAME: &'static str = "TrampolineFinalPayload";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        TrampolineFinalPayload(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineFinalPayloadReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineFinalPayloadReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .final_amount(self.final_amount())
+            .final_tlc_expiry_delta(self.final_tlc_expiry_delta())
+            .payment_preimage(self.payment_preimage())
+            .custom_records(self.custom_records())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct TrampolineFinalPayloadReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for TrampolineFinalPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for TrampolineFinalPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for TrampolineFinalPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "final_amount", self.final_amount())?;
+        write!(
+            f,
+            ", {}: {}",
+            "final_tlc_expiry_delta",
+            self.final_tlc_expiry_delta()
+        )?;
+        write!(f, ", {}: {}", "payment_preimage", self.payment_preimage())?;
+        write!(f, ", {}: {}", "custom_records", self.custom_records())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> TrampolineFinalPayloadReader<'r> {
+    pub const FIELD_COUNT: usize = 4;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn final_amount(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn final_tlc_expiry_delta(&self) -> Uint64Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn payment_preimage(&self) -> PaymentPreimageOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let end = molecule::unpack_number(&slice[16..]) as usize;
+        PaymentPreimageOptReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn custom_records(&self) -> CustomRecordsOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[20..]) as usize;
+            CustomRecordsOptReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            CustomRecordsOptReader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for TrampolineFinalPayloadReader<'r> {
+    type Entity = TrampolineFinalPayload;
+    const NAME: &'static str = "TrampolineFinalPayloadReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        TrampolineFinalPayloadReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        Uint128Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        PaymentPreimageOptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        CustomRecordsOptReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct TrampolineFinalPayloadBuilder {
+    pub(crate) final_amount: Uint128,
+    pub(crate) final_tlc_expiry_delta: Uint64,
+    pub(crate) payment_preimage: PaymentPreimageOpt,
+    pub(crate) custom_records: CustomRecordsOpt,
+}
+impl TrampolineFinalPayloadBuilder {
+    pub const FIELD_COUNT: usize = 4;
+    pub fn final_amount(mut self, v: Uint128) -> Self {
+        self.final_amount = v;
+        self
+    }
+    pub fn final_tlc_expiry_delta(mut self, v: Uint64) -> Self {
+        self.final_tlc_expiry_delta = v;
+        self
+    }
+    pub fn payment_preimage(mut self, v: PaymentPreimageOpt) -> Self {
+        self.payment_preimage = v;
+        self
+    }
+    pub fn custom_records(mut self, v: CustomRecordsOpt) -> Self {
+        self.custom_records = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for TrampolineFinalPayloadBuilder {
+    type Entity = TrampolineFinalPayload;
+    const NAME: &'static str = "TrampolineFinalPayloadBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.final_amount.as_slice().len()
+            + self.final_tlc_expiry_delta.as_slice().len()
+            + self.payment_preimage.as_slice().len()
+            + self.custom_records.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.final_amount.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.final_tlc_expiry_delta.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.payment_preimage.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.custom_records.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.final_amount.as_slice())?;
+        writer.write_all(self.final_tlc_expiry_delta.as_slice())?;
+        writer.write_all(self.payment_preimage.as_slice())?;
+        writer.write_all(self.custom_records.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        TrampolineFinalPayload::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct TrampolineHopPayload(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for TrampolineHopPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for TrampolineHopPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for TrampolineHopPayload {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}(", Self::NAME)?;
+        self.to_enum().display_inner(f)?;
+        write!(f, ")")
+    }
+}
+impl ::core::default::Default for TrampolineHopPayload {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        TrampolineHopPayload::new_unchecked(v)
+    }
+}
+impl TrampolineHopPayload {
+    const DEFAULT_VALUE: [u8; 118] = [
+        0, 0, 0, 0, 114, 0, 0, 0, 32, 0, 0, 0, 65, 0, 0, 0, 81, 0, 0, 0, 82, 0, 0, 0, 98, 0, 0, 0,
+        106, 0, 0, 0, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+    ];
+    pub const ITEMS_COUNT: usize = 2;
+    pub fn item_id(&self) -> molecule::Number {
+        molecule::unpack_number(self.as_slice())
+    }
+    pub fn to_enum(&self) -> TrampolineHopPayloadUnion {
+        let inner = self.0.slice(molecule::NUMBER_SIZE..);
+        match self.item_id() {
+            0 => TrampolineForwardPayload::new_unchecked(inner).into(),
+            1 => TrampolineFinalPayload::new_unchecked(inner).into(),
+            _ => panic!("{}: invalid data", Self::NAME),
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> TrampolineHopPayloadReader<'r> {
+        TrampolineHopPayloadReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for TrampolineHopPayload {
+    type Builder = TrampolineHopPayloadBuilder;
+    const NAME: &'static str = "TrampolineHopPayload";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        TrampolineHopPayload(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineHopPayloadReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineHopPayloadReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().set(self.to_enum())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct TrampolineHopPayloadReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for TrampolineHopPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for TrampolineHopPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for TrampolineHopPayloadReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}(", Self::NAME)?;
+        self.to_enum().display_inner(f)?;
+        write!(f, ")")
+    }
+}
+impl<'r> TrampolineHopPayloadReader<'r> {
+    pub const ITEMS_COUNT: usize = 2;
+    pub fn item_id(&self) -> molecule::Number {
+        molecule::unpack_number(self.as_slice())
+    }
+    pub fn to_enum(&self) -> TrampolineHopPayloadUnionReader<'r> {
+        let inner = &self.as_slice()[molecule::NUMBER_SIZE..];
+        match self.item_id() {
+            0 => TrampolineForwardPayloadReader::new_unchecked(inner).into(),
+            1 => TrampolineFinalPayloadReader::new_unchecked(inner).into(),
+            _ => panic!("{}: invalid data", Self::NAME),
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for TrampolineHopPayloadReader<'r> {
+    type Entity = TrampolineHopPayload;
+    const NAME: &'static str = "TrampolineHopPayloadReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        TrampolineHopPayloadReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let item_id = molecule::unpack_number(slice);
+        let inner_slice = &slice[molecule::NUMBER_SIZE..];
+        match item_id {
+            0 => TrampolineForwardPayloadReader::verify(inner_slice, compatible),
+            1 => TrampolineFinalPayloadReader::verify(inner_slice, compatible),
+            _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
+        }?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct TrampolineHopPayloadBuilder(pub(crate) TrampolineHopPayloadUnion);
+impl TrampolineHopPayloadBuilder {
+    pub const ITEMS_COUNT: usize = 2;
+    pub fn set<I>(mut self, v: I) -> Self
+    where
+        I: ::core::convert::Into<TrampolineHopPayloadUnion>,
+    {
+        self.0 = v.into();
+        self
+    }
+}
+impl molecule::prelude::Builder for TrampolineHopPayloadBuilder {
+    type Entity = TrampolineHopPayload;
+    const NAME: &'static str = "TrampolineHopPayloadBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE + self.0.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        writer.write_all(&molecule::pack_number(self.0.item_id()))?;
+        writer.write_all(self.0.as_slice())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        TrampolineHopPayload::new_unchecked(inner.into())
+    }
+}
+#[derive(Debug, Clone)]
+pub enum TrampolineHopPayloadUnion {
+    TrampolineForwardPayload(TrampolineForwardPayload),
+    TrampolineFinalPayload(TrampolineFinalPayload),
+}
+#[derive(Debug, Clone, Copy)]
+pub enum TrampolineHopPayloadUnionReader<'r> {
+    TrampolineForwardPayload(TrampolineForwardPayloadReader<'r>),
+    TrampolineFinalPayload(TrampolineFinalPayloadReader<'r>),
+}
+impl ::core::default::Default for TrampolineHopPayloadUnion {
+    fn default() -> Self {
+        TrampolineHopPayloadUnion::TrampolineForwardPayload(::core::default::Default::default())
+    }
+}
+impl ::core::fmt::Display for TrampolineHopPayloadUnion {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            TrampolineHopPayloadUnion::TrampolineForwardPayload(ref item) => {
+                write!(
+                    f,
+                    "{}::{}({})",
+                    Self::NAME,
+                    TrampolineForwardPayload::NAME,
+                    item
+                )
+            }
+            TrampolineHopPayloadUnion::TrampolineFinalPayload(ref item) => {
+                write!(
+                    f,
+                    "{}::{}({})",
+                    Self::NAME,
+                    TrampolineFinalPayload::NAME,
+                    item
+                )
+            }
+        }
+    }
+}
+impl<'r> ::core::fmt::Display for TrampolineHopPayloadUnionReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            TrampolineHopPayloadUnionReader::TrampolineForwardPayload(ref item) => {
+                write!(
+                    f,
+                    "{}::{}({})",
+                    Self::NAME,
+                    TrampolineForwardPayload::NAME,
+                    item
+                )
+            }
+            TrampolineHopPayloadUnionReader::TrampolineFinalPayload(ref item) => {
+                write!(
+                    f,
+                    "{}::{}({})",
+                    Self::NAME,
+                    TrampolineFinalPayload::NAME,
+                    item
+                )
+            }
+        }
+    }
+}
+impl TrampolineHopPayloadUnion {
+    pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            TrampolineHopPayloadUnion::TrampolineForwardPayload(ref item) => write!(f, "{}", item),
+            TrampolineHopPayloadUnion::TrampolineFinalPayload(ref item) => write!(f, "{}", item),
+        }
+    }
+}
+impl<'r> TrampolineHopPayloadUnionReader<'r> {
+    pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            TrampolineHopPayloadUnionReader::TrampolineForwardPayload(ref item) => {
+                write!(f, "{}", item)
+            }
+            TrampolineHopPayloadUnionReader::TrampolineFinalPayload(ref item) => {
+                write!(f, "{}", item)
+            }
+        }
+    }
+}
+impl ::core::convert::From<TrampolineForwardPayload> for TrampolineHopPayloadUnion {
+    fn from(item: TrampolineForwardPayload) -> Self {
+        TrampolineHopPayloadUnion::TrampolineForwardPayload(item)
+    }
+}
+impl ::core::convert::From<TrampolineFinalPayload> for TrampolineHopPayloadUnion {
+    fn from(item: TrampolineFinalPayload) -> Self {
+        TrampolineHopPayloadUnion::TrampolineFinalPayload(item)
+    }
+}
+impl<'r> ::core::convert::From<TrampolineForwardPayloadReader<'r>>
+    for TrampolineHopPayloadUnionReader<'r>
+{
+    fn from(item: TrampolineForwardPayloadReader<'r>) -> Self {
+        TrampolineHopPayloadUnionReader::TrampolineForwardPayload(item)
+    }
+}
+impl<'r> ::core::convert::From<TrampolineFinalPayloadReader<'r>>
+    for TrampolineHopPayloadUnionReader<'r>
+{
+    fn from(item: TrampolineFinalPayloadReader<'r>) -> Self {
+        TrampolineHopPayloadUnionReader::TrampolineFinalPayload(item)
+    }
+}
+impl TrampolineHopPayloadUnion {
+    pub const NAME: &'static str = "TrampolineHopPayloadUnion";
+    pub fn as_bytes(&self) -> molecule::bytes::Bytes {
+        match self {
+            TrampolineHopPayloadUnion::TrampolineForwardPayload(item) => item.as_bytes(),
+            TrampolineHopPayloadUnion::TrampolineFinalPayload(item) => item.as_bytes(),
+        }
+    }
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            TrampolineHopPayloadUnion::TrampolineForwardPayload(item) => item.as_slice(),
+            TrampolineHopPayloadUnion::TrampolineFinalPayload(item) => item.as_slice(),
+        }
+    }
+    pub fn item_id(&self) -> molecule::Number {
+        match self {
+            TrampolineHopPayloadUnion::TrampolineForwardPayload(_) => 0,
+            TrampolineHopPayloadUnion::TrampolineFinalPayload(_) => 1,
+        }
+    }
+    pub fn item_name(&self) -> &str {
+        match self {
+            TrampolineHopPayloadUnion::TrampolineForwardPayload(_) => "TrampolineForwardPayload",
+            TrampolineHopPayloadUnion::TrampolineFinalPayload(_) => "TrampolineFinalPayload",
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> TrampolineHopPayloadUnionReader<'r> {
+        match self {
+            TrampolineHopPayloadUnion::TrampolineForwardPayload(item) => item.as_reader().into(),
+            TrampolineHopPayloadUnion::TrampolineFinalPayload(item) => item.as_reader().into(),
+        }
+    }
+}
+impl<'r> TrampolineHopPayloadUnionReader<'r> {
+    pub const NAME: &'r str = "TrampolineHopPayloadUnionReader";
+    pub fn as_slice(&self) -> &'r [u8] {
+        match self {
+            TrampolineHopPayloadUnionReader::TrampolineForwardPayload(item) => item.as_slice(),
+            TrampolineHopPayloadUnionReader::TrampolineFinalPayload(item) => item.as_slice(),
+        }
+    }
+    pub fn item_id(&self) -> molecule::Number {
+        match self {
+            TrampolineHopPayloadUnionReader::TrampolineForwardPayload(_) => 0,
+            TrampolineHopPayloadUnionReader::TrampolineFinalPayload(_) => 1,
+        }
+    }
+    pub fn item_name(&self) -> &str {
+        match self {
+            TrampolineHopPayloadUnionReader::TrampolineForwardPayload(_) => {
+                "TrampolineForwardPayload"
+            }
+            TrampolineHopPayloadUnionReader::TrampolineFinalPayload(_) => "TrampolineFinalPayload",
+        }
+    }
+}
+impl From<TrampolineForwardPayload> for TrampolineHopPayload {
+    fn from(value: TrampolineForwardPayload) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<TrampolineFinalPayload> for TrampolineHopPayload {
+    fn from(value: TrampolineFinalPayload) -> Self {
+        Self::new_builder().set(value).build()
     }
 }
 #[derive(Clone)]
@@ -15651,6 +16745,279 @@ impl molecule::prelude::Builder for NodeFailedBuilder {
     }
 }
 #[derive(Clone)]
+pub struct TrampolineFailed(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for TrampolineFailed {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for TrampolineFailed {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for TrampolineFailed {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "node_id", self.node_id())?;
+        write!(
+            f,
+            ", {}: {}",
+            "inner_error_packet",
+            self.inner_error_packet()
+        )?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for TrampolineFailed {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        TrampolineFailed::new_unchecked(v)
+    }
+}
+impl TrampolineFailed {
+    const DEFAULT_VALUE: [u8; 49] = [
+        49, 0, 0, 0, 12, 0, 0, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn node_id(&self) -> Pubkey {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Pubkey::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn inner_error_packet(&self) -> Bytes {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Bytes::new_unchecked(self.0.slice(start..end))
+        } else {
+            Bytes::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> TrampolineFailedReader<'r> {
+        TrampolineFailedReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for TrampolineFailed {
+    type Builder = TrampolineFailedBuilder;
+    const NAME: &'static str = "TrampolineFailed";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        TrampolineFailed(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineFailedReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineFailedReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .node_id(self.node_id())
+            .inner_error_packet(self.inner_error_packet())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct TrampolineFailedReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for TrampolineFailedReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for TrampolineFailedReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for TrampolineFailedReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "node_id", self.node_id())?;
+        write!(
+            f,
+            ", {}: {}",
+            "inner_error_packet",
+            self.inner_error_packet()
+        )?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> TrampolineFailedReader<'r> {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn node_id(&self) -> PubkeyReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn inner_error_packet(&self) -> BytesReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            BytesReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            BytesReader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for TrampolineFailedReader<'r> {
+    type Entity = TrampolineFailed;
+    const NAME: &'static str = "TrampolineFailedReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        TrampolineFailedReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        PubkeyReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        BytesReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct TrampolineFailedBuilder {
+    pub(crate) node_id: Pubkey,
+    pub(crate) inner_error_packet: Bytes,
+}
+impl TrampolineFailedBuilder {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn node_id(mut self, v: Pubkey) -> Self {
+        self.node_id = v;
+        self
+    }
+    pub fn inner_error_packet(mut self, v: Bytes) -> Self {
+        self.inner_error_packet = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for TrampolineFailedBuilder {
+    type Entity = TrampolineFailed;
+    const NAME: &'static str = "TrampolineFailedBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.node_id.as_slice().len()
+            + self.inner_error_packet.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.node_id.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.inner_error_packet.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.node_id.as_slice())?;
+        writer.write_all(self.inner_error_packet.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        TrampolineFailed::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct TlcErrData(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for TlcErrData {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -15685,7 +17052,7 @@ impl TlcErrData {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const ITEMS_COUNT: usize = 2;
+    pub const ITEMS_COUNT: usize = 3;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -15694,6 +17061,7 @@ impl TlcErrData {
         match self.item_id() {
             0 => ChannelFailed::new_unchecked(inner).into(),
             1 => NodeFailed::new_unchecked(inner).into(),
+            2 => TrampolineFailed::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -15750,7 +17118,7 @@ impl<'r> ::core::fmt::Display for TlcErrDataReader<'r> {
     }
 }
 impl<'r> TlcErrDataReader<'r> {
-    pub const ITEMS_COUNT: usize = 2;
+    pub const ITEMS_COUNT: usize = 3;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -15759,6 +17127,7 @@ impl<'r> TlcErrDataReader<'r> {
         match self.item_id() {
             0 => ChannelFailedReader::new_unchecked(inner).into(),
             1 => NodeFailedReader::new_unchecked(inner).into(),
+            2 => TrampolineFailedReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -15786,6 +17155,7 @@ impl<'r> molecule::prelude::Reader<'r> for TlcErrDataReader<'r> {
         match item_id {
             0 => ChannelFailedReader::verify(inner_slice, compatible),
             1 => NodeFailedReader::verify(inner_slice, compatible),
+            2 => TrampolineFailedReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -15794,7 +17164,7 @@ impl<'r> molecule::prelude::Reader<'r> for TlcErrDataReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct TlcErrDataBuilder(pub(crate) TlcErrDataUnion);
 impl TlcErrDataBuilder {
-    pub const ITEMS_COUNT: usize = 2;
+    pub const ITEMS_COUNT: usize = 3;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<TlcErrDataUnion>,
@@ -15824,11 +17194,13 @@ impl molecule::prelude::Builder for TlcErrDataBuilder {
 pub enum TlcErrDataUnion {
     ChannelFailed(ChannelFailed),
     NodeFailed(NodeFailed),
+    TrampolineFailed(TrampolineFailed),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum TlcErrDataUnionReader<'r> {
     ChannelFailed(ChannelFailedReader<'r>),
     NodeFailed(NodeFailedReader<'r>),
+    TrampolineFailed(TrampolineFailedReader<'r>),
 }
 impl ::core::default::Default for TlcErrDataUnion {
     fn default() -> Self {
@@ -15844,6 +17216,9 @@ impl ::core::fmt::Display for TlcErrDataUnion {
             TlcErrDataUnion::NodeFailed(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, NodeFailed::NAME, item)
             }
+            TlcErrDataUnion::TrampolineFailed(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, TrampolineFailed::NAME, item)
+            }
         }
     }
 }
@@ -15856,6 +17231,9 @@ impl<'r> ::core::fmt::Display for TlcErrDataUnionReader<'r> {
             TlcErrDataUnionReader::NodeFailed(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, NodeFailed::NAME, item)
             }
+            TlcErrDataUnionReader::TrampolineFailed(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, TrampolineFailed::NAME, item)
+            }
         }
     }
 }
@@ -15864,6 +17242,7 @@ impl TlcErrDataUnion {
         match self {
             TlcErrDataUnion::ChannelFailed(ref item) => write!(f, "{}", item),
             TlcErrDataUnion::NodeFailed(ref item) => write!(f, "{}", item),
+            TlcErrDataUnion::TrampolineFailed(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -15872,6 +17251,7 @@ impl<'r> TlcErrDataUnionReader<'r> {
         match self {
             TlcErrDataUnionReader::ChannelFailed(ref item) => write!(f, "{}", item),
             TlcErrDataUnionReader::NodeFailed(ref item) => write!(f, "{}", item),
+            TlcErrDataUnionReader::TrampolineFailed(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -15885,6 +17265,11 @@ impl ::core::convert::From<NodeFailed> for TlcErrDataUnion {
         TlcErrDataUnion::NodeFailed(item)
     }
 }
+impl ::core::convert::From<TrampolineFailed> for TlcErrDataUnion {
+    fn from(item: TrampolineFailed) -> Self {
+        TlcErrDataUnion::TrampolineFailed(item)
+    }
+}
 impl<'r> ::core::convert::From<ChannelFailedReader<'r>> for TlcErrDataUnionReader<'r> {
     fn from(item: ChannelFailedReader<'r>) -> Self {
         TlcErrDataUnionReader::ChannelFailed(item)
@@ -15895,36 +17280,46 @@ impl<'r> ::core::convert::From<NodeFailedReader<'r>> for TlcErrDataUnionReader<'
         TlcErrDataUnionReader::NodeFailed(item)
     }
 }
+impl<'r> ::core::convert::From<TrampolineFailedReader<'r>> for TlcErrDataUnionReader<'r> {
+    fn from(item: TrampolineFailedReader<'r>) -> Self {
+        TlcErrDataUnionReader::TrampolineFailed(item)
+    }
+}
 impl TlcErrDataUnion {
     pub const NAME: &'static str = "TlcErrDataUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
         match self {
             TlcErrDataUnion::ChannelFailed(item) => item.as_bytes(),
             TlcErrDataUnion::NodeFailed(item) => item.as_bytes(),
+            TlcErrDataUnion::TrampolineFailed(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
         match self {
             TlcErrDataUnion::ChannelFailed(item) => item.as_slice(),
             TlcErrDataUnion::NodeFailed(item) => item.as_slice(),
+            TlcErrDataUnion::TrampolineFailed(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
             TlcErrDataUnion::ChannelFailed(_) => 0,
             TlcErrDataUnion::NodeFailed(_) => 1,
+            TlcErrDataUnion::TrampolineFailed(_) => 2,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             TlcErrDataUnion::ChannelFailed(_) => "ChannelFailed",
             TlcErrDataUnion::NodeFailed(_) => "NodeFailed",
+            TlcErrDataUnion::TrampolineFailed(_) => "TrampolineFailed",
         }
     }
     pub fn as_reader<'r>(&'r self) -> TlcErrDataUnionReader<'r> {
         match self {
             TlcErrDataUnion::ChannelFailed(item) => item.as_reader().into(),
             TlcErrDataUnion::NodeFailed(item) => item.as_reader().into(),
+            TlcErrDataUnion::TrampolineFailed(item) => item.as_reader().into(),
         }
     }
 }
@@ -15934,18 +17329,21 @@ impl<'r> TlcErrDataUnionReader<'r> {
         match self {
             TlcErrDataUnionReader::ChannelFailed(item) => item.as_slice(),
             TlcErrDataUnionReader::NodeFailed(item) => item.as_slice(),
+            TlcErrDataUnionReader::TrampolineFailed(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
             TlcErrDataUnionReader::ChannelFailed(_) => 0,
             TlcErrDataUnionReader::NodeFailed(_) => 1,
+            TlcErrDataUnionReader::TrampolineFailed(_) => 2,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             TlcErrDataUnionReader::ChannelFailed(_) => "ChannelFailed",
             TlcErrDataUnionReader::NodeFailed(_) => "NodeFailed",
+            TlcErrDataUnionReader::TrampolineFailed(_) => "TrampolineFailed",
         }
     }
 }
@@ -15956,6 +17354,11 @@ impl From<ChannelFailed> for TlcErrData {
 }
 impl From<NodeFailed> for TlcErrData {
     fn from(value: NodeFailed) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<TrampolineFailed> for TlcErrData {
+    fn from(value: TrampolineFailed) -> Self {
         Self::new_builder().set(value).build()
     }
 }

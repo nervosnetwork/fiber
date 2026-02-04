@@ -95,6 +95,7 @@ async fn test_open_channel_to_peer() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -135,6 +136,7 @@ async fn test_open_and_accept_channel() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -967,19 +969,12 @@ async fn test_network_send_previous_tlc_error() {
             amount: 2,
             expiry: 3,
             next_hop: Some(keys[0].pubkey()),
-            funding_tx_hash: Hash256::default(),
-            hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 8,
             expiry: 9,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
-            hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
@@ -1008,6 +1003,7 @@ async fn test_network_send_previous_tlc_error() {
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1069,19 +1065,12 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
             amount: 300000000,
             expiry: 3,
             next_hop: Some(keys[0].pubkey()),
-            funding_tx_hash: Hash256::default(),
-            hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 300300000,
             expiry: 9,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
-            hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
     let generated_payment_hash = gen_rand_sha256_hash();
@@ -1110,6 +1099,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1479,7 +1469,12 @@ async fn test_send_payment_with_3_nodes_overflow() {
 
     let sent_amount = 0xfffffffffffffffffffffffffffffff;
     let res = node_a
-        .send_payment_keysend(&node_c, sent_amount, false)
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_c.pubkey),
+            amount: Some(sent_amount),
+            keysend: Some(true),
+            ..Default::default()
+        })
         .await;
     assert!(res.is_err());
     assert!(res
@@ -1764,6 +1759,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: node_a_funding_amount,
                 funding_udt_type_script: None,
@@ -1860,6 +1856,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1980,6 +1977,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2033,6 +2031,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2116,6 +2115,7 @@ async fn do_test_channel_remote_commitment_error() {
                             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
+                            is_trampoline_hop: false,
                             previous_tlc: None,
                         },
                         rpc_reply,
@@ -2204,6 +2204,7 @@ async fn do_test_channel_add_tlc_amount_invalid() {
                             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
+                            is_trampoline_hop: false,
                             previous_tlc: None,
                         },
                         rpc_reply,
@@ -2279,6 +2280,7 @@ async fn test_network_add_tlc_amount_overflow_error() {
                             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
+                            is_trampoline_hop: false,
                             previous_tlc: None,
                             attempt_id: None,
                         },
@@ -2326,6 +2328,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2353,6 +2356,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2384,6 +2388,7 @@ async fn test_network_add_two_tlcs_remove_one() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2518,6 +2523,7 @@ async fn test_remove_tlc_with_expiry_error() {
         expiry: now_timestamp_as_millis_u64() + 10,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
     };
 
@@ -2541,6 +2547,7 @@ async fn test_remove_tlc_with_expiry_error() {
         expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA - 1000,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
         attempt_id: None,
     };
@@ -2565,6 +2572,7 @@ async fn test_remove_tlc_with_expiry_error() {
         expiry: now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 200,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
         attempt_id: None,
     };
@@ -2592,6 +2600,7 @@ async fn test_remove_tlc_with_expiry_error() {
         expiry: now_timestamp_as_millis_u64() + MAX_PAYMENT_TLC_EXPIRY_LIMIT + 20 * 1000,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
     };
 
@@ -2666,6 +2675,7 @@ async fn test_remove_expired_tlc_in_background() {
         expiry: a_valid_but_small_expiry,
         onion_packet: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
         previous_tlc: None,
         attempt_id: None,
     };
@@ -2724,6 +2734,7 @@ async fn do_test_add_tlc_duplicated() {
             attempt_id: None,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2766,6 +2777,7 @@ async fn do_test_add_tlc_waiting_ack() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2800,6 +2812,7 @@ async fn do_test_add_tlc_waiting_ack() {
             onion_packet: None,
             previous_tlc: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2811,7 +2824,6 @@ async fn do_test_add_tlc_waiting_ack() {
         })
         .expect("node_b alive");
         if i == 2 {
-            // we are sending AddTlc constantly, so we should get a WaitingTlcAck
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result.unwrap_err();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
@@ -2854,6 +2866,7 @@ async fn do_test_add_tlc_with_number_limit() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2886,6 +2899,7 @@ async fn do_test_add_tlc_with_number_limit() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -2935,6 +2949,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -2967,6 +2982,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3017,6 +3033,7 @@ async fn do_test_add_tlc_value_limit() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -3049,6 +3066,7 @@ async fn do_test_add_tlc_value_limit() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
@@ -3097,6 +3115,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3122,6 +3141,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3147,6 +3167,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3448,6 +3469,7 @@ async fn test_forward_payment_tlc_minimum_value() {
         onion_packet: None,
         previous_tlc: None,
         shared_secret: NO_SHARED_SECRET,
+        is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3583,6 +3605,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -3700,6 +3723,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: true,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 0xfffffffffffffffffffffffffffffff,
                 funding_udt_type_script: None,
@@ -3733,6 +3757,7 @@ async fn test_revoke_old_commitment_transaction() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -3934,6 +3959,7 @@ async fn test_create_channel() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -4063,6 +4089,7 @@ async fn test_reestablish_channel() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -4254,6 +4281,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -4488,6 +4516,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -4565,6 +4594,8 @@ async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
+
                 shutdown_script: Some(Script::new_builder().args([0u8; 60].pack()).build()),
                 funding_amount: (101 + 1) * 100000000 - 1,
                 funding_udt_type_script: None,
@@ -4613,6 +4644,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: Some(Script::new_builder().args([0u8; 40].pack()).build()),
                 funding_amount: (81 + 1 + 90) * 100000000,
                 funding_udt_type_script: None,
@@ -5777,6 +5809,8 @@ async fn test_abandon_failed_channel_without_accept() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
+
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -5823,6 +5857,7 @@ async fn test_open_channel_with_invalid_commitment_delay() {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     public: false,
+                    one_way: false,
                     shutdown_script: None,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
@@ -5874,6 +5909,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -5903,6 +5939,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -5932,6 +5969,7 @@ async fn test_abandon_channel_with_peer_accept() {
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
@@ -6095,6 +6133,7 @@ async fn test_funding_timeout() {
             OpenChannelCommand {
                 peer_id: nodes[1].peer_id.clone(),
                 public: false,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount,
                 funding_udt_type_script: None,
@@ -6153,6 +6192,7 @@ async fn test_auto_accept_fails_debug_event() {
                 tlc_fee_proportional_millionths: None,
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
+                one_way: false,
             },
             rpc_reply,
         ))
@@ -6232,6 +6272,7 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: true,
+                one_way: false,
                 shutdown_script: None,
                 funding_amount: 200 * 100000000, // 200 CKB
                 funding_udt_type_script: None,

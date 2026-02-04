@@ -11,7 +11,7 @@ use crate::fiber::{
     graph::*,
     history::Direction,
     history::TimedResult,
-    payment::{PaymentSession, PaymentStatus, SendPaymentData},
+    payment::{PaymentSession, PaymentStatus, SendPaymentData, SendPaymentDataBuilder},
     types::{Privkey, Pubkey},
 };
 use crate::gen_rand_fiber_private_key;
@@ -512,6 +512,7 @@ fn test_channel_actor_state_store() {
         funding_tx: Some(Transaction::default()),
         funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
         is_acceptor: true,
+        is_one_way: false,
         funding_udt_type_script: Some(Script::default()),
         to_local_amount: 100,
         to_remote_amount: 100,
@@ -634,6 +635,7 @@ fn test_serde_channel_actor_state_ciborium() {
         funding_tx: Some(Transaction::default()),
         funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
         is_acceptor: true,
+        is_one_way: false,
         funding_udt_type_script: Some(Script::default()),
         to_local_amount: 100,
         to_remote_amount: 100,
@@ -694,27 +696,13 @@ fn test_serde_channel_actor_state_ciborium() {
 fn test_store_payment_session() {
     let (store, _dir) = generate_store();
     let payment_hash = gen_rand_sha256_hash();
-    let payment_data = SendPaymentData {
-        target_pubkey: gen_rand_fiber_public_key(),
-        amount: 100,
-        payment_hash,
-        invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
-        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-        timeout: Some(10),
-        max_fee_amount: Some(1000),
-        max_parts: None,
-        keysend: false,
-        udt_type_script: None,
-        preimage: None,
-        allow_self_payment: false,
-        hop_hints: vec![],
-        dry_run: false,
-        custom_records: None,
-        router: vec![],
-        allow_mpp: false,
-        channel_stats: Default::default(),
-    };
+    let payment_data = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, payment_hash)
+        .final_tlc_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .timeout(Some(10))
+        .max_fee_amount(Some(1000))
+        .build()
+        .expect("valid payment_data");
     let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
@@ -728,52 +716,24 @@ fn test_store_payment_session() {
 fn test_store_payment_sessions_with_status() {
     let (store, _dir) = generate_store();
     let payment_hash0 = gen_rand_sha256_hash();
-    let payment_data = SendPaymentData {
-        target_pubkey: gen_rand_fiber_public_key(),
-        amount: 100,
-        payment_hash: payment_hash0,
-        invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
-        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-        timeout: Some(10),
-        max_fee_amount: Some(1000),
-        max_parts: None,
-        keysend: false,
-        udt_type_script: None,
-        preimage: None,
-        allow_self_payment: false,
-        hop_hints: vec![],
-        dry_run: false,
-        custom_records: None,
-        router: vec![],
-        allow_mpp: false,
-        channel_stats: Default::default(),
-    };
+    let payment_data = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, payment_hash0)
+        .final_tlc_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .timeout(Some(10))
+        .max_fee_amount(Some(1000))
+        .build()
+        .expect("valid payment_data");
     let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
 
     let payment_hash1 = gen_rand_sha256_hash();
-    let payment_data = SendPaymentData {
-        target_pubkey: gen_rand_fiber_public_key(),
-        amount: 100,
-        payment_hash: payment_hash1,
-        invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
-        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-        timeout: Some(10),
-        max_fee_amount: Some(1000),
-        max_parts: None,
-        keysend: false,
-        udt_type_script: None,
-        preimage: None,
-        allow_self_payment: false,
-        hop_hints: vec![],
-        dry_run: false,
-        custom_records: None,
-        router: vec![],
-        allow_mpp: false,
-        channel_stats: Default::default(),
-    };
+    let payment_data = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, payment_hash1)
+        .final_tlc_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .timeout(Some(10))
+        .max_fee_amount(Some(1000))
+        .build()
+        .expect("valid payment_data");
     let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
     payment_session.set_success_status();
     store.insert_payment_session(payment_session.clone());

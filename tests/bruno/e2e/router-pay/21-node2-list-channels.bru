@@ -46,8 +46,7 @@ script:post-response {
   const channel = res.body.result.channels[0];
   if (channel.remote_balance != "0x997" || channel.local_balance != "0x37785d3ec369") {
     throw new Error(`Assertion failed: channel amount is not right.
-      Expected remote: 0x997, got: ${channel.remote_balance}.
-      Expected local: 0x37785d3ec369, got: ${channel.local_balance}.
-      Pending HTLCs: ${JSON.stringify(channel.pending_htlcs)}`);
+      Expected remote: 0x997, got: ${channel.remote_balance}
+      Expected local: 0x37785d3ec369, got: ${channel.local_balance}`);
   }
 }

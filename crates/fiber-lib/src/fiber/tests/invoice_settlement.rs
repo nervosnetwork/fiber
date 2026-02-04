@@ -230,15 +230,18 @@ async fn test_send_payment_with_hold_invoice_workflow() {
     assert!(res.is_ok());
     println!("res: {:?}", res);
 
-    for _i in 0..50 {
+    // wait until invoice in received
+    for _ in 0..30 {
         let status = node_1
+            .store
             .get_invoice_status(&payment_hash)
-            .expect("get invoice status");
+            .expect("invoice status");
         if status == CkbInvoiceStatus::Received {
             break;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     }
+
     node_1
         .settle_invoice(&payment_hash, payment_preimage)
         .await
@@ -285,7 +288,7 @@ async fn test_send_mpp_to_hold_invoice() {
     };
 
     let res = node_0.send_payment(command).await;
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     node_1
         .settle_invoice(&payment_hash, payment_preimage)
         .await

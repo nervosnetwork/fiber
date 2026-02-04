@@ -255,7 +255,7 @@ pub struct NetworkNode {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub chain_client: MockCkbChainClient,
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
-    pub gossip_actor: ActorRef<GossipActorMessage>,
+    pub gossip_actor: Option<ActorRef<GossipActorMessage>>,
     pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
@@ -399,6 +399,7 @@ impl NetworkNodeConfigBuilder {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ChannelParameters {
     pub public: bool,
+    pub one_way: bool,
     pub node_a_funding_amount: u128,
     pub node_b_funding_amount: u128,
     pub a_max_tlc_number_in_flight: Option<u64>,
@@ -418,6 +419,7 @@ impl ChannelParameters {
     pub fn new(node_a_funding_amount: u128, node_b_funding_amount: u128) -> Self {
         Self {
             public: true,
+            one_way: false,
             node_a_funding_amount,
             node_b_funding_amount,
             ..Default::default()
@@ -435,6 +437,7 @@ pub(crate) async fn create_channel_with_nodes(
             OpenChannelCommand {
                 peer_id: node_b.peer_id.clone(),
                 public: params.public,
+                one_way: params.one_way,
                 shutdown_script: None,
                 funding_amount: params.node_a_funding_amount,
                 funding_udt_type_script: params.funding_udt_type_script,
@@ -632,7 +635,8 @@ pub(crate) async fn create_n_nodes_network_with_params(
         }
         debug!("finished add channel idx: {:?}", idx);
     }
-    wait_for_network_graph_update(&nodes[0], amounts.len()).await;
+    let expected_graph_channels = amounts.iter().filter(|(_, p)| p.public).count();
+    wait_for_network_graph_update(&nodes[0], expected_graph_channels).await;
     (nodes, channels)
 }
 
@@ -646,6 +650,32 @@ pub async fn create_n_nodes_network(
         .map(|((i, j), (a, b))| ((*i, *j), ChannelParameters::new(*a, *b)))
         .collect::<Vec<_>>();
     create_n_nodes_network_with_params(&amounts, n, None).await
+}
+
+/// Like `create_n_nodes_network`, but allows specifying whether each channel is public.
+///
+/// Each entry is `((i, j), (a_funding, b_funding), public)`.
+#[allow(clippy::type_complexity)]
+pub async fn create_n_nodes_network_with_visibility(
+    channels: &[((usize, usize), (u128, u128), bool)],
+    n: usize,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    let channels = channels
+        .iter()
+        .map(|((i, j), (a, b), public)| {
+            (
+                (*i, *j),
+                ChannelParameters {
+                    public: *public,
+                    one_way: false,
+                    node_a_funding_amount: *a,
+                    node_b_funding_amount: *b,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    create_n_nodes_network_with_params(&channels, n, None).await
 }
 
 impl NetworkNode {
@@ -707,6 +737,22 @@ impl NetworkNode {
         self.store
             .insert_invoice(invoice, preimage)
             .expect("insert success");
+    }
+
+    pub fn build_basic_invoice(&self, amount: u128, preimage: Hash256) -> CkbInvoice {
+        InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(self.get_public_key().into())
+            .build()
+            .expect("build invoice")
+    }
+
+    pub fn gen_basic_invoice(&self, amount: u128) -> (CkbInvoice, Hash256) {
+        let preimage = gen_rand_sha256_hash();
+        let invoice = self.build_basic_invoice(amount, preimage);
+        self.insert_invoice(invoice.clone(), Some(preimage));
+        (invoice, preimage)
     }
 
     pub fn get_invoice_status(&self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
@@ -822,6 +868,12 @@ impl NetworkNode {
         let res = res.unwrap();
         self.wait_until_success(res.payment_hash).await;
         res
+    }
+
+    pub async fn assert_send_payment_failure(&self, command: SendPaymentCommand) -> String {
+        let res = self.send_payment(command).await;
+        assert!(res.is_err());
+        res.err().unwrap()
     }
 
     pub async fn send_payment_with_router(
@@ -1343,6 +1395,18 @@ impl NetworkNode {
             .expect("network actor is live");
     }
 
+    pub async fn update_node_features_and_wait(&self, features: FeatureVector) {
+        self.update_node_features(features.clone()).await;
+        for _ in 0..50 {
+            let info = self.node_info().await;
+            if info.features == features {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        panic!("node features update did not apply in time");
+    }
+
     pub async fn retry_send_payment(&self, payment_hash: Hash256, attempt_id: Option<u64>) {
         let message = NetworkActorMessage::Event(NetworkActorEvent::RetrySendPayment(
             payment_hash,
@@ -1516,9 +1580,8 @@ impl NetworkNode {
             base_dir.as_ref()
         );
 
-        let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
-            .expect("gossip actor should have been started")
-            .into();
+        let gossip_actor =
+            ractor::registry::where_is(get_gossip_actor_name(&peer_id)).map(Into::into);
         #[cfg(not(target_arch = "wasm32"))]
         let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
@@ -1887,6 +1950,8 @@ impl NetworkNode {
 
     pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
         self.gossip_actor
+            .as_ref()
+            .expect("gossip actor should have been started")
             .send_message(message)
             .expect("send message to gossip actor");
     }
@@ -1954,6 +2019,40 @@ pub async fn wait_until<F: Fn() -> bool>(f: F) {
     wait_until_timeout(MAX_WAIT_TIME, f).await;
 }
 
+pub async fn wait_until_async_timeout<F, Fut>(mut f: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = tokio::time::Instant::now();
+    let interval = Duration::from_millis(200);
+    let max_wait_time = Duration::from_secs(10);
+    loop {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(interval).await;
+        if start.elapsed() > max_wait_time {
+            panic!(
+                "Wait timeout after {:?} (interval {:?})",
+                max_wait_time, interval
+            );
+        }
+    }
+}
+
+pub async fn wait_until_node_supports_trampoline_routing(node: &NetworkNode, target: &NetworkNode) {
+    let target = target.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_nodes()
+            .await
+            .into_iter()
+            .find(|n| n.node_id == target)
+            .is_some_and(|n| n.features.supports_trampoline_routing())
+    })
+    .await;
+}
+
 pub async fn wait_for_tlc_sync(
     sender: &NetworkNode,
     receiver: &NetworkNode,
@@ -1969,6 +2068,131 @@ pub async fn wait_for_tlc_sync(
             && receiver_state.tlc_state.received_tlcs.tlcs.len() == expected_offered
     })
     .await;
+}
+
+pub async fn wait_until_graph_channel_has_update(
+    node: &NetworkNode,
+    node1: &NetworkNode,
+    node2: &NetworkNode,
+) {
+    let node1 = node1.get_public_key();
+    let node2 = node2.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_graph_channels()
+            .await
+            .into_iter()
+            .any(|c| {
+                let is_pair = (c.node1 == node1 && c.node2 == node2)
+                    || (c.node1 == node2 && c.node2 == node1);
+                is_pair && (c.update_of_node1.is_some() || c.update_of_node2.is_some())
+            })
+    })
+    .await;
+}
+
+pub async fn wait_until_graph_channel_has_update_for_direction(
+    node: &NetworkNode,
+    from: &NetworkNode,
+    to: &NetworkNode,
+) {
+    let from = from.get_public_key();
+    let to = to.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_graph_channels()
+            .await
+            .into_iter()
+            .any(|c| {
+                if c.node1 == from && c.node2 == to {
+                    c.update_of_node1.is_some()
+                } else if c.node2 == from && c.node1 == to {
+                    c.update_of_node2.is_some()
+                } else {
+                    false
+                }
+            })
+    })
+    .await;
+}
+
+pub async fn wait_until_graph_channel_has_updates(
+    node: &NetworkNode,
+    edges: &[(&NetworkNode, &NetworkNode)],
+) {
+    for (node1, node2) in edges {
+        wait_until_graph_channel_has_update(node, node1, node2).await;
+    }
+}
+
+pub async fn wait_until_graph_channel_updates_along_path(
+    node: &NetworkNode,
+    path: &[&NetworkNode],
+) {
+    assert!(
+        path.len() >= 2,
+        "path must include at least 2 nodes (got {})",
+        path.len()
+    );
+
+    for window in path.windows(2) {
+        wait_until_graph_channel_has_update(node, window[0], window[1]).await;
+    }
+}
+
+pub async fn wait_until_graph_channel_updates_along_directed_path(
+    node: &NetworkNode,
+    path: &[&NetworkNode],
+) {
+    assert!(
+        path.len() >= 2,
+        "path must include at least 2 nodes (got {})",
+        path.len()
+    );
+
+    for window in path.windows(2) {
+        wait_until_graph_channel_has_update_for_direction(node, window[0], window[1]).await;
+    }
+}
+
+pub async fn wait_until_node_has_public_channels_at_least(node: &NetworkNode, channels: usize) {
+    wait_until_async_timeout(|| async { node.get_network_channels().await.len() >= channels })
+        .await;
+}
+
+/// Helper function to capture all nodes' balances across all channels
+/// Returns 0 for channels that don't exist on a particular node
+pub fn capture_balances(
+    nodes: &[&NetworkNode],
+    channels: &[crate::fiber::types::Hash256],
+) -> Vec<Vec<u128>> {
+    nodes
+        .iter()
+        .map(|node| {
+            channels
+                .iter()
+                .map(|channel| {
+                    node.store
+                        .get_channel_actor_state(channel)
+                        .map(|state| state.to_local_amount)
+                        .unwrap_or(0)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Helper function to calculate balance changes
+pub fn calculate_balance_changes(before: &[Vec<u128>], after: &[Vec<u128>]) -> Vec<Vec<i128>> {
+    before
+        .iter()
+        .zip(after.iter())
+        .map(|(before_node, after_node)| {
+            before_node
+                .iter()
+                .zip(after_node.iter())
+                .map(|(b, a)| *a as i128 - *b as i128)
+                .collect()
+        })
+        .collect()
 }
 
 #[tokio::test]

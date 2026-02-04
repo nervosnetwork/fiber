@@ -8,8 +8,8 @@ use crate::{
         types::{
             pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BasicMppPaymentData,
             BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId, PaymentHopData,
-            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
-            NO_SHARED_SECRET,
+            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrData, TlcErrPacket,
+            TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket, NO_SHARED_SECRET,
         },
         PaymentCustomRecords,
     },
@@ -188,28 +188,21 @@ fn test_peeled_onion_packet() {
             amount: 2,
             expiry: 3,
             next_hop: Some(keys[1].pubkey()),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 5,
             expiry: 6,
             next_hop: Some(keys[2].pubkey()),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 8,
             expiry: 9,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
     let packet = PeeledPaymentOnionPacket::create(
@@ -260,20 +253,15 @@ fn test_peeled_large_onion_packet() {
                 amount: 2,
                 expiry: 3,
                 next_hop: Some(key.pubkey()),
-                funding_tx_hash: Hash256::default(),
                 hash_algorithm: HashAlgorithm::Sha256,
-                payment_preimage: None,
-                custom_records: None,
+                ..Default::default()
             });
         }
         hops_infos.push(PaymentHopData {
             amount: 8,
             expiry: 9,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         });
 
         let packet = PeeledPaymentOnionPacket::create(
@@ -310,11 +298,199 @@ fn test_peeled_large_onion_packet() {
     }
 
     // default PACKET_DATA_LEN is 6500
-    build_onion_packet(40).expect("build onion packet with 40 hops");
-    let res = build_onion_packet(41);
+    build_onion_packet(39).expect("build onion packet with 39 hops");
+    let res = build_onion_packet(40);
     assert!(
         res.is_err(),
-        "should fail to build onion packet with 41 hops"
+        "should fail to build onion packet with 40 hops"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_onion_packet_multi_hop_peel() {
+    let secp = Secp256k1::new();
+
+    let t1 = gen_rand_fiber_private_key();
+    let t2 = gen_rand_fiber_private_key();
+    let final_node = gen_rand_fiber_private_key();
+    let session_key = gen_rand_fiber_private_key();
+
+    let payloads = vec![
+        TrampolineHopPayload::Forward {
+            next_node_id: t2.pubkey(),
+            amount_to_forward: 50_000,
+            build_max_fee_amount: 0,
+            tlc_expiry_delta: 1234,
+            max_parts: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+            tlc_expiry_limit: crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        },
+        TrampolineHopPayload::Forward {
+            next_node_id: final_node.pubkey(),
+            amount_to_forward: 50_000,
+            build_max_fee_amount: 0,
+            tlc_expiry_delta: 1234,
+            max_parts: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+            tlc_expiry_limit: crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        },
+        TrampolineHopPayload::Final {
+            final_amount: 50_000,
+            final_tlc_expiry_delta: 1234,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+
+    let pkt = TrampolineOnionPacket::create(
+        session_key,
+        vec![t1.pubkey(), t2.pubkey(), final_node.pubkey()],
+        payloads.clone(),
+        None,
+        &secp,
+    )
+    .expect("create trampoline onion");
+
+    let p1 = pkt.peel(&t1, None, &secp).expect("peel at t1");
+    assert_eq!(p1.current, payloads[0]);
+    assert!(p1.next.is_some());
+
+    let p2 = p1
+        .next
+        .expect("next")
+        .peel(&t2, None, &secp)
+        .expect("peel at t2");
+    assert_eq!(p2.current, payloads[1]);
+    assert!(p2.next.is_some());
+
+    let p3 = p2
+        .next
+        .expect("next")
+        .peel(&final_node, None, &secp)
+        .expect("peel at final");
+    assert_eq!(p3.current, payloads[2]);
+    assert!(p3.next.is_none());
+
+    // Cover assoc_data != None cases:
+    // - Using the correct assoc_data should succeed.
+    // - Using missing/mismatched assoc_data should fail (MAC mismatch).
+    let assoc_data = b"fiber-trampoline-assoc-data".to_vec();
+    let session_key_with_ad = gen_rand_fiber_private_key();
+    let pkt_with_ad = TrampolineOnionPacket::create(
+        session_key_with_ad,
+        vec![t1.pubkey(), t2.pubkey(), final_node.pubkey()],
+        payloads.clone(),
+        Some(assoc_data.clone()),
+        &secp,
+    )
+    .expect("create trampoline onion with assoc_data");
+
+    assert!(
+        pkt_with_ad.clone().peel(&t1, None, &secp).is_err(),
+        "peel should fail when assoc_data is missing"
+    );
+    assert!(
+        pkt_with_ad
+            .clone()
+            .peel(&t1, Some("wrong".as_bytes()), &secp)
+            .is_err(),
+        "peel should fail when assoc_data mismatches"
+    );
+
+    let p1 = pkt_with_ad
+        .peel(&t1, Some(&assoc_data), &secp)
+        .expect("peel at t1 with assoc_data");
+    assert_eq!(p1.current, payloads[0]);
+    assert!(p1.next.is_some());
+
+    let p2 = p1
+        .next
+        .expect("next")
+        .peel(&t2, Some(&assoc_data), &secp)
+        .expect("peel at t2 with assoc_data");
+    assert_eq!(p2.current, payloads[1]);
+    assert!(p2.next.is_some());
+
+    let p3 = p2
+        .next
+        .expect("next")
+        .peel(&final_node, Some(&assoc_data), &secp)
+        .expect("peel at final with assoc_data");
+    assert_eq!(p3.current, payloads[2]);
+    assert!(p3.next.is_none());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_u64_max_overflow() {
+    // Length header is u64::MAX, which would cause overflow when adding HOP_DATA_HEAD_LEN
+    // Input: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
+    let malicious_input = [255u8, 255, 255, 255, 255, 255, 255, 255, 0];
+    let result = PeeledPaymentOnionPacket::deserialize(&malicious_input);
+    assert!(
+        result.is_err(),
+        "Should reject input with overflow-causing length"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_large_claimed_length() {
+    // Length header claims more data than available
+    let mut large_claim = vec![0u8; 16];
+    large_claim[..8].copy_from_slice(&(1000u64).to_be_bytes()); // Claims 1000 bytes
+    let result = PeeledPaymentOnionPacket::deserialize(&large_claim);
+    assert!(
+        result.is_err(),
+        "Should reject input claiming more data than available"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_empty_input() {
+    let result = PeeledPaymentOnionPacket::deserialize(&[]);
+    assert!(result.is_err(), "Should reject empty input");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_short_header() {
+    // Input too short for header (need 8 bytes, only 7 provided)
+    let result = PeeledPaymentOnionPacket::deserialize(&[1, 2, 3, 4, 5, 6, 7]);
+    assert!(
+        result.is_err(),
+        "Should reject input shorter than header length"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_exceeds_buffer() {
+    // Large length that exceeds buffer size
+    // Claimed length (6501 + 8 = 6509) far exceeds actual buffer (16 bytes)
+    let large_len: u64 = 6501;
+    let mut large_input = vec![0u8; 16];
+    large_input[..8].copy_from_slice(&large_len.to_be_bytes());
+    let result = PeeledPaymentOnionPacket::deserialize(&large_input);
+    assert!(
+        result.is_err(),
+        "Should reject when claimed length exceeds buffer"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_peeled_onion_packet_deserialize_near_max_overflow() {
+    // Near-max value that would overflow with header addition
+    let near_max = (usize::MAX - 7) as u64; // Adding 8 would overflow
+    let mut near_max_input = vec![0u8; 16];
+    near_max_input[..8].copy_from_slice(&near_max.to_be_bytes());
+    let result = PeeledPaymentOnionPacket::deserialize(&near_max_input);
+    assert!(
+        result.is_err(),
+        "Should reject near-max length that overflows"
     );
 }
 
@@ -390,6 +566,49 @@ fn test_tlc_err_packet_encryption() {
             .expect("decrypted");
         assert_eq!(decrypted_tlc_fail_detail, tlc_fail_detail);
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
+    // Simulate a trampoline boundary wrapping a downstream error packet:
+    // - The downstream error packet bytes are opaque to the payer.
+    // - The wrapper is encrypted with the *outer* shared secret of the trampoline hop,
+    //   so the payer can decode at least the TrampolineFailed envelope.
+
+    let secp = Secp256k1::new();
+    let hops_path = [
+        "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
+        "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
+    ]
+    .iter()
+    .map(|s| Pubkey(PublicKey::from_str(s).expect("valid public key")))
+    .collect::<Vec<_>>();
+
+    let session_key = SecretKey::from_slice(&[0x42; 32]).expect("32 bytes, within curve order");
+    let hops_ss: Vec<[u8; 32]> =
+        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp).collect();
+
+    // Pretend the downstream error originated beyond the trampoline boundary.
+    let inner_err = TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
+    let inner_err_packet = TlcErrPacket::new(inner_err.clone(), &hops_ss[1]);
+
+    // Trampoline wraps the opaque downstream error bytes.
+    let trampoline_node_id = hops_path[0];
+    let wrapper_err = TlcErr {
+        error_code: inner_err.error_code,
+        extra_data: Some(TlcErrData::TrampolineFailed {
+            node_id: trampoline_node_id,
+            inner_error_packet: inner_err_packet.onion_packet.clone(),
+        }),
+    };
+    let wrapper_packet = TlcErrPacket::new(wrapper_err.clone(), &hops_ss[0]);
+
+    let decoded = wrapper_packet
+        .decode(session_key.as_ref(), hops_path.clone())
+        .expect("payer decodes wrapper");
+
+    assert_eq!(decoded, wrapper_err);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -580,13 +799,13 @@ fn test_verify_hard_coded_node_announcement() {
 
     for (signature, message, node_announcement) in [
         (
-            "7cd5e05013bd41c8de80fdef75d6ffd1be45408d8e2a8cd54f0994d2bfdb590826583e662e05ca39cdb844f796fc43c4627746a485fc8e54c1859f710122008a",
-            "18564fef8fcea0fcef42a982d4df86a0dd0b7838159e05a12aa4e74498aca4ff",
+            "d5102b528c475e568981c43a8505606333129d4e71142482f59e5bb0a02bc70324d0cdf396eb6dd537c971de34bec77636565f54ded88b9dda53b65570b9ca70",
+            "c63db3aec76b6a62e9d563dc35450de058d37047f80dc6c60abad344dd48beba",
             node1(),
         ),
         (
-            "3a1eea2e372e5c3bc53d1c283d449afbfff029308fe59e111a23ad32163d2a6f58128e21083e128a05d34fb8c0068a1f4fa6e4ae12e370d3051591df151a957a",
-            "db96ac7278d1db7b03eefdc4d21c952e3aee8a4be87a82c8c0e66a87e8897a81",
+            "1fec23d92c9fc9fafd39f477bf1fbb79cfb8f63604a6aeb0712cfd7dbe31e4e21a174f4e6733e78970f4489859aa1ba615fe712d4d212dd7f1c1a6678dff5d00",
+            "3e612fcfa66885352ac18e1fdd602199fb125fa4435ea509f472c0c870b0d307",
             node2(),
         ),
     ] {
@@ -641,13 +860,12 @@ fn test_verify_payment_hop_data() {
     let hop_data = PaymentHopData {
         amount: 1000,
         expiry: 1000,
-        next_hop: None,
-        funding_tx_hash: Hash256::default(),
         hash_algorithm: HashAlgorithm::Sha256,
         payment_preimage: Some([1; 32].into()),
         custom_records: Some(PaymentCustomRecords {
             data: vec![(1, vec![2, 3])].into_iter().collect(),
         }),
+        ..Default::default()
     };
 
     let data = pack_hop_data(&hop_data);
@@ -659,7 +877,7 @@ fn test_verify_payment_hop_data() {
     // make sure we don't change PaymentHopData format since it's stored in db with encrypted format
     // do migration with old data version is not workable
     let expected_check_sum =
-        "1ea2a67b30c7d2cedab21c6e5f4a3b860fc8b1ccc525f42dd1bdd4a7d6dfe489".to_string();
+        "7abddd1a352a8191bea7b694973a83d1d21c91ce50b2c657521ac83233103ce4".to_string();
     if check_sum != expected_check_sum {
         panic!(
             "PaymentHopData check sum mismatch, you need compatible with old data version when deserializing, \
@@ -715,12 +933,12 @@ fn test_convert_payment_hop_data() {
         amount: 1000,
         expiry: 1000,
         next_hop: Some(public_key),
-        funding_tx_hash: Hash256::default(),
         hash_algorithm: HashAlgorithm::Sha256,
         payment_preimage: Some([1; 32].into()),
         custom_records: Some(PaymentCustomRecords {
             data: vec![(1, vec![2, 3])].into_iter().collect(),
         }),
+        ..Default::default()
     };
     let payment_hop_data_gen = molecule_fiber::PaymentHopData::from(payment_hop_data.clone());
     assert_eq!(payment_hop_data, payment_hop_data_gen.clone().into());

@@ -205,6 +205,7 @@ Attempts to open a channel with a peer.
 * `peer_id` - <em>`PeerId`</em>, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
 * `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
 * `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+* `one_way` - <em>`Option<bool>`</em>, Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
 * `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
 * `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
@@ -552,6 +553,7 @@ Generates a new invoice.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
+* `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
 
 ##### Returns
 
@@ -660,10 +662,14 @@ Sends a payment to a peer.
  this is also the default value for the payment if this parameter is not provided
 * `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
 * `timeout` - <em>`Option<u64>`</em>, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
-* `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay,
- default is 0.5% * amount
+* `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay.
+ Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
 * `max_fee_rate` - <em>`Option<u64>`</em>, the maximum fee rate per thousand (‰), default is 5 (0.5%)
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
+* `trampoline_hops` - <em>Option<Vec<[Pubkey](#type-pubkey)>></em>, Optional explicit trampoline hops.
+
+ When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+ payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
 * `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
@@ -1107,6 +1113,10 @@ The channel data structure
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID
 * `is_public` - <em>`bool`</em>, Whether the channel is public
+* `is_acceptor` - <em>`bool`</em>, Is this channel initially inbound?
+ An inbound channel is one where the counterparty is the funder of the channel.
+* `is_one_way` - <em>`bool`</em>, Is this channel one-way?
+ Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
 * `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint of the channel
 * `peer_id` - <em>`PeerId`</em>, The peer ID of the channel
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel

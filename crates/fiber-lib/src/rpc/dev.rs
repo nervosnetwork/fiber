@@ -228,6 +228,7 @@ impl DevRpcServerImpl {
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
+                            is_trampoline_hop: false,
                             previous_tlc: None,
                         },
                         rpc_reply,

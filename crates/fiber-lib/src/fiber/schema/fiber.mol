@@ -232,6 +232,32 @@ table PaymentHopData {
     funding_tx_hash: Byte32,
     next_hop: PubkeyOpt,
     custom_records: CustomRecordsOpt,
+    trampoline_onion: BytesOpt,
+}
+
+// Trampoline hop payload for forwarding nodes
+table TrampolineForwardPayload {
+    next_node_id: Pubkey,
+    amount_to_forward: Uint128,
+    hash_algorithm: byte,
+    build_max_fee_amount: Uint128,
+    tlc_expiry_delta: Uint64,
+    tlc_expiry_limit: Uint64,
+    max_parts: Uint64Opt,
+}
+
+// Trampoline hop payload for the final recipient
+table TrampolineFinalPayload {
+    final_amount: Uint128,
+    final_tlc_expiry_delta: Uint64,
+    payment_preimage: PaymentPreimageOpt,
+    custom_records: CustomRecordsOpt,
+}
+
+// Trampoline onion hop payload (either forward or final)
+union TrampolineHopPayload {
+    TrampolineForwardPayload,
+    TrampolineFinalPayload,
 }
 
 // A ChannelUpdate is a update to the public channel. Newer channel information may be updated with
@@ -261,9 +287,15 @@ table NodeFailed {
     node_id: Pubkey,
 }
 
+table TrampolineFailed {
+    node_id: Pubkey,
+    inner_error_packet: Bytes,
+}
+
 union TlcErrData {
     ChannelFailed,
     NodeFailed,
+    TrampolineFailed,
 }
 
 option TlcErrDataOpt (TlcErrData);

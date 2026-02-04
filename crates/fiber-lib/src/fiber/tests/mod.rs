@@ -15,4 +15,7 @@ mod payment;
 mod rpc;
 mod serde_utils;
 mod tlc_op;
+#[cfg(not(target_arch = "wasm32"))]
+mod trampoline;
 mod types;
+mod utils;

@@ -8,7 +8,8 @@ use crate::fiber::serde_utils::SliceHex;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     channel::ChannelActorStateStore,
-    payment::{HopHint as NetworkHopHint, PaymentStatus, SendPaymentCommand},
+    payment::PaymentStatus,
+    payment::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{EntityHex, U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
@@ -127,8 +128,8 @@ pub struct SendPaymentCommandParams {
     #[serde_as(as = "Option<U64Hex>")]
     pub timeout: Option<u64>,
 
-    /// the maximum fee amounts in shannons that the sender is willing to pay,
-    /// default is 0.5% * amount
+    /// the maximum fee amounts in shannons that the sender is willing to pay.
+    /// Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
     #[serde_as(as = "Option<U128Hex>")]
     pub max_fee_amount: Option<u128>,
 
@@ -139,6 +140,12 @@ pub struct SendPaymentCommandParams {
     /// max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
     pub max_parts: Option<u64>,
+
+    /// Optional explicit trampoline hops.
+    ///
+    /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+    /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
+    pub trampoline_hops: Option<Vec<Pubkey>>,
 
     /// keysend payment
     pub keysend: Option<bool>,
@@ -179,6 +186,7 @@ pub struct SendPaymentCommandParams {
     /// default is false
     pub dry_run: Option<bool>,
 }
+
 /// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -390,6 +398,7 @@ where
                     max_fee_amount: params.max_fee_amount,
                     max_fee_rate: params.max_fee_rate,
                     max_parts: params.max_parts,
+                    trampoline_hops: params.trampoline_hops.clone(),
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),

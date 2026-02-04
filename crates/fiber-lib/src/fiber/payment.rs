@@ -1,18 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
 use super::types::{Hash256, Privkey, Pubkey, TlcErrData};
-use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
+use crate::fiber::channel::{ChannelActorStateStore, PrevTlcInfo, ProcessingChannelError};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
     MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
 };
-use crate::fiber::fee::calculate_fee_with_base;
+use crate::fiber::fee::{calculate_fee_with_base, calculate_tlc_forward_fee};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{
     GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
 };
+use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT,
     DEFAULT_PAYMENT_TRY_LIMIT, MAX_CUSTOM_RECORDS_SIZE,
@@ -42,6 +43,9 @@ use strum::AsRefStr;
 use tokio::sync::RwLock;
 use tracing::{debug, error, instrument, warn};
 
+// Maximum number of trampoline nodes encoded in the inner trampoline onion.
+// This is a safety guard against excessive route construction work.
+const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
 const DEFAULT_MAX_FEE_RATE: u64 = 5;
 const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
 
@@ -167,10 +171,320 @@ pub struct SendPaymentData {
     pub allow_self_payment: bool,
     pub hop_hints: Vec<HopHint>,
     pub router: Vec<RouterHop>,
+    /// This flag indicates the invoice whether to allow multi-path payment.
     pub allow_mpp: bool,
     pub dry_run: bool,
+
+    /// Optional explicit trampoline hops.
+    ///
+    /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+    /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
+    pub trampoline_hops: Option<Vec<Pubkey>>,
+    #[serde(default)]
+    pub trampoline_context: Option<TrampolineContext>,
     #[serde(skip)]
     pub channel_stats: GraphChannelStat,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SendPaymentDataBuilder {
+    target_pubkey: Option<Pubkey>,
+    amount: Option<u128>,
+    payment_hash: Option<Hash256>,
+    invoice: Option<String>,
+    final_tlc_expiry_delta: u64,
+    tlc_expiry_limit: u64,
+    timeout: Option<u64>,
+    max_fee_amount: Option<u128>,
+    max_parts: Option<u64>,
+    keysend: bool,
+    udt_type_script: Option<Script>,
+    preimage: Option<Hash256>,
+    custom_records: Option<PaymentCustomRecords>,
+    allow_self_payment: bool,
+    hop_hints: Vec<HopHint>,
+    router: Vec<RouterHop>,
+    allow_mpp: bool,
+    dry_run: bool,
+    trampoline_hops: Option<Vec<Pubkey>>,
+    trampoline_context: Option<TrampolineContext>,
+    channel_stats: GraphChannelStat,
+}
+
+impl SendPaymentDataBuilder {
+    pub fn new(target_pubkey: Pubkey, amount: u128, payment_hash: Hash256) -> Self {
+        Self {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(amount),
+            payment_hash: Some(payment_hash),
+            // Match the defaults used by SendPaymentData::new.
+            final_tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+            ..Default::default()
+        }
+    }
+
+    pub fn target_pubkey(mut self, target_pubkey: Pubkey) -> Self {
+        self.target_pubkey = Some(target_pubkey);
+        self
+    }
+
+    pub fn amount(mut self, amount: u128) -> Self {
+        self.amount = Some(amount);
+        self
+    }
+
+    pub fn payment_hash(mut self, payment_hash: Hash256) -> Self {
+        self.payment_hash = Some(payment_hash);
+        self
+    }
+
+    pub fn invoice(mut self, invoice: Option<String>) -> Self {
+        self.invoice = invoice;
+        self
+    }
+
+    pub fn final_tlc_expiry_delta(mut self, final_tlc_expiry_delta: u64) -> Self {
+        self.final_tlc_expiry_delta = final_tlc_expiry_delta;
+        self
+    }
+
+    pub fn tlc_expiry_limit(mut self, tlc_expiry_limit: u64) -> Self {
+        self.tlc_expiry_limit = tlc_expiry_limit;
+        self
+    }
+
+    pub fn timeout(mut self, timeout: Option<u64>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn max_fee_amount(mut self, max_fee_amount: Option<u128>) -> Self {
+        self.max_fee_amount = max_fee_amount;
+        self
+    }
+
+    pub fn max_parts(mut self, max_parts: Option<u64>) -> Self {
+        self.max_parts = max_parts;
+        self
+    }
+
+    pub fn keysend(mut self, keysend: bool) -> Self {
+        self.keysend = keysend;
+        self
+    }
+
+    pub fn udt_type_script(mut self, udt_type_script: Option<Script>) -> Self {
+        self.udt_type_script = udt_type_script;
+        self
+    }
+
+    pub fn preimage(mut self, preimage: Option<Hash256>) -> Self {
+        self.preimage = preimage;
+        self
+    }
+
+    pub fn custom_records(mut self, custom_records: Option<PaymentCustomRecords>) -> Self {
+        self.custom_records = custom_records;
+        self
+    }
+
+    pub fn allow_self_payment(mut self, allow_self_payment: bool) -> Self {
+        self.allow_self_payment = allow_self_payment;
+        self
+    }
+
+    pub fn hop_hints(mut self, hop_hints: Vec<HopHint>) -> Self {
+        self.hop_hints = hop_hints;
+        self
+    }
+
+    pub fn router(mut self, router: Vec<RouterHop>) -> Self {
+        self.router = router;
+        self
+    }
+
+    pub fn allow_mpp(mut self, allow_mpp: bool) -> Self {
+        self.allow_mpp = allow_mpp;
+        self
+    }
+
+    pub fn dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    pub fn trampoline_hops(mut self, trampoline_hops: Option<Vec<Pubkey>>) -> Self {
+        self.trampoline_hops = trampoline_hops;
+        self
+    }
+
+    pub fn trampoline_context(mut self, trampoline_context: Option<TrampolineContext>) -> Self {
+        self.trampoline_context = trampoline_context;
+        self
+    }
+
+    pub fn channel_stats(mut self, channel_stats: GraphChannelStat) -> Self {
+        self.channel_stats = channel_stats;
+        self
+    }
+
+    fn validate(&self, target_pubkey: Pubkey, amount: u128) -> Result<(), String> {
+        if amount == 0 {
+            return Err("amount must be greater than 0".to_string());
+        }
+
+        if amount
+            .checked_add(self.max_fee_amount.expect("must got max_fee_amount"))
+            .is_none()
+        {
+            return Err(format!(
+                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {:?}",
+                amount, self.max_fee_amount
+            ));
+        }
+
+        if !(MIN_TLC_EXPIRY_DELTA..=MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .contains(&self.final_tlc_expiry_delta)
+        {
+            return Err(format!(
+                "invalid final_tlc_expiry_delta, expect between {} and {}",
+                MIN_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
+
+        if self.tlc_expiry_limit < self.final_tlc_expiry_delta
+            || self.tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA
+        {
+            return Err(format!(
+                "tlc_expiry_limit is too small, final_tlc_expiry_delta: {}, tlc_expiry_limit: {}",
+                self.final_tlc_expiry_delta, self.tlc_expiry_limit
+            ));
+        }
+        if self.tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+            return Err(format!(
+                "tlc_expiry_limit is too large, expect it to less than {}",
+                MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
+
+        if let Some(hops) = self.trampoline_hops.as_ref() {
+            if hops.is_empty() {
+                return Err("trampoline_hops must be non-empty when provided".to_string());
+            }
+            if hops.len() > MAX_TRAMPOLINE_HOPS_LIMIT as usize {
+                return Err(format!(
+                    "too many trampoline_hops, at most {}",
+                    MAX_TRAMPOLINE_HOPS_LIMIT
+                ));
+            }
+            if self.allow_mpp && self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) > 1 && hops.len() > 1 {
+                return Err(
+                    "trampoline_hops must contain only one hop when MPP is enabled".to_string(),
+                );
+            }
+            if hops.contains(&target_pubkey) {
+                return Err("trampoline_hops must not contain target_pubkey".to_string());
+            }
+            if self.max_fee_amount.is_none() {
+                return Err(
+                    "max_fee_amount must be set when trampoline_hops is provided".to_string(),
+                );
+            }
+            if hops.iter().collect::<HashSet<_>>().len() != hops.len() {
+                return Err("trampoline_hops must not contain duplicates".to_string());
+            }
+            if self.allow_self_payment {
+                return Err(
+                    "allow_self_payment cannot be enabled with trampoline routing".to_string(),
+                );
+            }
+        }
+
+        if self.udt_type_script.is_none() && amount >= u64::MAX as u128 {
+            return Err(format!(
+                "The payment amount ({}) should be less than {}",
+                amount,
+                u64::MAX
+            ));
+        }
+
+        if let Some(custom_records) = &self.custom_records {
+            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
+                > MAX_CUSTOM_RECORDS_SIZE
+            {
+                return Err(format!(
+                    "the sum size of custom_records's value can not more than {} bytes",
+                    MAX_CUSTOM_RECORDS_SIZE
+                ));
+            }
+        }
+
+        if let Some(max_parts) = self.max_parts {
+            if max_parts == 0 || max_parts > PAYMENT_MAX_PARTS_LIMIT {
+                return Err(format!(
+                    "invalid max_parts, value should be in range [1, {}]",
+                    PAYMENT_MAX_PARTS_LIMIT
+                ));
+            }
+            if self.allow_mpp && max_parts <= 1 {
+                return Err(format!(
+                    "invalid max_parts, value should be in range [1, {}]",
+                    PAYMENT_MAX_PARTS_LIMIT
+                ));
+            }
+            if !self.allow_mpp && max_parts > 1 && self.trampoline_context.is_none() {
+                return Err("payment invoice is not allow MPP".to_string());
+            }
+        }
+
+        if self.keysend {
+            if self.invoice.is_some() {
+                return Err("keysend payment should not have invoice".to_string());
+            }
+            if self.preimage.is_none() {
+                return Err("keysend payment should have preimage".to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn build(self) -> Result<SendPaymentData, String> {
+        let target_pubkey = self
+            .target_pubkey
+            .ok_or_else(|| "target_pubkey is missing".to_string())?;
+        let amount = self.amount.ok_or_else(|| "amount is missing".to_string())?;
+        let payment_hash = self
+            .payment_hash
+            .ok_or_else(|| "payment_hash is missing".to_string())?;
+
+        self.validate(target_pubkey, amount)?;
+
+        Ok(SendPaymentData {
+            target_pubkey,
+            amount,
+            payment_hash,
+            invoice: self.invoice,
+            final_tlc_expiry_delta: self.final_tlc_expiry_delta,
+            tlc_expiry_limit: self.tlc_expiry_limit,
+            timeout: self.timeout,
+            max_fee_amount: self.max_fee_amount,
+            max_parts: self.max_parts,
+            keysend: self.keysend,
+            udt_type_script: self.udt_type_script,
+            preimage: self.preimage,
+            custom_records: self.custom_records,
+            allow_self_payment: self.allow_self_payment,
+            hop_hints: self.hop_hints,
+            router: self.router,
+            allow_mpp: self.allow_mpp,
+            dry_run: self.dry_run,
+            trampoline_hops: self.trampoline_hops,
+            channel_stats: self.channel_stats,
+            trampoline_context: self.trampoline_context,
+        })
+    }
 }
 
 impl SendPaymentData {
@@ -220,6 +534,15 @@ impl SendPaymentData {
             "amount",
         )?;
 
+        let max_fee_rate = command.max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE) as u128;
+        let max_fee_amount_by_rate =
+            calculate_fee_with_base(amount, max_fee_rate, MAX_FEE_RATE_DENOMINATOR)?;
+
+        let max_fee_amount = match command.max_fee_amount {
+            Some(max_fee_amount) => Some(max_fee_amount.min(max_fee_amount_by_rate)),
+            None => Some(max_fee_amount_by_rate),
+        };
+
         let udt_type_script = match validate_field(
             command.udt_type_script.clone(),
             invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
@@ -236,30 +559,10 @@ impl SendPaymentData {
             .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
             .or(command.final_tlc_expiry_delta)
             .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
-        if !(MIN_TLC_EXPIRY_DELTA..=MAX_PAYMENT_TLC_EXPIRY_LIMIT).contains(&final_tlc_expiry_delta)
-        {
-            return Err(format!(
-                "invalid final_tlc_expiry_delta, expect between {} and {}",
-                MIN_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT
-            ));
-        }
 
         let tlc_expiry_limit = command
             .tlc_expiry_limit
             .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
-
-        if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
-            return Err(format!(
-                "tlc_expiry_limit is too small, final_tlc_expiry_delta: {}, tlc_expiry_limit: {}",
-                final_tlc_expiry_delta, tlc_expiry_limit
-            ));
-        }
-        if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
-            return Err(format!(
-                "tlc_expiry_limit is too large, expect it to less than {}",
-                MAX_PAYMENT_TLC_EXPIRY_LIMIT
-            ));
-        }
 
         let keysend = command.keysend.unwrap_or(false);
         let (payment_hash, preimage) = if !keysend {
@@ -288,41 +591,14 @@ impl SendPaymentData {
             (payment_hash, Some(preimage))
         };
 
-        if udt_type_script.is_none() && amount >= u64::MAX as u128 {
-            return Err(format!(
-                "The payment amount ({}) should be less than {}",
-                amount,
-                u64::MAX
-            ));
-        }
-
-        if amount == 0 {
-            return Err("amount must be greater than 0".to_string());
-        }
-
-        let max_fee_rate = command.max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE) as u128;
-        let max_fee_amount_by_rate =
-            calculate_fee_with_base(amount, max_fee_rate, MAX_FEE_RATE_DENOMINATOR)?;
-
-        let max_fee_amount = match command.max_fee_amount {
-            Some(max_fee_amount) => Some(max_fee_amount.min(max_fee_amount_by_rate)),
-            None => Some(max_fee_amount_by_rate),
-        };
-
-        debug!(
-            "SendPaymentData now get : {:?} command.max_fee_amount: {:?} command.max_fee_rate: {:?} amount: {:?}",
-            max_fee_amount, command.max_fee_amount, command.max_fee_rate, amount
-        );
-
-        if amount.checked_add(max_fee_amount.unwrap_or(0)).is_none() {
-            return Err(format!(
-                "amount + max_fee_amount overflow: amount = {}, max_fee_amount = {}",
-                amount,
-                max_fee_amount.unwrap_or(0)
-            ));
-        }
-
         let hop_hints = command.hop_hints.unwrap_or_default();
+        if !hop_hints.is_empty()
+            && invoice
+                .as_ref()
+                .is_some_and(|inv| !inv.allow_trampoline_routing())
+        {
+            return Err("invoice does not support hop hints".to_string());
+        }
 
         let allow_mpp = invoice.as_ref().is_some_and(|inv| inv.allow_mpp());
         let payment_secret = invoice
@@ -331,27 +607,8 @@ impl SendPaymentData {
         if allow_mpp && payment_secret.is_none() {
             return Err("payment secret is required for multi-path payment".to_string());
         }
-        if allow_mpp
-            && command
-                .max_parts
-                .is_some_and(|max_parts| max_parts <= 1 || max_parts > PAYMENT_MAX_PARTS_LIMIT)
-        {
-            return Err(format!(
-                "invalid max_parts, value should be in range [1, {}]",
-                PAYMENT_MAX_PARTS_LIMIT
-            ));
-        }
 
         if let Some(custom_records) = &command.custom_records {
-            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
-                > MAX_CUSTOM_RECORDS_SIZE
-            {
-                return Err(format!(
-                    "the sum size of custom_records's value can not more than {} bytes",
-                    MAX_CUSTOM_RECORDS_SIZE
-                ));
-            }
-
             if custom_records
                 .data
                 .keys()
@@ -371,27 +628,24 @@ impl SendPaymentData {
             BasicMppPaymentData::new(payment_secret, amount).write(records);
         }
 
-        Ok(SendPaymentData {
-            target_pubkey: target,
-            amount,
-            payment_hash,
-            invoice: command.invoice,
-            final_tlc_expiry_delta,
-            tlc_expiry_limit,
-            timeout: command.timeout,
-            max_fee_amount,
-            max_parts: command.max_parts,
-            keysend,
-            udt_type_script,
-            preimage,
-            custom_records,
-            allow_self_payment: command.allow_self_payment,
-            hop_hints,
-            allow_mpp,
-            router: vec![],
-            dry_run: command.dry_run,
-            channel_stats: Default::default(),
-        })
+        SendPaymentDataBuilder::new(target, amount, payment_hash)
+            .invoice(command.invoice)
+            .final_tlc_expiry_delta(final_tlc_expiry_delta)
+            .tlc_expiry_limit(tlc_expiry_limit)
+            .timeout(command.timeout)
+            .max_fee_amount(max_fee_amount)
+            .max_parts(command.max_parts)
+            .keysend(keysend)
+            .udt_type_script(udt_type_script)
+            .preimage(preimage)
+            .custom_records(custom_records)
+            .allow_self_payment(command.allow_self_payment)
+            .hop_hints(hop_hints)
+            .allow_mpp(allow_mpp)
+            .dry_run(command.dry_run)
+            .trampoline_hops(command.trampoline_hops)
+            .channel_stats(Default::default())
+            .build()
     }
 
     pub fn max_parts(&self) -> usize {
@@ -402,6 +656,35 @@ impl SendPaymentData {
         // only allow mpp if max_parts is greater than 1 and not keysend
         self.allow_mpp && self.max_parts() > 1 && !self.keysend
     }
+
+    pub fn use_trampoline_routing(&self) -> bool {
+        self.trampoline_hops
+            .as_ref()
+            .is_some_and(|hops| !hops.is_empty())
+    }
+
+    pub fn trampoline_hops(&self) -> Option<&[Pubkey]> {
+        self.trampoline_hops.as_deref()
+    }
+
+    pub fn payment_invoice(&self) -> Option<CkbInvoice> {
+        self.invoice
+            .as_ref()
+            .and_then(|x| x.parse::<CkbInvoice>().ok())
+    }
+
+    pub fn hash_algorithm(&self) -> HashAlgorithm {
+        let invoice = self.payment_invoice();
+        invoice
+            .as_ref()
+            .and_then(|x| x.hash_algorithm().copied())
+            .unwrap_or_else(|| {
+                self.trampoline_context
+                    .as_ref()
+                    .map(|c| c.hash_algorithm)
+                    .unwrap_or_default()
+            })
+    }
 }
 
 #[serde_as]
@@ -409,6 +692,8 @@ impl SendPaymentData {
 pub struct PaymentSession {
     pub request: SendPaymentData,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_error_code: Option<TlcErrorCode>,
     // For non-MPP, this is the maximum number of single attempt retry limit
     // For MPP, this is the sum limit of all parts' retry times.
     pub try_limit: u32,
@@ -429,6 +714,7 @@ impl PaymentSession {
         Self {
             request,
             last_error: None,
+            last_error_code: None,
             try_limit,
             status: PaymentStatus::Created,
             created_at: now,
@@ -500,7 +786,7 @@ impl PaymentSession {
     }
 
     pub fn max_parts(&self) -> usize {
-        if self.allow_mpp() {
+        if self.allow_mpp() && !self.request.use_trampoline_routing() {
             self.request.max_parts()
         } else {
             1
@@ -512,7 +798,22 @@ impl PaymentSession {
     }
 
     pub fn fee_paid(&self) -> u128 {
-        self.active_attempts().map(|a| a.route.fee()).sum()
+        if self.request.use_trampoline_routing() {
+            // For trampoline routing, calculate the actual total fee
+            // which includes both trampoline service fee and routing fee
+            let total_sent: u128 = self
+                .active_attempts()
+                .map(|a| {
+                    // The first node's amount is what we send
+                    a.route.nodes.first().map_or(0, |n| n.amount)
+                })
+                .sum();
+            let total_received = self.request.amount;
+            total_sent.saturating_sub(total_received)
+        } else {
+            // For normal routing, sum up the fee from each route
+            self.active_attempts().map(|a| a.route.fee()).sum()
+        }
     }
 
     fn success_attempts_amount_is_enough(&self) -> bool {
@@ -639,6 +940,7 @@ impl PaymentSession {
     pub fn set_success_status(&mut self) {
         self.set_status(PaymentStatus::Success);
         self.last_error = None;
+        self.last_error_code = None;
     }
 
     pub fn set_failed_status(&mut self, error: &str) {
@@ -664,25 +966,6 @@ impl From<PaymentSession> for SendPaymentResponse {
             })
             .collect::<Vec<_>>();
         all_attempts.sort_by_key(|a| a.0);
-
-        #[cfg(debug_assertions)]
-        {
-            dbg!(&all_attempts);
-            dbg!(
-                fee,
-                &status,
-                all_attempts.len(),
-                session.try_limit,
-                &session.last_error
-            );
-
-            let active_count = session.active_attempts().count();
-            let active_amount = session
-                .active_attempts()
-                .map(|a| a.route.receiver_amount())
-                .sum::<u128>();
-            dbg!(active_amount, session.request.amount, active_count);
-        }
 
         #[cfg(any(debug_assertions, test, feature = "bench"))]
         let attempts = session
@@ -903,6 +1186,25 @@ pub struct SendPaymentCommand {
     pub hop_hints: Option<Vec<HopHint>>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
+    /// Optional explicit trampoline hops.
+    ///
+    /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+    /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
+    pub trampoline_hops: Option<Vec<Pubkey>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct TrampolineContext {
+    /// Optional final trampoline onion packet.
+    ///
+    /// When provided, this onion packet will be attached to the payload of the next hop
+    /// (which in this context is the next trampoline node).
+    pub remaining_trampoline_onion: Vec<u8>,
+    /// Previous TLCs information for the payment session.
+    /// This is used to associate the outgoing payment with the incoming payment.
+    pub previous_tlcs: Vec<PrevTlcInfo>,
+    /// Hash algorighm used for the payment.
+    pub hash_algorithm: HashAlgorithm,
 }
 
 impl SendPaymentCommand {
@@ -961,7 +1263,6 @@ impl SendPaymentWithRouterCommand {
             ));
         };
 
-        // let source = self.network_graph.read().await.get_source_pubkey();
         let target = last_edge.target;
         let amount = last_edge.amount_received;
 
@@ -1452,11 +1753,13 @@ where
             iteration += 1;
 
             debug!(
-                "build route iteration {}, target_amount: {} amount_low_bound: {:?} remain_amount: {}",
+                "build route iteration {}, target_amount: {} amount_low_bound: {:?} remain_amount: {}, max_parts: {}, max_fee: {:?}",
                 iteration,
                 target_amount,
                 amount_low_bound,
                 remain_amount,
+                session.max_parts(),
+                max_fee,
             );
             #[cfg(not(target_arch = "wasm32"))]
             let build_route_result = self
@@ -1479,11 +1782,24 @@ where
 
             match build_route_result {
                 Err(e) => {
+                    error!("build_payment_routes failed to build route: {}", e);
                     let error = format!("Failed to build route, {}", e);
                     return Err(Error::SendPaymentError(error));
                 }
-                Ok(hops) => {
+                Ok(mut hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
+
+                    // Embed trampoline onion in the last hop if available
+                    // This is needed both for actual payments and dry_run to get correct fee calculations
+                    if let Some(trampoline) = &session.request.trampoline_context {
+                        if let Some(last_hop) = hops.last_mut() {
+                            last_hop.trampoline_onion =
+                                Some(trampoline.remaining_trampoline_onion.clone());
+                        }
+                        self.apply_trampoline_forwarding_fee(session, source, &hops, &mut max_fee)
+                            .await?;
+                    }
+
                     let new_attempt_id = if session.is_dry_run() {
                         0
                     } else {
@@ -1499,14 +1815,6 @@ where
                     );
 
                     let session_route = &attempt.route;
-                    #[cfg(debug_assertions)]
-                    dbg!(
-                        "left amount: {}, minimal_amount: {} target amount: {}",
-                        remain_amount - session_route.receiver_amount(),
-                        target_amount,
-                        session_route.receiver_amount()
-                    );
-
                     let route_channels: Vec<_> = session_route
                         .channel_outpoints()
                         .map(|(from, channel_outpoint, amount)| {
@@ -1529,14 +1837,32 @@ where
                         }
                     }
                     let current_amount = session_route.receiver_amount();
-                    remain_amount -= current_amount;
+                    if session.request.use_trampoline_routing() {
+                        remain_amount =
+                            remain_amount.checked_sub(target_amount).ok_or_else(|| {
+                                Error::SendPaymentError(
+                                    "Trampoline route amount exceeds remaining amount".to_string(),
+                                )
+                            })?;
+                    } else {
+                        remain_amount =
+                            remain_amount.checked_sub(current_amount).ok_or_else(|| {
+                                Error::SendPaymentError(
+                                    "Route amount exceeds remaining amount".to_string(),
+                                )
+                            })?;
+                    }
                     target_amount = if let Some(single) = single_path_max {
                         single.min(remain_amount)
                     } else {
                         remain_amount
                     };
                     if let Some(fee) = max_fee {
-                        max_fee = Some(fee - session_route.fee());
+                        max_fee = Some(fee.checked_sub(session_route.fee()).ok_or_else(|| {
+                            Error::SendPaymentError(
+                                "max_fee_amount is too low for selected route".to_string(),
+                            )
+                        })?);
                     }
                     result.push(attempt);
                     if remain_amount > 0
@@ -1561,6 +1887,58 @@ where
         return Ok(result);
     }
 
+    async fn apply_trampoline_forwarding_fee(
+        &self,
+        session: &mut PaymentSession,
+        source: Pubkey,
+        hops: &[PaymentHopData],
+        max_fee: &mut Option<u128>,
+    ) -> Result<(), Error> {
+        if session.request.trampoline_context.is_none() {
+            return Ok(());
+        }
+
+        let first_hop = hops.first().ok_or_else(|| {
+            Error::SendPaymentError("Trampoline forwarding requires at least one hop".to_string())
+        })?;
+        let channel_outpoint = OutPoint::new(first_hop.funding_tx_hash.into(), 0);
+        let fee_rate = {
+            let graph = self.network_graph.read().await;
+            let (Some(_info), Some(update)) =
+                graph.get_outbound_channel_info_and_update(&channel_outpoint, source)
+            else {
+                return Err(Error::SendPaymentError(
+                    "get outbound info failed".to_string(),
+                ));
+            };
+            update.fee_rate
+        };
+
+        let local_fee =
+            calculate_tlc_forward_fee(first_hop.amount, fee_rate as u128).map_err(|err| {
+                Error::SendPaymentError(format!(
+                    "Trampoline forwarding fee calculation failed: {:?}",
+                    err
+                ))
+            })?;
+
+        let cur_max_fee = max_fee.ok_or_else(|| {
+            Error::SendPaymentError("Trampoline forwarding requires max_fee_amount".to_string())
+        })?;
+        if cur_max_fee < local_fee {
+            session.last_error_code = Some(TlcErrorCode::FeeInsufficient);
+            error!(
+                "not enough fee budget for trampoline forwarding: budget {}, required {}",
+                cur_max_fee, local_fee
+            );
+            return Err(Error::SendPaymentError(
+                "Trampoline forwarding fee insufficient".to_string(),
+            ));
+        }
+        *max_fee = Some(cur_max_fee - local_fee);
+        Ok(())
+    }
+
     async fn send_payment_onion_packet(
         &self,
         session: &mut PaymentSession,
@@ -1583,7 +1961,7 @@ where
                     "Failed to create onion packet: {:?}, error: {:?}",
                     attempt.hash, e
                 );
-                self.set_attempt_fail_with_error(session, attempt, &err, false);
+                self.set_attempt_fail_with_error(session, attempt, None, &err, false);
                 return Err(Error::FirstHopError(err, false));
             }
         };
@@ -1621,7 +1999,13 @@ where
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
                 );
-                self.set_attempt_fail_with_error(session, attempt, &err, need_to_retry);
+                self.set_attempt_fail_with_error(
+                    session,
+                    attempt,
+                    Some(error_detail.error_code),
+                    &err,
+                    need_to_retry,
+                );
                 return Err(Error::FirstHopError(err, need_to_retry));
             }
             Ok(_) => {
@@ -1630,8 +2014,16 @@ where
         }
     }
 
-    fn set_payment_fail_with_error(&self, session: &mut PaymentSession, error: &str) {
+    fn set_payment_fail_with_error(
+        &self,
+        session: &mut PaymentSession,
+        error: &str,
+        error_code: Option<TlcErrorCode>,
+    ) {
         session.set_failed_status(error);
+        if error_code.is_some() {
+            session.last_error_code = error_code;
+        }
         if !session.is_dry_run() {
             self.store.insert_payment_session(session.clone());
         }
@@ -1641,11 +2033,12 @@ where
         &self,
         session: &mut PaymentSession,
         attempt: &mut Attempt,
+        error_code: Option<TlcErrorCode>,
         error: &str,
         retryable: bool,
     ) {
         if !retryable && !session.active_attempts().any(|a| a.id != attempt.id) {
-            self.set_payment_fail_with_error(session, error);
+            self.set_payment_fail_with_error(session, error, error_code);
         }
 
         attempt.set_failed_status(error, retryable);
@@ -1668,7 +2061,7 @@ where
                 self.register_payment_retry(myself, state, Some(attempt.id));
                 return Ok(());
             } else {
-                self.set_attempt_fail_with_error(session, attempt, &err.to_string(), false);
+                self.set_attempt_fail_with_error(session, attempt, None, &err.to_string(), false);
                 return Err(err);
             }
         }
@@ -1708,7 +2101,7 @@ where
             .build_payment_routes(&mut session)
             .await
             .inspect_err(|e| {
-                self.set_payment_fail_with_error(&mut session, &e.to_string());
+                self.set_payment_fail_with_error(&mut session, &e.to_string(), None);
             })?;
 
         for attempt in attempts.iter_mut() {
@@ -1752,6 +2145,7 @@ where
                         self.set_attempt_fail_with_error(
                             session,
                             &mut attempt,
+                            None,
                             &err.to_string(),
                             false,
                         );
@@ -1828,6 +2222,7 @@ where
                 self.set_attempt_fail_with_error(
                     &mut session,
                     &mut attempt,
+                    Some(tlc_err.error_code),
                     &error.to_string(),
                     need_to_retry,
                 );
@@ -1858,12 +2253,13 @@ where
         };
 
         match reason {
-            RemoveTlcReason::RemoveTlcFulfill(_) => {
+            RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
                 self.network_graph
                     .write()
                     .await
                     .record_attempt_success(&attempt);
                 attempt.set_success_status();
+                attempt.preimage = Some(fulfill.payment_preimage);
                 self.store.insert_attempt(attempt.clone());
 
                 session.update_with_attempt(attempt);
@@ -1872,7 +2268,7 @@ where
                 }
             }
             RemoveTlcReason::RemoveTlcFail(reason) => {
-                let error_detail = reason
+                let tlc_error = reason
                     .decode(&attempt.session_key, attempt.hops_public_keys())
                     .unwrap_or_else(|| {
                         debug_event!(self.network, "InvalidOnionError");
@@ -1880,20 +2276,21 @@ where
                     });
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
-                    error_detail.clone(),
+                    tlc_error.clone(),
                     false,
                 );
                 debug!(
                     "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
                     payment_hash,
-                    error_detail.error_code.as_ref(),
+                    tlc_error.error_code.as_ref(),
                     need_to_retry
                 );
 
                 self.set_attempt_fail_with_error(
                     &mut session,
                     &mut attempt,
-                    error_detail.error_code.as_ref(),
+                    Some(tlc_error.error_code),
+                    tlc_error.error_code.as_ref(),
                     need_to_retry,
                 );
 
@@ -1922,7 +2319,7 @@ where
         let more_attempt = session.allow_more_attempts();
         if !more_attempt && session.remain_amount() > 0 {
             let err = "Can not send payment with limited attempts";
-            self.set_payment_fail_with_error(session, err);
+            self.set_payment_fail_with_error(session, err, None);
             return Err(Error::SendPaymentError(err.to_string()));
         }
         Ok(more_attempt)

@@ -40,6 +40,7 @@ impl TrackIncomingInvoiceDispatcher {
         state: &CchState<S>,
         _cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
+        _retry_count: u32,
     ) -> Option<Box<dyn ActionExecutor>> {
         if !Self::should_dispatch(order) {
             return None;
