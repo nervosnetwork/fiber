@@ -4323,26 +4323,36 @@ impl PaymentSphinxCodec {
     pub(crate) fn pack_hop_data(version: u8, hop_data: &PaymentHopData) -> Vec<u8> {
         match version {
             ONION_PACKET_VERSION_V0 => pack_len_prefixed(hop_data.serialize()),
-            _ => hop_data.serialize(),
+            ONION_PACKET_VERSION_V1 => hop_data.serialize(),
+            other => {
+                debug_assert!(
+                    false,
+                    "Unknown onion packet version {} passed to pack_hop_data; defaulting to v1",
+                    other
+                );
+                hop_data.serialize()
+            }
         }
     }
 
     /// Unpacks hop data according to the specified onion packet version.
     /// - Version 0: Skips u64 BE length header, deserializes molecule data.
     /// - Version 1: Deserializes molecule data directly (using molecule's u32 LE length).
+    /// - Unknown versions: Returns None to fail fast and avoid silent misparsing.
     pub(crate) fn unpack_hop_data(version: u8, buf: &[u8]) -> Option<PaymentHopData> {
         match version {
             ONION_PACKET_VERSION_V0 => {
                 let payload = unpack_len_prefixed_payload(buf)?;
                 PaymentHopData::deserialize(payload)
             }
-            _ => {
+            ONION_PACKET_VERSION_V1 => {
                 let len = molecule_data_len(buf)?;
                 if buf.len() < len {
                     return None;
                 }
                 PaymentHopData::deserialize(&buf[..len])
             }
+            _ => None,
         }
     }
 }
@@ -4375,7 +4385,8 @@ impl SphinxOnionCodec for PaymentSphinxCodec {
     fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize> {
         match version {
             ONION_PACKET_VERSION_V0 => len_with_u64_header(buf),
-            _ => molecule_data_len(buf),
+            ONION_PACKET_VERSION_V1 => molecule_data_len(buf),
+            _ => None,
         }
     }
 }
@@ -4530,7 +4541,13 @@ fn molecule_data_len(buf: &[u8]) -> Option<usize> {
     if buf.len() < molecule::NUMBER_SIZE {
         return None;
     }
-    Some(molecule::unpack_number(buf) as usize)
+    let len = molecule::unpack_number(buf) as usize;
+    // Molecule size must be at least NUMBER_SIZE (4 bytes for the length header itself).
+    // Reject malformed data claiming a smaller size.
+    if len < molecule::NUMBER_SIZE {
+        return None;
+    }
+    Some(len)
 }
 
 /// Used as identifier of node.

@@ -6,11 +6,12 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            secp256k1_instance, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Hash256,
-            NodeAnnouncement, NodeId, PaymentHopData, PaymentOnionPacket, PaymentSphinxCodec,
-            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrData, TlcErrPacket,
-            TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket, NO_SHARED_SECRET,
-            ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
+            secp256k1_instance, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error,
+            Hash256, NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData,
+            PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey,
+            TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
+            TrampolineOnionPacket, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
+            ONION_PACKET_VERSION_V1,
         },
         PaymentCustomRecords,
     },
@@ -489,13 +490,45 @@ fn test_payment_onion_packet_peel_unknown_version() {
     let secp = Secp256k1::new();
     let key = gen_rand_fiber_private_key();
 
-    // Create a packet with unknown version (99) in the version byte position
-    // OnionPacket format: [version: 1 byte][public_key: 33 bytes][packet_data][hmac: 32 bytes]
-    let mut data = vec![99u8]; // Unknown version
-    data.extend(vec![0u8; 33 + 100 + 32]); // pubkey + data + hmac (placeholder)
-    let packet = PaymentOnionPacket::new(data);
-    let result = packet.peel(&key, None, &secp);
+    // Build a valid onion packet first
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 100,
+            expiry: 1000,
+            next_hop: Some(key.pubkey()),
+            hash_algorithm: HashAlgorithm::Sha256,
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount: 100,
+            expiry: 1000,
+            hash_algorithm: HashAlgorithm::Sha256,
+            ..Default::default()
+        },
+    ];
+
+    let packet =
+        PeeledPaymentOnionPacket::create(gen_rand_fiber_private_key(), hops_infos, None, &secp)
+            .expect("create peeled packet");
+
+    // Get the next packet's bytes and flip the version byte to an unknown version
+    let mut data = packet.next.expect("next packet").into_bytes();
+    data[0] = 99; // Flip version to unknown value
+
+    let tampered_packet = PaymentOnionPacket::new(data);
+    let result = tampered_packet.peel(&key, None, &secp);
+
     assert!(result.is_err(), "Should reject unknown version in peel");
+    // Verify it's specifically an UnknownVersion error
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::OnionPacket(OnionPacketError::UnknownVersion(99))
+        ),
+        "Expected UnknownVersion(99) error, got: {:?}",
+        err
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
