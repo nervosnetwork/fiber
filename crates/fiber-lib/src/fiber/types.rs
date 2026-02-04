@@ -3818,11 +3818,101 @@ pub enum TrampolineHopPayload {
 
 impl TrampolineHopPayload {
     pub fn serialize(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("serialize TrampolineHopPayload")
+        molecule_fiber::TrampolineHopPayload::from(self.clone())
+            .as_bytes()
+            .to_vec()
     }
 
     pub fn deserialize(data: &[u8]) -> Option<Self> {
-        bincode::deserialize(data).ok()
+        molecule_fiber::TrampolineHopPayload::from_slice(data)
+            .ok()
+            .map(Into::into)
+    }
+}
+
+impl From<TrampolineHopPayload> for molecule_fiber::TrampolineHopPayload {
+    fn from(payload: TrampolineHopPayload) -> Self {
+        match payload {
+            TrampolineHopPayload::Forward {
+                next_node_id,
+                amount_to_forward,
+                hash_algorithm,
+                build_max_fee_amount,
+                tlc_expiry_delta,
+                tlc_expiry_limit,
+                max_parts,
+            } => {
+                let forward = molecule_fiber::TrampolineForwardPayload::new_builder()
+                    .next_node_id(next_node_id.into())
+                    .amount_to_forward(amount_to_forward.pack())
+                    .hash_algorithm(Byte::new(hash_algorithm as u8))
+                    .build_max_fee_amount(build_max_fee_amount.pack())
+                    .tlc_expiry_delta(tlc_expiry_delta.pack())
+                    .tlc_expiry_limit(tlc_expiry_limit.pack())
+                    .max_parts(
+                        molecule_fiber::Uint64Opt::new_builder()
+                            .set(max_parts.map(|x| x.pack()))
+                            .build(),
+                    )
+                    .build();
+                molecule_fiber::TrampolineHopPayload::new_builder()
+                    .set(forward)
+                    .build()
+            }
+            TrampolineHopPayload::Final {
+                final_amount,
+                final_tlc_expiry_delta,
+                payment_preimage,
+                custom_records,
+            } => {
+                let final_payload = molecule_fiber::TrampolineFinalPayload::new_builder()
+                    .final_amount(final_amount.pack())
+                    .final_tlc_expiry_delta(final_tlc_expiry_delta.pack())
+                    .payment_preimage(
+                        PaymentPreimageOpt::new_builder()
+                            .set(payment_preimage.map(|x| x.into()))
+                            .build(),
+                    )
+                    .custom_records(
+                        CustomRecordsOpt::new_builder()
+                            .set(custom_records.map(|x| x.into()))
+                            .build(),
+                    )
+                    .build();
+                molecule_fiber::TrampolineHopPayload::new_builder()
+                    .set(final_payload)
+                    .build()
+            }
+        }
+    }
+}
+
+impl From<molecule_fiber::TrampolineHopPayload> for TrampolineHopPayload {
+    fn from(payload: molecule_fiber::TrampolineHopPayload) -> Self {
+        match payload.to_enum() {
+            molecule_fiber::TrampolineHopPayloadUnion::TrampolineForwardPayload(forward) => {
+                TrampolineHopPayload::Forward {
+                    next_node_id: forward
+                        .next_node_id()
+                        .try_into()
+                        .expect("valid next_node_id"),
+                    amount_to_forward: forward.amount_to_forward().unpack(),
+                    hash_algorithm: forward.hash_algorithm().try_into().unwrap_or_default(),
+                    build_max_fee_amount: forward.build_max_fee_amount().unpack(),
+                    tlc_expiry_delta: forward.tlc_expiry_delta().unpack(),
+                    tlc_expiry_limit: forward.tlc_expiry_limit().unpack(),
+                    max_parts: forward.max_parts().to_opt().map(|x| x.unpack()),
+                }
+            }
+            molecule_fiber::TrampolineHopPayloadUnion::TrampolineFinalPayload(final_payload) => {
+                TrampolineHopPayload::Final {
+                    final_amount: final_payload.final_amount().unpack(),
+                    final_tlc_expiry_delta: final_payload.final_tlc_expiry_delta().unpack(),
+                    payment_preimage: final_payload.payment_preimage().to_opt().map(|x| x.into()),
+                    custom_records: final_payload.custom_records().to_opt().map(|x| x.into()),
+                }
+            }
+        }
     }
 }
 
