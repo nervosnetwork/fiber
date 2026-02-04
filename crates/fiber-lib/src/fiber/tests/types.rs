@@ -582,12 +582,13 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
         "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
     ]
     .iter()
-    .map(|s| Pubkey(PublicKey::from_str(s).expect("valid public key")))
-    .collect::<Vec<_>>();
+    .map(|s| PublicKey::from_str(s).expect("valid public key").into())
+    .collect::<Vec<Pubkey>>();
 
     let session_key = SecretKey::from_slice(&[0x42; 32]).expect("32 bytes, within curve order");
+    let hops_keys: Vec<PublicKey> = hops_path.iter().map(|k| k.into()).collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp).collect();
+        OnionSharedSecretIter::new(hops_keys.iter(), session_key, &secp).collect();
 
     // Pretend the downstream error originated beyond the trampoline boundary.
     let inner_err = TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
