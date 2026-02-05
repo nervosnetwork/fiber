@@ -5594,7 +5594,11 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
 }
 
 #[tokio::test]
-async fn test_send_payment_will_fail_with_no_invoice_preimage() {
+async fn test_received_invoice_without_preimage_keeps_payment_pending() {
+    // When an invoice is in Received status but no preimage is available,
+    // the payment should stay pending (Inflight) until TLCs expire.
+    // Hold TLC timeout is ignored when invoice is Received, so TLCs are
+    // only removed when they actually expire.
     init_tracing();
 
     let (nodes, channels) = create_n_nodes_network(
@@ -5613,22 +5617,18 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     let old_amount = node_3.get_local_balance_from_channel(channels[2]);
 
     let preimage = gen_rand_sha256_hash();
-    // with a short expiry time for test purpose
-    let expiry_time_in_seconds = 5;
-    let timer_started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("get time now")
-        .as_secs();
+    // Use a short invoice expiry time for test purposes
+    let invoice_expiry_seconds = 3;
 
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(100))
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
-        .expiry_time(Duration::from_secs(expiry_time_in_seconds))
+        .expiry_time(Duration::from_secs(invoice_expiry_seconds))
         .build()
         .expect("build invoice success");
 
-    // insert invoice without preimage
+    // Insert invoice WITHOUT preimage - this simulates a hold invoice scenario
     node_3.insert_invoice(ckb_invoice.clone(), None);
 
     let res = source_node
@@ -5641,45 +5641,27 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
         })
         .await;
 
-    // expect send payment to failed because we can not find preimage
     assert!(res.is_ok());
-
     let payment_hash = res.unwrap().payment_hash;
 
-    source_node.wait_until_failed(payment_hash).await;
-    source_node
-        .assert_payment_status(payment_hash, PaymentStatus::Failed, Some(1))
-        .await;
+    // Wait for invoice to expire and a bit more for processing
+    tokio::time::sleep(tokio::time::Duration::from_secs(invoice_expiry_seconds + 2)).await;
 
-    let time_elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("get time now")
-        .as_secs()
-        - timer_started;
-
-    assert!(time_elapsed >= expiry_time_in_seconds);
-
-    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
-    assert_eq!(new_amount, old_amount);
-
-    // the invoice is updated to Received
+    // The invoice should be in Received status
     assert_eq!(
         node_3.get_invoice_status(ckb_invoice.payment_hash()),
         Some(CkbInvoiceStatus::Received)
     );
 
-    // send the same payment_hash again will also fail
-    let res = source_node
-        .send_payment(SendPaymentCommand {
-            target_pubkey: Some(target_pubkey),
-            amount: Some(100),
-            invoice: Some(ckb_invoice.to_string()),
-            ..Default::default()
-        })
+    // The payment should still be Inflight (pending), not failed
+    // because TLCs are held until they expire (not based on hold timeout)
+    source_node
+        .assert_payment_status(payment_hash, PaymentStatus::Inflight, None)
         .await;
 
-    let error = res.unwrap_err();
-    assert!(error.contains("invoice is expired"));
+    // Balance should not have changed
+    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    assert_eq!(new_amount, old_amount);
 }
 
 #[tokio::test]

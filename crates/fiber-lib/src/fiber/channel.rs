@@ -935,15 +935,14 @@ where
                         // Not a hold invoice.
                         if is_mpp {
                             // Use the default expiry for mpp
-                            now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT
+                            Some(now_timestamp_as_millis_u64() + DEFAULT_HOLD_TLC_TIMEOUT)
                         } else {
-                            // Use 0 to indicate to not create HoldTLC for single path payment
-                            // with preimage.
-                            0
+                            // Do not hold this TLC for a single path payment with preimage.
+                            None
                         }
                     } else {
                         // A hold invoice. Ensure the expiry is large enough for manual settlement via RPC.
-                        match invoice.expiry_time() {
+                        Some(match invoice.expiry_time() {
                             Some(invoice_expiry) => u64::try_from(
                                 invoice_expiry
                                     .as_millis()
@@ -952,14 +951,13 @@ where
                             )
                             .unwrap_or(u64::MAX),
                             None => tlc.expiry,
-                        }
+                        })
                     };
                     state
                         .pending_notify_settle_tlcs
                         .push(PendingNotifySettleTlc {
                             payment_hash: tlc.payment_hash,
                             tlc_id: tlc.id(),
-                            is_mpp,
                             hold_expire_at,
                         });
 
@@ -1651,6 +1649,8 @@ where
         {
             self.store_preimage(payment_hash, payment_preimage);
         }
+        self.store
+            .remove_payment_hold_tlc(&payment_hash, &state.id, command.id);
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
             FiberMessage::remove_tlc(RemoveTlc {
@@ -2856,46 +2856,52 @@ where
 
         self.store.insert_channel_actor_state(state.clone());
 
+        let channel_id = state.get_id();
+        let mut immediate_tlc_sets = HashMap::<Hash256, Vec<(Hash256, u64)>>::new();
+        let mut hold_tlc_sets = HashSet::new();
         // try to settle down tlc set
-        for PendingNotifySettleTlc {
-            payment_hash,
-            tlc_id,
-            is_mpp,
-            hold_expire_at,
-        } in pending_notify_tlcs
-        {
-            let channel_id = state.get_id();
+        for pending_notify_tlc in pending_notify_tlcs {
             // Hold the tlc
-            let expiry_duration =
-                Duration::from_millis(hold_expire_at.saturating_sub(now_timestamp_as_millis_u64()));
-            if !expiry_duration.is_zero() {
+            if pending_notify_tlc.should_hold() {
+                let expiry_duration =
+                    pending_notify_tlc.hold_expiry_duration(now_timestamp_as_millis_u64());
                 self.store.insert_payment_hold_tlc(
-                    payment_hash,
+                    pending_notify_tlc.payment_hash,
                     HoldTlc {
                         channel_id,
-                        tlc_id,
-                        hold_expire_at,
+                        tlc_id: pending_notify_tlc.tlc_id,
+                        hold_expire_at: pending_notify_tlc.hold_expire_at.unwrap_or_default(),
                     },
                 );
-                // set timeout for hold tlc
-                self.network.send_after(expiry_duration, move || {
+                let timeout_command = move || {
                     NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
-                        payment_hash,
+                        pending_notify_tlc.payment_hash,
                         channel_id,
-                        tlc_id,
+                        pending_notify_tlc.tlc_id,
                     ))
-                });
+                };
+                // set timeout for hold tlc
+                self.network.send_after(expiry_duration, timeout_command);
+                hold_tlc_sets.insert(pending_notify_tlc.payment_hash);
+            } else {
+                immediate_tlc_sets
+                    .entry(pending_notify_tlc.payment_hash)
+                    .or_default()
+                    .push((channel_id, pending_notify_tlc.tlc_id));
             }
+        }
+
+        for (payment_hash, tlc_ids) in immediate_tlc_sets {
             self.network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SettleTlcSet(
-                        payment_hash,
-                        if !is_mpp {
-                            Some((state.get_id(), tlc_id))
-                        } else {
-                            None
-                        },
-                    ),
+                    NetworkActorCommand::SettleTlcSet(payment_hash, tlc_ids),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        for payment_hash in hold_tlc_sets {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SettleHoldTlcSet(payment_hash),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
@@ -3711,8 +3717,22 @@ type ScheduledChannelUpdateHandle =
 pub struct PendingNotifySettleTlc {
     pub payment_hash: Hash256,
     pub tlc_id: u64,
-    pub is_mpp: bool,
-    pub hold_expire_at: u64,
+    /// The expire time if the TLC should be held.
+    pub hold_expire_at: Option<u64>,
+}
+
+impl PendingNotifySettleTlc {
+    fn should_hold(&self) -> bool {
+        self.hold_expire_at.is_some()
+    }
+
+    fn hold_expiry_duration(&self, now_millis_since_unix_epoch: u64) -> Duration {
+        Duration::from_millis(
+            self.hold_expire_at
+                .unwrap_or_default()
+                .saturating_sub(now_millis_since_unix_epoch),
+        )
+    }
 }
 
 #[serde_as]
