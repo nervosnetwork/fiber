@@ -1,10 +1,6 @@
 use molecule::prelude::Entity;
 use musig2::{BinaryEncoding, CompactSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
-use serde::{
-    de::{Error, SeqAccess, Visitor},
-    ser::SerializeTuple,
-    Deserialize, Deserializer, Serializer,
-};
+use serde::{de::Error, Deserialize, Deserializer, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
 
 pub fn from_hex<'de, D, E>(deserializer: D) -> Result<E, D::Error>
@@ -17,11 +13,10 @@ where
         .and_then(|string| {
             // Accept both "0x" prefixed and non-prefixed hex strings for backward compatibility
             // with secp256k1::PublicKey's serde format which doesn't use "0x" prefix
-            let hex_str = if string.len() >= 2 && string[..2].to_lowercase() == "0x" {
-                &string[2..]
-            } else {
-                &string[..]
-            };
+            let hex_str = string
+                .strip_prefix("0x")
+                .or_else(|| string.strip_prefix("0X"))
+                .unwrap_or(&string);
             hex::decode(hex_str).map_err(|err| {
                 Error::custom(format!(
                     "failed to decode hex string {}: {:?}",
@@ -235,73 +230,5 @@ where
                     Error::custom(format!("failed to convert vector into type: {:?}", err))
                 })
             })
-    }
-}
-
-/// Serializer for [u8; 33] that is compatible with secp256k1::PublicKey's bincode format.
-/// - For human-readable formats (JSON): uses hex with "0x" prefix
-/// - For non-human-readable formats (bincode): uses tuple serialization (no length prefix)
-///
-/// This is necessary because:
-/// - secp256k1::PublicKey uses `serialize_tuple(33)` for bincode (33 bytes, no length prefix)
-/// - serde_with::Bytes uses `serialize_bytes` for bincode (adds 8-byte length prefix)
-/// - We need to maintain backward compatibility with existing stored data
-pub struct Pubkey33Bytes;
-
-impl SerializeAs<[u8; 33]> for Pubkey33Bytes {
-    fn serialize_as<S>(source: &[u8; 33], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if serializer.is_human_readable() {
-            // For JSON: use hex format
-            to_hex(source, serializer)
-        } else {
-            // For bincode: use tuple serialization (no length prefix)
-            // This matches secp256k1::PublicKey's serialization behavior
-            let mut tuple = serializer.serialize_tuple(33)?;
-            for byte in source {
-                tuple.serialize_element(byte)?;
-            }
-            tuple.end()
-        }
-    }
-}
-
-impl<'de> DeserializeAs<'de, [u8; 33]> for Pubkey33Bytes {
-    fn deserialize_as<D>(deserializer: D) -> Result<[u8; 33], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        if deserializer.is_human_readable() {
-            // For JSON: use hex format
-            from_hex(deserializer)
-        } else {
-            // For bincode: use tuple deserialization (no length prefix)
-            struct Bytes33Visitor;
-
-            impl<'de> Visitor<'de> for Bytes33Visitor {
-                type Value = [u8; 33];
-
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    formatter.write_str("a tuple of 33 bytes")
-                }
-
-                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-                where
-                    A: SeqAccess<'de>,
-                {
-                    let mut arr = [0u8; 33];
-                    for (i, byte) in arr.iter_mut().enumerate() {
-                        *byte = seq
-                            .next_element()?
-                            .ok_or_else(|| Error::invalid_length(i, &self))?;
-                    }
-                    Ok(arr)
-                }
-            }
-
-            deserializer.deserialize_tuple(33, Bytes33Visitor)
-        }
     }
 }

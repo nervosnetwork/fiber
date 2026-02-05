@@ -9,7 +9,6 @@ use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
-use super::serde_utils::Pubkey33Bytes;
 use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
@@ -329,10 +328,10 @@ impl Privkey {
 
 /// The public key for a Node
 /// It stores the serialized form ([u8; 33]) directly for fast comparison and hashing
-/// and uses SliceHex for human-readable formats (JSON), Pubkey33Bytes for bincode
+/// and uses SliceHex for human-readable formats (JSON), default tuple serialization for bincode
 #[serde_as]
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHex, Pubkey33Bytes>")] pub [u8; 33]);
+pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHex, [_; 33]>")] pub [u8; 33]);
 
 impl std::fmt::Debug for Pubkey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
