@@ -39,14 +39,13 @@ use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
 use musig2::SecNonce;
-use secp256k1::{Keypair, Secp256k1};
+use secp256k1::{Keypair, SECP256K1};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tentacle::secio::PeerId;
 
 fn gen_rand_local_signer() -> LocalSigner {
-    let secp = Secp256k1::new();
-    let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+    let keypair = Keypair::new(SECP256K1, &mut rand::thread_rng());
     LocalSigner::new(keypair.secret_key())
 }
 

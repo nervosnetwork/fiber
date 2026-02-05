@@ -17,7 +17,7 @@ use molecule::prelude::{Builder, Entity};
 use secp256k1::{
     self,
     ecdsa::{RecoverableSignature, RecoveryId},
-    Message, PublicKey, Secp256k1,
+    Message, PublicKey, SECP256K1,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -241,9 +241,8 @@ impl CkbInvoice {
         let hash = Message::from_digest_slice(&self.hash()[..])
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
 
-        let secp_context = Secp256k1::new();
         let verification_result =
-            secp_context.verify_ecdsa(&hash, &signature.0.to_standard(), pub_key);
+            SECP256K1.verify_ecdsa(&hash, &signature.0.to_standard(), pub_key);
         match verification_result {
             Ok(()) => true,
             Err(_) => false,
@@ -267,7 +266,7 @@ impl CkbInvoice {
         let hash = Message::from_digest_slice(&self.hash()[..])
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
 
-        secp256k1::Secp256k1::new().recover_ecdsa(
+        SECP256K1.recover_ecdsa(
             &hash,
             &self
                 .signature

@@ -30,7 +30,7 @@ use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
-use secp256k1::Secp256k1;
+use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
@@ -1480,7 +1480,6 @@ where
 
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         let mut trampoline_path: Vec<Pubkey> = hops.to_vec();
-        let secp = Secp256k1::new();
 
         trampoline_path.push(target);
         let trampoline_onion = TrampolineOnionPacket::create(
@@ -1488,7 +1487,7 @@ where
             trampoline_path,
             payloads,
             Some(payment_data.payment_hash.as_ref().to_vec()),
-            &secp,
+            SECP256K1,
         )
         .map_err(|_| PathFindError::NoPathFound)?
         .into_bytes();

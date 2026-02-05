@@ -21,7 +21,7 @@ use ckb_types::{
 };
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use secp256k1::{Message, Secp256k1, SecretKey};
+use secp256k1::{Message, SecretKey, SECP256K1};
 use strum::AsRefStr;
 use tracing::{debug, error, info, warn};
 
@@ -1506,8 +1506,7 @@ fn sign_tx_with_settlement(
 
     let message = compute_tx_message(&tx);
     let secp256k1_message = Message::from_digest_slice(&message)?;
-    let secp256k1 = Secp256k1::new();
-    let signature = secp256k1.sign_ecdsa_recoverable(&secp256k1_message, &settlement_secret_key);
+    let signature = SECP256K1.sign_ecdsa_recoverable(&secp256k1_message, &settlement_secret_key);
     let (recov_id, data) = signature.serialize_compact();
     let mut signature_bytes = [0u8; 65];
     signature_bytes[0..64].copy_from_slice(&data[0..64]);

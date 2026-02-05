@@ -5,7 +5,7 @@ use ractor::{
     call, port::OutputPortSubscriberTrait as _, Actor, ActorProcessingErr, ActorRef, OutputPort,
     RpcReplyPort,
 };
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use serde::Deserialize;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -468,9 +468,7 @@ impl<S: CchOrderStore> CchState<S> {
             .final_expiry_delta(self.config.ckb_final_tlc_expiry_delta_seconds * 1000)
             .udt_type_script(wrapped_btc_type_script.clone().into())
             .payee_pub_key(self.node_keypair.0)
-            .build_with_sign(|hash| {
-                Secp256k1::new().sign_ecdsa_recoverable(hash, &self.node_keypair.1)
-            })?;
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &self.node_keypair.1))?;
 
         let message = {
             let invoice = invoice.clone();

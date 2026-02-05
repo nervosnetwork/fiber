@@ -74,7 +74,7 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort,
 };
-use secp256k1::{Secp256k1, XOnlyPublicKey};
+use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1029,7 +1029,7 @@ where
                     .peel(
                         state.private_key(),
                         Some(add_tlc.payment_hash.as_ref()),
-                        &Secp256k1::new(),
+                        SECP256K1,
                     )
                     .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err.to_string()))
                     .map_err(ProcessingChannelError::without_shared_secret)?;
@@ -1100,11 +1100,7 @@ where
                 .expect("trampoline_onion present");
 
             let peeled_trampoline = TrampolineOnionPacket::new(trampoline_bytes.to_vec())
-                .peel(
-                    state.private_key(),
-                    Some(payment_hash.as_ref()),
-                    &Secp256k1::new(),
-                )
+                .peel(state.private_key(), Some(payment_hash.as_ref()), SECP256K1)
                 .map_err(|err| {
                     ProcessingChannelError::PeelingOnionPacketError(format!(
                         "Failed to peel trampoline onion packet: {err}"

@@ -28,7 +28,7 @@ use crate::NetworkServiceEvent;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use ractor::call;
-use secp256k1::Secp256k1;
+use secp256k1::SECP256K1;
 use std::collections::{HashMap, HashSet};
 use std::panic;
 use std::time::{Duration, SystemTime};
@@ -4745,7 +4745,6 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
     let hash_algorithm = HashAlgorithm::CkbHash;
 
     // Build an onion packet for the receiver (last hop) carrying the payment hash.
-    let secp = Secp256k1::new();
     let hops_infos = vec![
         PaymentHopData {
             amount,
@@ -4772,7 +4771,7 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
         source_node.get_private_key().clone(),
         hops_infos,
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -6174,7 +6173,6 @@ async fn test_payment_with_payment_data_record() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 10000000000);
     record.write(&mut custom_records);
@@ -6200,7 +6198,7 @@ async fn test_payment_with_payment_data_record() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -6273,7 +6271,6 @@ async fn test_payment_with_insufficient_total_amount() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set total amount to 20000000000, but pay only 10000000000
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
@@ -6300,7 +6297,7 @@ async fn test_payment_with_insufficient_total_amount() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -6398,7 +6395,6 @@ async fn test_payment_with_wrong_payment_secret() {
     let hash_algorithm = HashAlgorithm::CkbHash;
 
     let wrong_payment_secret = gen_rand_sha256_hash();
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(wrong_payment_secret, 10000000000);
     record.write(&mut custom_records);
@@ -6424,7 +6420,7 @@ async fn test_payment_with_wrong_payment_secret() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -6509,7 +6505,6 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 9000000000);
     record.write(&mut custom_records);
@@ -6535,7 +6530,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -6620,7 +6615,6 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let hops_infos = vec![
         PaymentHopData {
             amount: 9000000000,
@@ -6641,7 +6635,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
