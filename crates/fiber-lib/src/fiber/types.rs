@@ -4346,7 +4346,7 @@ impl PaymentSphinxCodec {
                 PaymentHopData::deserialize(payload)
             }
             ONION_PACKET_VERSION_V1 => {
-                let len = molecule_data_len(buf)?;
+                let len = molecule_table_data_len(buf)?;
                 if buf.len() < len {
                     return None;
                 }
@@ -4385,7 +4385,7 @@ impl SphinxOnionCodec for PaymentSphinxCodec {
     fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize> {
         match version {
             ONION_PACKET_VERSION_V0 => len_with_u64_header(buf),
-            ONION_PACKET_VERSION_V1 => molecule_data_len(buf),
+            ONION_PACKET_VERSION_V1 => molecule_table_data_len(buf),
             _ => None,
         }
     }
@@ -4537,7 +4537,7 @@ fn len_with_u64_header(buf: &[u8]) -> Option<usize> {
 
 /// Returns the total length from molecule's native u32 LE header.
 /// Used by v1 format (current payment hop data).
-fn molecule_data_len(buf: &[u8]) -> Option<usize> {
+fn molecule_table_data_len(buf: &[u8]) -> Option<usize> {
     if buf.len() < molecule::NUMBER_SIZE {
         return None;
     }
