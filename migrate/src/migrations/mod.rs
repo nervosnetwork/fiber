@@ -3,3 +3,4 @@ pub mod mig_20250724;
 // pub(crate) mod sample;
 pub mod mig_20251219;
 pub mod mig_20260203;
+pub mod mig_20260203_channel_index;

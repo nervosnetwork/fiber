@@ -209,7 +209,7 @@ fn extract_payment_hash_from_command(cmd: &SendPaymentCommand) -> Hash256 {
             return *invoice.payment_hash();
         }
         if let Ok(ln_invoice) = lightning_invoice::Bolt11Invoice::from_str(invoice_str) {
-            return (*ln_invoice.payment_hash()).into();
+            return Hash256::from(*ln_invoice.payment_hash());
         }
     }
     cmd.payment_hash.unwrap_or_else(|| test_payment_hash(0))
@@ -412,9 +412,9 @@ fn create_test_lightning_invoice_with_payment_hash(
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let private_key = bitcoin::secp256k1::SecretKey::from_slice(&[43u8; 32]).unwrap();
 
-    // Convert Hash256 to bitcoin's sha256::Hash
-    let payment_hash_btc =
-        bitcoin::hashes::sha256::Hash::from_slice(payment_hash.as_ref()).unwrap();
+    // Convert Hash256 to bitcoin's sha256::Hash (now unified with lightning-invoice)
+    let payment_hash_btc = bitcoin::hashes::sha256::Hash::from_slice(payment_hash.as_ref())
+        .expect("valid 32-byte hash");
 
     // Create a payment secret (required for build_signed)
     let payment_secret = lightning_invoice::PaymentSecret([0u8; 32]);
@@ -422,11 +422,14 @@ fn create_test_lightning_invoice_with_payment_hash(
     // Build the invoice with current timestamp (will be valid for 1 hour)
     // Use 36 blocks (~6 hours) for final CLTV, which is less than half of the default
     // CKB final TLC expiry (20 hours), satisfying the cross-chain safety requirement.
+    let duration_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time");
     LnInvoiceBuilder::new(LnCurrency::Bitcoin)
         .description("test invoice".to_string())
         .payment_hash(payment_hash_btc)
         .payment_secret(payment_secret)
-        .current_timestamp()
+        .duration_since_epoch(duration_since_epoch)
         .min_final_cltv_expiry_delta(36)
         .amount_milli_satoshis(100_000_000) // 100k sats
         .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
