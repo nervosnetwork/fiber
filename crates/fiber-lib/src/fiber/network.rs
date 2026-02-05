@@ -308,8 +308,8 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
-    // The first parameter is the peeled onion in binary via `PeeledPaymentOnionPacket::serialize`. `PeeledPaymentOnionPacket::current`
-    // is for the current node.
+    // Send an onion packet to the next hop. The `PeeledPaymentOnionPacket::current` contains
+    // the hop data for the current node.
     SendPaymentOnionPacket(SendOnionPacketCommand, RpcReplyPort<Result<(), TlcErr>>),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     VerifyFundingTx {

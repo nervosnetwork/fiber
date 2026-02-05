@@ -6,10 +6,12 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            pack_hop_data, secp256k1_instance, unpack_hop_data, AddTlc, BasicMppPaymentData,
-            BroadcastMessageID, Cursor, Hash256, NodeAnnouncement, NodeId, PaymentHopData,
-            PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrData, TlcErrPacket,
-            TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket, NO_SHARED_SECRET,
+            secp256k1_instance, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error,
+            Hash256, NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData,
+            PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey,
+            TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
+            TrampolineOnionPacket, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
+            ONION_PACKET_VERSION_V1,
         },
         PaymentCustomRecords,
     },
@@ -213,11 +215,6 @@ fn test_peeled_onion_packet() {
     )
     .expect("create peeled packet");
 
-    let serialized = packet.serialize();
-    let deserialized = PeeledPaymentOnionPacket::deserialize(&serialized).expect("deserialize");
-
-    assert_eq!(packet, deserialized);
-
     assert_eq!(packet.current, hops_infos[0].clone().into());
     assert!(!packet.is_last());
 
@@ -272,11 +269,6 @@ fn test_peeled_large_onion_packet() {
         )
         .map_err(|e| format!("create peeled packet error: {}", e))?;
 
-        let serialized = packet.serialize();
-        let deserialized = PeeledPaymentOnionPacket::deserialize(&serialized).expect("deserialize");
-
-        assert_eq!(packet, deserialized);
-
         let mut now = Some(packet);
         for i in 0..hops_infos.len() - 1 {
             let packet = now
@@ -298,11 +290,13 @@ fn test_peeled_large_onion_packet() {
     }
 
     // default PACKET_DATA_LEN is 6500
-    build_onion_packet(39).expect("build onion packet with 39 hops");
-    let res = build_onion_packet(40);
+    // v1 format saves 8 bytes per hop vs v0, allowing more hops
+    // Note: with trampoline_onion field, each hop is slightly larger
+    build_onion_packet(41).expect("build onion packet with 41 hops");
+    let res = build_onion_packet(42);
     assert!(
         res.is_err(),
-        "should fail to build onion packet with 40 hops"
+        "should fail to build onion packet with 42 hops"
     );
 }
 
@@ -423,75 +417,219 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_peeled_onion_packet_deserialize_u64_max_overflow() {
+fn test_unpack_hop_data_v0_empty_input() {
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V0, &[]);
+    assert!(result.is_none(), "Should reject empty input");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_unpack_hop_data_v0_u64_max_overflow() {
+    // v0 format: [u64 BE length header with u64::MAX]
     // Length header is u64::MAX, which would cause overflow when adding HOP_DATA_HEAD_LEN
-    // Input: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
     let malicious_input = [255u8, 255, 255, 255, 255, 255, 255, 255, 0];
-    let result = PeeledPaymentOnionPacket::deserialize(&malicious_input);
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V0, &malicious_input);
     assert!(
-        result.is_err(),
+        result.is_none(),
         "Should reject input with overflow-causing length"
     );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_peeled_onion_packet_deserialize_large_claimed_length() {
-    // Length header claims more data than available
+fn test_unpack_hop_data_v0_large_claimed_length() {
+    // v0 format: [u64 BE length claiming 1000 bytes]
     let mut large_claim = vec![0u8; 16];
-    large_claim[..8].copy_from_slice(&(1000u64).to_be_bytes()); // Claims 1000 bytes
-    let result = PeeledPaymentOnionPacket::deserialize(&large_claim);
+    large_claim[0..8].copy_from_slice(&(1000u64).to_be_bytes());
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V0, &large_claim);
     assert!(
-        result.is_err(),
+        result.is_none(),
         "Should reject input claiming more data than available"
     );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_peeled_onion_packet_deserialize_empty_input() {
-    let result = PeeledPaymentOnionPacket::deserialize(&[]);
-    assert!(result.is_err(), "Should reject empty input");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_peeled_onion_packet_deserialize_short_header() {
-    // Input too short for header (need 8 bytes, only 7 provided)
-    let result = PeeledPaymentOnionPacket::deserialize(&[1, 2, 3, 4, 5, 6, 7]);
+fn test_unpack_hop_data_v0_short_header() {
+    // v0 format needs 8 byte header, only providing 7 bytes
+    let input = [1, 2, 3, 4, 5, 6, 7];
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V0, &input);
     assert!(
-        result.is_err(),
+        result.is_none(),
         "Should reject input shorter than header length"
     );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_peeled_onion_packet_deserialize_exceeds_buffer() {
-    // Large length that exceeds buffer size
-    // Claimed length (6501 + 8 = 6509) far exceeds actual buffer (16 bytes)
+fn test_unpack_hop_data_v0_exceeds_buffer() {
+    // v0 format: claimed length (6501 + 8) far exceeds actual buffer
     let large_len: u64 = 6501;
     let mut large_input = vec![0u8; 16];
-    large_input[..8].copy_from_slice(&large_len.to_be_bytes());
-    let result = PeeledPaymentOnionPacket::deserialize(&large_input);
+    large_input[0..8].copy_from_slice(&large_len.to_be_bytes());
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V0, &large_input);
     assert!(
-        result.is_err(),
+        result.is_none(),
         "Should reject when claimed length exceeds buffer"
     );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_peeled_onion_packet_deserialize_near_max_overflow() {
-    // Near-max value that would overflow with header addition
-    let near_max = (usize::MAX - 7) as u64; // Adding 8 would overflow
+fn test_unpack_hop_data_v0_near_max_overflow() {
+    // v0 format: near-max value that would overflow with header addition
+    let near_max = (usize::MAX - 7) as u64;
     let mut near_max_input = vec![0u8; 16];
-    near_max_input[..8].copy_from_slice(&near_max.to_be_bytes());
-    let result = PeeledPaymentOnionPacket::deserialize(&near_max_input);
+    near_max_input[0..8].copy_from_slice(&near_max.to_be_bytes());
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V0, &near_max_input);
     assert!(
-        result.is_err(),
+        result.is_none(),
         "Should reject near-max length that overflows"
     );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_unpack_hop_data_v1_empty_input() {
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V1, &[]);
+    assert!(result.is_none(), "Should reject empty v1 input");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_unpack_hop_data_v1_short_header() {
+    // v1 format needs 4 byte molecule header, only providing 3 bytes
+    let input = [1, 2, 3];
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V1, &input);
+    assert!(
+        result.is_none(),
+        "Should reject v1 input shorter than molecule header length"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_unpack_hop_data_v1_large_claimed_length() {
+    // v1 format: molecule u32 LE header claiming 1000 bytes
+    let mut large_claim = vec![0u8; 8];
+    large_claim[0..4].copy_from_slice(&1000u32.to_le_bytes());
+    let result = PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V1, &large_claim);
+    assert!(
+        result.is_none(),
+        "Should reject v1 input claiming more data than available"
+    );
+}
+
+// Tests for PaymentOnionPacket::peel error handling
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_onion_packet_peel_unknown_version() {
+    let secp = Secp256k1::new();
+    let key = gen_rand_fiber_private_key();
+
+    // Build a valid onion packet first
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 100,
+            expiry: 1000,
+            next_hop: Some(key.pubkey()),
+            hash_algorithm: HashAlgorithm::Sha256,
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount: 100,
+            expiry: 1000,
+            hash_algorithm: HashAlgorithm::Sha256,
+            ..Default::default()
+        },
+    ];
+
+    let packet =
+        PeeledPaymentOnionPacket::create(gen_rand_fiber_private_key(), hops_infos, None, &secp)
+            .expect("create peeled packet");
+
+    // Get the next packet's bytes and flip the version byte to an unknown version
+    let mut data = packet.next.expect("next packet").into_bytes();
+    data[0] = 99; // Flip version to unknown value
+
+    let tampered_packet = PaymentOnionPacket::new(data);
+    let result = tampered_packet.peel(&key, None, &secp);
+
+    assert!(result.is_err(), "Should reject unknown version in peel");
+    // Verify it's specifically an UnknownVersion error
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::OnionPacket(OnionPacketError::UnknownVersion(99))
+        ),
+        "Expected UnknownVersion(99) error, got: {:?}",
+        err
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_onion_packet_peel_wrong_key() {
+    let secp = Secp256k1::new();
+    let correct_key = gen_rand_fiber_private_key();
+    let wrong_key = gen_rand_fiber_private_key();
+
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 100,
+            expiry: 1000,
+            next_hop: Some(correct_key.pubkey()),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_preimage: None,
+            custom_records: None,
+            trampoline_onion: None,
+        },
+        PaymentHopData {
+            amount: 100,
+            expiry: 1000,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_preimage: None,
+            custom_records: None,
+            trampoline_onion: None,
+        },
+    ];
+    let packet =
+        PeeledPaymentOnionPacket::create(gen_rand_fiber_private_key(), hops_infos, None, &secp)
+            .expect("create packet");
+
+    let next = packet.next.expect("should have next");
+    // Try to peel with wrong key - should fail HMAC verification
+    let result = next.peel(&wrong_key, None, &secp);
+    assert!(result.is_err(), "Should reject peel with wrong key");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_onion_packet_peel_invalid_data() {
+    let secp = Secp256k1::new();
+    let key = gen_rand_fiber_private_key();
+
+    // Create packet with garbage data
+    let garbage = vec![0u8; 100];
+    let packet = PaymentOnionPacket::new(garbage);
+    let result = packet.peel(&key, None, &secp);
+    assert!(result.is_err(), "Should reject invalid packet data");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_onion_packet_peel_empty_data() {
+    let secp = Secp256k1::new();
+    let key = gen_rand_fiber_private_key();
+
+    let packet = PaymentOnionPacket::new(vec![]);
+    let result = packet.peel(&key, None, &secp);
+    assert!(result.is_err(), "Should reject empty packet data");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -855,10 +993,10 @@ fn test_custom_records_serialize_deserialize() {
     let _deserialized: Custom = bincode::deserialize(&bincode_serialize).expect("deserialize");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_verify_payment_hop_data() {
-    let hop_data = PaymentHopData {
+/// Creates a canonical PaymentHopData for checksum tests.
+/// This exact data is used to verify format compatibility across versions.
+fn create_checksum_test_hop_data() -> PaymentHopData {
+    PaymentHopData {
         amount: 1000,
         expiry: 1000,
         hash_algorithm: HashAlgorithm::Sha256,
@@ -867,24 +1005,71 @@ fn test_verify_payment_hop_data() {
             data: vec![(1, vec![2, 3])].into_iter().collect(),
         }),
         ..Default::default()
-    };
-
-    let data = pack_hop_data(&hop_data);
-    let unpacked: PaymentHopData = unpack_hop_data(&data).expect("unpack error");
-    assert_eq!(hop_data, unpacked);
-
-    let check_sum = hex::encode(blake2b_256(&data));
-
-    // make sure we don't change PaymentHopData format since it's stored in db with encrypted format
-    // do migration with old data version is not workable
-    let expected_check_sum =
-        "7abddd1a352a8191bea7b694973a83d1d21c91ce50b2c657521ac83233103ce4".to_string();
-    if check_sum != expected_check_sum {
-        panic!(
-            "PaymentHopData check sum mismatch, you need compatible with old data version when deserializing, \
-            migration will not work with PaymentHopData"
-        );
     }
+}
+
+/// Test that v0 format (with u64 BE length header) round-trips correctly.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_hop_data_v0_roundtrip() {
+    let hop_data = create_checksum_test_hop_data();
+    let data_v0 = PaymentSphinxCodec::pack_hop_data(ONION_PACKET_VERSION_V0, &hop_data);
+    let unpacked: PaymentHopData =
+        PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V0, &data_v0)
+            .expect("unpack v0 error");
+    assert_eq!(hop_data, unpacked);
+}
+
+/// Test v0 format checksum to ensure backward compatibility.
+/// This checksum must not change since v0 packets may be in-flight in encrypted form.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_hop_data_v0_checksum() {
+    let hop_data = create_checksum_test_hop_data();
+    let data_v0 = PaymentSphinxCodec::pack_hop_data(ONION_PACKET_VERSION_V0, &hop_data);
+    let check_sum = hex::encode(blake2b_256(&data_v0));
+    let expected = "7abddd1a352a8191bea7b694973a83d1d21c91ce50b2c657521ac83233103ce4";
+    assert_eq!(
+        check_sum, expected,
+        "PaymentHopData v0 checksum mismatch - v0 format compatibility broken"
+    );
+}
+
+/// Test that v1 format (molecule data directly, no u64 header) round-trips correctly.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_hop_data_v1_roundtrip() {
+    let hop_data = create_checksum_test_hop_data();
+    let data_v1 = PaymentSphinxCodec::pack_hop_data(ONION_PACKET_VERSION_V1, &hop_data);
+    let unpacked: PaymentHopData =
+        PaymentSphinxCodec::unpack_hop_data(ONION_PACKET_VERSION_V1, &data_v1)
+            .expect("unpack v1 error");
+    assert_eq!(hop_data, unpacked);
+}
+
+/// Test v1 format checksum for consistency verification.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_hop_data_v1_checksum() {
+    let hop_data = create_checksum_test_hop_data();
+    let data_v1 = PaymentSphinxCodec::pack_hop_data(ONION_PACKET_VERSION_V1, &hop_data);
+    let check_sum = hex::encode(blake2b_256(&data_v1));
+    let expected = "6640af3fa9342368dbe2f3a54fa6bc0e17f394a7de8094ec7d4d33571c8c2160";
+    assert_eq!(check_sum, expected, "PaymentHopData v1 checksum mismatch");
+}
+
+/// Test that v1 format is exactly 8 bytes shorter than v0 (no u64 header).
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_payment_hop_data_v1_is_8_bytes_shorter() {
+    let hop_data = create_checksum_test_hop_data();
+    let data_v0 = PaymentSphinxCodec::pack_hop_data(ONION_PACKET_VERSION_V0, &hop_data);
+    let data_v1 = PaymentSphinxCodec::pack_hop_data(ONION_PACKET_VERSION_V1, &hop_data);
+    assert_eq!(
+        data_v0.len(),
+        data_v1.len() + 8,
+        "v1 should be exactly 8 bytes shorter than v0"
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
