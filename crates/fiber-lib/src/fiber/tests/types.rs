@@ -28,9 +28,8 @@ use molecule::prelude::{Builder, Byte, Entity};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use serde::Serialize;
-use tentacle::{multiaddr::MultiAddr, secio::PeerId};
-
 use std::str::FromStr;
+use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -38,12 +37,51 @@ fn test_serde_public_key() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
     let public_key = Pubkey::from(sk.public_key(secp256k1_instance()));
     let pk_str = serde_json::to_string(&public_key).unwrap();
+    // Now Pubkey uses SliceHex which adds "0x" prefix
     assert_eq!(
-        "\"035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"",
+        "\"0x035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"",
         &pk_str
     );
     let pubkey: Pubkey = serde_json::from_str(&pk_str).unwrap();
     assert_eq!(pubkey, public_key)
+}
+
+/// Test that Pubkey can be deserialized from hex strings without "0x" prefix
+/// for backward compatibility with secp256k1::PublicKey's serde format
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_serde_public_key_without_0x_prefix() {
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    let expected_pubkey = Pubkey::from(sk.public_key(secp256k1_instance()));
+
+    // Old secp256k1::PublicKey format without "0x" prefix
+    let pk_str_without_prefix =
+        "\"035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"";
+    let pubkey: Pubkey =
+        serde_json::from_str(pk_str_without_prefix).expect("should accept hex without 0x prefix");
+    assert_eq!(pubkey, expected_pubkey);
+
+    // Also verify "0x" prefixed still works
+    let pk_str_with_prefix =
+        "\"0x035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"";
+    let pubkey2: Pubkey =
+        serde_json::from_str(pk_str_with_prefix).expect("should accept hex with 0x prefix");
+    assert_eq!(pubkey2, expected_pubkey);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_pubkey_debug_format() {
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    let pubkey = Pubkey::from(sk.public_key(secp256k1_instance()));
+
+    // Debug format should show 33-byte compressed public key in hex
+    // This is a BREAKING CHANGE from the old format which showed 64-byte uncompressed coordinates
+    let debug_str = format!("{:?}", pubkey);
+    assert_eq!(
+        debug_str,
+        "Pubkey(035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c)"
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -493,12 +531,20 @@ fn test_tlc_err_packet_encryption() {
         "027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007",
     ]
     .iter()
-    .map(|s| Pubkey(PublicKey::from_str(s).expect("valid public key")))
+    .map(|s| {
+        let pk = PublicKey::from_str(s).expect("valid public key");
+        Pubkey(pk.serialize())
+    })
     .collect::<Vec<_>>();
 
     let session_key = SecretKey::from_slice(&[0x41; 32]).expect("32 bytes, within curve order");
+    // Convert [u8; 33] back to PublicKey for OnionSharedSecretIter
+    let hops_pubkeys: Vec<PublicKey> = hops_path
+        .iter()
+        .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
+        .collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp).collect();
+        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, &secp).collect();
 
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     {
@@ -536,12 +582,13 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
         "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
     ]
     .iter()
-    .map(|s| Pubkey(PublicKey::from_str(s).expect("valid public key")))
-    .collect::<Vec<_>>();
+    .map(|s| PublicKey::from_str(s).expect("valid public key").into())
+    .collect::<Vec<Pubkey>>();
 
     let session_key = SecretKey::from_slice(&[0x42; 32]).expect("32 bytes, within curve order");
+    let hops_keys: Vec<PublicKey> = hops_path.iter().map(|k| k.into()).collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key, &secp).collect();
+        OnionSharedSecretIter::new(hops_keys.iter(), session_key, &secp).collect();
 
     // Pretend the downstream error originated beyond the trampoline boundary.
     let inner_err = TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
@@ -946,4 +993,126 @@ fn test_basic_mpp_custom_records() {
 
     let new_record = BasicMppPaymentData::read(&payment_custom_records).unwrap();
     assert_eq!(new_record, record);
+}
+
+/// Test bincode serialization compatibility of Pubkey
+/// This test verifies that the new Pubkey([u8; 33]) format is compatible with
+/// the old Pubkey(PublicKey) format when serialized with bincode.
+#[test]
+fn test_pubkey_bincode_serialization_compatibility() {
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    let secp_pubkey = sk.public_key(secp256k1_instance());
+    let pubkey = Pubkey::from(secp_pubkey);
+
+    // Serialize the new Pubkey type
+    let serialized = bincode::serialize(&pubkey).expect("serialize pubkey");
+
+    // The old secp256k1::PublicKey serializes using serialize_tuple(33),
+    // which in bincode should be 33 bytes (no length prefix for tuples).
+    // Our new format using serde_with::Bytes serializes with serialize_bytes,
+    // which adds a length prefix in bincode.
+    //
+    // If this test fails, we need to either:
+    // 1. Write a custom SerializeAs implementation that uses serialize_tuple
+    // 2. Or write a migration to convert old data
+
+    // Expected old format: just 33 bytes, the compressed public key
+    let expected_old_format = secp_pubkey.serialize();
+    assert_eq!(expected_old_format.len(), 33);
+
+    // Check if the serialization matches the expected format
+    // Note: bincode::serialize for Bytes adds 8-byte length prefix (u64) by default
+    if serialized.len() == 33 {
+        // Direct match - compatible!
+        assert_eq!(
+            serialized.as_slice(),
+            expected_old_format.as_slice(),
+            "Pubkey bincode serialization should match the old format"
+        );
+    } else if serialized.len() == 41 {
+        // Has 8-byte length prefix - NOT compatible with old format!
+        // This means we need a migration
+        panic!(
+            "MIGRATION NEEDED: New Pubkey bincode format has length prefix (41 bytes) \
+             but old format was 33 bytes without prefix."
+        );
+    } else {
+        panic!(
+            "Unexpected Pubkey bincode serialization length: {} bytes (expected 33 or 41)",
+            serialized.len()
+        );
+    }
+
+    // Also verify deserialization works correctly
+    let deserialized: Pubkey = bincode::deserialize(&serialized).expect("deserialize pubkey");
+    assert_eq!(deserialized, pubkey);
+}
+
+/// Test that old Pubkey(PublicKey) bincode data can be deserialized by new Pubkey([u8; 33])
+/// This ensures backward compatibility with existing stored data.
+#[test]
+fn test_pubkey_bincode_backward_compatibility() {
+    // Define the old Pubkey type that wraps secp256k1::PublicKey directly
+    #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    struct OldPubkey(pub PublicKey);
+
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    let secp_pubkey = sk.public_key(secp256k1_instance());
+
+    // Create and serialize using old type
+    let old_pubkey = OldPubkey(secp_pubkey);
+    eprintln!("Old Pubkey: {:?}", old_pubkey);
+
+    let old_serialized = bincode::serialize(&old_pubkey).expect("serialize old pubkey");
+
+    // Verify old format is 33 bytes (no length prefix)
+    assert_eq!(
+        old_serialized.len(),
+        33,
+        "Old Pubkey(PublicKey) should serialize to exactly 33 bytes"
+    );
+
+    // Deserialize using new Pubkey type - this tests backward compatibility
+    let new_pubkey: Pubkey =
+        bincode::deserialize(&old_serialized).expect("deserialize old data with new type");
+
+    eprintln!("Deserialized Pubkey: {:?}", new_pubkey);
+
+    // Verify the deserialized data is correct
+    assert_eq!(
+        new_pubkey.0,
+        secp_pubkey.serialize(),
+        "Deserialized pubkey bytes should match original"
+    );
+
+    // Also verify we can convert back to PublicKey and it matches
+    let recovered_pubkey = PublicKey::from_slice(&new_pubkey.0).expect("convert back to PublicKey");
+    assert_eq!(
+        recovered_pubkey, secp_pubkey,
+        "Recovered PublicKey should match original"
+    );
+
+    // Test the reverse: new type serialized can be read by old type
+    let new_pubkey = Pubkey::from(secp_pubkey);
+    let new_serialized = bincode::serialize(&new_pubkey).expect("serialize new pubkey");
+
+    assert_eq!(
+        new_serialized.len(),
+        33,
+        "New Pubkey([u8; 33]) should also serialize to 33 bytes"
+    );
+
+    let old_deserialized: OldPubkey =
+        bincode::deserialize(&new_serialized).expect("deserialize new data with old type");
+
+    assert_eq!(
+        old_deserialized.0, secp_pubkey,
+        "Old type should correctly deserialize new format"
+    );
+
+    // Verify the serialized bytes are identical
+    assert_eq!(
+        old_serialized, new_serialized,
+        "Old and new serialization formats should be identical"
+    );
 }

@@ -4226,13 +4226,13 @@ fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
 }
 
 fn derive_channel_id_from_tlc_keys(tlc_basepoint1: &Pubkey, tlc_basepoint2: &Pubkey) -> Hash256 {
-    let mut preimage = [tlc_basepoint1.0.serialize(), tlc_basepoint2.0.serialize()];
+    let mut preimage = [tlc_basepoint1.0, tlc_basepoint2.0];
     preimage.sort();
     new_channel_id_from_seed(&preimage.concat())
 }
 
 fn derive_temp_channel_id_from_tlc_key(tlc_basepoint: &Pubkey) -> Hash256 {
-    let preimage = [tlc_basepoint.0.serialize(), [0; 33]].concat();
+    let preimage = [tlc_basepoint.0, [0; 33]].concat();
     new_channel_id_from_seed(&preimage)
 }
 

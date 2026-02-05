@@ -13,6 +13,7 @@ use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::payment::{PaymentCustomRecords, USER_CUSTOM_RECORDS_MAX_INDEX};
+use serde_with::IfIsHumanReadable;
 
 use anyhow::anyhow;
 use bitcoin::hashes::Hash;
@@ -326,36 +327,50 @@ impl Privkey {
 }
 
 /// The public key for a Node
-#[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Pubkey(pub PublicKey);
+/// It stores the serialized form ([u8; 33]) directly for fast comparison and hashing
+/// and uses SliceHex for human-readable formats (JSON), default tuple serialization for bincode
+#[serde_as]
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHex, [_; 33]>")] pub [u8; 33]);
+
+impl std::fmt::Debug for Pubkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Display as 33-byte compressed public key hex (matches JSON format and internal storage)
+        write!(f, "Pubkey({})", hex::encode(self.0))
+    }
+}
 
 impl From<Pubkey> for Point {
     fn from(val: Pubkey) -> Self {
-        val.0.into()
+        let pk: PublicKey = val.into();
+        pk.into()
     }
 }
 
 impl From<&Pubkey> for Point {
     fn from(val: &Pubkey) -> Self {
-        val.0.into()
+        let pk: PublicKey = val.into();
+        pk.into()
     }
 }
 
 impl From<&Pubkey> for PublicKey {
     fn from(val: &Pubkey) -> Self {
-        val.0
+        PublicKey::from_slice(&val.0)
+            .expect("Pubkey should always contain valid serialized public key")
     }
 }
 
 impl From<Pubkey> for PublicKey {
     fn from(pk: Pubkey) -> Self {
-        pk.0
+        PublicKey::from_slice(&pk.0)
+            .expect("Pubkey should always contain valid serialized public key")
     }
 }
 
 impl From<PublicKey> for Pubkey {
     fn from(pk: PublicKey) -> Pubkey {
-        Pubkey(pk)
+        Pubkey(pk.serialize())
     }
 }
 
@@ -386,17 +401,22 @@ impl Pubkey {
     }
 
     pub fn serialize(&self) -> [u8; PUBKEY_SIZE] {
-        PublicKey::from(self).serialize()
+        self.0
     }
 
     pub fn from_slice(slice: &[u8]) -> Result<Self, secp256k1::Error> {
-        PublicKey::from_slice(slice).map(Into::into)
+        // Validate by parsing, then store the bytes directly
+        let _ = PublicKey::from_slice(slice)?;
+        let mut bytes = [0u8; PUBKEY_SIZE];
+        bytes.copy_from_slice(slice);
+        Ok(Pubkey(bytes))
     }
 
     pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
         let scalar = scalar.into();
         let scalar = Scalar::from_slice(&scalar)
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
+        // Convert to Point, perform operation, then serialize back
         let result = Point::from(self) + scalar.base_point_mul();
         let point = result.not_inf().expect("valid public key");
         PublicKey::from(point).into()
@@ -414,8 +434,11 @@ pub struct EcdsaSignature(pub Secp256k1Signature);
 impl EcdsaSignature {
     pub fn verify(&self, pubkey: &Pubkey, message: &[u8; 32]) -> bool {
         let message = secp256k1::Message::from_digest(*message);
+        // Convert from [u8; 33] to PublicKey for verification
+        let pk = PublicKey::from_slice(&pubkey.0)
+            .expect("Pubkey should always contain valid serialized public key");
         secp256k1_instance()
-            .verify_ecdsa(&message, &self.0, &pubkey.0)
+            .verify_ecdsa(&message, &self.0, &pk)
             .is_ok()
     }
 }
@@ -463,8 +486,7 @@ impl From<Pubkey> for molecule_fiber::Pubkey {
     fn from(pk: Pubkey) -> molecule_fiber::Pubkey {
         molecule_fiber::Pubkey::new_builder()
             .set(
-                pk.0.serialize()
-                    .into_iter()
+                pk.0.into_iter()
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
                     .try_into()
@@ -1521,7 +1543,10 @@ impl TlcErrPacket {
             }
         }
 
-        let hops_public_keys: Vec<PublicKey> = hops_public_keys.iter().map(|k| k.0).collect();
+        let hops_public_keys: Vec<PublicKey> = hops_public_keys
+            .iter()
+            .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
+            .collect();
         let session_key = SecretKey::from_slice(session_key).inspect_err(|err|
             error!(target: "fnn::fiber::types::TlcErrPacket", "decode session_key error={} key={}", err, hex::encode(session_key))
         ).ok()?;

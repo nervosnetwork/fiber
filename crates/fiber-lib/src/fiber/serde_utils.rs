@@ -11,13 +11,13 @@ where
 {
     String::deserialize(deserializer)
         .and_then(|string| {
-            if string.len() < 2 || &string[..2].to_lowercase() != "0x" {
-                return Err(Error::custom(format!(
-                    "hex string does not start with 0x: {}",
-                    &string
-                )));
-            };
-            hex::decode(&string[2..]).map_err(|err| {
+            // Accept both "0x" prefixed and non-prefixed hex strings for backward compatibility
+            // with secp256k1::PublicKey's serde format which doesn't use "0x" prefix
+            let hex_str = string
+                .strip_prefix("0x")
+                .or_else(|| string.strip_prefix("0X"))
+                .unwrap_or(&string);
+            hex::decode(hex_str).map_err(|err| {
                 Error::custom(format!(
                     "failed to decode hex string {}: {:?}",
                     &string, err

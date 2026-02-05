@@ -1421,6 +1421,8 @@ A wrapper for secp256k1 secret key
 ### Type `Pubkey`
 
 The public key for a Node
+ It stores the serialized form ([u8; 33]) directly for fast comparison and hashing
+ and uses SliceHex for human-readable formats (JSON), default tuple serialization for bincode
 
 
 
