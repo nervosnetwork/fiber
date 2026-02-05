@@ -4040,16 +4040,22 @@ impl SphinxOnionCodec for TrampolineSphinxCodec {
     type Current = TrampolineHopPayload;
 
     const PACKET_DATA_LEN: usize = TRAMPOLINE_PACKET_DATA_LEN;
-    // Trampoline uses bincode serialization, which requires v0 format with u64 length header
-    const CURRENT_VERSION: u8 = ONION_PACKET_VERSION_V0;
+    // Trampoline uses molecule enum serialization (v1 format without u64 length header)
+    const CURRENT_VERSION: u8 = ONION_PACKET_VERSION_V1;
 
     fn pack(decoded: &Self::Decoded) -> Vec<u8> {
-        pack_trampoline_hop_payload(decoded)
+        decoded.serialize()
     }
 
-    fn unpack(_version: u8, buf: &[u8]) -> Option<Self::Decoded> {
-        // Trampoline always uses v0 format with length header
-        unpack_trampoline_hop_payload(buf)
+    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded> {
+        if !Self::is_version_allowed(version) {
+            return None;
+        }
+        let len = molecule_enum_of_tables_data_len(buf)?;
+        if buf.len() < len {
+            return None;
+        }
+        TrampolineHopPayload::deserialize(&buf[..len])
     }
 
     fn to_current(decoded: Self::Decoded) -> Self::Current {
@@ -4057,13 +4063,16 @@ impl SphinxOnionCodec for TrampolineSphinxCodec {
     }
 
     fn is_version_allowed(version: u8) -> bool {
-        // Trampoline only supports v0 (bincode with u64 length header)
-        version == ONION_PACKET_VERSION_V0
+        // Trampoline only supports v1 (molecule enum without u64 length header)
+        version == ONION_PACKET_VERSION_V1
     }
 
-    fn hop_data_len(_version: u8, buf: &[u8]) -> Option<usize> {
-        // Trampoline always uses v0 format: [u64 BE length][data]
-        len_with_u64_header(buf)
+    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize> {
+        if !Self::is_version_allowed(version) {
+            return None;
+        }
+        // Trampoline uses molecule enum where all branches are tables
+        molecule_enum_of_tables_data_len(buf)
     }
 }
 
@@ -4121,15 +4130,6 @@ impl TrampolineOnionPacket {
             secp_ctx,
         )?))
     }
-}
-
-pub(crate) fn pack_trampoline_hop_payload(payload: &TrampolineHopPayload) -> Vec<u8> {
-    pack_len_prefixed(payload.serialize())
-}
-
-pub(crate) fn unpack_trampoline_hop_payload(buf: &[u8]) -> Option<TrampolineHopPayload> {
-    let payload = unpack_len_prefixed_payload(buf)?;
-    TrampolineHopPayload::deserialize(payload)
 }
 
 #[serde_as]
@@ -4548,6 +4548,15 @@ fn molecule_table_data_len(buf: &[u8]) -> Option<usize> {
         return None;
     }
     Some(len)
+}
+
+/// Returns the total length of a molecule enum where all branches are tables.
+/// Layout: [item_id: u32 LE][table_data]. The table's first u32 LE is its total length.
+/// Total length = 4 (item_id) + table_length.
+/// Used by trampoline hop data (v1 format).
+fn molecule_enum_of_tables_data_len(buf: &[u8]) -> Option<usize> {
+    let table_len = molecule_table_data_len(buf.get(molecule::NUMBER_SIZE..)?)?;
+    molecule::NUMBER_SIZE.checked_add(table_len)
 }
 
 /// Used as identifier of node.
