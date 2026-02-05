@@ -93,9 +93,8 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
-    AttemptStatus, PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords,
-    PaymentStatus, SendPaymentCommand, SendPaymentDataBuilder, SendPaymentWithRouterCommand,
-    TrampolineContext,
+    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords, PaymentStatus,
+    SendPaymentCommand, SendPaymentDataBuilder, SendPaymentWithRouterCommand, TrampolineContext,
 };
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -864,23 +863,25 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
-                // retry related payment attempts for this channel
+                // Retry payment attempts whose first hop uses this channel
                 for attempt in self
                     .store
-                    .get_attempts_with_statuses(&[AttemptStatus::Created, AttemptStatus::Retrying])
+                    .get_pending_attempts_by_channel_outpoint(&channel_outpoint)
                 {
-                    if attempt.first_hop_channel_outpoint_eq(&channel_outpoint) {
+                    debug!(
+                        "Retrying payment attempt {:?} for channel {:?} reestablished",
+                        attempt.payment_hash, channel_outpoint
+                    );
+                    if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::RetrySendPayment(attempt.payment_hash, Some(attempt.id)),
+                    )) {
                         debug!(
-                            "Now retrying payment attempt {:?} for channel {:?} reestablished",
-                            attempt.payment_hash, channel_id
-                        );
-                        self.register_payment_retry(
-                            myself.clone(),
-                            attempt.payment_hash,
-                            Some(attempt.id),
+                            "Failed to register payment retry for {:?}: {:?}",
+                            attempt.payment_hash, err
                         );
                     }
                 }
+
                 debug_event!(
                     myself,
                     format!(
@@ -2678,19 +2679,6 @@ where
             },
         )
         .await;
-    }
-
-    fn register_payment_retry(
-        &self,
-        myself: ActorRef<NetworkActorMessage>,
-        payment_hash: Hash256,
-        attempt_id: Option<u64>,
-    ) {
-        if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
-            NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id),
-        )) {
-            debug!("Failed to register payment retry for {payment_hash:?} {attempt_id:?}: {err:?}");
-        }
     }
 
     async fn resume_payment_actor_and_send_command(

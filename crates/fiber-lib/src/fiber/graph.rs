@@ -20,7 +20,7 @@ use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
-use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
+use crate::fiber::payment::{Attempt, PaymentSession, PaymentStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
@@ -2698,6 +2698,11 @@ pub trait NetworkGraphStateStore {
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
+    /// Deletes all attempts and their channel index entries for the given payment hash.
     fn delete_attempts(&self, payment_hash: Hash256);
-    fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt>;
+    /// Clears only the channel index entries for attempts, keeping the attempt records.
+    fn clear_attempts_channel_index(&self, payment_hash: Hash256);
+    /// Returns all pending attempts (Created/Retrying status) using this channel as first hop.
+    fn get_pending_attempts_by_channel_outpoint(&self, channel_outpoint: &OutPoint)
+        -> Vec<Attempt>;
 }
