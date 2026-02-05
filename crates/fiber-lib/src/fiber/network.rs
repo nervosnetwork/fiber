@@ -2328,6 +2328,13 @@ where
         }
 
         self.store.insert_preimage(payment_hash, payment_preimage);
+        // Notify watchtower about the preimage so it can settle TLCs on-chain if needed
+        // (e.g., after force close).
+        myself
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::PreimageCreated(payment_hash, payment_preimage),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(
             NetworkActorCommand::SettleHoldTlcSet(payment_hash),
