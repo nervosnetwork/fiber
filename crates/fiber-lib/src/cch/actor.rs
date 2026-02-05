@@ -415,7 +415,7 @@ impl<S: CchOrderStore> CchState<S> {
 
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
         tracing::debug!("BTC invoice: {:?}", invoice);
-        let payment_hash = (*invoice.payment_hash()).into();
+        let payment_hash = Hash256::from(*invoice.payment_hash());
 
         // Validate that outgoing BTC invoice's final CLTV is less than half of incoming CKB invoice's final TLC expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.

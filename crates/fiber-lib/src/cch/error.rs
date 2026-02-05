@@ -19,7 +19,7 @@ pub enum CchError {
     #[error("Outgoing invoice expiry time is too short")]
     OutgoingInvoiceExpiryTooShort,
     #[error("BTC invoice parse error: {0}")]
-    BTCInvoiceParseError(#[from] lightning_invoice::ParseOrSemanticError),
+    BTCInvoiceParseError(lightning_invoice::ParseOrSemanticError),
     #[error("BTC invoice expired")]
     BTCInvoiceExpired,
     #[error("BTC invoice missing amount")]
@@ -61,6 +61,12 @@ pub enum CchError {
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;
+
+impl From<lightning_invoice::ParseOrSemanticError> for CchError {
+    fn from(err: lightning_invoice::ParseOrSemanticError) -> Self {
+        CchError::BTCInvoiceParseError(err)
+    }
+}
 
 impl From<CchError> for ErrorObjectOwned {
     fn from(val: CchError) -> Self {
