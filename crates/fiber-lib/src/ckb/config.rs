@@ -21,7 +21,7 @@ use serde_with::serde_as;
 use std::fs;
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::info;
-use {ckb_hash::blake2b_256, secp256k1::Secp256k1};
+use {ckb_hash::blake2b_256, secp256k1::SECP256K1};
 
 use std::{path::PathBuf, str::FromStr};
 
@@ -149,8 +149,7 @@ impl CkbConfig {
 
     pub fn get_default_funding_lock_script(&self) -> Result<Script> {
         let secret_key = self.read_secret_key()?;
-        let secp = Secp256k1::new();
-        let pubkey_hash = blake2b_256(secret_key.public_key(&secp).serialize());
+        let pubkey_hash = blake2b_256(secret_key.public_key(SECP256K1).serialize());
         Ok(get_script_by_contract(
             Contract::Secp256k1Lock,
             &pubkey_hash[0..20],

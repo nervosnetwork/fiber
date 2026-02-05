@@ -12,7 +12,7 @@ use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
 use rand::seq::{IteratorRandom, SliceRandom};
-use secp256k1::Secp256k1;
+use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
@@ -2474,11 +2474,7 @@ where
             })?;
         let udt_type_script = prev_channel_state.funding_udt_type_script.clone();
         let peeled_trampoline = trampoline_packet
-            .peel(
-                &state.private_key,
-                Some(payment_hash.as_ref()),
-                &Secp256k1::new(),
-            )
+            .peel(&state.private_key, Some(payment_hash.as_ref()), SECP256K1)
             .map_err(|_| {
                 TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
             })?;

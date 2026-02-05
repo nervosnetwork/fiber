@@ -35,7 +35,7 @@ use fnn::{
 };
 use jsonrpsee::wasm_client::WasmClientBuilder;
 use ractor::{Actor, ActorRef};
-use secp256k1::{Secp256k1, SecretKey};
+use secp256k1::{SECP256K1, SecretKey};
 use std::fmt::Debug;
 use tokio::{
     select,
@@ -124,7 +124,7 @@ pub async fn fiber(
             None => {
                 tracing::warn!("Ckb SecretKey not provided, generating a random one..");
                 let mut rng = secp256k1::rand::thread_rng();
-                Secp256k1::new().generate_keypair(&mut rng).0
+                SECP256K1.generate_keypair(&mut rng).0
             }
         };
     if let Some(ref mut value) = config.ckb {

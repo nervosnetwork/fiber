@@ -3,7 +3,7 @@ use ckb_types::core::TransactionView;
 use ckb_types::packed::CellOutput;
 use ckb_types::prelude::{Builder, Entity, Unpack};
 use ckb_types::{packed::OutPoint, prelude::Pack};
-use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::{Keypair, PublicKey, SecretKey, XOnlyPublicKey, SECP256K1};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
 use crate::fiber::features::FeatureVector;
@@ -43,8 +43,7 @@ pub fn gen_rand_secp256k1_public_key() -> PublicKey {
 }
 
 pub fn gen_rand_secp256k1_keypair() -> Keypair {
-    let secp = Secp256k1::new();
-    Keypair::new(&secp, &mut rand::thread_rng())
+    Keypair::new(SECP256K1, &mut rand::thread_rng())
 }
 
 pub fn gen_rand_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {
@@ -56,8 +55,7 @@ pub fn gen_rand_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {
 }
 
 pub fn gen_deterministic_secp256k1_keypair() -> Keypair {
-    let secp = Secp256k1::new();
-    Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[42u8; 32]).unwrap())
+    Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[42u8; 32]).unwrap())
 }
 
 pub fn gen_deterministic_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {

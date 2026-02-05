@@ -49,7 +49,7 @@ use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
 use rand::Rng;
-use secp256k1::{Message, Secp256k1};
+use secp256k1::{Message, SECP256K1};
 #[cfg(not(target_arch = "wasm32"))]
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
@@ -219,11 +219,10 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
 
 // Mock function to create a dummy EcdsaSignature
 pub fn mock_ecdsa_signature() -> EcdsaSignature {
-    let secp = Secp256k1::new();
     let mut rng = OsRng;
-    let (secret_key, _public_key) = secp.generate_keypair(&mut rng);
+    let (secret_key, _public_key) = SECP256K1.generate_keypair(&mut rng);
     let message = Message::from_digest_slice(&[0u8; 32]).expect("32 bytes");
-    let signature = secp.sign_ecdsa(&message, &secret_key);
+    let signature = SECP256K1.sign_ecdsa(&message, &secret_key);
     EcdsaSignature(signature)
 }
 #[cfg(not(target_arch = "wasm32"))]

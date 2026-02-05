@@ -6,12 +6,11 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            secp256k1_instance, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error,
-            Hash256, NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData,
-            PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey,
-            TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
-            TrampolineOnionPacket, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
-            ONION_PACKET_VERSION_V1,
+            AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error, Hash256,
+            NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData, PaymentOnionPacket,
+            PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrData,
+            TlcErrPacket, TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket,
+            NO_SHARED_SECRET, ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
         },
         PaymentCustomRecords,
     },
@@ -27,7 +26,7 @@ use ckb_types::{
 };
 use fiber_sphinx::OnionSharedSecretIter;
 use molecule::prelude::{Builder, Byte, Entity};
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use serde::Deserialize;
 use serde::Serialize;
 use std::str::FromStr;
@@ -37,7 +36,7 @@ use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_public_key() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
-    let public_key = Pubkey::from(sk.public_key(secp256k1_instance()));
+    let public_key = Pubkey::from(sk.public_key(SECP256K1));
     let pk_str = serde_json::to_string(&public_key).unwrap();
     // Now Pubkey uses SliceHex which adds "0x" prefix
     assert_eq!(
@@ -54,7 +53,7 @@ fn test_serde_public_key() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_public_key_without_0x_prefix() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
-    let expected_pubkey = Pubkey::from(sk.public_key(secp256k1_instance()));
+    let expected_pubkey = Pubkey::from(sk.public_key(SECP256K1));
 
     // Old secp256k1::PublicKey format without "0x" prefix
     let pk_str_without_prefix =
@@ -75,7 +74,7 @@ fn test_serde_public_key_without_0x_prefix() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_pubkey_debug_format() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
-    let pubkey = Pubkey::from(sk.public_key(secp256k1_instance()));
+    let pubkey = Pubkey::from(sk.public_key(SECP256K1));
 
     // Debug format should show 33-byte compressed public key in hex
     // This is a BREAKING CHANGE from the old format which showed 64-byte uncompressed coordinates
@@ -181,7 +180,6 @@ fn test_add_tlc_serialization() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_peeled_onion_packet() {
-    let secp = Secp256k1::new();
     let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
         .take(3)
         .collect();
@@ -211,7 +209,7 @@ fn test_peeled_onion_packet() {
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         None,
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -221,7 +219,7 @@ fn test_peeled_onion_packet() {
     let packet = packet
         .next
         .expect("next hop")
-        .peel(&keys[1], None, &secp)
+        .peel(&keys[1], None, SECP256K1)
         .expect("peel");
     assert_eq!(packet.current, hops_infos[1].clone().into());
     assert!(!packet.is_last());
@@ -229,7 +227,7 @@ fn test_peeled_onion_packet() {
     let packet = packet
         .next
         .expect("next hop")
-        .peel(&keys[2], None, &secp)
+        .peel(&keys[2], None, SECP256K1)
         .expect("peel");
     assert_eq!(packet.current, hops_infos[2].clone().into());
     assert!(packet.is_last());
@@ -239,7 +237,6 @@ fn test_peeled_onion_packet() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_peeled_large_onion_packet() {
     fn build_onion_packet(hops_num: usize) -> Result<(), String> {
-        let secp = Secp256k1::new();
         let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
             .take(hops_num + 1)
             .collect();
@@ -265,7 +262,7 @@ fn test_peeled_large_onion_packet() {
             gen_rand_fiber_private_key(),
             hops_infos.clone(),
             None,
-            &secp,
+            SECP256K1,
         )
         .map_err(|e| format!("create peeled packet error: {}", e))?;
 
@@ -275,7 +272,7 @@ fn test_peeled_large_onion_packet() {
                 .unwrap()
                 .next
                 .expect("next hop")
-                .peel(&keys[i], None, &secp)
+                .peel(&keys[i], None, SECP256K1)
                 .expect("peel");
             assert_eq!(packet.current, hops_infos[i + 1].clone().into());
             now = Some(packet.clone());
@@ -303,8 +300,6 @@ fn test_peeled_large_onion_packet() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_trampoline_onion_packet_multi_hop_peel() {
-    let secp = Secp256k1::new();
-
     let t1 = gen_rand_fiber_private_key();
     let t2 = gen_rand_fiber_private_key();
     let final_node = gen_rand_fiber_private_key();
@@ -342,18 +337,18 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
         vec![t1.pubkey(), t2.pubkey(), final_node.pubkey()],
         payloads.clone(),
         None,
-        &secp,
+        SECP256K1,
     )
     .expect("create trampoline onion");
 
-    let p1 = pkt.peel(&t1, None, &secp).expect("peel at t1");
+    let p1 = pkt.peel(&t1, None, SECP256K1).expect("peel at t1");
     assert_eq!(p1.current, payloads[0]);
     assert!(p1.next.is_some());
 
     let p2 = p1
         .next
         .expect("next")
-        .peel(&t2, None, &secp)
+        .peel(&t2, None, SECP256K1)
         .expect("peel at t2");
     assert_eq!(p2.current, payloads[1]);
     assert!(p2.next.is_some());
@@ -361,7 +356,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
     let p3 = p2
         .next
         .expect("next")
-        .peel(&final_node, None, &secp)
+        .peel(&final_node, None, SECP256K1)
         .expect("peel at final");
     assert_eq!(p3.current, payloads[2]);
     assert!(p3.next.is_none());
@@ -376,24 +371,24 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
         vec![t1.pubkey(), t2.pubkey(), final_node.pubkey()],
         payloads.clone(),
         Some(assoc_data.clone()),
-        &secp,
+        SECP256K1,
     )
     .expect("create trampoline onion with assoc_data");
 
     assert!(
-        pkt_with_ad.clone().peel(&t1, None, &secp).is_err(),
+        pkt_with_ad.clone().peel(&t1, None, SECP256K1).is_err(),
         "peel should fail when assoc_data is missing"
     );
     assert!(
         pkt_with_ad
             .clone()
-            .peel(&t1, Some("wrong".as_bytes()), &secp)
+            .peel(&t1, Some("wrong".as_bytes()), SECP256K1)
             .is_err(),
         "peel should fail when assoc_data mismatches"
     );
 
     let p1 = pkt_with_ad
-        .peel(&t1, Some(&assoc_data), &secp)
+        .peel(&t1, Some(&assoc_data), SECP256K1)
         .expect("peel at t1 with assoc_data");
     assert_eq!(p1.current, payloads[0]);
     assert!(p1.next.is_some());
@@ -401,7 +396,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
     let p2 = p1
         .next
         .expect("next")
-        .peel(&t2, Some(&assoc_data), &secp)
+        .peel(&t2, Some(&assoc_data), SECP256K1)
         .expect("peel at t2 with assoc_data");
     assert_eq!(p2.current, payloads[1]);
     assert!(p2.next.is_some());
@@ -409,7 +404,7 @@ fn test_trampoline_onion_packet_multi_hop_peel() {
     let p3 = p2
         .next
         .expect("next")
-        .peel(&final_node, Some(&assoc_data), &secp)
+        .peel(&final_node, Some(&assoc_data), SECP256K1)
         .expect("peel at final with assoc_data");
     assert_eq!(p3.current, payloads[2]);
     assert!(p3.next.is_none());
@@ -525,7 +520,6 @@ fn test_unpack_hop_data_v1_large_claimed_length() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_payment_onion_packet_peel_unknown_version() {
-    let secp = Secp256k1::new();
     let key = gen_rand_fiber_private_key();
 
     // Build a valid onion packet first
@@ -546,7 +540,7 @@ fn test_payment_onion_packet_peel_unknown_version() {
     ];
 
     let packet =
-        PeeledPaymentOnionPacket::create(gen_rand_fiber_private_key(), hops_infos, None, &secp)
+        PeeledPaymentOnionPacket::create(gen_rand_fiber_private_key(), hops_infos, None, SECP256K1)
             .expect("create peeled packet");
 
     // Get the next packet's bytes and flip the version byte to an unknown version
@@ -554,7 +548,7 @@ fn test_payment_onion_packet_peel_unknown_version() {
     data[0] = 99; // Flip version to unknown value
 
     let tampered_packet = PaymentOnionPacket::new(data);
-    let result = tampered_packet.peel(&key, None, &secp);
+    let result = tampered_packet.peel(&key, None, SECP256K1);
 
     assert!(result.is_err(), "Should reject unknown version in peel");
     // Verify it's specifically an UnknownVersion error
@@ -572,7 +566,6 @@ fn test_payment_onion_packet_peel_unknown_version() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_payment_onion_packet_peel_wrong_key() {
-    let secp = Secp256k1::new();
     let correct_key = gen_rand_fiber_private_key();
     let wrong_key = gen_rand_fiber_private_key();
 
@@ -599,36 +592,34 @@ fn test_payment_onion_packet_peel_wrong_key() {
         },
     ];
     let packet =
-        PeeledPaymentOnionPacket::create(gen_rand_fiber_private_key(), hops_infos, None, &secp)
+        PeeledPaymentOnionPacket::create(gen_rand_fiber_private_key(), hops_infos, None, SECP256K1)
             .expect("create packet");
 
     let next = packet.next.expect("should have next");
     // Try to peel with wrong key - should fail HMAC verification
-    let result = next.peel(&wrong_key, None, &secp);
+    let result = next.peel(&wrong_key, None, SECP256K1);
     assert!(result.is_err(), "Should reject peel with wrong key");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_payment_onion_packet_peel_invalid_data() {
-    let secp = Secp256k1::new();
     let key = gen_rand_fiber_private_key();
 
     // Create packet with garbage data
     let garbage = vec![0u8; 100];
     let packet = PaymentOnionPacket::new(garbage);
-    let result = packet.peel(&key, None, &secp);
+    let result = packet.peel(&key, None, SECP256K1);
     assert!(result.is_err(), "Should reject invalid packet data");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_payment_onion_packet_peel_empty_data() {
-    let secp = Secp256k1::new();
     let key = gen_rand_fiber_private_key();
 
     let packet = PaymentOnionPacket::new(vec![]);
-    let result = packet.peel(&key, None, &secp);
+    let result = packet.peel(&key, None, SECP256K1);
     assert!(result.is_err(), "Should reject empty packet data");
 }
 
@@ -662,7 +653,6 @@ fn test_tlc_fail_error() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_tlc_err_packet_encryption() {
     // Setup
-    let secp = Secp256k1::new();
     let hops_path = [
         "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
         "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
@@ -682,7 +672,7 @@ fn test_tlc_err_packet_encryption() {
         .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
         .collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, &secp).collect();
+        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, SECP256K1).collect();
 
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     {
@@ -714,7 +704,6 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
     // - The wrapper is encrypted with the *outer* shared secret of the trampoline hop,
     //   so the payer can decode at least the TrampolineFailed envelope.
 
-    let secp = Secp256k1::new();
     let hops_path = [
         "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
         "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
@@ -726,7 +715,7 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
     let session_key = SecretKey::from_slice(&[0x42; 32]).expect("32 bytes, within curve order");
     let hops_keys: Vec<PublicKey> = hops_path.iter().map(|k| k.into()).collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_keys.iter(), session_key, &secp).collect();
+        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1).collect();
 
     // Pretend the downstream error originated beyond the trampoline boundary.
     let inner_err = TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
@@ -1113,7 +1102,7 @@ fn test_convert_udt_arg_info() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_convert_payment_hop_data() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
-    let public_key = Pubkey::from(sk.public_key(secp256k1_instance()));
+    let public_key = Pubkey::from(sk.public_key(SECP256K1));
 
     let payment_hop_data = PaymentHopData {
         amount: 1000,
@@ -1186,7 +1175,7 @@ fn test_basic_mpp_custom_records() {
 #[test]
 fn test_pubkey_bincode_serialization_compatibility() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
-    let secp_pubkey = sk.public_key(secp256k1_instance());
+    let secp_pubkey = sk.public_key(SECP256K1);
     let pubkey = Pubkey::from(secp_pubkey);
 
     // Serialize the new Pubkey type
@@ -1242,7 +1231,7 @@ fn test_pubkey_bincode_backward_compatibility() {
     struct OldPubkey(pub PublicKey);
 
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
-    let secp_pubkey = sk.public_key(secp256k1_instance());
+    let secp_pubkey = sk.public_key(SECP256K1);
 
     // Create and serialize using old type
     let old_pubkey = OldPubkey(secp_pubkey);

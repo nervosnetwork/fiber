@@ -45,7 +45,7 @@ use ckb_types::{
 use musig2::secp::Point;
 use musig2::KeyAggContext;
 use ractor::call;
-use secp256k1::Secp256k1;
+use secp256k1::SECP256K1;
 use std::collections::HashSet;
 use std::time::Duration;
 use tracing::{debug, error};
@@ -960,7 +960,6 @@ async fn test_network_send_previous_tlc_error() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
 
-    let secp = Secp256k1::new();
     let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
         .take(1)
         .collect();
@@ -983,7 +982,7 @@ async fn test_network_send_previous_tlc_error() {
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         Some(generated_payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -1056,7 +1055,6 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
 
-    let secp = Secp256k1::new();
     let keys: Vec<Privkey> = std::iter::repeat_with(gen_rand_fiber_private_key)
         .take(1)
         .collect();
@@ -1079,7 +1077,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
         gen_rand_fiber_private_key(),
         hops_infos.clone(),
         Some(generated_payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 

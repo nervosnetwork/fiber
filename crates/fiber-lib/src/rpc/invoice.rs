@@ -21,7 +21,7 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use ractor::{call, ActorRef};
 use rand::Rng;
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::time::Duration;
@@ -454,7 +454,7 @@ where
         let invoice = if let Some((public_key, secret_key)) = &self.keypair {
             invoice_builder = invoice_builder.payee_pub_key(*public_key);
             invoice_builder
-                .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, secret_key))
+                .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, secret_key))
         } else {
             invoice_builder.build()
         };

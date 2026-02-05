@@ -1,4 +1,4 @@
-use secp256k1::Secp256k1;
+use secp256k1::SECP256K1;
 use std::{collections::HashMap, time::Duration};
 use tracing::debug;
 
@@ -516,7 +516,6 @@ async fn test_mpp_tlc_set() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
@@ -542,7 +541,7 @@ async fn test_mpp_tlc_set() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -654,7 +653,6 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set total amount to 20000000000, but pay only 10000000000
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
@@ -681,7 +679,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -790,7 +788,6 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 10000000000);
     record.write(&mut custom_records);
@@ -816,7 +813,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -892,7 +889,6 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let hops_infos = vec![
         PaymentHopData {
             amount: 10000000000,
@@ -913,7 +909,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -989,7 +985,6 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // the total amount should be 20000000000, but we set 10000000000 here
     let record = BasicMppPaymentData::new(payment_secret, 10000000000);
@@ -1017,7 +1012,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -1139,8 +1134,6 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
-
     // Tlc 1 is set to 20000000000, but tlc2 is set to 20000000001
     // both should valid since there are greater than invoice amount
     // but payment will fail because the total_amount is inconsistent
@@ -1177,7 +1170,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
             source_node.get_private_key().clone(),
             hops_infos.clone(),
             Some(payment_hash.as_ref().to_vec()),
-            &secp,
+            SECP256K1,
         )
         .expect("create peeled packet")
     };
@@ -1315,7 +1308,6 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set the payment secret to a random value
     let record = BasicMppPaymentData::new(gen_rand_sha256_hash(), 20000000000);
@@ -1342,7 +1334,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -1467,7 +1459,6 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 30000000000);
     record.write(&mut custom_records);
@@ -1493,7 +1484,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -1679,7 +1670,6 @@ async fn test_mpp_tlc_set_timeout() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
@@ -1705,7 +1695,7 @@ async fn test_mpp_tlc_set_timeout() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -1855,7 +1845,6 @@ async fn test_mpp_tlc_set_without_payment_data() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     // We leave payment_data in the custom_records as none
     let hops_infos = vec![
         PaymentHopData {
@@ -1877,7 +1866,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -2513,7 +2502,6 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
         let payment_secret = gen_rand_sha256_hash();
         let hash_algorithm = HashAlgorithm::CkbHash;
 
-        let secp = Secp256k1::new();
         let mut custom_records = PaymentCustomRecords::default();
         let record = BasicMppPaymentData::new(payment_secret, 20000000000);
         record.write(&mut custom_records);
@@ -2541,7 +2529,7 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
             source_node.get_private_key().clone(),
             hops_infos.clone(),
             Some(payment_hash.as_ref().to_vec()),
-            &secp,
+            SECP256K1,
         )
         .expect("create peeled packet");
 
@@ -2679,7 +2667,6 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
     record.write(&mut custom_records);
@@ -2705,7 +2692,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 

@@ -32,10 +32,10 @@ use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
-use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
+use secp256k1::SECP256K1;
 use secp256k1::{
-    ecdsa::Signature as Secp256k1Signature, schnorr::Signature as SchnorrSignature, All, PublicKey,
+    ecdsa::Signature as Secp256k1Signature, schnorr::Signature as SchnorrSignature, PublicKey,
     Secp256k1, SecretKey, Signing,
 };
 use secp256k1::{Verification, XOnlyPublicKey};
@@ -51,11 +51,6 @@ use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::{error, trace};
-
-pub fn secp256k1_instance() -> &'static Secp256k1<All> {
-    static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
-    INSTANCE.get_or_init(Secp256k1::new)
-}
 
 bitflags::bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -285,7 +280,7 @@ impl Privkey {
     }
 
     pub fn pubkey(&self) -> Pubkey {
-        Pubkey::from(self.0.public_key(secp256k1_instance()))
+        Pubkey::from(self.0.public_key(SECP256K1))
     }
 
     pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
@@ -301,21 +296,19 @@ impl Privkey {
 
     pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
         let message = secp256k1::Message::from_digest(message);
-        secp256k1_instance().sign_ecdsa(&message, &self.0).into()
+        SECP256K1.sign_ecdsa(&message, &self.0).into()
     }
 
     pub fn x_only_pub_key(&self) -> XOnlyPublicKey {
-        let secp256k1_instance = secp256k1_instance();
         let secret_key = self.0;
-        let keypair = secp256k1::Keypair::from_secret_key(secp256k1_instance, &secret_key);
+        let keypair = secp256k1::Keypair::from_secret_key(SECP256K1, &secret_key);
         XOnlyPublicKey::from_keypair(&keypair).0
     }
 
     pub fn sign_schnorr(&self, message: [u8; 32]) -> SchnorrSignature {
-        let secp256k1_instance = secp256k1_instance();
         let secret_key = self.0;
-        let keypair = secp256k1::Keypair::from_secret_key(secp256k1_instance, &secret_key);
-        let sig = secp256k1_instance.sign_schnorr(&message, &keypair);
+        let keypair = secp256k1::Keypair::from_secret_key(SECP256K1, &secret_key);
+        let sig = SECP256K1.sign_schnorr(&message, &keypair);
         trace!(
             "Schnorr signing message {:?} (pub key {:?}), Signature: {:?}",
             message,
@@ -437,9 +430,7 @@ impl EcdsaSignature {
         // Convert from [u8; 33] to PublicKey for verification
         let pk = PublicKey::from_slice(&pubkey.0)
             .expect("Pubkey should always contain valid serialized public key");
-        secp256k1_instance()
-            .verify_ecdsa(&message, &self.0, &pk)
-            .is_ok()
+        SECP256K1.verify_ecdsa(&message, &self.0, &pk).is_ok()
     }
 }
 

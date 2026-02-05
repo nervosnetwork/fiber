@@ -1,4 +1,5 @@
 use core::panic;
+use secp256k1::SECP256K1;
 use std::{
     cmp::max,
     collections::{HashMap, HashSet},
@@ -37,7 +38,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::fiber::network::DEFAULT_CHAIN_ACTOR_TIMEOUT;
 use crate::{
     ckb::{client::CkbChainClient, CkbChainMessage, GetTxResponse},
-    fiber::{network::MAX_SERVICE_PROTOCOAL_DATA_SIZE, types::secp256k1_instance},
+    fiber::network::MAX_SERVICE_PROTOCOAL_DATA_SIZE,
     now_timestamp_as_millis_u64, unwrap_or_return,
     utils::actor::ActorHandleLogGuard,
     Error,
@@ -2343,7 +2344,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     }
 
     if let Err(err) =
-        secp256k1_instance().verify_schnorr(ckb_signature, &message, &channel_announcement.ckb_key)
+        SECP256K1.verify_schnorr(ckb_signature, &message, &channel_announcement.ckb_key)
     {
         return Err(Error::InvalidParameter(format!(
             "Channel announcement message signature verification failed for ckb: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}, error: {:?}",

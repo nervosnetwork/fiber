@@ -19,7 +19,7 @@ use crate::{
 };
 use ractor::RpcReplyPort;
 use rand::Rng;
-use secp256k1::Secp256k1;
+use secp256k1::SECP256K1;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
@@ -1891,12 +1891,11 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     let node_b = &nodes[1];
     let channel_ab = channels[0];
 
-    let secp = Secp256k1::new();
     let payment_hash = gen_rand_sha256_hash();
 
     // 1. Construct Trampoline Onion for B
     // B should forward 1000 to some final target.
-    let (_sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
+    let (_sk, pk) = SECP256K1.generate_keypair(&mut rand::thread_rng());
     let final_target: Pubkey = pk.into();
 
     let forward_payload = TrampolineHopPayload::Forward {
@@ -1927,7 +1926,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
         path,
         payloads,
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create onion")
     .into_bytes();
@@ -1988,11 +1987,10 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     let node_b = &nodes[1];
     let channel_ab = channels[0];
 
-    let secp = Secp256k1::new();
     let payment_hash = gen_rand_sha256_hash();
 
     // Construct Trampoline Onion for B
-    let (_sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
+    let (_sk, pk) = SECP256K1.generate_keypair(&mut rand::thread_rng());
     let final_target: Pubkey = pk.into();
 
     let forward_payload = TrampolineHopPayload::Forward {
@@ -2023,7 +2021,7 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
         path,
         payloads,
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create onion")
     .into_bytes();
@@ -3056,13 +3054,12 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     };
 
     let session_key = gen_rand_session_key();
-    let secp = Secp256k1::new();
     let trampoline_packet = TrampolineOnionPacket::create(
         session_key,
         vec![node.pubkey],
         vec![hop_data],
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("build trampoline");
 
@@ -3147,13 +3144,12 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     };
 
     let session_key = gen_rand_session_key();
-    let secp = Secp256k1::new();
     let trampoline_packet = TrampolineOnionPacket::create(
         session_key,
         vec![node.pubkey],
         vec![hop_data],
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("build trampoline");
 
