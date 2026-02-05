@@ -1992,11 +1992,6 @@ where
         channel_id: Hash256,
         tlc_id: u64,
     ) {
-        debug!(
-            "Remove timeout hold tlc payment hash {:?} channel_id {:?} tlc id {:?}",
-            payment_hash, channel_id, tlc_id
-        );
-
         if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received) {
             // When invoice is marked as received, we ignore the hold TLC timeout and only
             // remove the TLC when it actually expires. Expired TLCs are removed in the
@@ -2009,7 +2004,7 @@ where
             .as_ref()
             .and_then(|state| state.tlc_state.get(&TLCId::Received(tlc_id)));
         let Some(tlc) = tlc else {
-            debug!(
+            trace!(
                 "Timeout tlc {:?} (payment hash {:?}) for channel {:?}: tlc is settled or not found, just unhold it",
                 tlc_id, payment_hash, channel_id
             );
@@ -2018,6 +2013,11 @@ where
                 .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
             return;
         };
+
+        debug!(
+            "Removing timeout hold tlc: payment_hash={:?} channel_id={:?} tlc_id={:?}",
+            payment_hash, channel_id, tlc_id
+        );
 
         let (send, _recv) = oneshot::channel();
         let rpc_reply = RpcReplyPort::from(send);
@@ -2048,8 +2048,8 @@ where
                     .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
             }
             Err(err) => {
-                error!(
-                    "Failed to remove tlc {:?} for channel {:?}: {}",
+                debug!(
+                    "Failed to remove tlc {:?} for channel {:?}: {}, will retry on next check",
                     tlc.id(),
                     channel_id,
                     err
