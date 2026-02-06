@@ -100,22 +100,11 @@ jobs:
           SAFE_WORKFLOW_NAME="${{ matrix.workflow }}"
           echo "SAFE_WORKFLOW_NAME=${SAFE_WORKFLOW_NAME//\//-}" >> $GITHUB_ENV
 
-          # Prebuild the program so that we can run the following script faster
-          cargo build --locked
-          cd ./tests/deploy/udt-init && cargo build --locked && cd -
-          export ON_GITHUB_ACTION=y
-          # Pass it to tests/funding-tx-builder as args
-          export EXTRA_BRU_ARGS="${{ matrix.extra_bru_args }}"
-          ./tests/nodes/start.sh "e2e/${{ matrix.workflow }}" &
-
-          # when .ports file is not generated, we will retry 20 times to check if all ports are open
-          ./tests/nodes/wait.sh
-
-          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
-
-          # -n means we will exit when any of the background processes exits.
-          # https://www.gnu.org/software/bash/manual/bash.html#index-wait
-          wait -n
+          # Use the Python script to run e2e tests (handles its own prebuild)
+          python3 ./tests/bruno/e2e/run_e2e_local.py \
+            "${{ matrix.workflow }}" \
+            --test-env "${{ matrix.test_env }}" \
+            --extra-bru-args "${{ matrix.extra_bru_args }}"
 
       - uses: actions/upload-artifact@v4
         if: failure() && steps.e2eTests.outcome == 'failure'
