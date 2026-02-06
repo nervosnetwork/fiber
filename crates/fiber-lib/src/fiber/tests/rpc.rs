@@ -467,6 +467,84 @@ async fn test_rpc_node_info() {
     assert_eq!(node_info.default_funding_lock_script, Default::default());
 }
 
+/// Test that node_id in node_info RPC and payee_public_key in invoice RPC
+/// have the same JSON format (both without "0x" prefix).
+#[tokio::test]
+async fn test_rpc_node_id_and_payee_public_key_same_format() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                node_b_funding_amount: MIN_RESERVED_CKB,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    // Get node_info raw response
+    let node_info_raw = node_0.send_rpc_request_raw("node_info", ()).await.unwrap();
+    let node_id = node_info_raw["node_id"]
+        .as_str()
+        .expect("node_id should be a string");
+
+    // Create an invoice and get raw response
+    let new_invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: None,
+        udt_type_script: None,
+        payment_preimage: Some(gen_rand_sha256_hash()),
+        payment_hash: None,
+        hash_algorithm: None,
+        allow_mpp: None,
+        allow_trampoline_routing: None,
+    };
+
+    let invoice_raw = node_0
+        .send_rpc_request_raw("new_invoice", new_invoice_params)
+        .await
+        .unwrap();
+
+    // Find PayeePublicKey in attrs
+    let attrs = invoice_raw["invoice"]["data"]["attrs"]
+        .as_array()
+        .expect("attrs should be an array");
+    let payee_public_key = attrs
+        .iter()
+        .find_map(|attr| attr.get("payee_public_key").and_then(|v| v.as_str()))
+        .expect("payee_public_key should exist in attrs");
+
+    // Both should have the same format (without "0x" prefix)
+    assert_eq!(
+        node_id, payee_public_key,
+        "node_id and payee_public_key should have the same format.\n\
+         node_id: {}\n\
+         payee_public_key: {}",
+        node_id, payee_public_key
+    );
+
+    // Verify neither has "0x" prefix
+    assert!(
+        !node_id.starts_with("0x"),
+        "node_id should not have 0x prefix, got: {}",
+        node_id
+    );
+    assert!(
+        !payee_public_key.starts_with("0x"),
+        "payee_public_key should not have 0x prefix, got: {}",
+        payee_public_key
+    );
+}
+
 #[tokio::test]
 async fn test_rpc_basic_with_auth() {
     init_tracing();

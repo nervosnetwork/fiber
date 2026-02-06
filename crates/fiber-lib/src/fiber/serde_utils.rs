@@ -36,7 +36,17 @@ where
     E: AsRef<[u8]>,
     S: Serializer,
 {
-    serializer.serialize_str(&format!("0x{}", &hex::encode(e.as_ref())))
+    to_hex_with_prefix(e, serializer, true)
+}
+
+fn to_hex_with_prefix<E, S>(e: E, serializer: S, with_prefix: bool) -> Result<S::Ok, S::Error>
+where
+    E: AsRef<[u8]>,
+    S: Serializer,
+{
+    let hex_str = hex::encode(e.as_ref());
+    let prefix = if with_prefix { "0x" } else { "" };
+    serializer.serialize_str(&format!("{}{}", prefix, hex_str))
 }
 
 pub struct SliceHex;
@@ -49,11 +59,38 @@ where
     where
         S: Serializer,
     {
-        to_hex(source, serializer)
+        to_hex_with_prefix(source, serializer, true)
     }
 }
 
 impl<'de, T> DeserializeAs<'de, T> for SliceHex
+where
+    T: TryFrom<Vec<u8>>,
+    T::Error: core::fmt::Debug,
+{
+    fn deserialize_as<D>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        from_hex(deserializer)
+    }
+}
+
+pub struct SliceHexNoPrefix;
+
+impl<T> SerializeAs<T> for SliceHexNoPrefix
+where
+    T: AsRef<[u8]>,
+{
+    fn serialize_as<S>(source: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        to_hex_with_prefix(source, serializer, false)
+    }
+}
+
+impl<'de, T> DeserializeAs<'de, T> for SliceHexNoPrefix
 where
     T: TryFrom<Vec<u8>>,
     T::Error: core::fmt::Debug,
