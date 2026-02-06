@@ -38,9 +38,9 @@ fn test_serde_public_key() {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
     let public_key = Pubkey::from(sk.public_key(SECP256K1));
     let pk_str = serde_json::to_string(&public_key).unwrap();
-    // Now Pubkey uses SliceHex which adds "0x" prefix
+    // Pubkey uses SliceHexNoPrefix which does not add "0x" prefix
     assert_eq!(
-        "\"0x035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"",
+        "\"035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"",
         &pk_str
     );
     let pubkey: Pubkey = serde_json::from_str(&pk_str).unwrap();
