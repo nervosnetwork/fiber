@@ -1,6 +1,6 @@
 [package]
 name = "fnn-migrate"
-version = "0.6.1"
+version = "0.7.0-rc1"
 edition = "2021"
 build = "build.rs"
 
@@ -18,7 +18,7 @@ clap = { version = "4.0", features = ["derive"] }
 ckb-types = "1"
 fiber_v060 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", branch = "migrate/v0.6.0" }
 fiber_v061 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", branch = "migrate/v0.6.1" }
-fiber_v070 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", branch = "migrate/v0.7.0"}
+fiber_v070 = { package = "fnn", git = "https://github.com/nervosnetwork/fiber.git", branch = "quake/oneway-channel"}
 serde_json = "1.0.135"
 ouroboros = "0.18.5"
 
