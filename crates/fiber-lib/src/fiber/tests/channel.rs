@@ -6499,3 +6499,116 @@ async fn test_reestablish_restores_send_nonce() {
         "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
     ));
 }
+
+/// TC5: Bidirectional pending operations.
+/// Tests reestablish when both nodes have pending operations.
+#[tokio::test]
+async fn test_reestablish_tc5_bidirectional_pending() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Both nodes send payments close in time to create pending operations in both directions.
+    let _payment_a = node_a.send_payment_keysend(&node_b, 1000, false).await;
+    let _payment_b = node_b.send_payment_keysend(&node_a, 1000, false).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    let state_b = node_b.get_channel_actor_state(channel_id);
+    debug!(
+        "Node A before restart: waiting_ack={}",
+        state_a.tlc_state.waiting_ack
+    );
+    debug!(
+        "Node B before restart: waiting_ack={}",
+        state_b.tlc_state.waiting_ack
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "Commitment numbers should remain symmetric"
+    );
+}
+
+/// TC8: Stress test with multiple payments and restarts.
+/// Tests repeated restart cycles with payments.
+#[tokio::test]
+async fn test_reestablish_tc8_stress_multiple_restarts() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let initial_balance_a = node_a.get_local_balance_from_channel(channel_id);
+    let initial_balance_b = node_b.get_local_balance_from_channel(channel_id);
+
+    for cycle in 0..5 {
+        let payment_amount = 100 * (cycle + 1) as u128;
+        let _result = node_a
+            .send_payment_keysend(&node_b, payment_amount, false)
+            .await;
+
+        let wait_ms = 100 + (cycle * 50) as u64;
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+
+        node_a.restart().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let state = node_a.get_channel_actor_state(channel_id);
+        assert!(
+            !state.reestablishing,
+            "Should complete reestablish in cycle {}",
+            cycle
+        );
+    }
+
+    let final_balance_a = node_a.get_local_balance_from_channel(channel_id);
+    let final_balance_b = node_b.get_local_balance_from_channel(channel_id);
+    assert_eq!(
+        final_balance_a + final_balance_b,
+        initial_balance_a + initial_balance_b,
+        "Total balance should be conserved"
+    );
+}
+
+/// Test that commitment numbers remain consistent after reestablish.
+#[tokio::test]
+async fn test_reestablish_commitment_number_consistency() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive several updates to move commitment numbers before restart.
+    for i in 0..5 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 1000 + i as u128, false)
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN"
+    );
+}
