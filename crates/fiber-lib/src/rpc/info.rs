@@ -315,7 +315,7 @@ mod tests {
     async fn test_rpc_backup_now_already_exists() {
         let (server, root) = setup_test_impl().await;
 
-        // Using an exisiting path
+        // Using an existing path
         let path_str = root.as_ref().to_str().unwrap().to_string();
 
         let result = server.backup_now(path_str).await;
