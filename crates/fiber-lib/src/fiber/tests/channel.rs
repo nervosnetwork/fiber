@@ -6541,10 +6541,10 @@ async fn test_reestablish_tc5_bidirectional_pending() {
     );
 }
 
-/// TC8: Stress test with multiple payments and restarts.
+/// Stress test with multiple payments and restarts.
 /// Tests repeated restart cycles with payments.
 #[tokio::test]
-async fn test_reestablish_tc8_stress_multiple_restarts() {
+async fn test_restart_stress_multiple_restarts() {
     init_tracing();
     let (mut node_a, node_b, channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
@@ -6619,6 +6619,73 @@ async fn test_reestablish_tc8_stress_multiple_restarts() {
         initial_balance_a + initial_balance_b,
         "Total balance should be conserved"
     );
+}
+
+/// Restart stress reproducer.
+/// Runs repeated payment bursts with node restart and checks unexpected events.
+#[tokio::test]
+#[ignore] // Long-running restart stress test. Run explicitly when validating restart regressions.
+async fn test_node_restart() {
+    init_tracing();
+    let (mut node_a, node_b, _channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let panic_unexpected_events = vec!["panic".to_string(), "panicked".to_string()];
+    node_a
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+    node_b
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+
+    for cycle in 0..10 {
+        debug!("=== Restart cycle {} ===", cycle);
+
+        for _i in 0..10 {
+            let _payment1 = node_a.send_payment_keysend(&node_b, 1, false).await;
+            let _payment2 = node_b.send_payment_keysend(&node_a, 1, false).await;
+        }
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+
+        debug!("Stopping node_a for restart cycle {}", cycle);
+        node_a.restart().await;
+        debug!("Starting node_a after restart cycle {}", cycle);
+        node_a
+            .add_unexpected_events(panic_unexpected_events.clone())
+            .await;
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+    }
+
+    debug!("test_node_restart completed successfully with no unexpected events");
 }
 
 /// Test that commitment numbers remain consistent after reestablish.
