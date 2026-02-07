@@ -759,6 +759,7 @@ where
         state: &mut ChannelActorState,
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
+        let was_waiting_ack_before_verify = state.tlc_state.waiting_ack;
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
             error!(
@@ -768,6 +769,12 @@ where
             );
             self.notify_network_actor_shutdown_me(state);
             return Err(err);
+        }
+        if was_waiting_ack_before_verify {
+            self.set_pending_commit_diff_replay_order_hint(
+                state,
+                ReplayOrderHint::CommitThenRevoke,
+            );
         }
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
@@ -784,6 +791,27 @@ where
         }
 
         Ok(())
+    }
+
+    fn set_pending_commit_diff_replay_order_hint(
+        &self,
+        state: &ChannelActorState,
+        replay_order_hint: ReplayOrderHint,
+    ) {
+        let channel_id = state.get_id();
+        let Some(mut commit_diff) = self.store.get_pending_commit_diff(&channel_id) else {
+            warn!(
+                "Unable to set replay_order_hint={:?} for channel {}: pending CommitDiff not found",
+                replay_order_hint, channel_id
+            );
+            return;
+        };
+        if commit_diff.replay_order_hint == Some(replay_order_hint) {
+            return;
+        }
+        commit_diff.replay_order_hint = Some(replay_order_hint);
+        self.store
+            .store_pending_commit_diff(&channel_id, &commit_diff);
     }
 
     async fn apply_settled_remove_tlcs(&self, state: &mut ChannelActorState, inbound: bool) {
@@ -1557,7 +1585,7 @@ where
             commitment_signed_template: Some(CommitmentSignedTemplate {
                 next_commitment_nonce: commitment_signed.next_commitment_nonce.clone(),
             }),
-            replay_order_hint: None,
+            replay_order_hint: Some(ReplayOrderHint::RevokeThenCommit),
             created_at_ms: now_timestamp_as_millis_u64(),
         };
         self.store
@@ -1645,6 +1673,7 @@ where
                 NetworkActorCommand::SendFiberMessage(msg),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        state.record_pending_replay_update(TlcReplayUpdate::Add(add_tlc));
 
         self.handle_commitment_signed_command(myself, state).await?;
         Ok(tlc_id.into())
@@ -1658,29 +1687,31 @@ where
     ) -> ProcessingChannelResult {
         state.check_for_tlc_update(TlcUpdateAction::RemoveTlcCommand)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
+        let reason = command.reason;
         let payment_hash = state
             .tlc_state
-            .set_received_tlc_removed(command.id, command.reason.clone());
-        if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) =
-            command.reason
-        {
-            self.store_preimage(payment_hash, payment_preimage);
+            .set_received_tlc_removed(command.id, reason.clone());
+        if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) = &reason {
+            self.store_preimage(payment_hash, *payment_preimage);
         }
         self.store
             .remove_payment_hold_tlc(&payment_hash, &state.id, command.id);
+
+        let remove_tlc = RemoveTlc {
+            channel_id: state.get_id(),
+            tlc_id: command.id,
+            reason,
+        };
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
-            FiberMessage::remove_tlc(RemoveTlc {
-                channel_id: state.get_id(),
-                tlc_id: command.id,
-                reason: command.reason,
-            }),
+            FiberMessage::remove_tlc(remove_tlc.clone()),
         );
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(msg),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        state.record_pending_replay_update(TlcReplayUpdate::Remove(remove_tlc));
 
         state.maybe_transfer_to_shutdown().await?;
         self.handle_commitment_signed_command(myself, state).await?;
@@ -3860,13 +3891,26 @@ fn validate_commit_diff_for_replay_inputs(
     Ok(())
 }
 
+fn require_pending_commit_diff_for_replay<'a>(
+    channel_id: Hash256,
+    pending_commit_diff: Option<&'a CommitDiff>,
+) -> Result<&'a CommitDiff, ProcessingChannelError> {
+    pending_commit_diff.ok_or_else(|| {
+        ProcessingChannelError::InvalidState(format!(
+            "Missing pending CommitDiff for owed CommitmentSigned replay on channel {}",
+            channel_id
+        ))
+    })
+}
+
 #[cfg(test)]
 mod commit_diff_tests {
     use super::{
-        now_timestamp_as_millis_u64, validate_commit_diff_for_replay_inputs, AddTlc, CommitDiff,
-        CommitmentSignedTemplate, Hash256, HashAlgorithm, ProcessingChannelError,
-        ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, ReplayOrderHint,
-        SecNonceBuilder, TlcReplayUpdate, TransactionBuilder,
+        now_timestamp_as_millis_u64, require_pending_commit_diff_for_replay,
+        validate_commit_diff_for_replay_inputs, AddTlc, CommitDiff, CommitmentSignedTemplate,
+        Hash256, HashAlgorithm, ProcessingChannelError, ReestablishChannel, RemoveTlc,
+        RemoveTlcFulfill, RemoveTlcReason, ReplayOrderHint, SecNonceBuilder, TlcReplayUpdate,
+        TransactionBuilder,
     };
     use molecule::prelude::Entity;
     use musig2::BinaryEncoding;
@@ -4034,6 +4078,17 @@ mod commit_diff_tests {
             ProcessingChannelError::InvalidState(msg) if msg.contains("remote commitment drift")
         ));
     }
+
+    #[test]
+    fn test_require_pending_commit_diff_for_replay() {
+        let channel_id = Hash256::from([5u8; 32]);
+        let err = require_pending_commit_diff_for_replay(channel_id, None)
+            .expect_err("missing pending commit diff should fail");
+        assert!(matches!(
+            err,
+            ProcessingChannelError::InvalidState(msg) if msg.contains("Missing pending CommitDiff")
+        ));
+    }
 }
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
@@ -4145,6 +4200,11 @@ pub struct ChannelActorState {
 
     // all the TLC related information
     pub tlc_state: TlcState,
+
+    /// TLC updates sent to peer since the last local CommitmentSigned.
+    /// This preserves send order for reestablish replay.
+    #[serde(default)]
+    pub pending_replay_updates: Vec<TlcReplayUpdate>,
 
     // the retryable tlc operations that are waiting to be processed.
     pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
@@ -5121,6 +5181,7 @@ impl ChannelActorState {
             funding_fee_rate,
             id: channel_id,
             tlc_state: Default::default(),
+            pending_replay_updates: vec![],
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
             local_shutdown_script,
@@ -5210,6 +5271,7 @@ impl ChannelActorState {
             funding_fee_rate,
             id: temp_channel_id,
             tlc_state: Default::default(),
+            pending_replay_updates: vec![],
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
             signer,
@@ -5773,40 +5835,13 @@ impl ChannelActorState {
         self.tlc_state.get(&tlc_id)
     }
 
-    /// Collect pending TLC updates that need to be resent during reestablishment.
-    /// Returns AddTlc for LocalAnnounced offered TLCs and RemoveTlc for LocalRemoved received TLCs.
-    pub fn collect_pending_tlc_updates(&self) -> Vec<TlcReplayUpdate> {
-        let mut updates = Vec::new();
+    pub fn record_pending_replay_update(&mut self, update: TlcReplayUpdate) {
+        self.pending_replay_updates.push(update);
+    }
 
-        // Collect LocalAnnounced offered TLCs (pending AddTlc)
-        for tlc in self.tlc_state.offered_tlcs.tlcs.iter() {
-            if matches!(tlc.outbound_status(), OutboundTlcStatus::LocalAnnounced) {
-                updates.push(TlcReplayUpdate::Add(AddTlc {
-                    channel_id: self.get_id(),
-                    tlc_id: tlc.tlc_id.into(),
-                    amount: tlc.amount,
-                    payment_hash: tlc.payment_hash,
-                    expiry: tlc.expiry,
-                    hash_algorithm: tlc.hash_algorithm,
-                    onion_packet: tlc.onion_packet.clone(),
-                }));
-            }
-        }
-
-        // Collect LocalRemoved received TLCs (pending RemoveTlc)
-        for tlc in self.tlc_state.received_tlcs.tlcs.iter() {
-            if matches!(tlc.inbound_status(), InboundTlcStatus::LocalRemoved) {
-                if let Some(reason) = &tlc.removed_reason {
-                    updates.push(TlcReplayUpdate::Remove(RemoveTlc {
-                        channel_id: self.get_id(),
-                        tlc_id: tlc.tlc_id.into(),
-                        reason: reason.clone(),
-                    }));
-                }
-            }
-        }
-
-        updates
+    /// Collect pending TLC updates that were actually sent to peer in wire order.
+    pub fn collect_pending_tlc_updates(&mut self) -> Vec<TlcReplayUpdate> {
+        std::mem::take(&mut self.pending_replay_updates)
     }
     pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> ProcessingChannelResult {
         let next_tlc_id = if tlc.is_offered() {
@@ -7415,30 +7450,43 @@ impl ChannelActorState {
                     // peer need ACK, I need to resend my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
-                    self.send_revoke_and_ack_message(true)?;
                     if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
-                        let commit_diff =
-                            pending_commit_diff.as_ref().ok_or_else(|| {
-                                ProcessingChannelError::InvalidState(format!(
-                                    "Missing pending CommitDiff for owed CommitmentSigned replay on channel {}",
-                                    self.get_id()
-                                ))
-                            })?;
+                        let commit_diff = require_pending_commit_diff_for_replay(
+                            self.get_id(),
+                            pending_commit_diff.as_ref(),
+                        )?;
                         self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
-                        // Don't clear waiting_ack - we're still waiting for response to our CommitmentSigned.
-                        self.resend_commitment_from_diff(commit_diff)?;
+                        let replay_order =
+                            commit_diff.replay_order_hint.unwrap_or_else(|| {
+                                warn!(
+                                    "No replay_order_hint found in CommitDiff for channel {}, fallback to RevokeThenCommit",
+                                    self.get_id()
+                                );
+                                ReplayOrderHint::RevokeThenCommit
+                            });
+                        match replay_order {
+                            ReplayOrderHint::RevokeThenCommit => {
+                                self.send_revoke_and_ack_message(true)?;
+                                // Don't clear waiting_ack - we're still waiting for response to our CommitmentSigned.
+                                self.resend_commitment_from_diff(commit_diff)?;
+                            }
+                            ReplayOrderHint::CommitThenRevoke => {
+                                self.resend_commitment_from_diff(commit_diff)?;
+                                self.send_revoke_and_ack_message(true)?;
+                            }
+                        }
+                    } else {
+                        self.send_revoke_and_ack_message(true)?;
                     }
                 } else if my_waiting_ack
                     && my_local_commitment_number == peer_remote_commitment_number
                 {
                     // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag.
-                    let commit_diff = pending_commit_diff.as_ref().ok_or_else(|| {
-                        ProcessingChannelError::InvalidState(format!(
-                            "Missing pending CommitDiff for owed CommitmentSigned replay on channel {}",
-                            self.get_id()
-                        ))
-                    })?;
+                    let commit_diff = require_pending_commit_diff_for_replay(
+                        self.get_id(),
+                        pending_commit_diff.as_ref(),
+                    )?;
                     self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
                     self.resend_commitment_from_diff(commit_diff)?;
                 } else {

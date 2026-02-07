@@ -1,8 +1,8 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus, TLCId,
-    TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
-    XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus,
+    ReplayOrderHint, TLCId, TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS,
+    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -6717,5 +6717,51 @@ async fn test_reestablish_commitment_number_consistency() {
         state_a_after.get_remote_commitment_number(),
         state_b_after.get_local_commitment_number(),
         "A remote CN should equal B local CN"
+    );
+}
+
+#[tokio::test]
+async fn test_reestablish_dual_owed_ordering() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 500 + i as u128, false)
+            .await;
+        let _ = node_b
+            .send_payment_keysend(&node_a, 700 + i as u128, false)
+            .await;
+    }
+
+    let mut saw_commit_then_revoke_hint = false;
+    for _ in 0..120 {
+        if let Some(diff) = node_a.store.get_pending_commit_diff(&channel_id) {
+            if diff.replay_order_hint == Some(ReplayOrderHint::CommitThenRevoke) {
+                saw_commit_then_revoke_hint = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        saw_commit_then_revoke_hint,
+        "Expected CommitDiff replay_order_hint=CommitThenRevoke in dual-owed scenario"
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish in dual-owed scenario"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "Commitment numbers should remain symmetric after dual-owed replay"
     );
 }
