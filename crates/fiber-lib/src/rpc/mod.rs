@@ -76,6 +76,10 @@ pub mod server {
 
     use super::biscuit::BiscuitAuth;
 
+    pub trait KVStore {
+        fn inner_db(&self) -> &std::sync::Arc<rocksdb::DB>;
+    }
+
     #[cfg(feature = "watchtower")]
     pub trait RpcServerStore:
         ChannelActorStateStore
@@ -84,6 +88,7 @@ pub mod server {
         + GossipMessageStore
         + WatchtowerStore
         + PreimageStore
+        + KVStore
     {
     }
     #[cfg(feature = "watchtower")]
@@ -94,6 +99,7 @@ pub mod server {
             + GossipMessageStore
             + WatchtowerStore
             + PreimageStore
+            + KVStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -249,8 +255,12 @@ pub mod server {
         if config.is_module_enabled("invoice") {
             modules
                 .merge(
-                    InvoiceRpcServerImpl::new(store.clone(), network_actor.clone(), fiber_config)
-                        .into_rpc(),
+                    InvoiceRpcServerImpl::new(
+                        store.clone(),
+                        network_actor.clone(),
+                        fiber_config.clone(),
+                    )
+                    .into_rpc(),
                 )
                 .unwrap();
         }
@@ -265,7 +275,9 @@ pub mod server {
                     .merge(
                         InfoRpcServerImpl::new(
                             network_actor.clone(),
+                            store.clone(),
                             ckb_config.clone().expect("ckb config should be set"),
+                            fiber_config.clone().expect("fiber config should be set"),
                         )
                         .into_rpc(),
                     )
