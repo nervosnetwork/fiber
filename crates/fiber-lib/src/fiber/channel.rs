@@ -1612,6 +1612,7 @@ where
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        state.last_was_revoke = false;
 
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
@@ -3903,14 +3904,64 @@ fn require_pending_commit_diff_for_replay<'a>(
     })
 }
 
+fn resolve_dual_owed_replay_order(
+    channel_id: Hash256,
+    replay_order_hint: Option<ReplayOrderHint>,
+    current_remote_commitment_number: u64,
+    remote_commitment_number_at_send: u64,
+    last_was_revoke: bool,
+) -> ReplayOrderHint {
+    if last_was_revoke {
+        if replay_order_hint != Some(ReplayOrderHint::CommitThenRevoke) {
+            warn!(
+                "Dual-owed reestablish for channel {} has last_was_revoke=true but replay hint={:?}; using CommitThenRevoke",
+                channel_id, replay_order_hint
+            );
+        }
+        return ReplayOrderHint::CommitThenRevoke;
+    }
+
+    let remote_advanced_after_send =
+        current_remote_commitment_number == remote_commitment_number_at_send.saturating_add(1);
+    match replay_order_hint {
+        Some(ReplayOrderHint::CommitThenRevoke) => ReplayOrderHint::CommitThenRevoke,
+        Some(ReplayOrderHint::RevokeThenCommit) if remote_advanced_after_send => {
+            warn!(
+                "Dual-owed reestablish for channel {} has RevokeThenCommit hint but remote CN advanced since send (state={}, at_send={}); forcing CommitThenRevoke to avoid stale-order BadSignature",
+                channel_id,
+                current_remote_commitment_number,
+                remote_commitment_number_at_send
+            );
+            ReplayOrderHint::CommitThenRevoke
+        }
+        Some(ReplayOrderHint::RevokeThenCommit) => ReplayOrderHint::RevokeThenCommit,
+        None if remote_advanced_after_send => {
+            warn!(
+                "No replay_order_hint found for dual-owed reestablish on channel {} and remote CN advanced since send (state={}, at_send={}); using CommitThenRevoke",
+                channel_id,
+                current_remote_commitment_number,
+                remote_commitment_number_at_send
+            );
+            ReplayOrderHint::CommitThenRevoke
+        }
+        None => {
+            warn!(
+                "No replay_order_hint found for dual-owed reestablish on channel {}; falling back to RevokeThenCommit",
+                channel_id
+            );
+            ReplayOrderHint::RevokeThenCommit
+        }
+    }
+}
+
 #[cfg(test)]
 mod commit_diff_tests {
     use super::{
         now_timestamp_as_millis_u64, require_pending_commit_diff_for_replay,
-        validate_commit_diff_for_replay_inputs, AddTlc, CommitDiff, CommitmentSignedTemplate,
-        Hash256, HashAlgorithm, ProcessingChannelError, ReestablishChannel, RemoveTlc,
-        RemoveTlcFulfill, RemoveTlcReason, ReplayOrderHint, SecNonceBuilder, TlcReplayUpdate,
-        TransactionBuilder,
+        resolve_dual_owed_replay_order, validate_commit_diff_for_replay_inputs, AddTlc, CommitDiff,
+        CommitmentSignedTemplate, Hash256, HashAlgorithm, ProcessingChannelError,
+        ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, ReplayOrderHint,
+        SecNonceBuilder, TlcReplayUpdate, TransactionBuilder,
     };
     use molecule::prelude::Entity;
     use musig2::BinaryEncoding;
@@ -4089,6 +4140,59 @@ mod commit_diff_tests {
             ProcessingChannelError::InvalidState(msg) if msg.contains("Missing pending CommitDiff")
         ));
     }
+
+    #[test]
+    fn test_resolve_dual_owed_replay_order() {
+        let channel_id = Hash256::from([6u8; 32]);
+        assert_eq!(
+            resolve_dual_owed_replay_order(
+                channel_id,
+                Some(ReplayOrderHint::CommitThenRevoke),
+                11,
+                10,
+                false
+            ),
+            ReplayOrderHint::CommitThenRevoke
+        );
+        assert_eq!(
+            resolve_dual_owed_replay_order(
+                channel_id,
+                Some(ReplayOrderHint::RevokeThenCommit),
+                10,
+                10,
+                false
+            ),
+            ReplayOrderHint::RevokeThenCommit
+        );
+        assert_eq!(
+            resolve_dual_owed_replay_order(
+                channel_id,
+                Some(ReplayOrderHint::RevokeThenCommit),
+                11,
+                10,
+                false
+            ),
+            ReplayOrderHint::CommitThenRevoke
+        );
+        assert_eq!(
+            resolve_dual_owed_replay_order(channel_id, None, 10, 10, false),
+            ReplayOrderHint::RevokeThenCommit
+        );
+        assert_eq!(
+            resolve_dual_owed_replay_order(channel_id, None, 11, 10, false),
+            ReplayOrderHint::CommitThenRevoke
+        );
+        assert_eq!(
+            resolve_dual_owed_replay_order(
+                channel_id,
+                Some(ReplayOrderHint::RevokeThenCommit),
+                10,
+                10,
+                true
+            ),
+            ReplayOrderHint::CommitThenRevoke
+        );
+    }
 }
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
@@ -4253,6 +4357,8 @@ pub struct ChannelActorState {
     // we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
+    #[serde(default)]
+    pub last_was_revoke: bool,
 
     pub created_at: SystemTime,
 
@@ -5214,6 +5320,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             last_revoke_ack_msg: None,
+            last_was_revoke: false,
             created_at: SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
@@ -5299,6 +5406,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             reestablishing: false,
             last_revoke_ack_msg: None,
+            last_was_revoke: false,
             created_at: SystemTime::now(),
             waiting_peer_response: None,
             network: Some(network),
@@ -5599,6 +5707,7 @@ impl ChannelActorState {
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    self.last_was_revoke = true;
                     self.log_ack_state("[ack] send_revoke_and_ack_message(resend_cached)");
                     return Ok(());
                 }
@@ -5699,6 +5808,7 @@ impl ChannelActorState {
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.last_was_revoke = true;
         Ok(())
     }
 
@@ -7457,22 +7567,25 @@ impl ChannelActorState {
                             pending_commit_diff.as_ref(),
                         )?;
                         self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
-                        let replay_order =
-                            commit_diff.replay_order_hint.unwrap_or_else(|| {
-                                warn!(
-                                    "No replay_order_hint found in CommitDiff for channel {}, fallback to RevokeThenCommit",
-                                    self.get_id()
-                                );
-                                ReplayOrderHint::RevokeThenCommit
-                            });
+                        // In dual-owed reestablish scenarios, stale/default hints can lead to
+                        // replaying RevokeAndAck before CommitmentSigned and trigger BadSignature.
+                        let replay_order = resolve_dual_owed_replay_order(
+                            self.get_id(),
+                            commit_diff.replay_order_hint,
+                            self.get_remote_commitment_number(),
+                            commit_diff.remote_commitment_number_at_send,
+                            self.last_was_revoke,
+                        );
                         match replay_order {
                             ReplayOrderHint::RevokeThenCommit => {
                                 self.send_revoke_and_ack_message(true)?;
                                 // Don't clear waiting_ack - we're still waiting for response to our CommitmentSigned.
                                 self.resend_commitment_from_diff(commit_diff)?;
+                                self.last_was_revoke = false;
                             }
                             ReplayOrderHint::CommitThenRevoke => {
                                 self.resend_commitment_from_diff(commit_diff)?;
+                                self.last_was_revoke = false;
                                 self.send_revoke_and_ack_message(true)?;
                             }
                         }
@@ -7489,6 +7602,7 @@ impl ChannelActorState {
                     )?;
                     self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
                     self.resend_commitment_from_diff(commit_diff)?;
+                    self.last_was_revoke = false;
                 } else {
                     // ignore, waiting for remote peer to resend revoke_and_ack
                 }
