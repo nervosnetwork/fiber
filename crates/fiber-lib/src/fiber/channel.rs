@@ -1538,7 +1538,7 @@ where
         };
         state.clean_up_failed_tlcs();
 
-        let (funding_tx_partial_signature, settlement_data) =
+        let (funding_tx_partial_signature, commitment_tx, settlement_data) =
             state.build_and_sign_commitment_tx()?;
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
@@ -1546,6 +1546,22 @@ where
             next_commitment_nonce: state.get_next_commitment_nonce(),
         };
 
+        // Store CommitDiff for potential reestablishment
+        let commit_diff = CommitDiff {
+            version: default_commit_diff_version(),
+            channel_id: state.get_id(),
+            local_commitment_number_at_send: state.get_local_commitment_number(),
+            remote_commitment_number_at_send: state.get_remote_commitment_number(),
+            commit_tx: commitment_tx.data(),
+            replay_updates: state.collect_pending_tlc_updates(),
+            commitment_signed_template: Some(CommitmentSignedTemplate {
+                next_commitment_nonce: commitment_signed.next_commitment_nonce.clone(),
+            }),
+            replay_order_hint: None,
+            created_at_ms: now_timestamp_as_millis_u64(),
+        };
+        self.store
+            .store_pending_commit_diff(&state.get_id(), &commit_diff);
         // Notify outside observers.
         self.network
             .send_message(NetworkActorMessage::new_notification(
@@ -3711,6 +3727,146 @@ impl SettlementTlc {
     }
 }
 
+/// CommitDiff stores everything needed to resend a pending CommitmentSigned
+/// during channel reestablishment without rebuilding the transaction.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitDiff {
+    /// Structure version for backward/forward compatibility.
+    #[serde(default = "default_commit_diff_version")]
+    pub version: u8,
+
+    /// Channel that owns this diff.
+    #[serde(default)]
+    pub channel_id: Hash256,
+
+    /// Local/remote commitment numbers when this commitment was sent.
+    #[serde(default)]
+    pub local_commitment_number_at_send: u64,
+    #[serde(default)]
+    pub remote_commitment_number_at_send: u64,
+
+    /// The commitment transaction (used for resign, not rebuilt)
+    #[serde_as(as = "EntityHex")]
+    pub commit_tx: Transaction,
+
+    /// TLC updates included in this commitment (for resending).
+    #[serde(default, alias = "tlc_updates")]
+    pub replay_updates: Vec<TlcReplayUpdate>,
+
+    /// Optional template fields for CommitmentSigned replay.
+    #[serde(default)]
+    pub commitment_signed_template: Option<CommitmentSignedTemplate>,
+
+    /// Optional replay ordering hint when both revoke+commit are owed.
+    #[serde(default)]
+    pub replay_order_hint: Option<ReplayOrderHint>,
+
+    /// Creation timestamp
+    #[serde(default, alias = "created_at")]
+    pub created_at_ms: u64,
+}
+
+const CURRENT_COMMIT_DIFF_VERSION: u8 = 2;
+
+fn default_commit_diff_version() -> u8 {
+    CURRENT_COMMIT_DIFF_VERSION
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitmentSignedTemplate {
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub next_commitment_nonce: PubNonce,
+}
+
+/// TLC update message to resend during reestablishment
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TlcReplayUpdate {
+    Add(AddTlc),
+    Remove(RemoveTlc),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReplayOrderHint {
+    RevokeThenCommit,
+    CommitThenRevoke,
+}
+
+#[cfg(test)]
+mod commit_diff_tests {
+    use super::{
+        now_timestamp_as_millis_u64, AddTlc, CommitDiff, CommitmentSignedTemplate, Hash256,
+        HashAlgorithm, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, ReplayOrderHint,
+        SecNonceBuilder, TlcReplayUpdate, TransactionBuilder,
+    };
+    use molecule::prelude::Entity;
+    use musig2::BinaryEncoding;
+
+    #[test]
+    fn test_commit_diff_roundtrip_v2() {
+        let channel_id = Hash256::from([1u8; 32]);
+        let payment_hash = Hash256::from([2u8; 32]);
+        let payment_preimage = Hash256::from([3u8; 32]);
+        let commit_tx = TransactionBuilder::default().build().data();
+        let next_commitment_nonce = SecNonceBuilder::new([7u8; 32]).build().public_nonce();
+
+        let diff = CommitDiff {
+            version: 2,
+            channel_id,
+            local_commitment_number_at_send: 10,
+            remote_commitment_number_at_send: 9,
+            commit_tx: commit_tx.clone(),
+            replay_updates: vec![
+                TlcReplayUpdate::Add(AddTlc {
+                    channel_id,
+                    tlc_id: 1,
+                    amount: 42,
+                    payment_hash,
+                    expiry: 1000,
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    onion_packet: None,
+                }),
+                TlcReplayUpdate::Remove(RemoveTlc {
+                    channel_id,
+                    tlc_id: 1,
+                    reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                        payment_preimage,
+                    }),
+                }),
+            ],
+            commitment_signed_template: Some(CommitmentSignedTemplate {
+                next_commitment_nonce: next_commitment_nonce.clone(),
+            }),
+            replay_order_hint: Some(ReplayOrderHint::CommitThenRevoke),
+            created_at_ms: now_timestamp_as_millis_u64(),
+        };
+
+        let encoded = serde_json::to_vec(&diff).expect("serialize commit diff");
+        let decoded: CommitDiff =
+            serde_json::from_slice(&encoded).expect("deserialize commit diff");
+
+        assert_eq!(decoded.version, 2);
+        assert_eq!(decoded.channel_id, channel_id);
+        assert_eq!(decoded.local_commitment_number_at_send, 10);
+        assert_eq!(decoded.remote_commitment_number_at_send, 9);
+        assert_eq!(decoded.commit_tx.as_slice(), commit_tx.as_slice());
+        assert_eq!(decoded.replay_updates.len(), 2);
+        assert_eq!(
+            decoded
+                .commitment_signed_template
+                .as_ref()
+                .expect("commitment template present")
+                .next_commitment_nonce
+                .to_bytes(),
+            next_commitment_nonce.to_bytes()
+        );
+        assert_eq!(
+            decoded.replay_order_hint,
+            Some(ReplayOrderHint::CommitThenRevoke)
+        );
+    }
+}
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
 
@@ -5449,6 +5605,41 @@ impl ChannelActorState {
         self.tlc_state.get(&tlc_id)
     }
 
+    /// Collect pending TLC updates that need to be resent during reestablishment.
+    /// Returns AddTlc for LocalAnnounced offered TLCs and RemoveTlc for LocalRemoved received TLCs.
+    pub fn collect_pending_tlc_updates(&self) -> Vec<TlcReplayUpdate> {
+        let mut updates = Vec::new();
+
+        // Collect LocalAnnounced offered TLCs (pending AddTlc)
+        for tlc in self.tlc_state.offered_tlcs.tlcs.iter() {
+            if matches!(tlc.outbound_status(), OutboundTlcStatus::LocalAnnounced) {
+                updates.push(TlcReplayUpdate::Add(AddTlc {
+                    channel_id: self.get_id(),
+                    tlc_id: tlc.tlc_id.into(),
+                    amount: tlc.amount,
+                    payment_hash: tlc.payment_hash,
+                    expiry: tlc.expiry,
+                    hash_algorithm: tlc.hash_algorithm,
+                    onion_packet: tlc.onion_packet.clone(),
+                }));
+            }
+        }
+
+        // Collect LocalRemoved received TLCs (pending RemoveTlc)
+        for tlc in self.tlc_state.received_tlcs.tlcs.iter() {
+            if matches!(tlc.inbound_status(), InboundTlcStatus::LocalRemoved) {
+                if let Some(reason) = &tlc.removed_reason {
+                    updates.push(TlcReplayUpdate::Remove(RemoveTlc {
+                        channel_id: self.get_id(),
+                        tlc_id: tlc.tlc_id.into(),
+                        reason: reason.clone(),
+                    }));
+                }
+            }
+        }
+
+        updates
+    }
     pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> ProcessingChannelResult {
         let next_tlc_id = if tlc.is_offered() {
             self.get_next_offering_tlc_id()
@@ -7163,6 +7354,76 @@ impl ChannelActorState {
         Ok(())
     }
 
+    /// Resend commitment using stored CommitDiff. This re-signs the stored transaction
+    /// instead of rebuilding it, ensuring consistent signatures during reestablishment.
+    fn resend_commitment_from_diff(&self, commit_diff: &CommitDiff) -> ProcessingChannelResult {
+        let network = self.network();
+
+        // 1. Resend TLC update messages from the stored diff
+        for update in &commit_diff.replay_updates {
+            match update {
+                TlcReplayUpdate::Add(add) => {
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::add_tlc(add.clone()),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    debug_event!(network, "resend add tlc from diff");
+                }
+                TlcReplayUpdate::Remove(remove) => {
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::remove_tlc(remove.clone()),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    debug_event!(network, "resend remove tlc from diff");
+                }
+            }
+        }
+
+        // 2. Re-sign the stored commitment tx (NOT rebuild)
+        let commit_tx_view = commit_diff.commit_tx.clone().into_view();
+        let new_partial_signature = self
+            .get_funding_sign_context()
+            .sign(&compute_tx_message(&commit_tx_view))?;
+
+        let next_commitment_nonce = commit_diff
+            .commitment_signed_template
+            .as_ref()
+            .map(|template| template.next_commitment_nonce.clone())
+            .unwrap_or_else(|| self.get_next_commitment_nonce());
+
+        // 3. Send CommitmentSigned with new signature
+        let commitment_signed = CommitmentSigned {
+            channel_id: self.get_id(),
+            funding_tx_partial_signature: new_partial_signature,
+            next_commitment_nonce,
+        };
+
+        debug!(
+            "Resending commitment_signed from diff: local_cn_at_send={}, remote_cn_at_send={}, replay_updates={}",
+            commit_diff.local_commitment_number_at_send,
+            commit_diff.remote_commitment_number_at_send,
+            commit_diff.replay_updates.len()
+        );
+
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    self.get_remote_peer_id(),
+                    FiberMessage::commitment_signed(commitment_signed),
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+        Ok(())
+    }
     fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
         let tx = tx.clone().into_view();
 
@@ -7712,13 +7973,13 @@ impl ChannelActorState {
 
     fn build_and_sign_commitment_tx(
         &self,
-    ) -> Result<(PartialSignature, SettlementData), ProcessingChannelError> {
+    ) -> Result<(PartialSignature, TransactionView, SettlementData), ProcessingChannelError> {
         let (commitment_tx, settlement_data) = self.build_commitment_tx_and_settlement_data(true);
         let funding_tx_partial_signature = self
             .get_funding_sign_context()
             .sign(&compute_tx_message(&commitment_tx))?;
 
-        Ok((funding_tx_partial_signature, settlement_data))
+        Ok((funding_tx_partial_signature, commitment_tx, settlement_data))
     }
 
     /// Get the latest commitment transaction with updated cell deps
