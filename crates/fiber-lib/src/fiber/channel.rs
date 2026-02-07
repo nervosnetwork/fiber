@@ -3793,11 +3793,79 @@ pub enum ReplayOrderHint {
     CommitThenRevoke,
 }
 
+fn validate_commit_diff_for_replay_inputs(
+    channel_id: Hash256,
+    waiting_ack: bool,
+    local_commitment_number: u64,
+    remote_commitment_number: u64,
+    reestablish_channel: &ReestablishChannel,
+    commit_diff: &CommitDiff,
+) -> ProcessingChannelResult {
+    if reestablish_channel.channel_id != channel_id {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "reestablish channel id mismatch: expected {}, got {}",
+            channel_id, reestablish_channel.channel_id
+        )));
+    }
+
+    if commit_diff.channel_id != channel_id {
+        return Err(ProcessingChannelError::InvalidState(format!(
+            "commit diff channel mismatch: expected {}, got {}",
+            channel_id, commit_diff.channel_id
+        )));
+    }
+
+    if !waiting_ack {
+        return Err(ProcessingChannelError::InvalidState(
+            "commit diff replay requested while channel is not waiting ack".to_string(),
+        ));
+    }
+
+    if reestablish_channel.remote_commitment_number != local_commitment_number {
+        return Err(ProcessingChannelError::InvalidState(format!(
+            "peer remote commitment number mismatch: expected {}, got {}",
+            local_commitment_number, reestablish_channel.remote_commitment_number
+        )));
+    }
+
+    if commit_diff.local_commitment_number_at_send != local_commitment_number {
+        return Err(ProcessingChannelError::InvalidState(format!(
+            "stale commit diff local commitment number: expected {}, got {}",
+            local_commitment_number, commit_diff.local_commitment_number_at_send
+        )));
+    }
+
+    let diff_remote = commit_diff.remote_commitment_number_at_send;
+    let diff_remote_upper = diff_remote.saturating_add(1);
+    if remote_commitment_number < diff_remote || remote_commitment_number > diff_remote_upper {
+        return Err(ProcessingChannelError::InvalidState(format!(
+            "stale commit diff remote commitment drift: state={}, diff_at_send={}, expected range=[{}, {}]",
+            remote_commitment_number, diff_remote, diff_remote, diff_remote_upper
+        )));
+    }
+
+    for update in &commit_diff.replay_updates {
+        let update_channel_id = match update {
+            TlcReplayUpdate::Add(add) => add.channel_id,
+            TlcReplayUpdate::Remove(remove) => remove.channel_id,
+        };
+        if update_channel_id != channel_id {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "commit diff replay update channel mismatch: expected {}, got {}",
+                channel_id, update_channel_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod commit_diff_tests {
     use super::{
-        now_timestamp_as_millis_u64, AddTlc, CommitDiff, CommitmentSignedTemplate, Hash256,
-        HashAlgorithm, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, ReplayOrderHint,
+        now_timestamp_as_millis_u64, validate_commit_diff_for_replay_inputs, AddTlc, CommitDiff,
+        CommitmentSignedTemplate, Hash256, HashAlgorithm, ProcessingChannelError,
+        ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, ReplayOrderHint,
         SecNonceBuilder, TlcReplayUpdate, TransactionBuilder,
     };
     use molecule::prelude::Entity;
@@ -3865,6 +3933,106 @@ mod commit_diff_tests {
             decoded.replay_order_hint,
             Some(ReplayOrderHint::CommitThenRevoke)
         );
+    }
+
+    #[test]
+    fn test_validate_commit_diff_for_replay() {
+        let channel_id = Hash256::from([1u8; 32]);
+        let other_channel_id = Hash256::from([9u8; 32]);
+        let commit_tx = TransactionBuilder::default().build().data();
+
+        let reestablish = ReestablishChannel {
+            channel_id,
+            local_commitment_number: 8,
+            remote_commitment_number: 10,
+        };
+        let base_diff = CommitDiff {
+            version: 2,
+            channel_id,
+            local_commitment_number_at_send: 10,
+            remote_commitment_number_at_send: 8,
+            commit_tx,
+            replay_updates: vec![TlcReplayUpdate::Add(AddTlc {
+                channel_id,
+                tlc_id: 1,
+                amount: 42,
+                payment_hash: Hash256::from([2u8; 32]),
+                expiry: 1000,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                onion_packet: None,
+            })],
+            commitment_signed_template: None,
+            replay_order_hint: None,
+            created_at_ms: now_timestamp_as_millis_u64(),
+        };
+
+        // happy path
+        validate_commit_diff_for_replay_inputs(channel_id, true, 10, 8, &reestablish, &base_diff)
+            .expect("valid commit diff should pass");
+
+        // channel mismatch
+        let mut channel_mismatch = base_diff.clone();
+        channel_mismatch.channel_id = other_channel_id;
+        let err = validate_commit_diff_for_replay_inputs(
+            channel_id,
+            true,
+            10,
+            8,
+            &reestablish,
+            &channel_mismatch,
+        )
+        .expect_err("channel mismatch should fail");
+        assert!(matches!(
+            err,
+            ProcessingChannelError::InvalidState(msg) if msg.contains("channel mismatch")
+        ));
+
+        // not waiting ack
+        let err = validate_commit_diff_for_replay_inputs(
+            channel_id,
+            false,
+            10,
+            8,
+            &reestablish,
+            &base_diff,
+        )
+        .expect_err("not waiting ack should fail");
+        assert!(matches!(
+            err,
+            ProcessingChannelError::InvalidState(msg) if msg.contains("not waiting ack")
+        ));
+
+        // stale local commitment number
+        let mut stale_local = base_diff.clone();
+        stale_local.local_commitment_number_at_send = 9;
+        let err = validate_commit_diff_for_replay_inputs(
+            channel_id,
+            true,
+            10,
+            8,
+            &reestablish,
+            &stale_local,
+        )
+        .expect_err("stale local commitment number should fail");
+        assert!(matches!(
+            err,
+            ProcessingChannelError::InvalidState(msg) if msg.contains("stale commit diff local commitment number")
+        ));
+
+        // stale remote commitment drift
+        let err = validate_commit_diff_for_replay_inputs(
+            channel_id,
+            true,
+            10,
+            11,
+            &reestablish,
+            &base_diff,
+        )
+        .expect_err("stale remote commitment drift should fail");
+        assert!(matches!(
+            err,
+            ProcessingChannelError::InvalidState(msg) if msg.contains("remote commitment drift")
+        ));
     }
 }
 type ScheduledChannelUpdateHandle =
@@ -7250,14 +7418,29 @@ impl ChannelActorState {
                     self.send_revoke_and_ack_message(true)?;
                     if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
-                        self.set_waiting_ack(myself, false);
-                        self.resend_tlcs_on_reestablish(true)?;
+                        let commit_diff =
+                            pending_commit_diff.as_ref().ok_or_else(|| {
+                                ProcessingChannelError::InvalidState(format!(
+                                    "Missing pending CommitDiff for owed CommitmentSigned replay on channel {}",
+                                    self.get_id()
+                                ))
+                            })?;
+                        self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
+                        // Don't clear waiting_ack - we're still waiting for response to our CommitmentSigned.
+                        self.resend_commitment_from_diff(commit_diff)?;
                     }
                 } else if my_waiting_ack
                     && my_local_commitment_number == peer_remote_commitment_number
                 {
-                    // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag
-                    self.resend_tlcs_on_reestablish(true)?;
+                    // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag.
+                    let commit_diff = pending_commit_diff.as_ref().ok_or_else(|| {
+                        ProcessingChannelError::InvalidState(format!(
+                            "Missing pending CommitDiff for owed CommitmentSigned replay on channel {}",
+                            self.get_id()
+                        ))
+                    })?;
+                    self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
+                    self.resend_commitment_from_diff(commit_diff)?;
                 } else {
                     // ignore, waiting for remote peer to resend revoke_and_ack
                 }
@@ -7352,6 +7535,21 @@ impl ChannelActorState {
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
         Ok(())
+    }
+
+    fn validate_commit_diff_for_replay(
+        &self,
+        reestablish_channel: &ReestablishChannel,
+        commit_diff: &CommitDiff,
+    ) -> ProcessingChannelResult {
+        validate_commit_diff_for_replay_inputs(
+            self.get_id(),
+            self.is_waiting_tlc_ack(),
+            self.get_local_commitment_number(),
+            self.get_remote_commitment_number(),
+            reestablish_channel,
+            commit_diff,
+        )
     }
 
     /// Resend commitment using stored CommitDiff. This re-signs the stored transaction
