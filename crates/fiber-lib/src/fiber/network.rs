@@ -3710,7 +3710,9 @@ where
                                     TLCId::Received(remove_tlc.id),
                                     remove_tlc.reason.clone(),
                                 );
-                                state.retryable_tlc_operations.push_back(operation);
+                                if !state.retryable_tlc_operations.contains(&operation) {
+                                    state.retryable_tlc_operations.push_back(operation);
+                                }
                                 self.store.insert_channel_actor_state(state);
                             }
                         }

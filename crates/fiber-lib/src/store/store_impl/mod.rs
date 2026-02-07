@@ -30,7 +30,7 @@ use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
 use crate::fiber::types::{Privkey, Pubkey};
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelState, CommitDiff},
         graph::NetworkGraphStateStore,
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PersistentNetworkActorState},
@@ -570,6 +570,22 @@ impl ChannelActorStateStore for Store {
         ]
         .concat();
         self.get(key).is_some()
+    }
+
+    fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff) {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        let value = serialize_to_vec(diff, "CommitDiff");
+        self.put(key, value);
+    }
+
+    fn get_pending_commit_diff(&self, channel_id: &Hash256) -> Option<CommitDiff> {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        self.get(&key).map(|v| deserialize_from(&v, "CommitDiff"))
+    }
+
+    fn delete_pending_commit_diff(&self, channel_id: &Hash256) {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        self.delete(&key);
     }
 }
 

@@ -428,8 +428,13 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
+                    let pending_commit_diff = self.store.get_pending_commit_diff(&state.get_id());
                     state
-                        .handle_reestablish_channel_message(myself, reestablish_channel)
+                        .handle_reestablish_channel_message(
+                            myself,
+                            reestablish_channel,
+                            pending_commit_diff,
+                        )
                         .await?;
                     if !state.reestablishing {
                         state.schedule_next_retry_task(myself);
@@ -608,9 +613,17 @@ where
                 Ok(())
             }
             FiberChannelMessage::AddTlc(add_tlc) => {
+                if state.defer_peer_tlc_updates {
+                    state.queue_deferred_peer_tlc_update(DeferredPeerTlcUpdate::Add(add_tlc));
+                    return Ok(());
+                }
                 self.handle_add_tlc_peer_message(state, add_tlc)
             }
             FiberChannelMessage::RemoveTlc(remove_tlc) => {
+                if state.defer_peer_tlc_updates {
+                    state.queue_deferred_peer_tlc_update(DeferredPeerTlcUpdate::Remove(remove_tlc));
+                    return Ok(());
+                }
                 self.handle_remove_tlc_peer_message(state, remove_tlc)
             }
             FiberChannelMessage::Shutdown(shutdown) => {
@@ -642,8 +655,13 @@ where
                 Ok(())
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
+                let pending_commit_diff = self.store.get_pending_commit_diff(&state.get_id());
                 state
-                    .handle_reestablish_channel_message(myself, reestablish_channel)
+                    .handle_reestablish_channel_message(
+                        myself,
+                        reestablish_channel,
+                        pending_commit_diff,
+                    )
                     .await?;
                 Ok(())
             }
@@ -759,6 +777,18 @@ where
         state: &mut ChannelActorState,
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
+        // If deferred peer TLC updates exist, they must be applied before verifying
+        // CommitmentSigned to preserve sender-side message order (Add/Remove before CommitSigned).
+        if state.defer_peer_tlc_updates && !state.deferred_peer_tlc_updates.is_empty() {
+            debug!(
+                "Applying deferred peer TLC updates before verifying CommitmentSigned for channel {} (queued={})",
+                state.get_id(),
+                state.deferred_peer_tlc_updates.len()
+            );
+            state.stop_defer_peer_tlc_updates();
+            self.flush_deferred_peer_tlc_updates(state)?;
+        }
+
         let was_waiting_ack_before_verify = state.tlc_state.waiting_ack;
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
@@ -788,6 +818,33 @@ where
 
         if need_commitment_signed && !state.tlc_state.waiting_ack {
             self.handle_commitment_signed_command(myself, state).await?;
+        }
+
+        if state.defer_peer_tlc_updates {
+            state.stop_defer_peer_tlc_updates();
+            self.flush_deferred_peer_tlc_updates(state)?;
+        }
+
+        Ok(())
+    }
+
+    fn flush_deferred_peer_tlc_updates(
+        &self,
+        state: &mut ChannelActorState,
+    ) -> ProcessingChannelResult {
+        if state.defer_peer_tlc_updates {
+            return Ok(());
+        }
+
+        while let Some(update) = state.deferred_peer_tlc_updates.pop_front() {
+            match update {
+                DeferredPeerTlcUpdate::Add(add_tlc) => {
+                    self.handle_add_tlc_peer_message(state, add_tlc)?
+                }
+                DeferredPeerTlcUpdate::Remove(remove_tlc) => {
+                    self.handle_remove_tlc_peer_message(state, remove_tlc)?
+                }
+            }
         }
 
         Ok(())
@@ -1519,6 +1576,16 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) -> ProcessingChannelResult {
+        // Follow LND's unacked-commitment guard: never send a new CommitmentSigned
+        // while the previous one is still awaiting RevokeAndAck.
+        if state.tlc_state.waiting_ack {
+            debug!(
+                "[SEND_CS] waiting_ack=true for channel {}, skip duplicate CommitmentSigned",
+                state.get_id()
+            );
+            return Ok(());
+        }
+
         let flags = match state.state {
             ChannelState::CollaboratingFundingTx(flags)
                 if !flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) =>
@@ -1570,7 +1637,7 @@ where
             state.build_and_sign_commitment_tx()?;
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
-            funding_tx_partial_signature,
+            funding_tx_partial_signature: funding_tx_partial_signature.clone(),
             next_commitment_nonce: state.get_next_commitment_nonce(),
         };
 
@@ -1584,6 +1651,7 @@ where
             replay_updates: state.collect_pending_tlc_updates(),
             commitment_signed_template: Some(CommitmentSignedTemplate {
                 next_commitment_nonce: commitment_signed.next_commitment_nonce.clone(),
+                funding_tx_partial_signature: Some(funding_tx_partial_signature),
             }),
             replay_order_hint: Some(ReplayOrderHint::RevokeThenCommit),
             created_at_ms: now_timestamp_as_millis_u64(),
@@ -3367,6 +3435,12 @@ pub enum RetryableTlcOperation {
     AddTlc(AddTlcCommand),
 }
 
+#[derive(Clone, Debug)]
+pub enum DeferredPeerTlcUpdate {
+    Add(AddTlc),
+    Remove(RemoveTlc),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct PendingTlcs {
     pub tlcs: Vec<TlcInfo>,
@@ -3810,6 +3884,9 @@ fn default_commit_diff_version() -> u8 {
 pub struct CommitmentSignedTemplate {
     #[serde_as(as = "PubNonceAsBytes")]
     pub next_commitment_nonce: PubNonce,
+    #[serde(default)]
+    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
+    pub funding_tx_partial_signature: Option<PartialSignature>,
 }
 
 /// TLC update message to resend during reestablishment
@@ -3911,47 +3988,21 @@ fn resolve_dual_owed_replay_order(
     remote_commitment_number_at_send: u64,
     last_was_revoke: bool,
 ) -> ReplayOrderHint {
-    if last_was_revoke {
-        if replay_order_hint != Some(ReplayOrderHint::CommitThenRevoke) {
-            warn!(
-                "Dual-owed reestablish for channel {} has last_was_revoke=true but replay hint={:?}; using CommitThenRevoke",
-                channel_id, replay_order_hint
-            );
-        }
+    if current_remote_commitment_number > remote_commitment_number_at_send
+        || replay_order_hint == Some(ReplayOrderHint::CommitThenRevoke)
+        || last_was_revoke
+    {
+        debug!(
+            "Dual-owed reestablish on channel {} chooses CommitThenRevoke (hint={:?}, last_was_revoke={}, remote_cn_now={}, remote_cn_at_send={})",
+            channel_id,
+            replay_order_hint,
+            last_was_revoke,
+            current_remote_commitment_number,
+            remote_commitment_number_at_send
+        );
         return ReplayOrderHint::CommitThenRevoke;
     }
-
-    let remote_advanced_after_send =
-        current_remote_commitment_number == remote_commitment_number_at_send.saturating_add(1);
-    match replay_order_hint {
-        Some(ReplayOrderHint::CommitThenRevoke) => ReplayOrderHint::CommitThenRevoke,
-        Some(ReplayOrderHint::RevokeThenCommit) if remote_advanced_after_send => {
-            warn!(
-                "Dual-owed reestablish for channel {} has RevokeThenCommit hint but remote CN advanced since send (state={}, at_send={}); forcing CommitThenRevoke to avoid stale-order BadSignature",
-                channel_id,
-                current_remote_commitment_number,
-                remote_commitment_number_at_send
-            );
-            ReplayOrderHint::CommitThenRevoke
-        }
-        Some(ReplayOrderHint::RevokeThenCommit) => ReplayOrderHint::RevokeThenCommit,
-        None if remote_advanced_after_send => {
-            warn!(
-                "No replay_order_hint found for dual-owed reestablish on channel {} and remote CN advanced since send (state={}, at_send={}); using CommitThenRevoke",
-                channel_id,
-                current_remote_commitment_number,
-                remote_commitment_number_at_send
-            );
-            ReplayOrderHint::CommitThenRevoke
-        }
-        None => {
-            warn!(
-                "No replay_order_hint found for dual-owed reestablish on channel {}; falling back to RevokeThenCommit",
-                channel_id
-            );
-            ReplayOrderHint::RevokeThenCommit
-        }
-    }
+    ReplayOrderHint::RevokeThenCommit
 }
 
 #[cfg(test)]
@@ -4000,6 +4051,7 @@ mod commit_diff_tests {
             ],
             commitment_signed_template: Some(CommitmentSignedTemplate {
                 next_commitment_nonce: next_commitment_nonce.clone(),
+                funding_tx_partial_signature: None,
             }),
             replay_order_hint: Some(ReplayOrderHint::CommitThenRevoke),
             created_at_ms: now_timestamp_as_millis_u64(),
@@ -4356,6 +4408,10 @@ pub struct ChannelActorState {
     // A flag to indicate whether the channel is reestablishing,
     // we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
+    #[serde(skip)]
+    pub defer_peer_tlc_updates: bool,
+    #[serde(skip)]
+    pub deferred_peer_tlc_updates: VecDeque<DeferredPeerTlcUpdate>,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
     #[serde(default)]
     pub last_was_revoke: bool,
@@ -4905,6 +4961,36 @@ impl ChannelActorState {
         }
     }
 
+    fn start_defer_peer_tlc_updates(&mut self) {
+        if !self.defer_peer_tlc_updates {
+            debug!(
+                "Start deferring peer TLC updates for channel {}",
+                self.get_id()
+            );
+            self.defer_peer_tlc_updates = true;
+        }
+    }
+
+    fn stop_defer_peer_tlc_updates(&mut self) {
+        if self.defer_peer_tlc_updates {
+            debug!(
+                "Stop deferring peer TLC updates for channel {} (queued={})",
+                self.get_id(),
+                self.deferred_peer_tlc_updates.len()
+            );
+            self.defer_peer_tlc_updates = false;
+        }
+    }
+
+    fn queue_deferred_peer_tlc_update(&mut self, update: DeferredPeerTlcUpdate) {
+        self.deferred_peer_tlc_updates.push_back(update);
+        debug!(
+            "Deferred peer TLC update for channel {} (queued={})",
+            self.get_id(),
+            self.deferred_peer_tlc_updates.len()
+        );
+    }
+
     fn log_ack_state(&self, context: &str) {
         debug!(
             channel = ?self.get_id(),
@@ -5319,6 +5405,8 @@ impl ChannelActorState {
             ),
             latest_commitment_transaction: None,
             reestablishing: false,
+            defer_peer_tlc_updates: false,
+            deferred_peer_tlc_updates: VecDeque::new(),
             last_revoke_ack_msg: None,
             last_was_revoke: false,
             created_at: SystemTime::now(),
@@ -5405,6 +5493,8 @@ impl ChannelActorState {
             remote_reserved_ckb_amount: 0,
             latest_commitment_transaction: None,
             reestablishing: false,
+            defer_peer_tlc_updates: false,
+            deferred_peer_tlc_updates: VecDeque::new(),
             last_revoke_ack_msg: None,
             last_was_revoke: false,
             created_at: SystemTime::now(),
@@ -7496,11 +7586,13 @@ impl ChannelActorState {
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         reestablish_channel: &ReestablishChannel,
+        pending_commit_diff: Option<CommitDiff>,
     ) -> ProcessingChannelResult {
         debug!(
-            "peer: {:?} Handling reestablish channel message: {:?}, our commitment_numbers {:?} in channel state {:?}",
+            "peer: {:?} Handling reestablish channel message: {:?}, our commitment_numbers {:?} in channel state {:?}, has_commit_diff: {}",
             self.get_local_peer_id(),
-            reestablish_channel, self.commitment_numbers, self.state
+            reestablish_channel, self.commitment_numbers, self.state,
+            pending_commit_diff.is_some()
         );
         let network = self.network();
         self.notify_funding_tx(&network);
@@ -7567,8 +7659,8 @@ impl ChannelActorState {
                             pending_commit_diff.as_ref(),
                         )?;
                         self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
-                        // In dual-owed reestablish scenarios, stale/default hints can lead to
-                        // replaying RevokeAndAck before CommitmentSigned and trigger BadSignature.
+                        // In our current implementation, replaying RevokeAndAck first avoids
+                        // transient CommitSig verification mismatches during reestablish.
                         let replay_order = resolve_dual_owed_replay_order(
                             self.get_id(),
                             commit_diff.replay_order_hint,
@@ -7576,6 +7668,18 @@ impl ChannelActorState {
                             commit_diff.remote_commitment_number_at_send,
                             self.last_was_revoke,
                         );
+                        debug!(
+                            "Dual-owed replay decision for channel {}: hint={:?}, last_was_revoke={}, remote_cn_now={}, remote_cn_at_send={}, chosen={:?}",
+                            self.get_id(),
+                            commit_diff.replay_order_hint,
+                            self.last_was_revoke,
+                            self.get_remote_commitment_number(),
+                            commit_diff.remote_commitment_number_at_send,
+                            replay_order
+                        );
+                        // During dual-owed replay, defer newly arrived peer TLC updates until
+                        // we finish verifying the replayed CommitmentSigned.
+                        self.start_defer_peer_tlc_updates();
                         match replay_order {
                             ReplayOrderHint::RevokeThenCommit => {
                                 self.send_revoke_and_ack_message(true)?;
@@ -7747,11 +7851,20 @@ impl ChannelActorState {
             }
         }
 
-        // 2. Re-sign the stored commitment tx (NOT rebuild)
+        // 2. Reuse the original partial signature when available.
+        //    Fallback to re-sign only for backward compatibility with old CommitDiff entries.
         let commit_tx_view = commit_diff.commit_tx.clone().into_view();
-        let new_partial_signature = self
-            .get_funding_sign_context()
-            .sign(&compute_tx_message(&commit_tx_view))?;
+        let (funding_tx_partial_signature, reused_stored_signature) = commit_diff
+            .commitment_signed_template
+            .as_ref()
+            .and_then(|template| template.funding_tx_partial_signature.clone())
+            .map(|signature| (signature, true))
+            .map(Ok)
+            .unwrap_or_else(|| {
+                self.get_funding_sign_context()
+                    .sign(&compute_tx_message(&commit_tx_view))
+                    .map(|signature| (signature, false))
+            })?;
 
         let next_commitment_nonce = commit_diff
             .commitment_signed_template
@@ -7762,15 +7875,16 @@ impl ChannelActorState {
         // 3. Send CommitmentSigned with new signature
         let commitment_signed = CommitmentSigned {
             channel_id: self.get_id(),
-            funding_tx_partial_signature: new_partial_signature,
+            funding_tx_partial_signature,
             next_commitment_nonce,
         };
 
         debug!(
-            "Resending commitment_signed from diff: local_cn_at_send={}, remote_cn_at_send={}, replay_updates={}",
+            "Resending commitment_signed from diff: local_cn_at_send={}, remote_cn_at_send={}, replay_updates={}, reused_stored_signature={}",
             commit_diff.local_commitment_number_at_send,
             commit_diff.remote_commitment_number_at_send,
-            commit_diff.replay_updates.len()
+            commit_diff.replay_updates.len(),
+            reused_stored_signature,
         );
 
         network
@@ -8570,6 +8684,15 @@ pub trait ChannelActorStateStore {
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
     /// Check if a tlc is settled on chain
     fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool;
+
+    /// Store a pending CommitDiff for channel reestablishment
+    fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff);
+
+    /// Get the pending CommitDiff for a channel
+    fn get_pending_commit_diff(&self, channel_id: &Hash256) -> Option<CommitDiff>;
+
+    /// Delete the pending CommitDiff for a channel
+    fn delete_pending_commit_diff(&self, channel_id: &Hash256);
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
