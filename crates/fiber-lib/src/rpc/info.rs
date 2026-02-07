@@ -1,11 +1,15 @@
+use std::path::{Path, PathBuf};
+
 use super::graph::UdtCfgInfos;
 use crate::ckb::CkbConfig;
 use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
-    NetworkActorCommand, NetworkActorMessage,
+    FiberConfig, NetworkActorCommand, NetworkActorMessage,
 };
+use crate::now_timestamp_as_millis_u64;
+use crate::rpc::server::RpcServerStore;
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
@@ -14,6 +18,7 @@ use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use ractor::{call, ActorRef};
+use rocksdb::checkpoint::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tentacle::multiaddr::MultiAddr;
@@ -81,16 +86,32 @@ pub struct NodeInfoResult {
     pub udt_cfg_infos: UdtCfgInfos,
 }
 
-pub struct InfoRpcServerImpl {
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct BackupResult {
+    // The path of backup file
+    path: String,
+    // The timestamp of backup
+    timestamp: u64,
+}
+
+pub struct InfoRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
+    store: S,
+    ckb_key_path: PathBuf,
+    fiber_key_path: PathBuf,
     default_funding_lock_script: Script,
 }
 
-impl InfoRpcServerImpl {
+impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServerImpl<S> {
     #[allow(unused_variables)]
-    pub fn new(actor: ActorRef<NetworkActorMessage>, config: CkbConfig) -> Self {
+    pub fn new(
+        actor: ActorRef<NetworkActorMessage>,
+        store: S,
+        ckb_config: CkbConfig,
+        fiber_config: FiberConfig,
+    ) -> Self {
         #[cfg(not(test))]
-        let default_funding_lock_script = config
+        let default_funding_lock_script = ckb_config
             .get_default_funding_lock_script()
             .expect("get default funding lock script should be ok")
             .into();
@@ -100,8 +121,14 @@ impl InfoRpcServerImpl {
         #[cfg(test)]
         let default_funding_lock_script = Default::default();
 
+        let ckb_key_path = ckb_config.base_dir().join("key");
+        let fiber_key_path = fiber_config.base_dir().join("sk");
+
         InfoRpcServerImpl {
             actor,
+            store,
+            ckb_key_path,
+            fiber_key_path,
             default_funding_lock_script,
         }
     }
@@ -114,16 +141,24 @@ trait InfoRpc {
     /// Get the node information.
     #[method(name = "node_info")]
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned>;
+
+    //Back the node information.
+    #[method(name = "backup_now")]
+    async fn backup_now(&self, path: String) -> Result<BackupResult, ErrorObjectOwned>;
 }
 
 #[async_trait::async_trait]
 #[cfg(not(target_arch = "wasm32"))]
-impl InfoRpcServer for InfoRpcServerImpl {
+impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServer for InfoRpcServerImpl<S> {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         self.node_info().await
     }
+
+    async fn backup_now(&self, path: String) -> Result<BackupResult, ErrorObjectOwned> {
+        self.backup_now(path).await
+    }
 }
-impl InfoRpcServerImpl {
+impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServerImpl<S> {
     pub async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
         let commit_hash = crate::get_git_commit_info();
@@ -151,5 +186,143 @@ impl InfoRpcServerImpl {
             peers_count: response.peers_count,
             udt_cfg_infos: response.udt_cfg_infos.into(),
         })
+    }
+
+    async fn backup_now(&self, path: String) -> Result<BackupResult, ErrorObjectOwned> {
+        let target_dir = PathBuf::from(&path);
+
+        // Prevent overwriting existing data
+        if target_dir.exists() {
+            return log_and_error!(path, "Backup directory already exists".to_string());
+        }
+
+        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+            return log_and_error!(path, format!("Failed to create backup directory: {}", e));
+        }
+        tracing::info!("Starting node backup to: {:?}", target_dir);
+
+        let db_backup_path = target_dir.join("db");
+        let checkpoint = match Checkpoint::new(self.store.inner_db()) {
+            Ok(c) => c,
+            Err(e) => return log_and_error!(path, format!("RocksDB checkpoint init error: {}", e)),
+        };
+
+        if let Err(e) = checkpoint.create_checkpoint(&db_backup_path) {
+            return log_and_error!(path, format!("Failed to create DB checkpoint: {}", e));
+        }
+
+        self.perform_key_backup(&target_dir)?;
+
+        let now = now_timestamp_as_millis_u64();
+
+        tracing::info!("Backup completed successfully at block height (synced): [Approach A]");
+
+        Ok(BackupResult {
+            path,
+            timestamp: now,
+        })
+    }
+}
+
+impl<S: RpcServerStore> InfoRpcServerImpl<S> {
+    fn perform_key_backup(&self, target_dir: &Path) -> Result<(), ErrorObjectOwned> {
+        let keys_to_copy = [(&self.ckb_key_path, "key"), (&self.fiber_key_path, "sk")];
+
+        for (src_file, dest_name) in keys_to_copy {
+            if src_file.exists() {
+                let dest_file = target_dir.join(dest_name);
+                if let Err(e) = std::fs::copy(src_file, &dest_file) {
+                    return log_and_error!(
+                        target_dir,
+                        format!("Failed to copy key file {:?}: {}", src_file, e)
+                    );
+                }
+                tracing::info!("Successfully backed up key: {}", dest_name);
+            } else {
+                tracing::warn!("Key file not found at {:?}, skipping", src_file);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{generate_store, get_fiber_config, NetworkNode, TempDir};
+    use std::fs;
+
+    async fn setup_test_impl() -> (InfoRpcServerImpl<crate::store::Store>, TempDir) {
+        let (store, tempdir) = generate_store();
+        let fiber_config = get_fiber_config(tempdir.as_ref(), Some("backup_test"));
+
+        let ckb_config = CkbConfig {
+            base_dir: Some(PathBuf::from(tempdir.as_ref())),
+            rpc_url: "http://127.0.0.1:8114".to_string(),
+            udt_whitelist: None,
+            tx_tracing_polling_interval_ms: 4000,
+            #[cfg(not(target_arch = "wasm32"))]
+            funding_tx_shell_builder: None,
+        };
+
+        let ckb_key_dir = ckb_config.base_dir.as_ref().unwrap();
+        let fiber_key_dir = fiber_config.base_dir().to_path_buf();
+
+        fs::create_dir_all(&ckb_key_dir).unwrap();
+        fs::create_dir_all(&fiber_key_dir).unwrap();
+        fs::write(ckb_key_dir.join("key"), "mock_ckb_key").unwrap();
+        fs::write(fiber_key_dir.join("sk"), "mock_fiber_key").unwrap();
+
+        let node = NetworkNode::new_with_node_name_opt(Some("backup_test".to_string()));
+        let actor = node.await.get_actor();
+
+        let server = InfoRpcServerImpl::new(actor, store, ckb_config, fiber_config);
+
+        (server, tempdir)
+    }
+
+    #[tokio::test]
+    async fn test_rpc_backup_now_success() {
+        let (server, root) = setup_test_impl().await;
+
+        // Construct path
+        let backup_path = root.as_ref().join("backup_v1");
+        let path_str = backup_path.to_str().unwrap().to_string();
+
+        let result = server
+            .backup_now(path_str)
+            .await
+            .expect("Backup should succeed");
+
+        // Assert path correction
+        assert!(result.path.contains("backup_v1"));
+
+        // Assert path exists
+        assert!(backup_path.exists());
+        assert!(backup_path.join("db").exists());
+
+        // Check copied file
+        let ckb_key = backup_path.join("key");
+        let fiber_key = backup_path.join("sk");
+
+        assert!(
+            ckb_key.exists() || fiber_key.exists(),
+            "At least one key should be backed up"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_backup_now_already_exists() {
+        let (server, root) = setup_test_impl().await;
+
+        // Using an exisiting path
+        let path_str = root.as_ref().to_str().unwrap().to_string();
+
+        let result = server.backup_now(path_str).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Should be -32000 (Invalid Params)
+        assert_eq!(err.code(), -32000);
     }
 }
