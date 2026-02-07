@@ -1,6 +1,5 @@
 use super::check_migrate;
-use super::{KeyValue, StoreChange, StoreKeyValue};
-use crate::rpc::server::KVStore;
+use super::{KVStore, KeyValue, StoreChange, StoreKeyValue};
 use ractor::OutputPort;
 pub use rocksdb::Direction as DbDirection;
 pub use rocksdb::IteratorMode;
@@ -94,6 +93,7 @@ impl Store {
 }
 
 impl KVStore for Store {
+    /// Returns the underlying database instance for backup and maintenance.
     fn inner_db(&self) -> &Arc<DB> {
         &self.db
     }

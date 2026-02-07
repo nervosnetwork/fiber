@@ -36,6 +36,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `graph_channels`](#graph-graph_channels)
     * [Module Info](#module-info)
         * [Method `node_info`](#info-node_info)
+        * [Method `backup_now`](#info-backup_now)
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#invoice-new_invoice)
         * [Method `parse_invoice`](#invoice-parse_invoice)
@@ -523,6 +524,24 @@ Get the node information.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, Configuration information for User-Defined Tokens (UDT) associated with the node.
+
+---
+
+
+
+<a id="info-backup_now"></a>
+#### Method `backup_now`
+
+Backup the node database and key files to a specified path.
+
+##### Params
+
+* `String` - <em>String</em>, 
+
+##### Returns
+
+* `path` - <em>`String`</em>, The path of backup file
+* `timestamp` - <em>`u64`</em>, The timestamp of backup
 
 ---
 

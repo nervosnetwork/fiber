@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
 use super::graph::UdtCfgInfos;
@@ -8,8 +9,12 @@ use crate::fiber::{
     types::{Hash256, Pubkey},
     FiberConfig, NetworkActorCommand, NetworkActorMessage,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use crate::now_timestamp_as_millis_u64;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::RpcServerStore;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::store_impl::KVStore;
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,6 +23,7 @@ use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use ractor::{call, ActorRef};
+#[cfg(not(target_arch = "wasm32"))]
 use rocksdb::checkpoint::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -86,29 +92,49 @@ pub struct NodeInfoResult {
     pub udt_cfg_infos: UdtCfgInfos,
 }
 
+/// The result of a backup operation.
+#[serde_as]
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BackupResult {
-    // The path of backup file
+    /// The path of backup file
     path: String,
-    // The timestamp of backup
+    /// The timestamp of backup
+    #[serde_as(as = "U64Hex")]
     timestamp: u64,
 }
 
 pub struct InfoRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
-    store: S,
-    ckb_key_path: PathBuf,
-    fiber_key_path: PathBuf,
+
     default_funding_lock_script: Script,
+
+    #[cfg(not(target_arch = "wasm32"))]
+    store: S,
+    #[cfg(not(target_arch = "wasm32"))]
+    fiber_key_path: PathBuf,
+    #[cfg(not(target_arch = "wasm32"))]
+    ckb_key_path: PathBuf,
+
+    #[cfg(target_arch = "wasm32")]
+    _marker: std::marker::PhantomData<S>,
 }
 
-impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServerImpl<S> {
+#[cfg(not(target_arch = "wasm32"))]
+pub trait StoreInfo: RpcServerStore + KVStore + Clone + Send + Sync + 'static {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T> StoreInfo for T where T: RpcServerStore + KVStore + Clone + Send + Sync + 'static {}
+#[cfg(target_arch = "wasm32")]
+pub trait StoreInfo: Clone + Send + Sync + 'static {}
+#[cfg(target_arch = "wasm32")]
+impl<T> StoreInfo for T where T: Clone + Send + Sync + 'static {}
+
+impl<S: StoreInfo> InfoRpcServerImpl<S> {
     #[allow(unused_variables)]
     pub fn new(
         actor: ActorRef<NetworkActorMessage>,
         store: S,
         ckb_config: CkbConfig,
-        fiber_config: FiberConfig,
+        fiber_config: Option<FiberConfig>,
     ) -> Self {
         #[cfg(not(test))]
         let default_funding_lock_script = ckb_config
@@ -121,15 +147,21 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServerImpl<S> {
         #[cfg(test)]
         let default_funding_lock_script = Default::default();
 
-        let ckb_key_path = ckb_config.base_dir().join("key");
-        let fiber_key_path = fiber_config.base_dir().join("sk");
+        #[cfg(not(target_arch = "wasm32"))]
+        let fiber_config = fiber_config.expect("fiber config should be set");
 
         InfoRpcServerImpl {
             actor,
-            store,
-            ckb_key_path,
-            fiber_key_path,
             default_funding_lock_script,
+
+            #[cfg(not(target_arch = "wasm32"))]
+            store,
+            #[cfg(not(target_arch = "wasm32"))]
+            ckb_key_path: ckb_config.base_dir().join("key"),
+            #[cfg(not(target_arch = "wasm32"))]
+            fiber_key_path: fiber_config.base_dir().join("sk"),
+            #[cfg(target_arch = "wasm32")]
+            _marker: std::marker::PhantomData,
         }
     }
 }
@@ -142,14 +174,14 @@ trait InfoRpc {
     #[method(name = "node_info")]
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned>;
 
-    //Back the node information.
+    /// Backup the node database and key files to a specified path.
     #[method(name = "backup_now")]
     async fn backup_now(&self, path: String) -> Result<BackupResult, ErrorObjectOwned>;
 }
 
 #[async_trait::async_trait]
 #[cfg(not(target_arch = "wasm32"))]
-impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServer for InfoRpcServerImpl<S> {
+impl<S: StoreInfo> InfoRpcServer for InfoRpcServerImpl<S> {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         self.node_info().await
     }
@@ -158,7 +190,8 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServer for InfoRp
         self.backup_now(path).await
     }
 }
-impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServerImpl<S> {
+
+impl<S: StoreInfo> InfoRpcServerImpl<S> {
     pub async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
         let commit_hash = crate::get_git_commit_info();
@@ -188,6 +221,7 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServerImpl<S> {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn backup_now(&self, path: String) -> Result<BackupResult, ErrorObjectOwned> {
         let target_dir = PathBuf::from(&path);
 
@@ -222,9 +256,8 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> InfoRpcServerImpl<S> {
             timestamp: now,
         })
     }
-}
 
-impl<S: RpcServerStore> InfoRpcServerImpl<S> {
+    #[cfg(not(target_arch = "wasm32"))]
     fn perform_key_backup(&self, target_dir: &Path) -> Result<(), ErrorObjectOwned> {
         let keys_to_copy = [(&self.ckb_key_path, "key"), (&self.fiber_key_path, "sk")];
 
@@ -246,7 +279,7 @@ impl<S: RpcServerStore> InfoRpcServerImpl<S> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::test_utils::{generate_store, get_fiber_config, NetworkNode, TempDir};
@@ -268,7 +301,7 @@ mod tests {
         let ckb_key_dir = ckb_config.base_dir.as_ref().unwrap();
         let fiber_key_dir = fiber_config.base_dir().to_path_buf();
 
-        fs::create_dir_all(&ckb_key_dir).unwrap();
+        fs::create_dir_all(ckb_key_dir).unwrap();
         fs::create_dir_all(&fiber_key_dir).unwrap();
         fs::write(ckb_key_dir.join("key"), "mock_ckb_key").unwrap();
         fs::write(fiber_key_dir.join("sk"), "mock_fiber_key").unwrap();
@@ -276,7 +309,7 @@ mod tests {
         let node = NetworkNode::new_with_node_name_opt(Some("backup_test".to_string()));
         let actor = node.await.get_actor();
 
-        let server = InfoRpcServerImpl::new(actor, store, ckb_config, fiber_config);
+        let server = InfoRpcServerImpl::new(actor, store, ckb_config, Some(fiber_config));
 
         (server, tempdir)
     }

@@ -31,7 +31,7 @@ pub(crate) struct FiberWasm<
 > {
     pub(crate) channel: ChannelRpcServerImpl<ChannelStoreType>,
     pub(crate) graph: GraphRpcServerImpl<GraphStoreType>,
-    pub(crate) info: InfoRpcServerImpl,
+    pub(crate) info: InfoRpcServerImpl<()>,
     pub(crate) invoice: InvoiceRpcServerImpl<InvoiceStoreType>,
     pub(crate) payment: PaymentRpcServerImpl<PaymentStoreType>,
     pub(crate) peer: PeerRpcServerImpl,
