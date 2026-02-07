@@ -6500,10 +6500,10 @@ async fn test_reestablish_restores_send_nonce() {
     ));
 }
 
-/// TC5: Bidirectional pending operations.
+/// Bidirectional pending operations during reestablish.
 /// Tests reestablish when both nodes have pending operations.
 #[tokio::test]
-async fn test_reestablish_tc5_bidirectional_pending() {
+async fn test_reestablish_bidirectional_pending() {
     init_tracing();
     let (mut node_a, node_b, channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
