@@ -6548,6 +6548,13 @@ async fn test_reestablish_tc8_stress_multiple_restarts() {
     init_tracing();
     let (mut node_a, node_b, channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let panic_unexpected_events = vec!["panic".to_string(), "panicked".to_string()];
+    node_a
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+    node_b
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
 
     let initial_balance_a = node_a.get_local_balance_from_channel(channel_id);
     let initial_balance_b = node_b.get_local_balance_from_channel(channel_id);
@@ -6561,8 +6568,41 @@ async fn test_reestablish_tc8_stress_multiple_restarts() {
         let wait_ms = 100 + (cycle * 50) as u64;
         tokio::time::sleep(Duration::from_millis(wait_ms)).await;
 
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+
         node_a.restart().await;
+        node_a
+            .add_unexpected_events(panic_unexpected_events.clone())
+            .await;
         tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
 
         let state = node_a.get_channel_actor_state(channel_id);
         assert!(
