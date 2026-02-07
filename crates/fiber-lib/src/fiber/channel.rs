@@ -1637,7 +1637,7 @@ where
             state.build_and_sign_commitment_tx()?;
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
-            funding_tx_partial_signature: funding_tx_partial_signature.clone(),
+            funding_tx_partial_signature,
             next_commitment_nonce: state.get_next_commitment_nonce(),
         };
 
@@ -3969,10 +3969,10 @@ pub(crate) fn validate_commit_diff_for_replay_inputs(
     Ok(())
 }
 
-pub(crate) fn require_pending_commit_diff_for_replay<'a>(
+pub(crate) fn require_pending_commit_diff_for_replay(
     channel_id: Hash256,
-    pending_commit_diff: Option<&'a CommitDiff>,
-) -> Result<&'a CommitDiff, ProcessingChannelError> {
+    pending_commit_diff: Option<&CommitDiff>,
+) -> Result<&CommitDiff, ProcessingChannelError> {
     pending_commit_diff.ok_or_else(|| {
         ProcessingChannelError::InvalidState(format!(
             "Missing pending CommitDiff for owed CommitmentSigned replay on channel {}",
@@ -7616,7 +7616,7 @@ impl ChannelActorState {
         let (funding_tx_partial_signature, reused_stored_signature) = commit_diff
             .commitment_signed_template
             .as_ref()
-            .and_then(|template| template.funding_tx_partial_signature.clone())
+            .and_then(|template| template.funding_tx_partial_signature)
             .map(|signature| (signature, true))
             .map(Ok)
             .unwrap_or_else(|| {
