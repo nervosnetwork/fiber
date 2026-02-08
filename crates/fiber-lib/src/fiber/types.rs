@@ -3967,7 +3967,7 @@ impl PaymentOnionPacket {
 
 impl PeeledPaymentOnionPacket {
     /// - `hops_info`: the first is the instruction for the origin node itself.
-    ///                Remaining elements are for each node to receive the packet.
+    ///   Remaining elements are for each node to receive the packet.
     pub fn create<C: Signing>(
         session_key: Privkey,
         mut hops_infos: Vec<PaymentHopData>,

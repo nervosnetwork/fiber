@@ -360,6 +360,7 @@ impl CkbChainState {
     }
 }
 
+#[allow(dead_code)]
 #[serde_as]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct FundingTxShellBuilderInput {
