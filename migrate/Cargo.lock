@@ -2113,7 +2113,7 @@ dependencies = [
 [[package]]
 name = "fiber-wasm-db-common"
 version = "0.1.0"
-source = "git+https://github.com/nervosnetwork/fiber.git?branch=quake%2Foneway-channel#1d754470664dde502bf6484dbdd5a0f32b7791d2"
+source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.7.0#1d754470664dde502bf6484dbdd5a0f32b7791d2"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -2284,7 +2284,7 @@ dependencies = [
 [[package]]
 name = "fnn"
 version = "0.7.0-rc1"
-source = "git+https://github.com/nervosnetwork/fiber.git?branch=quake%2Foneway-channel#1d754470664dde502bf6484dbdd5a0f32b7791d2"
+source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.7.0#1d754470664dde502bf6484dbdd5a0f32b7791d2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2309,7 +2309,7 @@ dependencies = [
  "console_error_panic_hook",
  "either",
  "fiber-sphinx",
- "fiber-wasm-db-common 0.1.0 (git+https://github.com/nervosnetwork/fiber.git?branch=quake%2Foneway-channel)",
+ "fiber-wasm-db-common 0.1.0 (git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.7.0)",
  "futures",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
