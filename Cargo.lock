@@ -246,11 +246,12 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "attohttpc"
-version = "0.24.1"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d9a9bf8b79a749ee0b911b91b671cc2b6c670bdbc7e3dfd537576ddc94bb2a2"
+checksum = "16e2cdb6d5ed835199484bb92bb8b3edd526effe995c61732580439c1a67e2e9"
 dependencies = [
- "http 0.2.12",
+ "base64 0.22.1",
+ "http 1.3.1",
  "log",
  "url",
 ]
@@ -1039,7 +1040,7 @@ dependencies = [
  "ckb-fixed-hash",
  "ckb-hash",
  "ckb-occupied-capacity",
- "molecule",
+ "molecule 0.8.0",
  "numext-fixed-uint",
 ]
 
@@ -1343,7 +1344,7 @@ dependencies = [
  "derive_more 1.0.0",
  "golomb-coded-set",
  "merkle-cbt",
- "molecule",
+ "molecule 0.8.0",
  "numext-fixed-uint",
  "paste",
 ]
@@ -2376,7 +2377,7 @@ dependencies = [
  "lnd-grpc-tonic-client",
  "metrics",
  "metrics-exporter-prometheus",
- "molecule",
+ "molecule 0.8.0",
  "musig2",
  "nom",
  "num_enum",
@@ -3238,13 +3239,13 @@ dependencies = [
 
 [[package]]
 name = "igd-next"
-version = "0.15.1"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76b0d7d4541def58a37bf8efc559683f21edce7c82f0d866c93ac21f7e098f93"
+checksum = "516893339c97f6011282d5825ac94fc1c7aad5cad26bdc2d0cee068c0bf97f97"
 dependencies = [
  "attohttpc",
  "log",
- "rand 0.8.5",
+ "rand 0.9.2",
  "url",
  "xmltree",
 ]
@@ -3928,6 +3929,17 @@ name = "molecule"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6efe1c7efcd0bdf4ca590e104bcb13087d9968956ae4ae98e92fb8c1da0f3730"
+dependencies = [
+ "bytes",
+ "cfg-if",
+ "faster-hex",
+]
+
+[[package]]
+name = "molecule"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "314eebe1fb025f681c1d6a62fdacbe831027177c1046503a8d73d8027fe19e16"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -5959,9 +5971,9 @@ dependencies = [
 
 [[package]]
 name = "tentacle"
-version = "0.7.3"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bc03a774edf73d8b3480383d694a5a0c86b3fe22dddd75e9119a8e41dd11677"
+checksum = "400b2285e0add6c24ed2b3fdba72464176e420aa957cb5d347809d5db419c505"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5973,7 +5985,7 @@ dependencies = [
  "js-sys",
  "libc",
  "log",
- "molecule",
+ "molecule 0.9.2",
  "nohash-hasher",
  "parking_lot",
  "rand 0.8.5",
@@ -6020,7 +6032,7 @@ dependencies = [
  "getrandom 0.2.16",
  "hmac",
  "log",
- "molecule",
+ "molecule 0.8.0",
  "openssl",
  "openssl-sys",
  "rand 0.8.5",
@@ -6254,9 +6266,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "489a59b6730eda1b0171fcfda8b121f4bee2b35cba8645ca35c5f7ba3eb736c1"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
 dependencies = [
  "futures-util",
  "log",
@@ -6596,9 +6608,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eadc29d668c91fcc564941132e17b28a7ceb2f3ebf0b9dae3e03fd7a6748eb0d"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
 dependencies = [
  "bytes",
  "data-encoding",
