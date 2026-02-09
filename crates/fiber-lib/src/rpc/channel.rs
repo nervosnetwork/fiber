@@ -424,9 +424,9 @@ pub struct OpenChannelWithExternalFundingResult {
     /// Use this ID to submit the signed funding transaction.
     pub temporary_channel_id: Hash256,
 
-    /// The unsigned funding transaction that needs to be signed.
+    /// The final unsigned funding transaction that needs to be signed.
     /// The user should sign this transaction with their wallet and submit it
-    /// using `submit_signed_funding_tx`.
+    /// using `submit_signed_funding_tx` directly, without changing structure.
     pub unsigned_funding_tx: ckb_jsonrpc_types::Transaction,
 }
 
@@ -436,9 +436,9 @@ pub struct SubmitSignedFundingTxParams {
     /// The temporary channel ID returned from `open_channel_with_external_funding`.
     pub channel_id: Hash256,
 
-    /// The signed funding transaction. This must be the same transaction structure
-    /// that was returned from `open_channel_with_external_funding`, but with valid
-    /// witnesses (signatures) added.
+    /// The signed funding transaction. This must be the same final transaction structure
+    /// that was returned from `open_channel_with_external_funding`, with valid
+    /// witnesses (signatures) added, and should be ready for direct broadcast.
     pub signed_funding_tx: ckb_jsonrpc_types::Transaction,
 }
 
@@ -497,8 +497,8 @@ trait ChannelRpc {
     /// This is useful when the user wants to fund a channel from an external wallet
     /// rather than having the node sign with its internal key.
     ///
-    /// Returns an unsigned funding transaction that the user must sign and submit
-    /// using `submit_signed_funding_tx`.
+    /// Returns a final unsigned funding transaction that the user must sign and submit
+    /// using `submit_signed_funding_tx` without changing transaction structure.
     #[method(name = "open_channel_with_external_funding")]
     async fn open_channel_with_external_funding(
         &self,
@@ -508,7 +508,8 @@ trait ChannelRpc {
     /// Submits a signed funding transaction for an externally funded channel.
     ///
     /// After calling `open_channel_with_external_funding`, the user signs the returned
-    /// unsigned transaction with their wallet and submits it here.
+    /// final unsigned transaction with their wallet and submits it here. The signed
+    /// transaction should be directly broadcastable and will not be structurally modified.
     #[method(name = "submit_signed_funding_tx")]
     async fn submit_signed_funding_tx(
         &self,

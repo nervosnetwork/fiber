@@ -811,11 +811,36 @@ where
             FiberMessage::ChannelNormalOperation(msg) => {
                 state.check_feature_compatibility(&peer_id)?;
                 let channel_id = msg.get_channel_id();
-                let found = state
+                let mut found = state
                     .peer_session_map
                     .get(&peer_id)
                     .and_then(|peer| state.session_channels_map.get(&peer.session_id))
                     .is_some_and(|channels| channels.contains(&channel_id));
+
+                if !found {
+                    if let Some(session) = state.get_peer_session(&peer_id) {
+                        if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id)
+                        {
+                            if !actor_state.is_closed()
+                                && actor_state.get_remote_peer_id() == peer_id
+                            {
+                                let channel_ready = state.channels.contains_key(&channel_id)
+                                    || state
+                                        .reestablish_channel(&peer_id, channel_id)
+                                        .await
+                                        .is_ok();
+                                if channel_ready {
+                                    state
+                                        .session_channels_map
+                                        .entry(session)
+                                        .or_default()
+                                        .insert(channel_id);
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if !found {
                     error!(
@@ -1163,7 +1188,7 @@ where
                             });
 
                     // Wait for the result
-                    match tokio::time::timeout(
+                    match ractor::concurrency::timeout(
                         Duration::from_millis(DEFAULT_CHAIN_ACTOR_TIMEOUT),
                         recv,
                     )

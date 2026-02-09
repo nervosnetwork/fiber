@@ -2378,10 +2378,15 @@ where
     /// This validates the signed tx, stores it, and initiates the commitment exchange with the peer.
     async fn handle_submit_external_funding_tx(
         &self,
-        myself: &ActorRef<ChannelActorMessage>,
+        _myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         signed_tx: Transaction,
     ) -> Result<Hash256, ProcessingChannelError> {
+        if state.external_funding_signed_submitted {
+            return Err(ProcessingChannelError::RepeatedProcessing(
+                "Signed funding tx has already been submitted".to_string(),
+            ));
+        }
         // Validate channel is in AwaitingExternalFunding state
         if state.state != ChannelState::AwaitingExternalFunding {
             return Err(ProcessingChannelError::InvalidState(format!(
@@ -2478,6 +2483,13 @@ where
             }
         }
 
+        // External funding v1 requires the submitted tx to already be final.
+        if !state.is_tx_final(&signed_tx)? {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Signed funding transaction is not final for external funding".to_string(),
+            ));
+        }
+
         let tx_hash: Hash256 = signed_view.hash().into();
         debug!(
             "Validated signed funding tx for external funding channel {:?}: {:?}",
@@ -2485,18 +2497,20 @@ where
             tx_hash
         );
 
-        // Store the signed funding tx
-        state.funding_tx = Some(signed_tx);
-
-        // Transition to CollaboratingFundingTx state with COLLABORATION_COMPLETED flag
-        // since we already have the complete funding tx from external signing
+        // Store the signed funding tx and start funding tx collaboration with peer.
+        // We must send TxUpdate/TxComplete so the peer uses the same funding tx,
+        // otherwise it will construct its own tx and fail verification.
+        state.funding_tx = Some(signed_tx.clone());
+        state.external_funding_signed_submitted = true;
         state.update_state(ChannelState::CollaboratingFundingTx(
-            CollaboratingFundingTxFlags::COLLABORATION_COMPLETED,
+            CollaboratingFundingTxFlags::empty(),
         ));
-
-        // Increment commitment number and start the commitment signed exchange
-        state.increment_local_commitment_number();
-        self.handle_commitment_signed_command(myself, state).await?;
+        self.handle_tx_collaboration_command(
+            state,
+            TxCollaborationCommand::TxUpdate(TxUpdateCommand {
+                transaction: signed_tx,
+            }),
+        )?;
 
         Ok(tx_hash)
     }
@@ -3045,6 +3059,7 @@ where
 
                 let mut channel = ChannelActorState::new_outbound_channel(
                     public_channel_info,
+                    false,
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
@@ -4264,6 +4279,11 @@ pub struct ChannelActorState {
     // The unsigned funding transaction for external funding (before user signs it)
     #[serde_as(as = "Option<EntityHex>")]
     pub unsigned_funding_tx: Option<Transaction>,
+
+    // Whether a signed funding tx has been submitted for external funding.
+    // This is a runtime-only flag and is not persisted.
+    #[serde(skip)]
+    pub external_funding_signed_submitted: bool,
 }
 
 #[serde_as]
@@ -4797,6 +4817,20 @@ impl ChannelActorState {
         );
     }
 
+    fn restore_missing_revocation_send_nonce(&mut self) {
+        if self.remote_revocation_nonce_for_send.is_some() || self.last_revoke_ack_msg.is_some() {
+            return;
+        }
+        let restored = self
+            .remote_revocation_nonce_for_verify
+            .clone()
+            .or_else(|| self.remote_revocation_nonce_for_next.clone());
+        if let Some(nonce) = restored {
+            self.remote_revocation_nonce_for_send = Some(nonce);
+            self.log_ack_state("[ack] restore_missing_revocation_send_nonce");
+        }
+    }
+
     pub fn try_create_channel_messages(&mut self) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
         let channel_announcement = self.try_create_channel_announcement_message()?;
         let channel_update = self.try_create_channel_update_message()?;
@@ -5209,6 +5243,7 @@ impl ChannelActorState {
             external_funding: false,
             external_funding_lock_script: None,
             unsigned_funding_tx: None,
+            external_funding_signed_submitted: false,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -5296,6 +5331,7 @@ impl ChannelActorState {
             external_funding: false,
             external_funding_lock_script: None,
             unsigned_funding_tx: None,
+            external_funding_signed_submitted: false,
         };
         state.log_ack_state("[ack] new_outbound_channel");
         state
@@ -6786,6 +6822,26 @@ impl ChannelActorState {
         };
         match msg {
             TxCollaborationMsg::TxUpdate(msg) => {
+                if self.external_funding && self.external_funding_signed_submitted {
+                    if let Some(local_tx) = self.funding_tx.as_ref() {
+                        // External funding v1 boundary: peer must not modify tx structure
+                        // after user submits the signed final tx.
+                        let local_hash = local_tx.calc_tx_hash();
+                        let remote_hash = msg.tx.calc_tx_hash();
+                        if local_hash != remote_hash {
+                            error!(
+                                "External funding signed tx mismatch on TxUpdate: local_hash={:?}, remote_hash={:?}",
+                                local_hash, remote_hash
+                            );
+                            myself
+                                .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                                    StopReason::AbortFunding,
+                                )))
+                                .expect("myself alive");
+                            return Ok(());
+                        }
+                    }
+                }
                 if let Err(err) = call!(network, |tx| NetworkActorMessage::Command(
                     NetworkActorCommand::VerifyFundingTx {
                         local_tx: self.funding_tx.clone().unwrap_or_default(),
@@ -7395,6 +7451,7 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady => {
                 self.clear_waiting_peer_response();
+                self.restore_missing_revocation_send_nonce();
 
                 let my_local_commitment_number = self.get_local_commitment_number();
                 let my_remote_commitment_number = self.get_remote_commitment_number();

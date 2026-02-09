@@ -555,29 +555,18 @@ impl TxBuilder for ExternalFundingTxBuilder {
 
 impl ExternalFundingTxBuilder {
     fn build_funding_cell(&self) -> Result<(packed::CellOutput, packed::Bytes), FundingError> {
-        // If outputs is not empty, assume that the remote party has already funded.
-        let remote_funded = self
-            .funding_tx
-            .tx
-            .as_ref()
-            .map(|tx| !tx.outputs().is_empty())
-            .unwrap_or(false);
-
         match self.request.udt_type_script {
             Some(ref udt_type_script) => {
-                let mut udt_amount = self.request.local_amount;
-                let mut ckb_amount = self.request.local_reserved_ckb_amount;
-
-                // To make tx building easier, do not include the amount not funded yet in the
-                // funding cell.
-                if remote_funded {
-                    udt_amount = udt_amount
-                        .checked_add(self.request.remote_amount)
-                        .ok_or(FundingError::OverflowError)?;
-                    ckb_amount = ckb_amount
-                        .checked_add(self.request.remote_reserved_ckb_amount)
-                        .ok_or(FundingError::OverflowError)?;
-                }
+                let udt_amount = self
+                    .request
+                    .local_amount
+                    .checked_add(self.request.remote_amount)
+                    .ok_or(FundingError::OverflowError)?;
+                let ckb_amount = self
+                    .request
+                    .local_reserved_ckb_amount
+                    .checked_add(self.request.remote_reserved_ckb_amount)
+                    .ok_or(FundingError::OverflowError)?;
 
                 let udt_output = packed::CellOutput::new_builder()
                     .capacity(Capacity::shannons(ckb_amount).pack())
@@ -591,17 +580,11 @@ impl ExternalFundingTxBuilder {
                 Ok((udt_output, data.freeze().pack()))
             }
             None => {
-                let mut ckb_amount = (self.request.local_amount as u64)
+                let ckb_amount = (self.request.local_amount as u64)
                     .checked_add(self.request.local_reserved_ckb_amount)
+                    .and_then(|amount| amount.checked_add(self.request.remote_amount as u64))
+                    .and_then(|amount| amount.checked_add(self.request.remote_reserved_ckb_amount))
                     .ok_or(FundingError::OverflowError)?;
-                if remote_funded {
-                    ckb_amount = ckb_amount
-                        .checked_add(
-                            self.request.remote_amount as u64
-                                + self.request.remote_reserved_ckb_amount,
-                        )
-                        .ok_or(FundingError::OverflowError)?;
-                }
                 let ckb_output = packed::CellOutput::new_builder()
                     .capacity(Capacity::shannons(ckb_amount).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
@@ -840,9 +823,10 @@ impl FundingTx {
     /// Build an unsigned funding transaction for external signing.
     ///
     /// This method collects cells from the user's wallet (identified by
-    /// `funding_source_lock_script`), builds a balanced transaction with
-    /// proper inputs and outputs, but does NOT sign it. The user is expected
-    /// to sign this transaction externally with their own wallet.
+    /// `funding_source_lock_script`) and builds a final, balanced transaction
+    /// with proper inputs and outputs, but does NOT sign it. The user is
+    /// expected to sign this transaction externally with their own wallet and
+    /// submit it directly without changing transaction structure.
     pub async fn build_unsigned_for_external_funding(
         self,
         request: FundingRequest,

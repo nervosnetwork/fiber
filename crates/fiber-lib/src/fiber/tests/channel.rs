@@ -6401,29 +6401,31 @@ async fn test_reestablish_restores_send_nonce() {
         .unwrap()
         .payment_hash;
 
-    // Wait for B to reach the target state where send is None but verify is Some.
-    // This confirms we are in the potential deadlock state if persistent.
-    let mut caught = false;
-    for _ in 0..100 {
-        let state = node_b.get_channel_actor_state(channel_id);
-        if state.remote_revocation_nonce_for_verify.is_some()
-            && state.remote_revocation_nonce_for_send.is_none()
-        {
-            debug!("Caught target state on Node B!");
-            caught = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        caught,
-        "Failed to reach target state where send nonce is None"
-    );
+    // Wait until payment is inflight so channel state is persisted.
+    node_a.wait_until_inflight(payment_hash).await;
+
+    // Stop node B and force the stored state into a known "send nonce missing" state
+    // to deterministically exercise the reestablish path.
+    node_b.stop().await;
+    let mut stored_state = node_b
+        .store
+        .get_channel_actor_state(&channel_id)
+        .expect("channel state exists");
+    let verify_nonce = stored_state
+        .remote_revocation_nonce_for_verify
+        .clone()
+        .or_else(|| stored_state.remote_revocation_nonce_for_send.clone())
+        .or_else(|| stored_state.remote_revocation_nonce_for_next.clone())
+        .expect("revocation nonce for verify");
+    stored_state.remote_revocation_nonce_for_verify = Some(verify_nonce);
+    stored_state.remote_revocation_nonce_for_send = None;
+    node_b.store.insert_channel_actor_state(stored_state);
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     assert_eq!(node_a.get_inflight_payment_count().await, 1);
 
     // Now restart node B to simulate disconnect/reconnect
-    node_b.restart().await;
+    node_b.start().await;
     node_b.connect_to(&mut node_a).await;
 
     node_a
