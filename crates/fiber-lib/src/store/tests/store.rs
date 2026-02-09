@@ -19,6 +19,8 @@ use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
 #[cfg(not(target_arch = "wasm32"))]
@@ -973,4 +975,68 @@ fn test_store_change_watcher() {
     assert!(changes.iter().any(
         |e| matches!(e, StoreChange::PutPreimage { payment_hash: h, payment_preimage: i } if h == &payment_hash && i == &preimage)
     ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_sample_channel_actor_state() {
+    let samples = ChannelActorState::samples(42);
+    assert!(!samples.is_empty());
+
+    let path = TempDir::new("sample_channel_actor_state_store");
+    let store = Store::new(path).expect("create store failed");
+
+    // Insert all samples
+    for sample in &samples {
+        assert!(store.get_channel_actor_state(&sample.id).is_none());
+        store.insert_channel_actor_state(sample.clone());
+    }
+
+    // Verify each sample can be queried back and key fields match
+    for sample in &samples {
+        let loaded = store
+            .get_channel_actor_state(&sample.id)
+            .expect("should find stored channel state");
+
+        // Verify core fields roundtrip correctly
+        assert_eq!(loaded.id, sample.id);
+        assert_eq!(loaded.state, sample.state);
+        assert_eq!(loaded.is_acceptor, sample.is_acceptor);
+        assert_eq!(loaded.is_one_way, sample.is_one_way);
+        assert_eq!(loaded.to_local_amount, sample.to_local_amount);
+        assert_eq!(loaded.to_remote_amount, sample.to_remote_amount);
+        assert_eq!(loaded.commitment_fee_rate, sample.commitment_fee_rate);
+        assert_eq!(loaded.reestablishing, sample.reestablishing);
+        assert_eq!(
+            loaded.local_reserved_ckb_amount,
+            sample.local_reserved_ckb_amount
+        );
+        assert_eq!(
+            loaded.remote_reserved_ckb_amount,
+            sample.remote_reserved_ckb_amount
+        );
+        assert_eq!(loaded.local_constraints, sample.local_constraints);
+        assert_eq!(loaded.remote_constraints, sample.remote_constraints);
+        assert_eq!(
+            loaded.shutdown_transaction_hash,
+            sample.shutdown_transaction_hash
+        );
+
+        // Verify peer-id index
+        let remote_peer_id = sample.get_remote_peer_id();
+        let channel_ids = store.get_channel_ids_by_peer(&remote_peer_id);
+        assert!(
+            channel_ids.contains(&sample.id),
+            "peer-id index should contain the channel id"
+        );
+    }
+
+    // Delete and verify removal
+    for sample in &samples {
+        store.delete_channel_actor_state(&sample.id);
+        assert!(
+            store.get_channel_actor_state(&sample.id).is_none(),
+            "channel state should be deleted"
+        );
+    }
 }
