@@ -1,19 +1,24 @@
 use crate::util::convert;
 use fiber_v061::fiber::channel::{
-    ChannelActorState as OldChannelActorState, TlcInfo as OldTlcInfo, TlcState as OldTlcState,
+    AddTlcCommand as OldAddTlcCommand, ChannelActorState as OldChannelActorState,
+    RetryableTlcOperation as OldRetryableTlcOperation, TlcInfo as OldTlcInfo,
+    TlcState as OldTlcState,
 };
 use fiber_v061::fiber::payment::PaymentSession as OldPaymentSession;
 use fiber_v061::fiber::payment::SendPaymentData as OldSendPaymentData;
 use fiber_v070::{
     fiber::channel::{
-        ChannelActorState as NewChannelActorState, PendingTlcs as NewPendingTlcs,
-        TlcInfo as NewTlcInfo, TlcState as NewTlcState,
+        AddTlcCommand as NewAddTlcCommand, ChannelActorState as NewChannelActorState,
+        PendingTlcs as NewPendingTlcs, PrevTlcInfo as NewPrevTlcInfo,
+        RetryableTlcOperation as NewRetryableTlcOperation, TlcInfo as NewTlcInfo,
+        TlcState as NewTlcState,
     },
     fiber::payment::{PaymentSession as NewPaymentSession, SendPaymentData as NewSendPaymentData},
     store::{migration::Migration, Store},
     Error,
 };
 use indicatif::ProgressBar;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::info;
 
@@ -100,7 +105,7 @@ fn migrate_channel_state(old: OldChannelActorState) -> NewChannelActorState {
     let local_constraints = convert(old.local_constraints);
     let remote_constraints = convert(old.remote_constraints);
     let tlc_state = migrate_tlc_state(old.tlc_state);
-    let retryable_tlc_operations = convert(old.retryable_tlc_operations);
+    let retryable_tlc_operations = migrate_retryable_tlc_operations(old.retryable_tlc_operations);
     let shutdown_transaction_hash = convert(old.shutdown_transaction_hash);
     let waiting_forward_tlc_tasks = convert(old.waiting_forward_tlc_tasks);
     let remote_commitment_points = convert(old.remote_commitment_points);
@@ -250,5 +255,49 @@ fn migrate_send_payment_data(old: OldSendPaymentData) -> NewSendPaymentData {
         trampoline_hops: None,
         trampoline_context: None,
         channel_stats: Default::default(),
+    }
+}
+
+fn migrate_retryable_tlc_operations(
+    old: VecDeque<OldRetryableTlcOperation>,
+) -> VecDeque<NewRetryableTlcOperation> {
+    old.into_iter()
+        .map(migrate_retryable_tlc_operation)
+        .collect()
+}
+
+fn migrate_retryable_tlc_operation(
+    old: OldRetryableTlcOperation,
+) -> NewRetryableTlcOperation {
+    match old {
+        OldRetryableTlcOperation::RemoveTlc(tlc_id, reason) => {
+            NewRetryableTlcOperation::RemoveTlc(convert(tlc_id), convert(reason))
+        }
+        OldRetryableTlcOperation::AddTlc(cmd) => {
+            NewRetryableTlcOperation::AddTlc(migrate_add_tlc_command(cmd))
+        }
+    }
+}
+
+fn migrate_add_tlc_command(old: OldAddTlcCommand) -> NewAddTlcCommand {
+    NewAddTlcCommand {
+        amount: old.amount,
+        payment_hash: convert(old.payment_hash),
+        attempt_id: old.attempt_id,
+        expiry: old.expiry,
+        hash_algorithm: convert(old.hash_algorithm),
+        onion_packet: convert(old.onion_packet),
+        shared_secret: old.shared_secret,
+        // New field: default to false for existing channels
+        is_trampoline_hop: false,
+        previous_tlc: old.previous_tlc.map(|prev| {
+            // PrevTlcInfo has pub(crate) fields so we can't access them directly.
+            // The new PrevTlcInfo adds a `shared_secret: Option<[u8; 32]>` field.
+            // Serialize old PrevTlcInfo and append bincode encoding of None
+            // (a single 0u8 byte) to create the new format.
+            let mut bytes = bincode::serialize(&prev).expect("serialize old PrevTlcInfo");
+            bytes.push(0u8); // bincode encoding of Option::None for the new shared_secret field
+            bincode::deserialize::<NewPrevTlcInfo>(&bytes).expect("deserialize new PrevTlcInfo")
+        }),
     }
 }
