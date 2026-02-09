@@ -11,6 +11,7 @@ use fnn::{
     },
     store::Store,
 };
+use js_sys::{Array, Object, Reflect};
 use jsonrpsee::{core::Serialize, types::ErrorObjectOwned};
 use serde::de::DeserializeOwned;
 use wasm_bindgen::JsValue;
@@ -47,7 +48,48 @@ fn fiber_wasm() -> Result<&'static WrappedFiberWasm, JsValue> {
         .ok_or_else(|| JsValue::from_str("Fiber wasm not started yet"))
 }
 
+fn normalize_dep_type(value: &JsValue) {
+    if value.is_null() || value.is_undefined() {
+        return;
+    }
+
+    if Array::is_array(value) {
+        let arr = Array::from(value);
+        for i in 0..arr.length() {
+            normalize_dep_type(&arr.get(i));
+        }
+        return;
+    }
+
+    if !value.is_object() {
+        return;
+    }
+
+    let obj = Object::from(value.clone());
+    for key in ["dep_type", "depType"] {
+        let key_js = JsValue::from_str(key);
+        if Reflect::has(&obj, &key_js).unwrap_or(false)
+            && let Ok(v) = Reflect::get(&obj, &key_js)
+        {
+            let v: JsValue = v;
+            if v.is_string() && v.as_string().as_deref() == Some("depGroup") {
+                let _ = Reflect::set(&obj, &key_js, &JsValue::from_str("dep_group"));
+            }
+        }
+    }
+
+    let keys = Object::keys(&obj);
+    for i in 0..keys.length() {
+        if let Some(key) = keys.get(i).as_string()
+            && let Ok(child) = Reflect::get(&obj, &JsValue::from_str(&key))
+        {
+            normalize_dep_type(&child);
+        }
+    }
+}
+
 fn param<T: DeserializeOwned>(input: JsValue) -> Result<T, JsValue> {
+    normalize_dep_type(&input);
     serde_wasm_bindgen::from_value(input).map_err(Into::into)
 }
 
@@ -115,24 +157,28 @@ pub mod channel {
             .await
             .map_err(error)
     }
-    #[wasm_bindgen]
-    pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
-        fiber_wasm()?
-            .channel
-            .open_channel_with_external_funding(param(params)?)
-            .await
-            .map(result)
-            .map_err(error)
-    }
-    #[wasm_bindgen]
-    pub async fn submit_signed_funding_tx(params: JsValue) -> Result<JsValue, JsValue> {
-        fiber_wasm()?
-            .channel
-            .submit_signed_funding_tx(param(params)?)
-            .await
-            .map(result)
-            .map_err(error)
-    }
+}
+
+/// LocalSign: open channel with external funding (user signs tx locally).
+/// Exported at crate root in lib.rs for fiber-js worker lookup.
+pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
+    fiber_wasm()?
+        .channel
+        .open_channel_with_external_funding(param(params)?)
+        .await
+        .map(result)
+        .map_err(error)
+}
+
+/// LocalSign: submit signed funding tx after user signs locally.
+/// Exported at crate root in lib.rs for fiber-js worker lookup.
+pub async fn submit_signed_funding_tx(params: JsValue) -> Result<JsValue, JsValue> {
+    fiber_wasm()?
+        .channel
+        .submit_signed_funding_tx(param(params)?)
+        .await
+        .map(result)
+        .map_err(error)
 }
 
 pub mod graph {
