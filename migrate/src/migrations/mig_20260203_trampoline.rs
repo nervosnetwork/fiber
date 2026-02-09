@@ -4,6 +4,7 @@ use fiber_v061::fiber::channel::{
     RetryableTlcOperation as OldRetryableTlcOperation, TlcInfo as OldTlcInfo,
     TlcState as OldTlcState,
 };
+use fiber_v061::fiber::payment::Attempt as OldAttempt;
 use fiber_v061::fiber::payment::PaymentSession as OldPaymentSession;
 use fiber_v061::fiber::payment::SendPaymentData as OldSendPaymentData;
 use fiber_v070::{
@@ -13,7 +14,11 @@ use fiber_v070::{
         RetryableTlcOperation as NewRetryableTlcOperation, TlcInfo as NewTlcInfo,
         TlcState as NewTlcState,
     },
-    fiber::payment::{PaymentSession as NewPaymentSession, SendPaymentData as NewSendPaymentData},
+    fiber::payment::{
+        Attempt as NewAttempt, PaymentSession as NewPaymentSession,
+        SendPaymentData as NewSendPaymentData,
+    },
+    fiber::types::PaymentHopData as NewPaymentHopData,
     store::{migration::Migration, Store},
     Error,
 };
@@ -83,6 +88,25 @@ impl Migration for MigrationObj {
             let new = migrate_payment_session(old);
 
             let new_bytes = bincode::serialize(&new).expect("serialize to new payment session");
+            db.put(k, new_bytes);
+        }
+
+        info!("migrate Attempt ...");
+        const ATTEMPT_PREFIX: u8 = 195;
+        let prefix = vec![ATTEMPT_PREFIX];
+        for (k, v) in db
+            .prefix_iterator(prefix.as_slice())
+            .take_while(|(col_key, _)| col_key.starts_with(prefix.as_slice()))
+        {
+            if bincode::deserialize::<NewAttempt>(&v).is_ok() {
+                continue;
+            }
+
+            let old: OldAttempt =
+                bincode::deserialize(&v).expect("deserialize to old attempt");
+            let new = migrate_attempt(old);
+
+            let new_bytes = bincode::serialize(&new).expect("serialize to new attempt");
             db.put(k, new_bytes);
         }
 
@@ -276,6 +300,38 @@ fn migrate_retryable_tlc_operation(
         OldRetryableTlcOperation::AddTlc(cmd) => {
             NewRetryableTlcOperation::AddTlc(migrate_add_tlc_command(cmd))
         }
+    }
+}
+
+fn migrate_attempt(old: OldAttempt) -> NewAttempt {
+    NewAttempt {
+        id: old.id,
+        try_limit: old.try_limit,
+        tried_times: old.tried_times,
+        hash: convert(old.hash),
+        status: convert(old.status),
+        payment_hash: convert(old.payment_hash),
+        route: convert(old.route),
+        route_hops: old
+            .route_hops
+            .into_iter()
+            .map(|hop| NewPaymentHopData {
+                amount: hop.amount,
+                expiry: hop.expiry,
+                payment_preimage: convert(hop.payment_preimage),
+                hash_algorithm: convert(hop.hash_algorithm),
+                funding_tx_hash: convert(hop.funding_tx_hash),
+                next_hop: convert(hop.next_hop),
+                custom_records: convert(hop.custom_records),
+                // New field: default to None for existing attempts
+                trampoline_onion: None,
+            })
+            .collect(),
+        session_key: old.session_key,
+        preimage: convert(old.preimage),
+        created_at: old.created_at,
+        last_updated_at: old.last_updated_at,
+        last_error: old.last_error,
     }
 }
 
