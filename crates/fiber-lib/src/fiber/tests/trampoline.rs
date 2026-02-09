@@ -1933,16 +1933,17 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
 
     // 2. Mock incoming packet stats
     // Incoming amount 900 < 1000
+    let mut current_hop_data = CurrentPaymentHopData {
+        amount: 900,
+        expiry: 5000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+    };
+    current_hop_data.set_trampoline_onion(trampoline_onion_bytes);
     let peeled_packet = PeeledPaymentOnionPacket {
-        current: CurrentPaymentHopData {
-            amount: 900,
-            expiry: 5000,
-            payment_preimage: None,
-            hash_algorithm: HashAlgorithm::Sha256,
-            funding_tx_hash: Default::default(),
-            custom_records: None,
-            trampoline_onion: Some(trampoline_onion_bytes),
-        },
+        current: current_hop_data,
         shared_secret: [0u8; 32],
         next: None,
     };
@@ -2027,16 +2028,17 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     .into_bytes();
 
     // Incoming amount equals amount_to_forward -> should be treated as insufficient fee
+    let mut current_hop_data = CurrentPaymentHopData {
+        amount: 1000,
+        expiry: 5000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+    };
+    current_hop_data.set_trampoline_onion(trampoline_onion_bytes);
     let peeled_packet = PeeledPaymentOnionPacket {
-        current: CurrentPaymentHopData {
-            amount: 1000,
-            expiry: 5000,
-            payment_preimage: None,
-            hash_algorithm: HashAlgorithm::Sha256,
-            funding_tx_hash: Default::default(),
-            custom_records: None,
-            trampoline_onion: Some(trampoline_onion_bytes),
-        },
+        current: current_hop_data,
         shared_secret: [0u8; 32],
         next: None,
     };
@@ -3064,15 +3066,15 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     .expect("build trampoline");
 
     // 2. Prepare the PeeledPaymentOnionPacket
-    let current_hop = CurrentPaymentHopData {
+    let mut current_hop = CurrentPaymentHopData {
         amount: 2000,
         expiry: 5000,
         payment_preimage: None,
         hash_algorithm: HashAlgorithm::Sha256,
         funding_tx_hash: Default::default(),
         custom_records: None,
-        trampoline_onion: Some(trampoline_packet.into_bytes()),
     };
+    current_hop.set_trampoline_onion(trampoline_packet.into_bytes());
 
     let peeled_onion = PeeledPaymentOnionPacket {
         current: current_hop,
@@ -3154,15 +3156,15 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     .expect("build trampoline");
 
     // 2. Prepare the PeeledPaymentOnionPacket
-    let current_hop = CurrentPaymentHopData {
+    let mut current_hop = CurrentPaymentHopData {
         amount: 1100, // Invalid amount to build max_fee_amount
         expiry: 5000,
         payment_preimage: None,
         hash_algorithm: HashAlgorithm::Sha256,
         funding_tx_hash: Default::default(),
         custom_records: None,
-        trampoline_onion: Some(trampoline_packet.into_bytes()),
     };
+    current_hop.set_trampoline_onion(trampoline_packet.into_bytes());
 
     let peeled_onion = PeeledPaymentOnionPacket {
         current: current_hop,

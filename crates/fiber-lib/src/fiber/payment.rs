@@ -1795,8 +1795,9 @@ where
                     // This is needed both for actual payments and dry_run to get correct fee calculations
                     if let Some(trampoline) = &session.request.trampoline_context {
                         if let Some(last_hop) = hops.last_mut() {
-                            last_hop.trampoline_onion =
-                                Some(trampoline.remaining_trampoline_onion.clone());
+                            last_hop.set_trampoline_onion(
+                                trampoline.remaining_trampoline_onion.clone(),
+                            );
                         }
                         self.apply_trampoline_forwarding_fee(session, source, &hops, &mut max_fee)
                             .await?;
