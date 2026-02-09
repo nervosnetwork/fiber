@@ -857,11 +857,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .graph
         .build_route(payment_data.amount, None, None, &payment_data)
         .expect("trampoline route should be built");
-    let trampoline_short = route_short
-        .last()
-        .unwrap()
-        .trampoline_onion()
-        .unwrap();
+    let trampoline_short = route_short.last().unwrap().trampoline_onion().unwrap();
     let peeled_short_1 = TrampolineOnionPacket::new(trampoline_short)
         .peel(
             &crate::fiber::types::Privkey(network.secret_keys[2]),
@@ -1067,11 +1063,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     }
 
     let assoc = Some(payment_hash.as_ref());
-    let trampoline_bytes = route
-        .last()
-        .unwrap()
-        .trampoline_onion()
-        .unwrap();
+    let trampoline_bytes = route.last().unwrap().trampoline_onion().unwrap();
 
     let peeled1 = TrampolineOnionPacket::new(trampoline_bytes)
         .peel(

@@ -3811,11 +3811,6 @@ impl TrampolineOnionData {
     pub fn read(custom_records: &PaymentCustomRecords) -> Option<Vec<u8>> {
         custom_records.data.get(&Self::CUSTOM_RECORD_KEY).cloned()
     }
-
-    #[allow(dead_code)]
-    pub fn take(custom_records: &mut PaymentCustomRecords) -> Option<Vec<u8>> {
-        custom_records.data.remove(&Self::CUSTOM_RECORD_KEY)
-    }
 }
 
 /// Trampoline onion hop payload.
