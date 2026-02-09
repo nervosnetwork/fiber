@@ -675,12 +675,11 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
     let last = route.last().expect("last hop");
     assert!(last.next_hop.is_none());
     let trampoline_bytes = last
-        .trampoline_onion
-        .as_deref()
+        .trampoline_onion()
         .expect("trampoline payload should be present");
     // The payload is now an inner trampoline onion packet.
     assert!(
-        TrampolineOnionPacket::new(trampoline_bytes.to_vec())
+        TrampolineOnionPacket::new(trampoline_bytes)
             .into_sphinx_onion_packet()
             .is_ok(),
         "trampoline_onion should be a valid sphinx onion packet"
@@ -788,10 +787,8 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
 
     let last = route.last().expect("last hop");
     let trampoline_bytes = last
-        .trampoline_onion
-        .as_deref()
-        .expect("trampoline payload should be present")
-        .to_vec();
+        .trampoline_onion()
+        .expect("trampoline payload should be present");
 
     let assoc = Some(payment_hash.as_ref());
 
@@ -863,10 +860,8 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
     let trampoline_short = route_short
         .last()
         .unwrap()
-        .trampoline_onion
-        .as_deref()
-        .unwrap()
-        .to_vec();
+        .trampoline_onion()
+        .unwrap();
     let peeled_short_1 = TrampolineOnionPacket::new(trampoline_short)
         .peel(
             &crate::fiber::types::Privkey(network.secret_keys[2]),
@@ -1075,10 +1070,8 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let trampoline_bytes = route
         .last()
         .unwrap()
-        .trampoline_onion
-        .as_deref()
-        .unwrap()
-        .to_vec();
+        .trampoline_onion()
+        .unwrap();
 
     let peeled1 = TrampolineOnionPacket::new(trampoline_bytes)
         .peel(

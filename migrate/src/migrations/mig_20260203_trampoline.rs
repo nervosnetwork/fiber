@@ -102,8 +102,7 @@ impl Migration for MigrationObj {
                 continue;
             }
 
-            let old: OldAttempt =
-                bincode::deserialize(&v).expect("deserialize to old attempt");
+            let old: OldAttempt = bincode::deserialize(&v).expect("deserialize to old attempt");
             let new = migrate_attempt(old);
 
             let new_bytes = bincode::serialize(&new).expect("serialize to new attempt");
@@ -290,9 +289,7 @@ fn migrate_retryable_tlc_operations(
         .collect()
 }
 
-fn migrate_retryable_tlc_operation(
-    old: OldRetryableTlcOperation,
-) -> NewRetryableTlcOperation {
+fn migrate_retryable_tlc_operation(old: OldRetryableTlcOperation) -> NewRetryableTlcOperation {
     match old {
         OldRetryableTlcOperation::RemoveTlc(tlc_id, reason) => {
             NewRetryableTlcOperation::RemoveTlc(convert(tlc_id), convert(reason))
@@ -323,8 +320,6 @@ fn migrate_attempt(old: OldAttempt) -> NewAttempt {
                 funding_tx_hash: convert(hop.funding_tx_hash),
                 next_hop: convert(hop.next_hop),
                 custom_records: convert(hop.custom_records),
-                // New field: default to None for existing attempts
-                trampoline_onion: None,
             })
             .collect(),
         session_key: old.session_key,

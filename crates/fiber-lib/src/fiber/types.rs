@@ -20,7 +20,6 @@ use serde_with::IfIsHumanReadable;
 use anyhow::anyhow;
 use bitcoin::hashes::Hash;
 use ckb_jsonrpc_types::CellOutput;
-use ckb_types::packed::BytesOpt;
 use ckb_types::H256;
 use ckb_types::{
     core::FeeRate,
@@ -3793,10 +3792,36 @@ impl BasicMppPaymentData {
     }
 }
 
+/// Helper to store the trampoline onion packet inside `custom_records`.
+///
+/// This embeds the trampoline onion bytes as a custom record entry so that the molecule
+/// `PaymentHopData` schema stays at 7 fields — matching v0.6.1 — and old onion packets
+/// created before trampoline support can still be deserialized.
+pub(crate) struct TrampolineOnionData;
+
+impl TrampolineOnionData {
+    /// Custom record key for embedded trampoline onion data.
+    /// `BasicMppPaymentData` uses `USER_CUSTOM_RECORDS_MAX_INDEX + 1` (65536).
+    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
+
+    pub fn write(data: Vec<u8>, custom_records: &mut PaymentCustomRecords) {
+        custom_records.data.insert(Self::CUSTOM_RECORD_KEY, data);
+    }
+
+    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Vec<u8>> {
+        custom_records.data.get(&Self::CUSTOM_RECORD_KEY).cloned()
+    }
+
+    #[allow(dead_code)]
+    pub fn take(custom_records: &mut PaymentCustomRecords) -> Option<Vec<u8>> {
+        custom_records.data.remove(&Self::CUSTOM_RECORD_KEY)
+    }
+}
+
 /// Trampoline onion hop payload.
 ///
-/// This is carried inside the *inner* trampoline onion packet (which is itself embedded in the
-/// `trampoline_onion` field of the *outer* payment onion hop payload).
+/// This is carried inside the *inner* trampoline onion packet (which is itself embedded in
+/// the `custom_records` of the *outer* payment onion hop payload via `TrampolineOnionData`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrampolineHopPayload {
     /// Payload for a trampoline node.
@@ -4164,7 +4189,6 @@ pub struct PaymentHopData {
     pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
     pub custom_records: Option<PaymentCustomRecords>,
-    pub trampoline_onion: Option<Vec<u8>>,
 }
 
 const PACKET_DATA_LEN: usize = 6500;
@@ -4178,7 +4202,6 @@ pub struct CurrentPaymentHopData {
     pub hash_algorithm: HashAlgorithm,
     pub funding_tx_hash: Hash256,
     pub custom_records: Option<PaymentCustomRecords>,
-    pub trampoline_onion: Option<Vec<u8>>,
 }
 
 impl From<PaymentHopData> for CurrentPaymentHopData {
@@ -4190,7 +4213,6 @@ impl From<PaymentHopData> for CurrentPaymentHopData {
             hash_algorithm: hop.hash_algorithm,
             funding_tx_hash: hop.funding_tx_hash,
             custom_records: hop.custom_records,
-            trampoline_onion: hop.trampoline_onion,
         }
     }
 }
@@ -4205,7 +4227,6 @@ impl From<CurrentPaymentHopData> for PaymentHopData {
             funding_tx_hash: hop.funding_tx_hash,
             custom_records: hop.custom_records,
             next_hop: None,
-            trampoline_onion: hop.trampoline_onion,
         }
     }
 }
@@ -4213,6 +4234,19 @@ impl From<CurrentPaymentHopData> for PaymentHopData {
 impl PaymentHopData {
     pub fn next_hop(&self) -> Option<Pubkey> {
         self.next_hop
+    }
+
+    /// Returns the trampoline onion bytes embedded in `custom_records`, if present.
+    pub fn trampoline_onion(&self) -> Option<Vec<u8>> {
+        self.custom_records
+            .as_ref()
+            .and_then(TrampolineOnionData::read)
+    }
+
+    /// Embeds a trampoline onion packet into `custom_records`.
+    pub fn set_trampoline_onion(&mut self, data: Vec<u8>) {
+        let cr = self.custom_records.get_or_insert_with(Default::default);
+        TrampolineOnionData::write(data, cr);
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -4281,17 +4315,15 @@ impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
                     .set(payment_hop_data.custom_records.map(|x| x.into()))
                     .build(),
             )
-            .trampoline_onion(
-                BytesOpt::new_builder()
-                    .set(payment_hop_data.trampoline_onion.map(|data| data.pack()))
-                    .build(),
-            )
             .build()
     }
 }
 
 impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
     fn from(payment_hop_data: molecule_fiber::PaymentHopData) -> Self {
+        let custom_records: Option<PaymentCustomRecords> =
+            payment_hop_data.custom_records().to_opt().map(|x| x.into());
+
         PaymentHopData {
             amount: payment_hop_data.amount().unpack(),
             expiry: payment_hop_data.expiry().unpack(),
@@ -4309,11 +4341,7 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
                 .to_opt()
                 .map(|x| x.try_into())
                 .and_then(Result::ok),
-            custom_records: payment_hop_data.custom_records().to_opt().map(|x| x.into()),
-            trampoline_onion: payment_hop_data
-                .trampoline_onion()
-                .to_opt()
-                .map(|x| x.raw_data().into()),
+            custom_records,
         }
     }
 }
@@ -4409,6 +4437,21 @@ impl SphinxOnionCodec for PaymentSphinxCodec {
             ONION_PACKET_VERSION_V1 => molecule_table_data_len(buf),
             _ => None,
         }
+    }
+}
+
+impl CurrentPaymentHopData {
+    /// Returns the trampoline onion bytes embedded in `custom_records`, if present.
+    pub fn trampoline_onion(&self) -> Option<Vec<u8>> {
+        self.custom_records
+            .as_ref()
+            .and_then(TrampolineOnionData::read)
+    }
+
+    /// Embeds a trampoline onion packet into `custom_records`.
+    pub fn set_trampoline_onion(&mut self, data: Vec<u8>) {
+        let cr = self.custom_records.get_or_insert_with(Default::default);
+        TrampolineOnionData::write(data, cr);
     }
 }
 

@@ -1074,7 +1074,7 @@ where
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
         let invoice = self.store.get_invoice(&payment_hash);
-        let is_trampoline = peeled_onion_packet.current.trampoline_onion.is_some();
+        let is_trampoline = peeled_onion_packet.current.trampoline_onion().is_some();
         let is_last = peeled_onion_packet.is_last();
 
         let tlc = state
@@ -1095,11 +1095,10 @@ where
             // to obtain the final recipient payload.
             let trampoline_bytes = peeled_onion_packet
                 .current
-                .trampoline_onion
-                .as_deref()
+                .trampoline_onion()
                 .expect("trampoline_onion present");
 
-            let peeled_trampoline = TrampolineOnionPacket::new(trampoline_bytes.to_vec())
+            let peeled_trampoline = TrampolineOnionPacket::new(trampoline_bytes)
                 .peel(state.private_key(), Some(payment_hash.as_ref()), SECP256K1)
                 .map_err(|err| {
                     ProcessingChannelError::PeelingOnionPacketError(format!(

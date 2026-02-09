@@ -288,12 +288,12 @@ fn test_peeled_large_onion_packet() {
 
     // default PACKET_DATA_LEN is 6500
     // v1 format saves 8 bytes per hop vs v0, allowing more hops
-    // Note: with trampoline_onion field, each hop is slightly larger
-    build_onion_packet(41).expect("build onion packet with 41 hops");
-    let res = build_onion_packet(42);
+    // Note: with trampoline_onion in custom_records, each hop is slightly larger
+    build_onion_packet(42).expect("build onion packet with 42 hops");
+    let res = build_onion_packet(43);
     assert!(
         res.is_err(),
-        "should fail to build onion packet with 42 hops"
+        "should fail to build onion packet with 43 hops"
     );
 }
 
@@ -578,7 +578,6 @@ fn test_payment_onion_packet_peel_wrong_key() {
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
             custom_records: None,
-            trampoline_onion: None,
         },
         PaymentHopData {
             amount: 100,
@@ -588,7 +587,6 @@ fn test_payment_onion_packet_peel_wrong_key() {
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
             custom_records: None,
-            trampoline_onion: None,
         },
     ];
     let packet =
@@ -1017,7 +1015,7 @@ fn test_payment_hop_data_v0_checksum() {
     let hop_data = create_checksum_test_hop_data();
     let data_v0 = PaymentSphinxCodec::pack_hop_data(ONION_PACKET_VERSION_V0, &hop_data);
     let check_sum = hex::encode(blake2b_256(&data_v0));
-    let expected = "7abddd1a352a8191bea7b694973a83d1d21c91ce50b2c657521ac83233103ce4";
+    let expected = "1ea2a67b30c7d2cedab21c6e5f4a3b860fc8b1ccc525f42dd1bdd4a7d6dfe489";
     assert_eq!(
         check_sum, expected,
         "PaymentHopData v0 checksum mismatch - v0 format compatibility broken"
@@ -1043,7 +1041,7 @@ fn test_payment_hop_data_v1_checksum() {
     let hop_data = create_checksum_test_hop_data();
     let data_v1 = PaymentSphinxCodec::pack_hop_data(ONION_PACKET_VERSION_V1, &hop_data);
     let check_sum = hex::encode(blake2b_256(&data_v1));
-    let expected = "6640af3fa9342368dbe2f3a54fa6bc0e17f394a7de8094ec7d4d33571c8c2160";
+    let expected = "05e50a25b23489e96a8c25a4d3eab07bf9c71c651046224b3cbf3fe3d5c876d7";
     assert_eq!(check_sum, expected, "PaymentHopData v1 checksum mismatch");
 }
 
