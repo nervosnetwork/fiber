@@ -1,5 +1,7 @@
 use molecule::prelude::Entity;
-use musig2::{BinaryEncoding, CompactSignature, PartialSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
+use musig2::{
+    BinaryEncoding, CompactSignature, PartialSignature, PubNonce, SCHNORR_SIGNATURE_SIZE,
+};
 use serde::{de::Error, Deserialize, Deserializer, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
 
