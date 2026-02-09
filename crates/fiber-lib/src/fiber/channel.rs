@@ -45,7 +45,9 @@ use crate::{
         network::{
             get_chain_hash, sign_network_message, FiberMessageWithPeerId, SendOnionPacketCommand,
         },
-        serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
+        serde_utils::{
+            CompactSignatureAsBytes, EntityHex, PartialSignatureAsBytes, PubNonceAsBytes,
+        },
         types::{
             AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessageWithTimestamp,
             ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned, CommitmentSigned,
@@ -3717,6 +3719,7 @@ pub struct ShutdownInfo {
     #[serde_as(as = "EntityHex")]
     pub close_script: Script,
     pub fee_rate: u64,
+    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
     pub signature: Option<PartialSignature>,
 }
 
@@ -3771,7 +3774,9 @@ impl ChannelTlcInfo {
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct PublicChannelInfo {
     // Channel announcement signatures, may be empty for private channel.
+    #[serde_as(as = "Option<(_, PartialSignatureAsBytes)>")]
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
+    #[serde_as(as = "Option<(_, PartialSignatureAsBytes)>")]
     pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
 
     #[serde_as(as = "Option<PubNonceAsBytes>")]

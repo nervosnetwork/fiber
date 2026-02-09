@@ -1,6 +1,8 @@
 use molecule::prelude::Entity;
-use musig2::{BinaryEncoding, CompactSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
-use serde::{de::Error, Deserialize, Deserializer, Serializer};
+use musig2::{
+    BinaryEncoding, CompactSignature, PartialSignature, PubNonce, SCHNORR_SIGNATURE_SIZE,
+};
+use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
 
 pub fn from_hex<'de, D, E>(deserializer: D) -> Result<E, D::Error>
@@ -164,6 +166,32 @@ impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
             return Err(serde::de::Error::custom("expected 66 bytes"));
         }
         PubNonce::from_bytes(&bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A custom serde wrapper for `musig2::PartialSignature` that serializes as a fixed-size
+/// `[u8; 32]` array (no length prefix in bincode). This is compatible with the format
+/// used by musig2 0.0.11's derive(Serialize), ensuring backward compatibility with
+/// data stored before the musig2 0.2.4 upgrade.
+pub struct PartialSignatureAsBytes;
+
+impl SerializeAs<PartialSignature> for PartialSignatureAsBytes {
+    fn serialize_as<S>(sig: &PartialSignature, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes: [u8; 32] = sig.serialize();
+        bytes.serialize(serializer)
+    }
+}
+
+impl<'de> DeserializeAs<'de, PartialSignature> for PartialSignatureAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<PartialSignature, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <[u8; 32]>::deserialize(deserializer)?;
+        PartialSignature::from_slice(&bytes).map_err(serde::de::Error::custom)
     }
 }
 
