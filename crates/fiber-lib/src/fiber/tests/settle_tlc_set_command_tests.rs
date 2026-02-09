@@ -272,6 +272,10 @@ fn create_test_channel_state_with_tlc(
         pending_notify_settle_tlcs: vec![],
         ephemeral_config: Default::default(),
         private_key: None,
+        external_funding: false,
+        external_funding_lock_script: None,
+        unsigned_funding_tx: None,
+        external_funding_signed_submitted: false,
     }
 }
 
