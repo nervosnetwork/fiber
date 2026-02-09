@@ -9,7 +9,9 @@ use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
-use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
+use super::serde_utils::{
+    EntityHex, PartialSignatureAsBytes, PubNonceAsBytes, SliceBase58, SliceHex,
+};
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::payment::{PaymentCustomRecords, USER_CUSTOM_RECORDS_MAX_INDEX};
@@ -766,10 +768,13 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitmentSigned {
     pub channel_id: Hash256,
+    #[serde_as(as = "PartialSignatureAsBytes")]
     pub funding_tx_partial_signature: PartialSignature,
+    #[serde_as(as = "PubNonceAsBytes")]
     pub next_commitment_nonce: PubNonce,
 }
 
@@ -1184,6 +1189,7 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAndAck {
     pub channel_id: Hash256,
+    #[serde_as(as = "PartialSignatureAsBytes")]
     pub revocation_partial_signature: PartialSignature,
     pub next_per_commitment_point: Pubkey,
     #[serde_as(as = "PubNonceAsBytes")]
