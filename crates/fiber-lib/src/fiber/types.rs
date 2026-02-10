@@ -66,9 +66,12 @@ bitflags::bitflags! {
     }
 }
 
-impl From<Byte66> for PubNonce {
-    fn from(value: Byte66) -> Self {
-        PubNonce::from_bytes(value.as_slice()).expect("PubNonce from Byte66")
+impl TryFrom<Byte66> for PubNonce {
+    type Error = Error;
+
+    fn try_from(value: Byte66) -> Result<Self, Self::Error> {
+        PubNonce::from_bytes(value.as_slice())
+            .map_err(|e| Error::Musig2(format!("Invalid PubNonce: {e}")))
     }
 }
 
@@ -702,8 +705,8 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: open_channel.second_per_commitment_point().try_into()?,
-            next_commitment_nonce: open_channel.next_commitment_nonce().into(),
-            next_revocation_nonce: open_channel.next_revocation_nonce().into(),
+            next_commitment_nonce: open_channel.next_commitment_nonce().try_into()?,
+            next_revocation_nonce: open_channel.next_revocation_nonce().try_into()?,
             channel_announcement_nonce: open_channel
                 .channel_announcement_nonce()
                 .to_opt()
@@ -779,8 +782,8 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
                 .map(TryInto::try_into)
                 .transpose()
                 .map_err(|err| Error::Musig2(format!("{err}")))?,
-            next_commitment_nonce: accept_channel.next_commitment_nonce().into(),
-            next_revocation_nonce: accept_channel.next_revocation_nonce().into(),
+            next_commitment_nonce: accept_channel.next_commitment_nonce().try_into()?,
+            next_revocation_nonce: accept_channel.next_revocation_nonce().try_into()?,
         })
     }
 }
@@ -818,7 +821,7 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
                 commitment_signed.funding_tx_partial_signature().as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
-            next_commitment_nonce: commitment_signed.next_commitment_nonce().into(),
+            next_commitment_nonce: commitment_signed.next_commitment_nonce().try_into()?,
         })
     }
 }
@@ -939,7 +942,7 @@ impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
     fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
         Ok(TxComplete {
             channel_id: tx_complete.channel_id().into(),
-            next_commitment_nonce: tx_complete.next_commitment_nonce().into(),
+            next_commitment_nonce: tx_complete.next_commitment_nonce().try_into()?,
         })
     }
 }
@@ -1233,7 +1236,7 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
             )
             .map_err(|e| anyhow!(e))?,
             next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,
-            next_revocation_nonce: revoke_and_ack.next_revocation_nonce().into(),
+            next_revocation_nonce: revoke_and_ack.next_revocation_nonce().try_into()?,
         })
     }
 }
@@ -1372,15 +1375,16 @@ impl TlcErr {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        molecule_fiber::TlcErr::from(self.clone())
+        molecule_fiber::TlcErr::try_from(self.clone())
+            .expect("TlcErr serialization should not fail for valid TlcErr")
             .as_slice()
             .to_vec()
     }
 
     fn deserialize(data: &[u8]) -> Option<Self> {
         molecule_fiber::TlcErr::from_slice(data)
-            .map(TlcErr::from)
             .ok()
+            .and_then(|e| TlcErr::try_from(e).ok())
     }
 }
 
@@ -1430,7 +1434,8 @@ impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
                     channel_update: channel_failed
                         .channel_update()
                         .to_opt()
-                        .map(|x| x.try_into().unwrap()),
+                        .map(|x| x.try_into())
+                        .transpose()?,
                     node_id: channel_failed.node_id().try_into()?,
                 })
             }
@@ -1449,31 +1454,37 @@ impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
     }
 }
 
-impl From<TlcErr> for molecule_fiber::TlcErr {
-    fn from(tlc_err: TlcErr) -> Self {
-        molecule_fiber::TlcErr::new_builder()
+impl TryFrom<TlcErr> for molecule_fiber::TlcErr {
+    type Error = Error;
+
+    fn try_from(tlc_err: TlcErr) -> Result<Self, Self::Error> {
+        Ok(molecule_fiber::TlcErr::new_builder()
             .error_code(tlc_err.error_code_as_u16().into())
             .extra_data(
                 TlcErrDataOpt::new_builder()
-                    .set(tlc_err.extra_data.map(|data| data.try_into().unwrap()))
+                    .set(tlc_err.extra_data.map(|data| data.try_into()).transpose()?)
                     .build(),
             )
-            .build()
+            .build())
     }
 }
 
-impl From<molecule_fiber::TlcErr> for TlcErr {
-    fn from(tlc_err: molecule_fiber::TlcErr) -> Self {
-        TlcErr {
-            error_code: {
-                let code: u16 = tlc_err.error_code().into();
-                TlcErrorCode::try_from(code).expect("tlc_error_code failed")
-            },
-            extra_data: tlc_err
-                .extra_data()
-                .to_opt()
-                .map(|data| data.try_into().unwrap()),
-        }
+impl TryFrom<molecule_fiber::TlcErr> for TlcErr {
+    type Error = Error;
+
+    fn try_from(tlc_err: molecule_fiber::TlcErr) -> Result<Self, Self::Error> {
+        let code: u16 = tlc_err.error_code().into();
+        let error_code = TlcErrorCode::try_from(code)
+            .map_err(|_| Error::AnyHow(anyhow!("Invalid TLC error code: {}", code)))?;
+        let extra_data = tlc_err
+            .extra_data()
+            .to_opt()
+            .map(|data| data.try_into())
+            .transpose()?;
+        Ok(TlcErr {
+            error_code,
+            extra_data,
+        })
     }
 }
 
@@ -1946,15 +1957,17 @@ impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
     }
 }
 
-impl From<molecule_fiber::UdtCellDep> for UdtCellDep {
-    fn from(udt_cell_dep: molecule_fiber::UdtCellDep) -> Self {
-        UdtCellDep {
+impl TryFrom<molecule_fiber::UdtCellDep> for UdtCellDep {
+    type Error = Error;
+
+    fn try_from(udt_cell_dep: molecule_fiber::UdtCellDep) -> Result<Self, Self::Error> {
+        Ok(UdtCellDep {
             out_point: udt_cell_dep.out_point().into(),
             dep_type: udt_cell_dep
                 .dep_type()
                 .try_into()
-                .expect("invalid dep type"),
-        }
+                .map_err(|e| Error::AnyHow(anyhow!("invalid dep type: {:?}", e)))?,
+        })
     }
 }
 
@@ -1968,16 +1981,19 @@ impl From<UdtScript> for molecule_fiber::UdtScript {
     }
 }
 
-impl From<molecule_fiber::UdtScript> for UdtScript {
-    fn from(udt_script: molecule_fiber::UdtScript) -> Self {
-        UdtScript {
+impl TryFrom<molecule_fiber::UdtScript> for UdtScript {
+    type Error = Error;
+
+    fn try_from(udt_script: molecule_fiber::UdtScript) -> Result<Self, Self::Error> {
+        Ok(UdtScript {
             code_hash: udt_script.code_hash().unpack(),
             hash_type: udt_script
                 .hash_type()
                 .try_into()
-                .expect("invalid hash type"),
-            args: String::from_utf8(udt_script.args().unpack()).expect("invalid utf8"),
-        }
+                .map_err(|e| Error::AnyHow(anyhow!("invalid hash type: {:?}", e)))?,
+            args: String::from_utf8(udt_script.args().unpack())
+                .map_err(|e| Error::AnyHow(anyhow!("invalid utf8 in UdtScript args: {}", e)))?,
+        })
     }
 }
 
@@ -2001,17 +2017,19 @@ impl From<UdtDep> for molecule_fiber::UdtDep {
     }
 }
 
-impl From<molecule_fiber::UdtDep> for UdtDep {
-    fn from(udt_dep: molecule_fiber::UdtDep) -> Self {
+impl TryFrom<molecule_fiber::UdtDep> for UdtDep {
+    type Error = Error;
+
+    fn try_from(udt_dep: molecule_fiber::UdtDep) -> Result<Self, Self::Error> {
         match udt_dep.to_enum() {
-            molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => UdtDep {
-                cell_dep: Some(cell_dep.into()),
+            molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => Ok(UdtDep {
+                cell_dep: Some(cell_dep.try_into()?),
                 type_id: None,
-            },
-            molecule_fiber::UdtDepUnion::Script(type_id) => UdtDep {
+            }),
+            molecule_fiber::UdtDepUnion::Script(type_id) => Ok(UdtDep {
                 cell_dep: None,
                 type_id: Some(type_id.into()),
-            },
+            }),
         }
     }
 }
@@ -2041,11 +2059,13 @@ impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
     }
 }
 
-impl From<molecule_fiber::UdtArgInfo> for UdtArgInfo {
-    fn from(udt_arg_info: molecule_fiber::UdtArgInfo) -> Self {
-        UdtArgInfo {
+impl TryFrom<molecule_fiber::UdtArgInfo> for UdtArgInfo {
+    type Error = Error;
+
+    fn try_from(udt_arg_info: molecule_fiber::UdtArgInfo) -> Result<Self, Self::Error> {
+        Ok(UdtArgInfo {
             name: String::from_utf8(udt_arg_info.name().unpack()).unwrap_or_default(),
-            script: udt_arg_info.script().into(),
+            script: udt_arg_info.script().try_into()?,
             auto_accept_amount: udt_arg_info
                 .auto_accept_amount()
                 .to_opt()
@@ -2053,9 +2073,9 @@ impl From<molecule_fiber::UdtArgInfo> for UdtArgInfo {
             cell_deps: udt_arg_info
                 .cell_deps()
                 .into_iter()
-                .map(Into::into)
-                .collect(),
-        }
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 }
 
@@ -2073,14 +2093,16 @@ impl From<UdtCfgInfos> for molecule_fiber::UdtCfgInfos {
     }
 }
 
-impl From<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
-    fn from(udt_arg_infos: molecule_fiber::UdtCfgInfos) -> Self {
-        UdtCfgInfos(
+impl TryFrom<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
+    type Error = Error;
+
+    fn try_from(udt_arg_infos: molecule_fiber::UdtCfgInfos) -> Result<Self, Self::Error> {
+        Ok(UdtCfgInfos(
             udt_arg_infos
                 .into_iter()
-                .map(|udt_arg_info| udt_arg_info.into())
-                .collect(),
-        )
+                .map(|udt_arg_info| udt_arg_info.try_into())
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
     }
 }
 
@@ -2135,7 +2157,7 @@ impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
                 .unpack(),
             node_name: AnnouncedNodeName::from_slice(node_announcement.node_name().as_slice())
                 .map_err(|e| Error::AnyHow(anyhow!("Invalid node_name: {}", e)))?,
-            udt_cfg_infos: node_announcement.udt_cfg_infos().into(),
+            udt_cfg_infos: node_announcement.udt_cfg_infos().try_into()?,
             addresses: node_announcement
                 .address()
                 .into_iter()
@@ -3844,7 +3866,7 @@ impl TrampolineHopPayload {
     pub fn deserialize(data: &[u8]) -> Option<Self> {
         molecule_fiber::TrampolineHopPayload::from_slice(data)
             .ok()
-            .map(Into::into)
+            .and_then(|p| TrampolineHopPayload::try_from(p).ok())
     }
 }
 
@@ -3905,30 +3927,29 @@ impl From<TrampolineHopPayload> for molecule_fiber::TrampolineHopPayload {
     }
 }
 
-impl From<molecule_fiber::TrampolineHopPayload> for TrampolineHopPayload {
-    fn from(payload: molecule_fiber::TrampolineHopPayload) -> Self {
+impl TryFrom<molecule_fiber::TrampolineHopPayload> for TrampolineHopPayload {
+    type Error = Error;
+
+    fn try_from(payload: molecule_fiber::TrampolineHopPayload) -> Result<Self, Self::Error> {
         match payload.to_enum() {
             molecule_fiber::TrampolineHopPayloadUnion::TrampolineForwardPayload(forward) => {
-                TrampolineHopPayload::Forward {
-                    next_node_id: forward
-                        .next_node_id()
-                        .try_into()
-                        .expect("valid next_node_id"),
+                Ok(TrampolineHopPayload::Forward {
+                    next_node_id: forward.next_node_id().try_into()?,
                     amount_to_forward: forward.amount_to_forward().unpack(),
                     hash_algorithm: forward.hash_algorithm().try_into().unwrap_or_default(),
                     build_max_fee_amount: forward.build_max_fee_amount().unpack(),
                     tlc_expiry_delta: forward.tlc_expiry_delta().unpack(),
                     tlc_expiry_limit: forward.tlc_expiry_limit().unpack(),
                     max_parts: forward.max_parts().to_opt().map(|x| x.unpack()),
-                }
+                })
             }
             molecule_fiber::TrampolineHopPayloadUnion::TrampolineFinalPayload(final_payload) => {
-                TrampolineHopPayload::Final {
+                Ok(TrampolineHopPayload::Final {
                     final_amount: final_payload.final_amount().unpack(),
                     final_tlc_expiry_delta: final_payload.final_tlc_expiry_delta().unpack(),
                     payment_preimage: final_payload.payment_preimage().to_opt().map(|x| x.into()),
                     custom_records: final_payload.custom_records().to_opt().map(|x| x.into()),
-                }
+                })
             }
         }
     }
