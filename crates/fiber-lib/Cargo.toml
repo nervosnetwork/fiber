@@ -122,6 +122,7 @@ web-time = { version = "1.1.0", features = ["serde"] }
 bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
 portable = ["rocksdb/portable"]
+sample = []
 watchtower = []
 metrics = ["dep:metrics", "ractor/metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter-prometheus"]
 pprof = ["dep:pprof"]

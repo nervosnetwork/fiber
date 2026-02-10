@@ -2140,7 +2140,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
- "tonic 0.11.0",
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
