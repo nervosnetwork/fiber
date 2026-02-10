@@ -117,7 +117,7 @@ impl Migration for MigrationObj {
     }
 }
 
-fn migrate_channel_state(old: OldChannelActorState) -> NewChannelActorState {
+pub(crate) fn migrate_channel_state(old: OldChannelActorState) -> NewChannelActorState {
     let state = convert(old.state);
     let local_pubkey = convert(old.local_pubkey);
     let remote_pubkey = convert(old.remote_pubkey);
@@ -241,7 +241,7 @@ fn migrate_tlc_info(old: OldTlcInfo) -> NewTlcInfo {
     }
 }
 
-fn migrate_payment_session(old: OldPaymentSession) -> NewPaymentSession {
+pub(crate) fn migrate_payment_session(old: OldPaymentSession) -> NewPaymentSession {
     NewPaymentSession {
         request: migrate_send_payment_data(old.request),
         last_error: old.last_error,
@@ -300,7 +300,7 @@ fn migrate_retryable_tlc_operation(old: OldRetryableTlcOperation) -> NewRetryabl
     }
 }
 
-fn migrate_attempt(old: OldAttempt) -> NewAttempt {
+pub(crate) fn migrate_attempt(old: OldAttempt) -> NewAttempt {
     NewAttempt {
         id: old.id,
         try_limit: old.try_limit,

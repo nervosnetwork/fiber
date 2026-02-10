@@ -2103,7 +2103,7 @@ dependencies = [
 [[package]]
 name = "fiber-wasm-db-common"
 version = "0.1.0"
-source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.6.1#1124c92f8e3d4c3a9d4e7d3ed4521fddb005d86d"
+source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.6.1#1318597f168574c4ed5d68dd1c830c026e392b29"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -2114,7 +2114,7 @@ dependencies = [
 [[package]]
 name = "fiber-wasm-db-common"
 version = "0.1.0"
-source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.7.0#399b059b0f1c7b5252e74addaafe066072e4ba5c"
+source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.7.0#433de2da8bada5be84d4cd5785e693fe8326df68"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -2216,7 +2216,7 @@ dependencies = [
 [[package]]
 name = "fnn"
 version = "0.6.1"
-source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.6.1#1124c92f8e3d4c3a9d4e7d3ed4521fddb005d86d"
+source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.6.1#1318597f168574c4ed5d68dd1c830c026e392b29"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2285,7 +2285,7 @@ dependencies = [
 [[package]]
 name = "fnn"
 version = "0.7.0-rc1"
-source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.7.0#399b059b0f1c7b5252e74addaafe066072e4ba5c"
+source = "git+https://github.com/nervosnetwork/fiber.git?branch=migrate%2Fv0.7.0#433de2da8bada5be84d4cd5785e693fe8326df68"
 dependencies = [
  "aes-gcm",
  "anyhow",
