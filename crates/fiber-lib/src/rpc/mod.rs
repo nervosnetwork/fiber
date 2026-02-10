@@ -167,6 +167,8 @@ pub mod server {
                 let auth = auth.clone();
 
                 // Configure CORS to allow all origins and handle preflight requests
+                // Note: CORS must be the outermost layer to handle OPTIONS preflight requests
+                // before authentication, as required by the CORS specification.
                 let cors_layer = CorsLayer::new()
                     .allow_origin(Any)
                     .allow_methods(Any)
