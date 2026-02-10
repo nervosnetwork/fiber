@@ -27,6 +27,9 @@ fuzz_target!(|data: &[u8]| {
         let reserialized = payload.serialize();
         let payload2 = TrampolineHopPayload::deserialize(&reserialized)
             .expect("roundtrip deserialization must succeed");
-        assert_eq!(payload, payload2, "roundtrip must preserve TrampolineHopPayload");
+        assert_eq!(
+            payload, payload2,
+            "roundtrip must preserve TrampolineHopPayload"
+        );
     }
 });
