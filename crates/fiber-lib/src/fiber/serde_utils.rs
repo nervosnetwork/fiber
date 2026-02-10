@@ -1,5 +1,7 @@
 use molecule::prelude::Entity;
-use musig2::{BinaryEncoding, CompactSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
+use musig2::{
+    BinaryEncoding, CompactSignature, PartialSignature, PubNonce, SCHNORR_SIGNATURE_SIZE,
+};
 use serde::{de::Error, Deserialize, Deserializer, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
 
@@ -201,6 +203,28 @@ impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
             return Err(serde::de::Error::custom("expected 66 bytes"));
         }
         PubNonce::from_bytes(&bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+pub struct PartialSignatureAsBytes;
+
+impl SerializeAs<PartialSignature> for PartialSignatureAsBytes {
+    fn serialize_as<S>(signature: &PartialSignature, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes: [u8; 32] = signature.serialize();
+        serde::Serialize::serialize(&bytes, serializer)
+    }
+}
+
+impl<'de> DeserializeAs<'de, PartialSignature> for PartialSignatureAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<PartialSignature, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <[u8; 32]>::deserialize(deserializer)?;
+        PartialSignature::from_slice(&bytes).map_err(serde::de::Error::custom)
     }
 }
 
