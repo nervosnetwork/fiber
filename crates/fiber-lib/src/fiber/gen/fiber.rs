@@ -14290,7 +14290,6 @@ impl ::core::fmt::Display for PaymentHopData {
         write!(f, ", {}: {}", "funding_tx_hash", self.funding_tx_hash())?;
         write!(f, ", {}: {}", "next_hop", self.next_hop())?;
         write!(f, ", {}: {}", "custom_records", self.custom_records())?;
-        write!(f, ", {}: {}", "trampoline_onion", self.trampoline_onion())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -14305,13 +14304,13 @@ impl ::core::default::Default for PaymentHopData {
     }
 }
 impl PaymentHopData {
-    const DEFAULT_VALUE: [u8; 93] = [
-        93, 0, 0, 0, 36, 0, 0, 0, 52, 0, 0, 0, 60, 0, 0, 0, 60, 0, 0, 0, 61, 0, 0, 0, 93, 0, 0, 0,
-        93, 0, 0, 0, 93, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 89] = [
+        89, 0, 0, 0, 32, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 56, 0, 0, 0, 57, 0, 0, 0, 89, 0, 0, 0,
+        89, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0,
+        0,
     ];
-    pub const FIELD_COUNT: usize = 8;
+    pub const FIELD_COUNT: usize = 7;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -14367,17 +14366,11 @@ impl PaymentHopData {
     pub fn custom_records(&self) -> CustomRecordsOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
-        let end = molecule::unpack_number(&slice[32..]) as usize;
-        CustomRecordsOpt::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn trampoline_onion(&self) -> BytesOpt {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[32..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[36..]) as usize;
-            BytesOpt::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[32..]) as usize;
+            CustomRecordsOpt::new_unchecked(self.0.slice(start..end))
         } else {
-            BytesOpt::new_unchecked(self.0.slice(start..))
+            CustomRecordsOpt::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> PaymentHopDataReader<'r> {
@@ -14414,7 +14407,6 @@ impl molecule::prelude::Entity for PaymentHopData {
             .funding_tx_hash(self.funding_tx_hash())
             .next_hop(self.next_hop())
             .custom_records(self.custom_records())
-            .trampoline_onion(self.trampoline_onion())
     }
 }
 #[derive(Clone, Copy)]
@@ -14443,7 +14435,6 @@ impl<'r> ::core::fmt::Display for PaymentHopDataReader<'r> {
         write!(f, ", {}: {}", "funding_tx_hash", self.funding_tx_hash())?;
         write!(f, ", {}: {}", "next_hop", self.next_hop())?;
         write!(f, ", {}: {}", "custom_records", self.custom_records())?;
-        write!(f, ", {}: {}", "trampoline_onion", self.trampoline_onion())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -14452,7 +14443,7 @@ impl<'r> ::core::fmt::Display for PaymentHopDataReader<'r> {
     }
 }
 impl<'r> PaymentHopDataReader<'r> {
-    pub const FIELD_COUNT: usize = 8;
+    pub const FIELD_COUNT: usize = 7;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -14508,17 +14499,11 @@ impl<'r> PaymentHopDataReader<'r> {
     pub fn custom_records(&self) -> CustomRecordsOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
-        let end = molecule::unpack_number(&slice[32..]) as usize;
-        CustomRecordsOptReader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn trampoline_onion(&self) -> BytesOptReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[32..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[36..]) as usize;
-            BytesOptReader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[32..]) as usize;
+            CustomRecordsOptReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            BytesOptReader::new_unchecked(&self.as_slice()[start..])
+            CustomRecordsOptReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -14575,7 +14560,6 @@ impl<'r> molecule::prelude::Reader<'r> for PaymentHopDataReader<'r> {
         Byte32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         PubkeyOptReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
         CustomRecordsOptReader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
-        BytesOptReader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
         Ok(())
     }
 }
@@ -14588,10 +14572,9 @@ pub struct PaymentHopDataBuilder {
     pub(crate) funding_tx_hash: Byte32,
     pub(crate) next_hop: PubkeyOpt,
     pub(crate) custom_records: CustomRecordsOpt,
-    pub(crate) trampoline_onion: BytesOpt,
 }
 impl PaymentHopDataBuilder {
-    pub const FIELD_COUNT: usize = 8;
+    pub const FIELD_COUNT: usize = 7;
     pub fn amount(mut self, v: Uint128) -> Self {
         self.amount = v;
         self
@@ -14620,10 +14603,6 @@ impl PaymentHopDataBuilder {
         self.custom_records = v;
         self
     }
-    pub fn trampoline_onion(mut self, v: BytesOpt) -> Self {
-        self.trampoline_onion = v;
-        self
-    }
 }
 impl molecule::prelude::Builder for PaymentHopDataBuilder {
     type Entity = PaymentHopData;
@@ -14637,7 +14616,6 @@ impl molecule::prelude::Builder for PaymentHopDataBuilder {
             + self.funding_tx_hash.as_slice().len()
             + self.next_hop.as_slice().len()
             + self.custom_records.as_slice().len()
-            + self.trampoline_onion.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -14656,8 +14634,6 @@ impl molecule::prelude::Builder for PaymentHopDataBuilder {
         total_size += self.next_hop.as_slice().len();
         offsets.push(total_size);
         total_size += self.custom_records.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.trampoline_onion.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -14669,7 +14645,6 @@ impl molecule::prelude::Builder for PaymentHopDataBuilder {
         writer.write_all(self.funding_tx_hash.as_slice())?;
         writer.write_all(self.next_hop.as_slice())?;
         writer.write_all(self.custom_records.as_slice())?;
-        writer.write_all(self.trampoline_onion.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

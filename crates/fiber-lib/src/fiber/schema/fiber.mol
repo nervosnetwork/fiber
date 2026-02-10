@@ -232,7 +232,6 @@ table PaymentHopData {
     funding_tx_hash: Byte32,
     next_hop: PubkeyOpt,
     custom_records: CustomRecordsOpt,
-    trampoline_onion: BytesOpt,
 }
 
 // Trampoline hop payload for forwarding nodes

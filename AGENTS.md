@@ -9,6 +9,8 @@ This document provides essential guidelines for AI coding agents working on the 
 - **Build System**: Cargo workspace with 5 member crates
 - **Test Runner**: cargo-nextest (preferred over `cargo test`)
 
+please wait several minutes for cargo commands to complete.
+
 ### Essential Commands
 
 #### Building

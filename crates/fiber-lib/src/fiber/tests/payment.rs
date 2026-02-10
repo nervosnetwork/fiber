@@ -4754,7 +4754,6 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
             hash_algorithm,
             payment_preimage: None,
             custom_records: None,
-            trampoline_onion: None,
         },
         PaymentHopData {
             amount,
@@ -4764,7 +4763,6 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
             hash_algorithm,
             payment_preimage: None,
             custom_records: None,
-            trampoline_onion: None,
         },
     ];
     let packet = PeeledPaymentOnionPacket::create(

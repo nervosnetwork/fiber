@@ -2359,11 +2359,11 @@ where
 
         // Trampoline forwarding: the onion for this node is the last hop, but contains an
         // encrypted payload telling us the real final recipient and parameters.
-        if let Some(trampoline_bytes) = peeled_onion_packet.current.trampoline_onion.as_deref() {
+        if let Some(trampoline_bytes) = peeled_onion_packet.current.trampoline_onion() {
             return self
                 .forward_trampoline_packet(
                     state,
-                    trampoline_bytes,
+                    &trampoline_bytes,
                     previous_tlc,
                     payment_hash,
                     peeled_onion_packet.current.amount,

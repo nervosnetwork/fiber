@@ -1796,15 +1796,18 @@ where
         let last_expiry_delta =
             final_hop_expiry_delta_override.unwrap_or(payment_data.final_tlc_expiry_delta);
 
-        hops_data.push(PaymentHopData {
+        let mut last_hop = PaymentHopData {
             amount: last_amount,
             hash_algorithm,
             expiry: now + last_expiry_delta + rand_tlc_expiry_delta,
             payment_preimage,
             custom_records,
-            trampoline_onion,
             ..Default::default()
-        });
+        };
+        if let Some(onion) = trampoline_onion {
+            last_hop.set_trampoline_onion(onion);
+        }
+        hops_data.push(last_hop);
         // assert there is no duplicate node in the route
         assert_eq!(
             hops_data
@@ -1821,7 +1824,7 @@ where
                 assert!(hops_data.len() >= 2);
                 let len = hops_data.len();
                 assert_eq!(hops_data[len - 2].amount, hops_data[len - 1].amount);
-                assert!(hops_data.last().unwrap().trampoline_onion.is_some());
+                assert!(hops_data.last().unwrap().trampoline_onion().is_some());
             }
         }
         hops_data

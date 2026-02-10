@@ -30,7 +30,9 @@ use crate::{
         key::blake2b_hash_with_salt,
         network::SendOnionPacketCommand,
         network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
-        serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
+        serde_utils::{
+            CompactSignatureAsBytes, EntityHex, PartialSignatureAsBytes, PubNonceAsBytes,
+        },
         types::{
             AcceptChannel, AddTlc, AnnouncementSignatures, BasicMppPaymentData,
             BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelReady, ChannelUpdate,
@@ -1072,7 +1074,7 @@ where
         let payment_hash = add_tlc.payment_hash;
         let forward_amount = peeled_onion_packet.current.amount;
         let invoice = self.store.get_invoice(&payment_hash);
-        let is_trampoline = peeled_onion_packet.current.trampoline_onion.is_some();
+        let is_trampoline = peeled_onion_packet.current.trampoline_onion().is_some();
         let is_last = peeled_onion_packet.is_last();
 
         let tlc = state
@@ -1093,11 +1095,10 @@ where
             // to obtain the final recipient payload.
             let trampoline_bytes = peeled_onion_packet
                 .current
-                .trampoline_onion
-                .as_deref()
+                .trampoline_onion()
                 .expect("trampoline_onion present");
 
-            let peeled_trampoline = TrampolineOnionPacket::new(trampoline_bytes.to_vec())
+            let peeled_trampoline = TrampolineOnionPacket::new(trampoline_bytes)
                 .peel(state.private_key(), Some(payment_hash.as_ref()), SECP256K1)
                 .map_err(|err| {
                     ProcessingChannelError::PeelingOnionPacketError(format!(
@@ -3905,6 +3906,7 @@ pub struct ShutdownInfo {
     #[serde_as(as = "EntityHex")]
     pub close_script: Script,
     pub fee_rate: u64,
+    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
     pub signature: Option<PartialSignature>,
 }
 
@@ -3959,7 +3961,9 @@ impl ChannelTlcInfo {
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct PublicChannelInfo {
     // Channel announcement signatures, may be empty for private channel.
+    #[serde_as(as = "Option<(_, PartialSignatureAsBytes)>")]
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
+    #[serde_as(as = "Option<(_, PartialSignatureAsBytes)>")]
     pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
 
     #[serde_as(as = "Option<PubNonceAsBytes>")]
