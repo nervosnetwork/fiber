@@ -72,6 +72,7 @@ pub mod server {
     use tokio::net::TcpListener;
     use tokio::sync::RwLock;
     use tower::Service;
+    use tower_http::cors::{Any, CorsLayer};
     use tracing::debug;
 
     use super::biscuit::BiscuitAuth;
@@ -165,6 +166,12 @@ pub mod server {
                 let per_conn2 = per_conn.clone();
                 let auth = auth.clone();
 
+                // Configure CORS to allow all origins and handle preflight requests
+                let cors_layer = CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any);
+
                 let svc = tower::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let PerConnection {
                         methods,
@@ -186,6 +193,10 @@ pub mod server {
                         .build(methods, stop_handle);
                     async move { svc.call(req).await }
                 });
+
+                // Wrap the service with CORS layer
+                let svc = tower::ServiceBuilder::new().layer(cors_layer).service(svc);
+
                 tokio::spawn(serve_with_graceful_shutdown(
                     sock,
                     svc,
