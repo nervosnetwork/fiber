@@ -168,6 +168,261 @@ pub struct ExternalFundingContext {
     pub funding_cell_lock_script: packed::Script,
 }
 
+/// Collect UDT inputs and build change outputs for funding transactions.
+/// This is shared logic used by both FundingTxBuilder and ExternalFundingTxBuilder.
+async fn collect_udt_inputs_outputs(
+    request: &FundingRequest,
+    funding_source_lock_script: &packed::Script,
+    cell_collector: &mut dyn CellCollector,
+    inputs: &mut Vec<CellInput>,
+    outputs: &mut Vec<packed::CellOutput>,
+    outputs_data: &mut Vec<packed::Bytes>,
+    cell_deps: &mut HashSet<packed::CellDep>,
+) -> Result<(), TxBuilderError> {
+    let udt_amount = request.local_amount;
+    // return early if we don't need to build UDT cell
+    if request.udt_type_script.is_none() || udt_amount == 0 {
+        return Ok(());
+    }
+
+    let udt_type_script = request.udt_type_script.clone().ok_or_else(|| {
+        TxBuilderError::InvalidParameter(anyhow!("UDT type script not configured"))
+    })?;
+    let owner = funding_source_lock_script.clone();
+    let mut found_udt_amount: u128 = 0;
+
+    let mut query = CellQueryOptions::new_lock(owner.clone());
+    query.script_search_mode = Some(SearchMode::Exact);
+    query.secondary_script = Some(udt_type_script.clone());
+    query.data_len_range = Some(ValueRangeOption::new_min(16));
+
+    loop {
+        // each query will found at most one cell because of `min_total_capacity == 1` in CellQueryOptions
+        let (udt_cells, _) = cell_collector
+            .collect_live_cells_async(&query, true)
+            .await?;
+        if udt_cells.is_empty() {
+            break;
+        }
+        for cell in udt_cells.iter() {
+            let mut amount_bytes = [0u8; 16];
+            amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
+            let cell_udt_amount = u128::from_le_bytes(amount_bytes);
+            let ckb_amount: u64 = cell.output.capacity().unpack();
+            debug!(
+                "found udt cell ckb_amount: {:?} udt_amount: {:?} cell: {:?}",
+                ckb_amount, cell_udt_amount, cell
+            );
+
+            found_udt_amount = found_udt_amount
+                .checked_add(cell_udt_amount)
+                .ok_or_else(|| TxBuilderError::Other(anyhow!("UDT amount overflow")))?;
+
+            inputs.push(CellInput::new(cell.out_point.clone(), 0));
+
+            if found_udt_amount >= udt_amount {
+                let change_amount = found_udt_amount - udt_amount;
+                if change_amount > 0 {
+                    let change_output_data: Bytes = change_amount.to_le_bytes().pack();
+                    let dummy_output = CellOutput::new_builder()
+                        .lock(owner)
+                        .type_(Some(udt_type_script.clone()).pack())
+                        .build();
+                    let required_capacity = dummy_output
+                        .occupied_capacity(
+                            Capacity::bytes(change_output_data.len())
+                                .map_err(|err| TxBuilderError::Other(err.into()))?,
+                        )
+                        .map_err(|err| TxBuilderError::Other(err.into()))?
+                        .pack();
+                    let change_output = dummy_output
+                        .as_builder()
+                        .capacity(required_capacity)
+                        .build();
+
+                    outputs.push(change_output);
+                    outputs_data.push(change_output_data);
+                }
+
+                debug!("find proper UDT owner cells: {:?}", inputs);
+                // we need to filter the cell deps by the contracts_context
+                let udt_cell_deps = get_udt_cell_deps(&udt_type_script)
+                    .await
+                    .map_err(|_| TxBuilderError::ResolveCellDepFailed(udt_type_script))?;
+                for cell_dep in udt_cell_deps {
+                    cell_deps.insert(cell_dep);
+                }
+                return Ok(());
+            }
+        }
+    }
+    Err(TxBuilderError::Other(anyhow!(
+        "can not find enough UDT owner cells for funding transaction"
+    )))
+}
+
+/// Build the funding transaction base from a pre-built funding cell.
+/// This is shared logic used by both FundingTxBuilder and ExternalFundingTxBuilder
+/// in their TxBuilder::build_base_async implementations.
+async fn build_base_from_funding_cell(
+    funding_cell_output: packed::CellOutput,
+    funding_cell_output_data: packed::Bytes,
+    funding_tx: &FundingTx,
+    request: &FundingRequest,
+    funding_source_lock_script: &packed::Script,
+    cell_collector: &mut dyn CellCollector,
+) -> Result<TransactionView, TxBuilderError> {
+    let mut inputs = vec![];
+    let mut cell_deps = HashSet::new();
+
+    // Funding cell does not need new cell deps and header deps. The type script deps will be added with inputs.
+    let mut outputs: Vec<packed::CellOutput> = vec![funding_cell_output];
+    let mut outputs_data: Vec<packed::Bytes> = vec![funding_cell_output_data];
+
+    if let Some(ref tx) = funding_tx.tx {
+        inputs = tx.inputs().into_iter().collect();
+        cell_deps = tx.cell_deps().into_iter().collect();
+    }
+    collect_udt_inputs_outputs(
+        request,
+        funding_source_lock_script,
+        cell_collector,
+        &mut inputs,
+        &mut outputs,
+        &mut outputs_data,
+        &mut cell_deps,
+    )
+    .await?;
+    if let Some(ref tx) = funding_tx.tx {
+        for (i, output) in tx.outputs().into_iter().enumerate().skip(1) {
+            outputs.push(output.clone());
+            outputs_data.push(tx.outputs_data().get(i).unwrap_or_default().clone());
+        }
+    }
+
+    let builder = match funding_tx.tx {
+        Some(ref tx) => tx.as_advanced_builder(),
+        None => packed::Transaction::default().as_advanced_builder(),
+    };
+
+    // set a placeholder_witness for calculating transaction fee according to transaction size
+    let placeholder_witness = packed::WitnessArgs::new_builder()
+        .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+        .build();
+
+    let tx_builder = builder
+        .set_inputs(inputs)
+        .set_outputs(outputs)
+        .set_outputs_data(outputs_data)
+        .set_cell_deps(cell_deps.into_iter().collect())
+        .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
+    let tx = tx_builder.build();
+    Ok(tx)
+}
+
+/// Balance a funding transaction using CKB RPC, build and unlock it (with placeholder signatures).
+/// This is shared logic used by both FundingTxBuilder and ExternalFundingTxBuilder.
+async fn build_and_balance_tx<T: TxBuilder>(
+    builder: &T,
+    rpc_url: &str,
+    funding_source_lock_script: &packed::Script,
+    funding_fee_rate: u64,
+    live_cells_exclusion_map: &mut LiveCellsExclusionMap,
+) -> Result<TransactionView, FundingError> {
+    // Build ScriptUnlocker
+    let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![]);
+    let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
+    let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
+    let mut unlockers = HashMap::default();
+    unlockers.insert(
+        sighash_script_id,
+        Box::new(sighash_unlocker) as Box<dyn ScriptUnlocker>,
+    );
+
+    let sender = funding_source_lock_script.clone();
+    // Build CapacityBalancer
+    let placeholder_witness = packed::WitnessArgs::new_builder()
+        .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+        .build();
+
+    let balancer =
+        CapacityBalancer::new_simple(sender.clone(), placeholder_witness, funding_fee_rate);
+
+    let ckb_client = new_ckb_rpc_async_client(rpc_url);
+    let cell_dep_resolver = {
+        match ckb_client.get_block_by_number(0.into()).await? {
+            Some(genesis_block) => {
+                match DefaultCellDepResolver::from_genesis_async(&BlockView::from(genesis_block))
+                    .await
+                    .ok()
+                {
+                    Some(ret) => ret,
+                    None => {
+                        return Err(FundingError::CkbTxBuilderError(
+                            TxBuilderError::ResolveCellDepFailed(sender),
+                        ))
+                    }
+                }
+            }
+            None => {
+                return Err(FundingError::CkbTxBuilderError(
+                    TxBuilderError::ResolveCellDepFailed(sender),
+                ))
+            }
+        }
+    };
+
+    let header_dep_resolver = DefaultHeaderDepResolver::new(rpc_url);
+    let mut cell_collector = new_default_cell_collector(rpc_url);
+    let tx_dep_provider = DefaultTransactionDependencyProvider::new(rpc_url, 10);
+
+    let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
+    live_cells_exclusion_map.truncate(tip_block_number);
+    live_cells_exclusion_map
+        .apply(&mut cell_collector)
+        .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let (tx, _) = builder.build_unlocked(
+        &mut cell_collector,
+        &cell_dep_resolver,
+        &header_dep_resolver,
+        &tx_dep_provider,
+        &balancer,
+        &unlockers,
+    )?;
+    #[cfg(target_arch = "wasm32")]
+    let (tx, _) = builder
+        .build_unlocked_async(
+            &mut cell_collector,
+            &cell_dep_resolver,
+            &header_dep_resolver,
+            &tx_dep_provider,
+            &balancer,
+            &unlockers,
+        )
+        .await?;
+
+    Ok(tx)
+}
+
+/// Finalize the funding transaction by updating FundingTx and the exclusion map.
+/// This is shared logic used by both FundingTxBuilder and ExternalFundingTxBuilder.
+fn finalize_funding_tx_update(
+    funding_tx: FundingTx,
+    tx: TransactionView,
+    live_cells_exclusion_map: &mut LiveCellsExclusionMap,
+) -> FundingTx {
+    let old_tx_hash = funding_tx.tx.as_ref().map(|tx| tx.hash());
+    let mut funding_tx = funding_tx;
+    funding_tx.update_for_self(tx);
+    if let Some(tx_hash) = old_tx_hash {
+        live_cells_exclusion_map.remove(&tx_hash);
+    }
+    live_cells_exclusion_map.add_funding_tx(&funding_tx);
+    funding_tx
+}
+
 #[allow(dead_code)]
 struct FundingTxBuilder {
     funding_tx: FundingTx,
@@ -189,50 +444,15 @@ impl TxBuilder for FundingTxBuilder {
             .build_funding_cell()
             .map_err(|err| TxBuilderError::Other(err.into()))?;
 
-        let mut inputs = vec![];
-        let mut cell_deps = HashSet::new();
-
-        // Funding cell does not need new cell deps and header deps. The type script deps will be added with inputs.
-        let mut outputs: Vec<packed::CellOutput> = vec![funding_cell_output];
-        let mut outputs_data: Vec<packed::Bytes> = vec![funding_cell_output_data];
-
-        if let Some(ref tx) = self.funding_tx.tx {
-            inputs = tx.inputs().into_iter().collect();
-            cell_deps = tx.cell_deps().into_iter().collect();
-        }
-        self.build_udt_inputs_outputs(
+        build_base_from_funding_cell(
+            funding_cell_output,
+            funding_cell_output_data,
+            &self.funding_tx,
+            &self.request,
+            &self.context.funding_source_lock_script,
             cell_collector,
-            &mut inputs,
-            &mut outputs,
-            &mut outputs_data,
-            &mut cell_deps,
         )
-        .await?;
-        if let Some(ref tx) = self.funding_tx.tx {
-            for (i, output) in tx.outputs().into_iter().enumerate().skip(1) {
-                outputs.push(output.clone());
-                outputs_data.push(tx.outputs_data().get(i).unwrap_or_default().clone());
-            }
-        }
-
-        let builder = match self.funding_tx.tx {
-            Some(ref tx) => tx.as_advanced_builder(),
-            None => packed::Transaction::default().as_advanced_builder(),
-        };
-
-        // set a placeholder_witness for calculating transaction fee according to transaction size
-        let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-            .build();
-
-        let tx_builder = builder
-            .set_inputs(inputs)
-            .set_outputs(outputs)
-            .set_outputs_data(outputs_data)
-            .set_cell_deps(cell_deps.into_iter().collect())
-            .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
-        let tx = tx_builder.build();
-        Ok(tx)
+        .await
     }
 }
 
@@ -294,192 +514,24 @@ impl FundingTxBuilder {
         }
     }
 
-    async fn build_udt_inputs_outputs(
-        &self,
-        cell_collector: &mut dyn CellCollector,
-        inputs: &mut Vec<CellInput>,
-        outputs: &mut Vec<packed::CellOutput>,
-        outputs_data: &mut Vec<packed::Bytes>,
-        cell_deps: &mut HashSet<packed::CellDep>,
-    ) -> Result<(), TxBuilderError> {
-        let udt_amount = self.request.local_amount;
-        // return early if we don't need to build UDT cell
-        if self.request.udt_type_script.is_none() || udt_amount == 0 {
-            return Ok(());
-        }
-
-        let udt_type_script = self.request.udt_type_script.clone().ok_or_else(|| {
-            TxBuilderError::InvalidParameter(anyhow!("UDT type script not configured"))
-        })?;
-        let owner = self.context.funding_source_lock_script.clone();
-        let mut found_udt_amount: u128 = 0;
-
-        let mut query = CellQueryOptions::new_lock(owner.clone());
-        query.script_search_mode = Some(SearchMode::Exact);
-        query.secondary_script = Some(udt_type_script.clone());
-        query.data_len_range = Some(ValueRangeOption::new_min(16));
-
-        loop {
-            // each query will found at most one cell because of `min_total_capacity == 1` in CellQueryOptions
-            let (udt_cells, _) = cell_collector
-                .collect_live_cells_async(&query, true)
-                .await?;
-            if udt_cells.is_empty() {
-                break;
-            }
-            for cell in udt_cells.iter() {
-                let mut amount_bytes = [0u8; 16];
-                amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
-                let cell_udt_amount = u128::from_le_bytes(amount_bytes);
-                let ckb_amount: u64 = cell.output.capacity().unpack();
-                debug!(
-                    "found udt cell ckb_amount: {:?} udt_amount: {:?} cell: {:?}",
-                    ckb_amount, cell_udt_amount, cell
-                );
-
-                found_udt_amount = found_udt_amount
-                    .checked_add(cell_udt_amount)
-                    .ok_or_else(|| TxBuilderError::Other(anyhow!("UDT amount overflow")))?;
-
-                inputs.push(CellInput::new(cell.out_point.clone(), 0));
-
-                if found_udt_amount >= udt_amount {
-                    let change_amount = found_udt_amount - udt_amount;
-                    if change_amount > 0 {
-                        let change_output_data: Bytes = change_amount.to_le_bytes().pack();
-                        let dummy_output = CellOutput::new_builder()
-                            .lock(owner)
-                            .type_(Some(udt_type_script.clone()).pack())
-                            .build();
-                        let required_capacity = dummy_output
-                            .occupied_capacity(
-                                Capacity::bytes(change_output_data.len())
-                                    .map_err(|err| TxBuilderError::Other(err.into()))?,
-                            )
-                            .map_err(|err| TxBuilderError::Other(err.into()))?
-                            .pack();
-                        let change_output = dummy_output
-                            .as_builder()
-                            .capacity(required_capacity)
-                            .build();
-
-                        outputs.push(change_output);
-                        outputs_data.push(change_output_data);
-                    }
-
-                    debug!("find proper UDT owner cells: {:?}", inputs);
-                    // we need to filter the cell deps by the contracts_context
-                    let udt_cell_deps = get_udt_cell_deps(&udt_type_script)
-                        .await
-                        .map_err(|_| TxBuilderError::ResolveCellDepFailed(udt_type_script))?;
-                    for cell_dep in udt_cell_deps {
-                        cell_deps.insert(cell_dep);
-                    }
-                    return Ok(());
-                }
-            }
-        }
-        return Err(TxBuilderError::Other(anyhow!(
-            "can not find enough UDT owner cells for funding transaction"
-        )));
-    }
-
     async fn build(
         self,
         live_cells_exclusion_map: &mut LiveCellsExclusionMap,
     ) -> Result<FundingTx, FundingError> {
-        // Build ScriptUnlocker
-        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![]);
-        let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
-        let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
-        let mut unlockers = HashMap::default();
-        unlockers.insert(
-            sighash_script_id,
-            Box::new(sighash_unlocker) as Box<dyn ScriptUnlocker>,
-        );
-
-        let sender = self.context.funding_source_lock_script.clone();
-        // Build CapacityBalancer
-        let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-            .build();
-
-        let balancer = CapacityBalancer::new_simple(
-            sender.clone(),
-            placeholder_witness,
+        let tx = build_and_balance_tx(
+            &self,
+            &self.context.rpc_url,
+            &self.context.funding_source_lock_script,
             self.request.funding_fee_rate,
-        );
-
-        let ckb_client = new_ckb_rpc_async_client(&self.context.rpc_url);
-        let cell_dep_resolver = {
-            match ckb_client.get_block_by_number(0.into()).await? {
-                Some(genesis_block) => {
-                    match DefaultCellDepResolver::from_genesis_async(&BlockView::from(
-                        genesis_block,
-                    ))
-                    .await
-                    .ok()
-                    {
-                        Some(ret) => ret,
-                        None => {
-                            return Err(FundingError::CkbTxBuilderError(
-                                TxBuilderError::ResolveCellDepFailed(sender),
-                            ))
-                        }
-                    }
-                }
-                None => {
-                    return Err(FundingError::CkbTxBuilderError(
-                        TxBuilderError::ResolveCellDepFailed(sender),
-                    ))
-                }
-            }
-        };
-
-        let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
-        let mut cell_collector = new_default_cell_collector(&self.context.rpc_url);
-        let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
-
-        let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
-        live_cells_exclusion_map.truncate(tip_block_number);
-        live_cells_exclusion_map
-            .apply(&mut cell_collector)
-            .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let (tx, _) = self.build_unlocked(
-            &mut cell_collector,
-            &cell_dep_resolver,
-            &header_dep_resolver,
-            &tx_dep_provider,
-            &balancer,
-            &unlockers,
-        )?;
-        #[cfg(target_arch = "wasm32")]
-        let (tx, _) = self
-            .build_unlocked_async(
-                &mut cell_collector,
-                &cell_dep_resolver,
-                &header_dep_resolver,
-                &tx_dep_provider,
-                &balancer,
-                &unlockers,
-            )
-            .await?;
-
-        let old_tx_hash = self.funding_tx.tx.as_ref().map(|tx| tx.hash());
-        let mut funding_tx = self.funding_tx;
-        let tx_builder = tx.as_advanced_builder();
-        debug!("final tx_builder: {:?}", tx_builder);
-
-        funding_tx.update_for_self(tx);
-
-        // Replace the old tx with the new one in the exclusion map
-        if let Some(tx_hash) = old_tx_hash {
-            live_cells_exclusion_map.remove(&tx_hash);
-        }
-        live_cells_exclusion_map.add_funding_tx(&funding_tx);
-
-        Ok(funding_tx)
+            live_cells_exclusion_map,
+        )
+        .await?;
+        debug!("final tx_builder: {:?}", tx.as_advanced_builder());
+        Ok(finalize_funding_tx_update(
+            self.funding_tx,
+            tx,
+            live_cells_exclusion_map,
+        ))
     }
 }
 
@@ -506,50 +558,15 @@ impl TxBuilder for ExternalFundingTxBuilder {
             .build_funding_cell()
             .map_err(|err| TxBuilderError::Other(err.into()))?;
 
-        let mut inputs = vec![];
-        let mut cell_deps = HashSet::new();
-
-        // Funding cell does not need new cell deps and header deps. The type script deps will be added with inputs.
-        let mut outputs: Vec<packed::CellOutput> = vec![funding_cell_output];
-        let mut outputs_data: Vec<packed::Bytes> = vec![funding_cell_output_data];
-
-        if let Some(ref tx) = self.funding_tx.tx {
-            inputs = tx.inputs().into_iter().collect();
-            cell_deps = tx.cell_deps().into_iter().collect();
-        }
-        self.build_udt_inputs_outputs(
+        build_base_from_funding_cell(
+            funding_cell_output,
+            funding_cell_output_data,
+            &self.funding_tx,
+            &self.request,
+            &self.context.funding_source_lock_script,
             cell_collector,
-            &mut inputs,
-            &mut outputs,
-            &mut outputs_data,
-            &mut cell_deps,
         )
-        .await?;
-        if let Some(ref tx) = self.funding_tx.tx {
-            for (i, output) in tx.outputs().into_iter().enumerate().skip(1) {
-                outputs.push(output.clone());
-                outputs_data.push(tx.outputs_data().get(i).unwrap_or_default().clone());
-            }
-        }
-
-        let builder = match self.funding_tx.tx {
-            Some(ref tx) => tx.as_advanced_builder(),
-            None => packed::Transaction::default().as_advanced_builder(),
-        };
-
-        // set a placeholder_witness for calculating transaction fee according to transaction size
-        let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-            .build();
-
-        let tx_builder = builder
-            .set_inputs(inputs)
-            .set_outputs(outputs)
-            .set_outputs_data(outputs_data)
-            .set_cell_deps(cell_deps.into_iter().collect())
-            .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
-        let tx = tx_builder.build();
-        Ok(tx)
+        .await
     }
 }
 
@@ -598,198 +615,26 @@ impl ExternalFundingTxBuilder {
         }
     }
 
-    async fn build_udt_inputs_outputs(
-        &self,
-        cell_collector: &mut dyn CellCollector,
-        inputs: &mut Vec<CellInput>,
-        outputs: &mut Vec<packed::CellOutput>,
-        outputs_data: &mut Vec<packed::Bytes>,
-        cell_deps: &mut HashSet<packed::CellDep>,
-    ) -> Result<(), TxBuilderError> {
-        let udt_amount = self.request.local_amount;
-        // return early if we don't need to build UDT cell
-        if self.request.udt_type_script.is_none() || udt_amount == 0 {
-            return Ok(());
-        }
-
-        let udt_type_script = self.request.udt_type_script.clone().ok_or_else(|| {
-            TxBuilderError::InvalidParameter(anyhow!("UDT type script not configured"))
-        })?;
-        let owner = self.context.funding_source_lock_script.clone();
-        let mut found_udt_amount: u128 = 0;
-
-        let mut query = CellQueryOptions::new_lock(owner.clone());
-        query.script_search_mode = Some(SearchMode::Exact);
-        query.secondary_script = Some(udt_type_script.clone());
-        query.data_len_range = Some(ValueRangeOption::new_min(16));
-
-        loop {
-            // each query will found at most one cell because of `min_total_capacity == 1` in CellQueryOptions
-            let (udt_cells, _) = cell_collector
-                .collect_live_cells_async(&query, true)
-                .await?;
-            if udt_cells.is_empty() {
-                break;
-            }
-            for cell in udt_cells.iter() {
-                let mut amount_bytes = [0u8; 16];
-                amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
-                let cell_udt_amount = u128::from_le_bytes(amount_bytes);
-                let ckb_amount: u64 = cell.output.capacity().unpack();
-                debug!(
-                    "found udt cell ckb_amount: {:?} udt_amount: {:?} cell: {:?}",
-                    ckb_amount, cell_udt_amount, cell
-                );
-
-                found_udt_amount = found_udt_amount
-                    .checked_add(cell_udt_amount)
-                    .ok_or_else(|| TxBuilderError::Other(anyhow!("UDT amount overflow")))?;
-
-                inputs.push(CellInput::new(cell.out_point.clone(), 0));
-
-                if found_udt_amount >= udt_amount {
-                    let change_amount = found_udt_amount - udt_amount;
-                    if change_amount > 0 {
-                        let change_output_data: Bytes = change_amount.to_le_bytes().pack();
-                        let dummy_output = CellOutput::new_builder()
-                            .lock(owner)
-                            .type_(Some(udt_type_script.clone()).pack())
-                            .build();
-                        let required_capacity = dummy_output
-                            .occupied_capacity(
-                                Capacity::bytes(change_output_data.len())
-                                    .map_err(|err| TxBuilderError::Other(err.into()))?,
-                            )
-                            .map_err(|err| TxBuilderError::Other(err.into()))?
-                            .pack();
-                        let change_output = dummy_output
-                            .as_builder()
-                            .capacity(required_capacity)
-                            .build();
-
-                        outputs.push(change_output);
-                        outputs_data.push(change_output_data);
-                    }
-
-                    debug!("find proper UDT owner cells: {:?}", inputs);
-                    // we need to filter the cell deps by the contracts_context
-                    let udt_cell_deps = get_udt_cell_deps(&udt_type_script)
-                        .await
-                        .map_err(|_| TxBuilderError::ResolveCellDepFailed(udt_type_script))?;
-                    for cell_dep in udt_cell_deps {
-                        cell_deps.insert(cell_dep);
-                    }
-                    return Ok(());
-                }
-            }
-        }
-        Err(TxBuilderError::Other(anyhow!(
-            "can not find enough UDT owner cells for funding transaction"
-        )))
-    }
-
     /// Build an unsigned funding transaction for external signing.
     /// This collects cells, balances capacity, but does NOT sign the transaction.
     async fn build(
         self,
         live_cells_exclusion_map: &mut LiveCellsExclusionMap,
     ) -> Result<FundingTx, FundingError> {
-        // Build ScriptUnlocker (with empty keys since we won't sign)
-        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![]);
-        let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
-        let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
-        let mut unlockers = HashMap::default();
-        unlockers.insert(
-            sighash_script_id,
-            Box::new(sighash_unlocker) as Box<dyn ScriptUnlocker>,
-        );
-
-        let sender = self.context.funding_source_lock_script.clone();
-        // Build CapacityBalancer
-        let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-            .build();
-
-        let balancer = CapacityBalancer::new_simple(
-            sender.clone(),
-            placeholder_witness,
+        let tx = build_and_balance_tx(
+            &self,
+            &self.context.rpc_url,
+            &self.context.funding_source_lock_script,
             self.request.funding_fee_rate,
-        );
-
-        let ckb_client = new_ckb_rpc_async_client(&self.context.rpc_url);
-        let cell_dep_resolver = {
-            match ckb_client.get_block_by_number(0.into()).await? {
-                Some(genesis_block) => {
-                    match DefaultCellDepResolver::from_genesis_async(&BlockView::from(
-                        genesis_block,
-                    ))
-                    .await
-                    .ok()
-                    {
-                        Some(ret) => ret,
-                        None => {
-                            return Err(FundingError::CkbTxBuilderError(
-                                TxBuilderError::ResolveCellDepFailed(sender),
-                            ))
-                        }
-                    }
-                }
-                None => {
-                    return Err(FundingError::CkbTxBuilderError(
-                        TxBuilderError::ResolveCellDepFailed(sender),
-                    ))
-                }
-            }
-        };
-
-        let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
-        let mut cell_collector = new_default_cell_collector(&self.context.rpc_url);
-        let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
-
-        let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
-        live_cells_exclusion_map.truncate(tip_block_number);
-        live_cells_exclusion_map
-            .apply(&mut cell_collector)
-            .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
-
-        // Build the balanced transaction but don't unlock/sign it.
-        // We use build_unlocked which adds inputs for capacity and sets up witnesses,
-        // but since we use an empty signer, the signatures will be placeholders.
-        // The user will replace these placeholders with real signatures.
-        #[cfg(not(target_arch = "wasm32"))]
-        let (tx, _) = self.build_unlocked(
-            &mut cell_collector,
-            &cell_dep_resolver,
-            &header_dep_resolver,
-            &tx_dep_provider,
-            &balancer,
-            &unlockers,
-        )?;
-        #[cfg(target_arch = "wasm32")]
-        let (tx, _) = self
-            .build_unlocked_async(
-                &mut cell_collector,
-                &cell_dep_resolver,
-                &header_dep_resolver,
-                &tx_dep_provider,
-                &balancer,
-                &unlockers,
-            )
-            .await?;
-
-        let old_tx_hash = self.funding_tx.tx.as_ref().map(|tx| tx.hash());
-        let mut funding_tx = self.funding_tx;
+            live_cells_exclusion_map,
+        )
+        .await?;
         debug!("built unsigned funding tx: {:?}", tx);
-
-        funding_tx.update_for_self(tx);
-
-        // Replace the old tx with the new one in the exclusion map
-        if let Some(tx_hash) = old_tx_hash {
-            live_cells_exclusion_map.remove(&tx_hash);
-        }
-        live_cells_exclusion_map.add_funding_tx(&funding_tx);
-
-        Ok(funding_tx)
+        Ok(finalize_funding_tx_update(
+            self.funding_tx,
+            tx,
+            live_cells_exclusion_map,
+        ))
     }
 }
 
