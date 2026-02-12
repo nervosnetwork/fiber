@@ -4840,6 +4840,12 @@ impl ChannelActorState {
         );
     }
 
+    /// Bug fix: restore the `remote_revocation_nonce_for_send` from `_verify` or `_next`
+    /// if it was lost during persistence (e.g. the nonce was consumed before the state was saved).
+    /// This prevents a deadlock during channel reestablishment when `send` nonce is None
+    /// but `verify`/`next` nonces are available.
+    ///
+    /// NOTE: This is an independent bug fix unrelated to external funding.
     fn restore_missing_revocation_send_nonce(&mut self) {
         if self.remote_revocation_nonce_for_send.is_some() || self.last_revoke_ack_msg.is_some() {
             return;

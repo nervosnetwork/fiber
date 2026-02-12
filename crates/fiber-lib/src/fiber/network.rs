@@ -817,6 +817,11 @@ where
                     .and_then(|peer| state.session_channels_map.get(&peer.session_id))
                     .is_some_and(|channels| channels.contains(&channel_id));
 
+                // NOTE: Independent robustness fix unrelated to external funding.
+                // If a channel message arrives for a channel not yet tracked in session_channels_map
+                // (e.g. after reconnect), attempt to reestablish it on-the-fly so the message
+                // is not dropped. This can happen when the peer sends a message before we have
+                // completed the reestablish handshake.
                 if !found {
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id)
