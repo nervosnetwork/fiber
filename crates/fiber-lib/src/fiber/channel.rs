@@ -7659,7 +7659,11 @@ impl ChannelActorState {
                     .ok_or(ProcessingChannelError::InvalidParameter(
                         "Funding transaction should have at least one output".to_string(),
                     ))?;
-            assert!(data.as_ref().len() >= 16);
+            if data.as_ref().len() < 16 {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "UDT output data too short, expected at least 16 bytes".to_string(),
+                ));
+            }
             let mut amount_bytes = [0u8; 16];
             amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
             let udt_amount = u128::from_le_bytes(amount_bytes);
