@@ -127,6 +127,11 @@ impl ChannelActorState {
             pending_notify_settle_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: None,
+            external_funding: false,
+            external_funding_lock_script: None,
+            unsigned_funding_tx: None,
+            external_funding_started_at: None,
+            external_funding_signed_submitted: false,
         }
     }
 
@@ -358,6 +363,11 @@ impl ChannelActorState {
             pending_notify_settle_tlcs: vec![],
             ephemeral_config: Default::default(),
             private_key: None,
+            external_funding: true,
+            external_funding_lock_script: Some(Script::default()),
+            unsigned_funding_tx: Some(Transaction::default()),
+            external_funding_started_at: Some(deterministic_time(300)),
+            external_funding_signed_submitted: true,
         }
     }
 }
