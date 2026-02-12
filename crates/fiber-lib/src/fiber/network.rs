@@ -2260,6 +2260,16 @@ where
                     signed_tx.calc_tx_hash()
                 );
 
+                if !state.channels.contains_key(&channel_id) {
+                    let err = Error::ChannelNotFound(channel_id);
+                    error!(
+                        "Failed to send SubmitExternalFundingTx command to channel {:?}: {:?}",
+                        channel_id, err
+                    );
+                    let _ = reply.send(Err(err.to_string()));
+                    return Ok(());
+                }
+
                 // Forward the command to the channel actor
                 if let Err(e) = state
                     .send_command_to_channel(
@@ -2272,7 +2282,6 @@ where
                         "Failed to send SubmitExternalFundingTx command to channel {:?}: {:?}",
                         channel_id, e
                     );
-                    // Note: reply is already moved to the channel command, can't send error here
                 }
             }
         };
@@ -4993,6 +5002,7 @@ where
             features,
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
+                external_funding_timeout_seconds: config.external_funding_timeout_seconds,
             },
             inflight_payments: Default::default(),
             pending_external_funding_replies: Default::default(),

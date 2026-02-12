@@ -564,6 +564,7 @@ fn test_channel_actor_state_store() {
         external_funding: false,
         external_funding_lock_script: None,
         unsigned_funding_tx: None,
+        external_funding_started_at: None,
         external_funding_signed_submitted: false,
     };
 
@@ -691,6 +692,7 @@ fn test_serde_channel_actor_state_ciborium() {
         external_funding: false,
         external_funding_lock_script: None,
         unsigned_funding_tx: None,
+        external_funding_started_at: None,
         external_funding_signed_submitted: false,
     };
 

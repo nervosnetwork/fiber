@@ -10,7 +10,9 @@ use crate::fiber::config::{
 };
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::ChannelInfo;
-use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason};
+use crate::fiber::network::{
+    DebugEvent, FiberMessageWithPeerId, OpenChannelWithExternalFundingCommand, PeerDisconnectReason,
+};
 use crate::fiber::payment::{PaymentStatus, SendPaymentCommand};
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
@@ -40,7 +42,7 @@ use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
     packed::{CellInput, Script, Transaction},
-    prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
+    prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use musig2::secp::Point;
 use musig2::KeyAggContext;
@@ -6500,4 +6502,475 @@ async fn test_reestablish_restores_send_nonce() {
     assert!(err_string.contains(
         "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
     ));
+}
+
+// ============================================================================
+// External Funding Tests
+// ============================================================================
+
+use crate::test_utils::NetworkNodeConfigBuilder;
+
+/// Helper: create two interconnected nodes where node_b has auto-accept enabled.
+/// This is required for external funding tests because the `call!` for
+/// OpenChannelWithExternalFunding blocks until the peer accepts.
+async fn new_2_nodes_with_auto_accept() -> [NetworkNode; 2] {
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("ext-fund-node-{}", i)))
+            .base_dir_prefix(&format!("test-ext-fund-node-{}-", i));
+        if i == 1 {
+            // Enable auto-accept on node_b (index 1)
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+    nodes.try_into().expect("2 nodes")
+}
+
+/// Helper: open a channel with external funding, returning the channel id and unsigned tx.
+/// Requires node_b to have auto-accept enabled.
+async fn open_external_funding_channel(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    funding_amount: u128,
+) -> (Hash256, Transaction) {
+    let peer_id = node_b.peer_id.clone();
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            OpenChannelWithExternalFundingCommand {
+                peer_id: peer_id.clone(),
+                funding_amount,
+                public: false,
+                shutdown_script: Script::default(),
+                funding_lock_script: Script::default(),
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel with external funding success");
+
+    (result.channel_id, result.unsigned_funding_tx)
+}
+
+#[tokio::test]
+async fn test_open_channel_with_external_funding() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let funding_amount: u128 = 100_000_000_000; // 1000 CKB
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, funding_amount).await;
+
+    // Verify result has valid channel id and unsigned tx
+    assert_ne!(
+        channel_id,
+        Hash256::default(),
+        "channel id should not be default"
+    );
+    let unsigned_tx_view = unsigned_tx.clone().into_view();
+    assert!(
+        !unsigned_tx_view.outputs().is_empty(),
+        "unsigned funding tx should have at least one output"
+    );
+
+    // Verify channel state on node_a is AwaitingExternalFunding
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state.state,
+        ChannelState::AwaitingExternalFunding,
+        "channel should be in AwaitingExternalFunding state"
+    );
+    assert!(
+        state.external_funding,
+        "channel should be marked as external funding"
+    );
+    assert!(
+        state.unsigned_funding_tx.is_some(),
+        "unsigned funding tx should be stored in channel state"
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_timeout_abort() {
+    init_tracing();
+
+    let funding_amount: u128 = 100_000_000_000;
+    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("test-ext-fund-timeout-node-{}-", i));
+        if i == 0 {
+            builder = builder.fiber_config_updater(|config| {
+                config.external_funding_timeout_seconds = 1;
+            });
+        }
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+
+    let (channel_id, _unsigned_tx) =
+        open_external_funding_channel(&nodes[0], &nodes[1], funding_amount).await;
+    nodes[0]
+        .expect_event(
+            move |event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let funding_amount: u128 = 100_000_000_000; // 1000 CKB
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, funding_amount).await;
+
+    // In a real scenario, the user signs the tx with their wallet.
+    // In this mock, we just add a placeholder witness to simulate signing.
+    // as_advanced_builder().build() returns TransactionView, .data() converts to packed::Transaction.
+    let signed_tx: Transaction = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    // Submit the signed funding tx
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    // Verify the returned tx hash
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(
+        submit_result, expected_tx_hash,
+        "returned tx hash should match the signed tx hash"
+    );
+
+    // Verify channel state transitioned beyond AwaitingExternalFunding
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+        ),
+        "channel should have progressed beyond AwaitingExternalFunding, got {:?}",
+        state.state
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_wrong_state() {
+    init_tracing();
+
+    let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    // Open a NORMAL channel (not external funding)
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount: 100_000_000_000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let open_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelPendingToBeAccepted(..)))
+        .await;
+
+    let channel_id = open_result.channel_id;
+
+    // Try to submit a signed funding tx to a normal (non-external-funding) channel.
+    // This should fail because the channel is not in AwaitingExternalFunding state.
+    let dummy_tx = Transaction::default();
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: dummy_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+
+    let submit_result = call!(node_a.network_actor, submit_message).expect("node_a alive");
+    assert!(
+        submit_result.is_err(),
+        "submitting signed funding tx to a non-external-funding channel should fail"
+    );
+    let err_msg = submit_result.unwrap_err();
+    assert!(
+        err_msg.contains("AwaitingExternalFunding") || err_msg.contains("InvalidState"),
+        "error should mention wrong state, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_duplicate() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let funding_amount: u128 = 100_000_000_000;
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, funding_amount).await;
+
+    // Simulate signing
+    let signed_tx: Transaction = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    // First submission should succeed
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let first_result = call!(node_a.network_actor, submit_message).expect("node_a alive");
+    assert!(first_result.is_ok(), "first submission should succeed");
+
+    // Second submission should fail with RepeatedProcessing or InvalidState
+    let submit_message2 = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let second_result = call!(node_a.network_actor, submit_message2).expect("node_a alive");
+    assert!(
+        second_result.is_err(),
+        "duplicate submission should fail, got: {:?}",
+        second_result
+    );
+    let err_msg = second_result.unwrap_err();
+    assert!(
+        err_msg.contains("already been submitted")
+            || err_msg.contains("InvalidState")
+            || err_msg.contains("AwaitingExternalFunding"),
+        "error should indicate repeated processing or wrong state, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_output_mismatch() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let funding_amount: u128 = 100_000_000_000;
+
+    let (channel_id, _unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, funding_amount).await;
+
+    // Create a tampered tx with different outputs
+    let tampered_tx: Transaction = Transaction::default()
+        .as_advanced_builder()
+        .output(
+            ckb_types::packed::CellOutput::new_builder()
+                .capacity(999u64.pack())
+                .build(),
+        )
+        .output_data(ckb_types::packed::Bytes::default())
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: tampered_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message).expect("node_a alive");
+    assert!(
+        submit_result.is_err(),
+        "submitting a tampered tx should fail"
+    );
+    let err_msg = submit_result.unwrap_err();
+    assert!(
+        err_msg.contains("mismatch") || err_msg.contains("InvalidParameter"),
+        "error should mention mismatch, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_input_count_mismatch() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let funding_amount: u128 = 100_000_000_000;
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, funding_amount).await;
+
+    // Add an extra input to the tx to create a mismatch
+    let tampered_tx: Transaction = unsigned_tx
+        .as_advanced_builder()
+        .input(CellInput::default())
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: tampered_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message).expect("node_a alive");
+    assert!(
+        submit_result.is_err(),
+        "submitting tx with extra inputs should fail"
+    );
+    let err_msg = submit_result.unwrap_err();
+    assert!(
+        err_msg.contains("Input count mismatch") || err_msg.contains("mismatch"),
+        "error should mention input count mismatch, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_invalid_tlc_expiry_delta() {
+    init_tracing();
+
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    // Use a TLC expiry delta that is too small
+    let peer_id = node_b.peer_id.clone();
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            OpenChannelWithExternalFundingCommand {
+                peer_id: peer_id.clone(),
+                funding_amount: 100_000_000_000,
+                public: false,
+                shutdown_script: Script::default(),
+                funding_lock_script: Script::default(),
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: Some(1), // too small, MIN_TLC_EXPIRY_DELTA is much larger
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let result = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(
+        result.is_err(),
+        "opening channel with tiny TLC expiry delta should fail"
+    );
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("TLC expiry delta"),
+        "error should mention TLC expiry delta, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_invalid_commitment_delay() {
+    init_tracing();
+
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    // Use a commitment delay epoch that is too small (0)
+    let too_small_epoch = EpochNumberWithFraction::new(0, 0, 1);
+    let peer_id = node_b.peer_id.clone();
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            OpenChannelWithExternalFundingCommand {
+                peer_id: peer_id.clone(),
+                funding_amount: 100_000_000_000,
+                public: false,
+                shutdown_script: Script::default(),
+                funding_lock_script: Script::default(),
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: Some(too_small_epoch),
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let result = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(
+        result.is_err(),
+        "opening channel with too small commitment delay should fail"
+    );
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("commitment delay") || err_msg.contains("Commitment delay"),
+        "error should mention commitment delay, got: {}",
+        err_msg
+    );
 }

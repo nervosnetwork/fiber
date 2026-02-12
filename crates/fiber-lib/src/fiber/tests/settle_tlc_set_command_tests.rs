@@ -275,6 +275,7 @@ fn create_test_channel_state_with_tlc(
         external_funding: false,
         external_funding_lock_script: None,
         unsigned_funding_tx: None,
+        external_funding_started_at: None,
         external_funding_signed_submitted: false,
     }
 }

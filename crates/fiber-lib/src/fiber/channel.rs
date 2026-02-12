@@ -1,5 +1,6 @@
 use super::config::{
-    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
+    DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_EXTERNAL_FUNDING_TIMEOUT_SECONDS,
+    DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
 };
 use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
 use super::{
@@ -375,12 +376,15 @@ pub struct OpenChannelWithExternalFundingParameter {
 pub struct ChannelEphemeralConfig {
     // Timeout to auto close a funding channel
     pub funding_timeout_seconds: u64,
+    // Timeout to abort an external funding channel while waiting for signed tx submission
+    pub external_funding_timeout_seconds: u64,
 }
 
 impl Default for ChannelEphemeralConfig {
     fn default() -> Self {
         Self {
             funding_timeout_seconds: DEFAULT_FUNDING_TIMEOUT_SECONDS,
+            external_funding_timeout_seconds: DEFAULT_EXTERNAL_FUNDING_TIMEOUT_SECONDS,
         }
     }
 }
@@ -2337,8 +2341,10 @@ where
                     tx.calc_tx_hash()
                 );
                 state.unsigned_funding_tx = Some(tx);
+                state.external_funding_started_at = Some(SystemTime::now());
                 // Transition to AwaitingExternalFunding state
                 state.update_state(ChannelState::AwaitingExternalFunding);
+                self.schedule_external_funding_timeout_check(myself, state);
                 Ok(())
             }
             ChannelCommand::SubmitExternalFundingTx(signed_tx, reply) => {
@@ -2502,6 +2508,7 @@ where
         // otherwise it will construct its own tx and fail verification.
         state.funding_tx = Some(signed_tx.clone());
         state.external_funding_signed_submitted = true;
+        state.external_funding_started_at = None;
         state.update_state(ChannelState::CollaboratingFundingTx(
             CollaboratingFundingTxFlags::empty(),
         ));
@@ -2611,6 +2618,42 @@ where
             }
         }
         Ok(())
+    }
+
+    fn schedule_timeout_event(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        created_at: SystemTime,
+        timeout_seconds: u64,
+    ) {
+        let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
+        match Duration::from_secs(timeout_seconds)
+            .checked_sub(created_at.elapsed().unwrap_or_default())
+        {
+            Some(timeout) => {
+                // timeout in future
+                myself.send_after(timeout, event_factory);
+            }
+            None => {
+                // already timeout
+                myself.send_message(event_factory()).expect("myself alive");
+            }
+        }
+    }
+
+    fn schedule_external_funding_timeout_check(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &ChannelActorState,
+    ) {
+        let created_at = state
+            .external_funding_started_at
+            .unwrap_or(state.created_at);
+        self.schedule_timeout_event(
+            myself,
+            created_at,
+            state.ephemeral_config.external_funding_timeout_seconds,
+        );
     }
 
     fn post_add_tlc_command(
@@ -3285,39 +3328,15 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // handle funding timeout
         if state.can_abort_funding_on_timeout() {
-            let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
-
-            match Duration::from_secs(DEFAULT_FUNDING_TIMEOUT_SECONDS)
-                .checked_sub(state.created_at.elapsed().unwrap_or_default())
-            {
-                Some(timeout) => {
-                    // timeout in future
-                    myself.send_after(timeout, event_factory);
-                }
-                None => {
-                    // already timeout
-                    myself.send_message(event_factory()).expect("myself alive");
-                }
-            }
-        }
-
-        // handle funding timeout
-        if state.can_abort_funding_on_timeout() {
-            let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
-
-            match Duration::from_secs(state.ephemeral_config.funding_timeout_seconds)
-                .checked_sub(state.created_at.elapsed().unwrap_or_default())
-            {
-                Some(timeout) => {
-                    // timeout in future
-                    myself.send_after(timeout, event_factory);
-                }
-                None => {
-                    // already timeout
-                    myself.send_message(event_factory()).expect("myself alive");
-                }
+            if state.state == ChannelState::AwaitingExternalFunding {
+                self.schedule_external_funding_timeout_check(&myself, state);
+            } else {
+                self.schedule_timeout_event(
+                    &myself,
+                    state.created_at,
+                    state.ephemeral_config.funding_timeout_seconds,
+                );
             }
         }
 
@@ -4279,6 +4298,10 @@ pub struct ChannelActorState {
     // The unsigned funding transaction for external funding (before user signs it)
     #[serde_as(as = "Option<EntityHex>")]
     pub unsigned_funding_tx: Option<Transaction>,
+
+    // Timestamp when channel enters AwaitingExternalFunding.
+    #[serde(default)]
+    pub external_funding_started_at: Option<SystemTime>,
 
     // Whether a signed funding tx has been submitted for external funding.
     // This is a runtime-only flag and is not persisted.
@@ -5243,6 +5266,7 @@ impl ChannelActorState {
             external_funding: false,
             external_funding_lock_script: None,
             unsigned_funding_tx: None,
+            external_funding_started_at: None,
             external_funding_signed_submitted: false,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
@@ -5331,6 +5355,7 @@ impl ChannelActorState {
             external_funding: false,
             external_funding_lock_script: None,
             unsigned_funding_tx: None,
+            external_funding_started_at: None,
             external_funding_signed_submitted: false,
         };
         state.log_ack_state("[ack] new_outbound_channel");

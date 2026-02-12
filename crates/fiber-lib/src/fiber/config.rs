@@ -373,6 +373,16 @@ pub struct FiberConfig {
     #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
     pub funding_timeout_seconds: u64,
 
+    /// Timeout to abort external funding channel while waiting for signed tx. [default: 5 minutes]
+    #[arg(
+        name = "FIBER_EXTERNAL_FUNDING_TIMEOUT_SECONDS",
+        long = "fiber-external-funding-timeout-seconds",
+        env,
+        help = "Timeout to abort external funding channel while waiting for signed tx. [default: 5 minutes]"
+    )]
+    #[default(DEFAULT_EXTERNAL_FUNDING_TIMEOUT_SECONDS)]
+    pub external_funding_timeout_seconds: u64,
+
     /// Listen to WebSocket on the same TCP port
     #[arg(
         name = "FIBER_REUSE_PORT_FOR_WEBSOCKET",

@@ -580,9 +580,13 @@ impl ExternalFundingTxBuilder {
                 Ok((udt_output, data.freeze().pack()))
             }
             None => {
-                let ckb_amount = (self.request.local_amount as u64)
+                let local_amount = u64::try_from(self.request.local_amount)
+                    .map_err(|_| FundingError::OverflowError)?;
+                let remote_amount = u64::try_from(self.request.remote_amount)
+                    .map_err(|_| FundingError::OverflowError)?;
+                let ckb_amount = local_amount
                     .checked_add(self.request.local_reserved_ckb_amount)
-                    .and_then(|amount| amount.checked_add(self.request.remote_amount as u64))
+                    .and_then(|amount| amount.checked_add(remote_amount))
                     .and_then(|amount| amount.checked_add(self.request.remote_reserved_ckb_amount))
                     .ok_or(FundingError::OverflowError)?;
                 let ckb_output = packed::CellOutput::new_builder()
@@ -1054,5 +1058,197 @@ impl FundingTx {
 
         self.tx = Some(remote_tx);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a dummy ExternalFundingContext for unit tests.
+    fn dummy_external_context() -> ExternalFundingContext {
+        let script = Script::default();
+        ExternalFundingContext {
+            rpc_url: String::new(),
+            funding_source_lock_script: script.clone(),
+            funding_cell_lock_script: script,
+        }
+    }
+
+    #[test]
+    fn test_external_funding_build_ckb_funding_cell() {
+        let context = dummy_external_context();
+        let request = FundingRequest {
+            script: Script::default(),
+            udt_type_script: None,
+            local_amount: 100_000_000_000, // 1000 CKB
+            remote_amount: 50_000_000_000,
+            funding_fee_rate: 1000,
+            local_reserved_ckb_amount: 6_200_000_000,
+            remote_reserved_ckb_amount: 6_200_000_000,
+        };
+
+        let builder = ExternalFundingTxBuilder {
+            funding_tx: FundingTx::new(),
+            request: request.clone(),
+            context: context.clone(),
+        };
+
+        let (output, data) = builder.build_funding_cell().expect("build funding cell");
+
+        // For CKB channels: capacity = local_amount + remote_amount + local_reserved + remote_reserved
+        let expected_capacity: u64 = request.local_amount as u64
+            + request.remote_amount as u64
+            + request.local_reserved_ckb_amount
+            + request.remote_reserved_ckb_amount;
+        let actual_capacity: u64 = output.capacity().unpack();
+        assert_eq!(actual_capacity, expected_capacity);
+
+        // Lock script should be the funding cell lock script
+        assert_eq!(output.lock(), context.funding_cell_lock_script);
+
+        // No type script for CKB channels
+        assert!(output.type_().is_none());
+
+        // Data should be empty for CKB channels
+        assert_eq!(data, packed::Bytes::default());
+    }
+
+    #[test]
+    fn test_external_funding_build_udt_funding_cell() {
+        let context = dummy_external_context();
+        let udt_type_script = Script::new_builder()
+            .code_hash(packed::Byte32::from_slice(&[1u8; 32]).unwrap())
+            .hash_type(packed::Byte::new(0))
+            .build();
+
+        let request = FundingRequest {
+            script: Script::default(),
+            udt_type_script: Some(udt_type_script.clone()),
+            local_amount: 1_000_000, // UDT amount
+            remote_amount: 500_000,
+            funding_fee_rate: 1000,
+            local_reserved_ckb_amount: 14_200_000_000,
+            remote_reserved_ckb_amount: 14_200_000_000,
+        };
+
+        let builder = ExternalFundingTxBuilder {
+            funding_tx: FundingTx::new(),
+            request: request.clone(),
+            context: context.clone(),
+        };
+
+        let (output, data) = builder.build_funding_cell().expect("build funding cell");
+
+        // For UDT channels: capacity = local_reserved + remote_reserved
+        let expected_capacity =
+            request.local_reserved_ckb_amount + request.remote_reserved_ckb_amount;
+        let actual_capacity: u64 = output.capacity().unpack();
+        assert_eq!(actual_capacity, expected_capacity);
+
+        // Lock script should be the funding cell lock script
+        assert_eq!(output.lock(), context.funding_cell_lock_script);
+
+        // Type script should be the UDT type script
+        assert_eq!(
+            output.type_().to_opt().expect("has type script"),
+            udt_type_script
+        );
+
+        // Data should contain the total UDT amount (16 bytes, little-endian)
+        let expected_udt_amount: u128 = request.local_amount + request.remote_amount;
+        let data_bytes = data.raw_data();
+        assert_eq!(data_bytes.len(), 16);
+        let mut amount_bytes = [0u8; 16];
+        amount_bytes.copy_from_slice(&data_bytes[..16]);
+        assert_eq!(u128::from_le_bytes(amount_bytes), expected_udt_amount);
+    }
+
+    #[test]
+    fn test_external_funding_build_funding_cell_overflow() {
+        let context = dummy_external_context();
+
+        // Create a request where amounts overflow u64
+        let request = FundingRequest {
+            script: Script::default(),
+            udt_type_script: None,
+            local_amount: u64::MAX as u128,
+            remote_amount: u64::MAX as u128,
+            funding_fee_rate: 1000,
+            local_reserved_ckb_amount: u64::MAX,
+            remote_reserved_ckb_amount: u64::MAX,
+        };
+
+        let builder = ExternalFundingTxBuilder {
+            funding_tx: FundingTx::new(),
+            request,
+            context,
+        };
+
+        let result = builder.build_funding_cell();
+        assert!(result.is_err(), "should overflow");
+        match result {
+            Err(FundingError::OverflowError) => {} // expected
+            other => panic!("expected OverflowError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_external_funding_build_udt_funding_cell_overflow() {
+        let context = dummy_external_context();
+        let udt_type_script = Script::new_builder()
+            .code_hash(packed::Byte32::from_slice(&[1u8; 32]).unwrap())
+            .hash_type(packed::Byte::new(0))
+            .build();
+
+        // UDT amounts that overflow u128
+        let request = FundingRequest {
+            script: Script::default(),
+            udt_type_script: Some(udt_type_script),
+            local_amount: u128::MAX,
+            remote_amount: 1,
+            funding_fee_rate: 1000,
+            local_reserved_ckb_amount: 14_200_000_000,
+            remote_reserved_ckb_amount: 14_200_000_000,
+        };
+
+        let builder = ExternalFundingTxBuilder {
+            funding_tx: FundingTx::new(),
+            request,
+            context,
+        };
+
+        let result = builder.build_funding_cell();
+        assert!(result.is_err(), "should overflow");
+        match result {
+            Err(FundingError::OverflowError) => {} // expected
+            other => panic!("expected OverflowError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_external_funding_build_ckb_funding_cell_amount_cast_overflow() {
+        let context = dummy_external_context();
+        let request = FundingRequest {
+            script: Script::default(),
+            udt_type_script: None,
+            local_amount: (u64::MAX as u128) + 1,
+            remote_amount: 0,
+            funding_fee_rate: 1000,
+            local_reserved_ckb_amount: 0,
+            remote_reserved_ckb_amount: 0,
+        };
+
+        let builder = ExternalFundingTxBuilder {
+            funding_tx: FundingTx::new(),
+            request,
+            context,
+        };
+
+        let result = builder.build_funding_cell();
+        match result {
+            Err(FundingError::OverflowError) => {}
+            other => panic!("expected OverflowError, got {:?}", other),
+        }
     }
 }
