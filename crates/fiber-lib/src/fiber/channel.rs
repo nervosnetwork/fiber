@@ -3969,6 +3969,7 @@ pub(crate) fn validate_commit_diff_for_replay_inputs(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn require_pending_commit_diff_for_replay(
     channel_id: Hash256,
     pending_commit_diff: Option<&CommitDiff>,
@@ -7413,44 +7414,49 @@ impl ChannelActorState {
                     // peer will resend commitment_signed message
                     if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
                     {
-                        let commit_diff = require_pending_commit_diff_for_replay(
-                            self.get_id(),
-                            pending_commit_diff.as_ref(),
-                        )?;
-                        self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
-                        // In our current implementation, replaying RevokeAndAck first avoids
-                        // transient CommitSig verification mismatches during reestablish.
-                        let replay_order = resolve_dual_owed_replay_order(
-                            self.get_id(),
-                            commit_diff.replay_order_hint,
-                            self.get_remote_commitment_number(),
-                            commit_diff.remote_commitment_number_at_send,
-                            self.last_was_revoke,
-                        );
-                        debug!(
-                            "Dual-owed replay decision for channel {}: hint={:?}, last_was_revoke={}, remote_cn_now={}, remote_cn_at_send={}, chosen={:?}",
-                            self.get_id(),
-                            commit_diff.replay_order_hint,
-                            self.last_was_revoke,
-                            self.get_remote_commitment_number(),
-                            commit_diff.remote_commitment_number_at_send,
-                            replay_order
-                        );
-                        // During dual-owed replay, defer newly arrived peer TLC updates until
-                        // we finish verifying the replayed CommitmentSigned.
-                        self.start_defer_peer_tlc_updates();
-                        match replay_order {
-                            ReplayOrderHint::RevokeThenCommit => {
-                                self.send_revoke_and_ack_message(true)?;
-                                // Don't clear waiting_ack - we're still waiting for response to our CommitmentSigned.
-                                self.resend_commitment_from_diff(commit_diff)?;
-                                self.last_was_revoke = false;
+                        if let Some(ref commit_diff) = pending_commit_diff {
+                            // === New path: deterministic replay from stored CommitDiff ===
+                            self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
+                            let replay_order = resolve_dual_owed_replay_order(
+                                self.get_id(),
+                                commit_diff.replay_order_hint,
+                                self.get_remote_commitment_number(),
+                                commit_diff.remote_commitment_number_at_send,
+                                self.last_was_revoke,
+                            );
+                            debug!(
+                                "Dual-owed replay decision for channel {}: hint={:?}, last_was_revoke={}, remote_cn_now={}, remote_cn_at_send={}, chosen={:?}",
+                                self.get_id(),
+                                commit_diff.replay_order_hint,
+                                self.last_was_revoke,
+                                self.get_remote_commitment_number(),
+                                commit_diff.remote_commitment_number_at_send,
+                                replay_order
+                            );
+                            // During dual-owed replay, defer newly arrived peer TLC updates until
+                            // we finish verifying the replayed CommitmentSigned.
+                            self.start_defer_peer_tlc_updates();
+                            match replay_order {
+                                ReplayOrderHint::RevokeThenCommit => {
+                                    self.send_revoke_and_ack_message(true)?;
+                                    // Don't clear waiting_ack - we're still waiting for response to our CommitmentSigned.
+                                    self.resend_commitment_from_diff(commit_diff)?;
+                                    self.last_was_revoke = false;
+                                }
+                                ReplayOrderHint::CommitThenRevoke => {
+                                    self.resend_commitment_from_diff(commit_diff)?;
+                                    self.send_revoke_and_ack_message(true)?;
+                                }
                             }
-                            ReplayOrderHint::CommitThenRevoke => {
-                                self.resend_commitment_from_diff(commit_diff)?;
-                                self.last_was_revoke = false;
-                                self.send_revoke_and_ack_message(true)?;
-                            }
+                        } else {
+                            // === Legacy fallback: no CommitDiff, use old develop-branch behavior ===
+                            warn!(
+                                "No CommitDiff for channel {}, falling back to legacy reestablish path",
+                                self.get_id()
+                            );
+                            self.send_revoke_and_ack_message(true)?;
+                            self.set_waiting_ack(myself, false);
+                            self.resend_tlcs_on_reestablish(true)?;
                         }
                     } else {
                         self.send_revoke_and_ack_message(true)?;
@@ -7459,13 +7465,19 @@ impl ChannelActorState {
                     && my_local_commitment_number == peer_remote_commitment_number
                 {
                     // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag.
-                    let commit_diff = require_pending_commit_diff_for_replay(
-                        self.get_id(),
-                        pending_commit_diff.as_ref(),
-                    )?;
-                    self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
-                    self.resend_commitment_from_diff(commit_diff)?;
-                    self.last_was_revoke = false;
+                    if let Some(ref commit_diff) = pending_commit_diff {
+                        // === New path: deterministic replay from stored CommitDiff ===
+                        self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
+                        self.resend_commitment_from_diff(commit_diff)?;
+                        self.last_was_revoke = false;
+                    } else {
+                        // === Legacy fallback: no CommitDiff ===
+                        warn!(
+                            "No CommitDiff for channel {}, falling back to legacy reestablish path",
+                            self.get_id()
+                        );
+                        self.resend_tlcs_on_reestablish(true)?;
+                    }
                 } else {
                     // ignore, waiting for remote peer to resend revoke_and_ack
                 }
