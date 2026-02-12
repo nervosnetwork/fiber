@@ -48,6 +48,17 @@ fn fiber_wasm() -> Result<&'static WrappedFiberWasm, JsValue> {
         .ok_or_else(|| JsValue::from_str("Fiber wasm not started yet"))
 }
 
+/// Recursively normalize CKB `dep_type` / `depType` field values in JS objects.
+///
+/// CKB JSON-RPC and some JS libraries (e.g. Lumos) use `"dep_group"` for the
+/// dep_type value, but the CKB JSON-RPC types serialized by `ckb-jsonrpc-types`
+/// via serde expect `"dep_group"` while some wallets/SDKs produce `"depGroup"`
+/// (camelCase variant). This function walks the JS object tree and rewrites any
+/// `"depGroup"` occurrences to `"dep_group"` so that serde deserialization
+/// succeeds when converting JS values to Rust types.
+///
+/// TODO: Ideally this should be handled at the serde layer (e.g. with a custom
+/// deserializer or `#[serde(alias)]`), removing the need for runtime patching.
 fn normalize_dep_type(value: &JsValue) {
     if value.is_null() || value.is_undefined() {
         return;
