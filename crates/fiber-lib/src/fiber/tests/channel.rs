@@ -6765,3 +6765,131 @@ async fn test_reestablish_dual_owed_ordering() {
         "Commitment numbers should remain symmetric after dual-owed replay"
     );
 }
+
+/// Test legacy fallback for dual-owed reestablish (Path B1) when no CommitDiff is stored.
+/// Simulates a legacy channel by deleting CommitDiff from store before restart.
+/// The fallback should use resend_tlcs_on_reestablish instead of deterministic replay.
+#[tokio::test]
+async fn test_legacy_fallback_dual_owed_no_commit_diff() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive bidirectional payments to create dual-owed state.
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 500 + i as u128, false)
+            .await;
+        let _ = node_b
+            .send_payment_keysend(&node_a, 700 + i as u128, false)
+            .await;
+    }
+
+    // Wait for CommitDiff to appear (confirms pending commitment state).
+    let mut found_commit_diff = false;
+    for _ in 0..120 {
+        if node_a.store.get_pending_commit_diff(&channel_id).is_some() {
+            found_commit_diff = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        found_commit_diff,
+        "Expected CommitDiff to be stored before we can test the legacy path"
+    );
+
+    // Delete CommitDiff to simulate a legacy channel without stored diff.
+    node_a.store.delete_pending_commit_diff(&channel_id);
+    assert!(
+        node_a.store.get_pending_commit_diff(&channel_id).is_none(),
+        "CommitDiff should be deleted"
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish via legacy fallback"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN after legacy fallback"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN after legacy fallback"
+    );
+
+    // Verify channel is still functional after legacy reestablish.
+    let res = node_a.send_payment_keysend(&node_b, 999, true).await;
+    assert!(
+        res.is_ok(),
+        "Payment should succeed after legacy reestablish"
+    );
+}
+
+/// Test legacy fallback for single-owed reestablish (Path C) when no CommitDiff is stored.
+/// Only commitment is owed (no revoke needed).
+#[tokio::test]
+async fn test_legacy_fallback_single_owed_no_commit_diff() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive unidirectional payments to create single-owed state.
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 1000 + i as u128, false)
+            .await;
+    }
+
+    // Wait for CommitDiff to appear.
+    let mut found_commit_diff = false;
+    for _ in 0..120 {
+        if node_a.store.get_pending_commit_diff(&channel_id).is_some() {
+            found_commit_diff = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        found_commit_diff,
+        "Expected CommitDiff to be stored before we can test the legacy path"
+    );
+
+    // Delete CommitDiff to simulate a legacy channel.
+    node_a.store.delete_pending_commit_diff(&channel_id);
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish via legacy single-owed fallback"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN after legacy single-owed fallback"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN after legacy single-owed fallback"
+    );
+
+    // Verify channel is still functional.
+    let res = node_a.send_payment_keysend(&node_b, 999, true).await;
+    assert!(
+        res.is_ok(),
+        "Payment should succeed after legacy single-owed reestablish"
+    );
+}
