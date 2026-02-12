@@ -8,7 +8,10 @@ use crate::fiber::{
         NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags, SigningCommitmentFlags,
         UpdateCommand,
     },
-    network::{AcceptChannelCommand, OpenChannelCommand, PendingAcceptChannel, OpenChannelWithExternalFundingCommand},
+    network::{
+        AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
+        PendingAcceptChannel,
+    },
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,

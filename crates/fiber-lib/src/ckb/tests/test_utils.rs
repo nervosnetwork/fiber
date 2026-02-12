@@ -655,11 +655,100 @@ impl Actor for MockChainActor {
                 }
             }
 
-            BuildUnsignedFundingTx { reply, .. } => {
-                // Mock implementation: return an error for now as this is for external funding
-                let _ = reply.send(Err(FundingError::CkbTxBuilderError(TxBuilderError::Other(
-                    anyhow!("BuildUnsignedFundingTx not implemented in mock"),
-                ))));
+            BuildUnsignedFundingTx {
+                funding_tx,
+                request,
+                funding_source_lock_script: _,
+                funding_cell_lock_script,
+                reply,
+            } => {
+                // Mock implementation: build a simple unsigned funding tx similar to Fund handler.
+                let mut fulfilled_tx = funding_tx.clone();
+
+                let (outputs, outputs_data) = if let Some(ref udt_script) = request.udt_type_script
+                {
+                    let ckb_amount = match request
+                        .local_reserved_ckb_amount
+                        .checked_add(request.remote_reserved_ckb_amount)
+                    {
+                        Some(value) => value,
+                        None => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let udt_amount = match request.local_amount.checked_add(request.remote_amount) {
+                        Some(value) => value,
+                        None => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let mut data = BytesMut::with_capacity(16);
+                    data.put(&udt_amount.to_le_bytes()[..]);
+                    let output = CellOutput::new_builder()
+                        .capacity(Capacity::shannons(ckb_amount).pack())
+                        .type_(Some(udt_script.clone()).pack())
+                        .lock(funding_cell_lock_script)
+                        .build();
+                    (vec![output], vec![data.freeze().pack()])
+                } else {
+                    let local_amount = match u64::try_from(request.local_amount) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let remote_amount = match u64::try_from(request.remote_amount) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let total = match local_amount
+                        .checked_add(request.local_reserved_ckb_amount)
+                        .and_then(|value| value.checked_add(remote_amount))
+                        .and_then(|value| value.checked_add(request.remote_reserved_ckb_amount))
+                    {
+                        Some(value) => value,
+                        None => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let output = CellOutput::new_builder()
+                        .capacity(Capacity::shannons(total).pack())
+                        .lock(funding_cell_lock_script)
+                        .build();
+                    (vec![output], vec![packed::Bytes::default()])
+                };
+
+                let tx_builder = fulfilled_tx
+                    .take()
+                    .map(|x| x.as_advanced_builder())
+                    .unwrap_or_default();
+
+                fulfilled_tx.update_for_self(
+                    tx_builder
+                        .set_outputs(outputs)
+                        .set_outputs_data(outputs_data)
+                        .build(),
+                );
+
+                debug!(
+                    "Built unsigned funding tx for external funding: {:?}",
+                    &fulfilled_tx
+                );
+
+                if let Err(e) = reply.send(Ok(fulfilled_tx)) {
+                    error!(
+                        "[{}] send reply failed: {:?}",
+                        myself.get_name().unwrap_or_default(),
+                        e
+                    );
+                }
             }
 
             ReportRejected(_) => {
