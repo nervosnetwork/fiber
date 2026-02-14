@@ -2607,13 +2607,22 @@ where
                 }
             }
             ChannelEvent::CheckFundingTimeout => {
-                if state.can_abort_funding_on_timeout() {
+                // A stale timeout message may arrive after state transitions (e.g. external
+                // funding timeout scheduled before signed tx submission). Only abort when
+                // the currently applicable timeout has actually elapsed.
+                if state.has_funding_timeout_elapsed() {
                     info!("Abort funding on timeout for channel {}", state.get_id());
                     myself
                         .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
                             StopReason::AbortFunding,
                         )))
                         .expect("myself alive");
+                } else {
+                    debug!(
+                        "Ignore stale funding timeout check for channel {} in state {:?}",
+                        state.get_id(),
+                        state.state
+                    );
                 }
             }
         }
@@ -8335,6 +8344,24 @@ impl ChannelActorState {
             }
             _ => false,
         }
+    }
+
+    fn has_funding_timeout_elapsed(&self) -> bool {
+        if !self.can_abort_funding_on_timeout() {
+            return false;
+        }
+        let (started_at, timeout_seconds) = if self.state == ChannelState::AwaitingExternalFunding {
+            (
+                self.external_funding_started_at.unwrap_or(self.created_at),
+                self.ephemeral_config.external_funding_timeout_seconds,
+            )
+        } else {
+            (
+                self.created_at,
+                self.ephemeral_config.funding_timeout_seconds,
+            )
+        };
+        started_at.elapsed().unwrap_or_default() >= Duration::from_secs(timeout_seconds)
     }
 
     pub fn has_pending_operations(&self) -> bool {

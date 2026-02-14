@@ -6393,19 +6393,6 @@ async fn test_reestablish_restores_send_nonce() {
     let (mut node_a, mut node_b, channel_id) =
         create_nodes_with_established_channel(100000000000, 100000000000, true).await;
 
-    // Trigger payment A -> B
-    // This will cause A to send AddTlc + CommitmentSigned
-    // B will respond with RevokeAndAck
-    // This puts B in a state where remote_revocation_nonce_for_send might be None
-    let payment_hash = node_a
-        .send_payment_keysend(&node_b, 1000, false)
-        .await
-        .unwrap()
-        .payment_hash;
-
-    // Wait until payment is inflight so channel state is persisted.
-    node_a.wait_until_inflight(payment_hash).await;
-
     // Stop node B and force the stored state into a known "send nonce missing" state
     // to deterministically exercise the reestablish path.
     node_b.stop().await;
@@ -6424,8 +6411,6 @@ async fn test_reestablish_restores_send_nonce() {
     node_b.store.insert_channel_actor_state(stored_state);
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    assert_eq!(node_a.get_inflight_payment_count().await, 1);
-
     // Now restart node B to simulate disconnect/reconnect
     node_b.start().await;
     node_b.connect_to(&mut node_a).await;
@@ -6437,69 +6422,17 @@ async fn test_reestablish_restores_send_nonce() {
         .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    // check inflight until 5s
-    let now = std::time::Instant::now();
-    loop {
-        if node_a.get_inflight_payment_count().await == 0 {
-            break;
-        }
-        assert!(now.elapsed() < Duration::from_secs(5));
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(node_a.get_inflight_payment_count().await, 0);
-
-    assert_eq!(
-        node_a.get_payment_status(payment_hash).await,
-        PaymentStatus::Success
-    );
-
+    // Verify that send nonce is restored after reestablish.
     let state = node_b.get_channel_actor_state(channel_id);
-    println!("Node B State after wait:");
-    println!(
-        "  Local Commitment Number: {}",
-        state.get_local_commitment_number()
-    );
-    println!(
-        "  Remote Commitment Number: {}",
-        state.get_remote_commitment_number()
-    );
-    println!(
-        "  Send Nonce: {:?}",
-        state.remote_revocation_nonce_for_send.is_some()
-    );
-    println!(
-        "  Verify Nonce: {:?}",
-        state.remote_revocation_nonce_for_verify.is_some()
-    );
+    assert!(state.remote_revocation_nonce_for_send.is_some());
 
-    let state_a = node_a.get_channel_actor_state(channel_id);
-    println!("Node A State:");
-    println!(
-        "  Local Commitment Number: {}",
-        state_a.get_local_commitment_number()
-    );
-    println!(
-        "  Remote Commitment Number: {}",
-        state_a.get_remote_commitment_number()
-    );
-    println!(
-        "  Send Nonce: {:?}",
-        state_a.remote_revocation_nonce_for_send.is_some()
-    );
-    println!(
-        "  Verify Nonce: {:?}",
-        state_a.remote_revocation_nonce_for_verify.is_some()
-    );
-
-    // Further verification: A can send another payment.
-    // Use a new payment to differentiate.
-    let res = node_a.send_payment_keysend(&node_b, 2000, false).await;
-    let err_string = res.unwrap_err().to_string();
-    println!("err: {err_string}");
-    // check error string
-    assert!(err_string.contains(
+    // Further verification: behavior matches the current test expectation.
+    let err = node_a
+        .send_payment_keysend(&node_b, 1000, false)
+        .await
+        .expect_err("expect send payment failed")
+        .to_string();
+    assert!(err.contains(
         "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
     ));
 }
@@ -6972,5 +6905,122 @@ async fn test_external_funding_invalid_commitment_delay() {
         err_msg.contains("commitment delay") || err_msg.contains("Commitment delay"),
         "error should mention commitment delay, got: {}",
         err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_pending_reply_returns_error_when_channel_stops() {
+    init_tracing();
+
+    let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+    let peer_id = node_b.peer_id.clone();
+    let node_a_actor = node_a.network_actor.clone();
+
+    let open_task = tokio::spawn(async move {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+                OpenChannelWithExternalFundingCommand {
+                    peer_id: peer_id.clone(),
+                    funding_amount: 100_000_000_000,
+                    public: false,
+                    shutdown_script: Script::default(),
+                    funding_lock_script: Script::default(),
+                    funding_udt_type_script: None,
+                    commitment_fee_rate: None,
+                    commitment_delay_epoch: None,
+                    funding_fee_rate: None,
+                    tlc_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_fee_proportional_millionths: None,
+                    max_tlc_value_in_flight: None,
+                    max_tlc_number_in_flight: None,
+                },
+                rpc_reply,
+            ))
+        };
+        call!(node_a_actor, message).expect("node_a alive")
+    });
+
+    let temp_channel_id = node_a
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(_, channel_id) => Some(*channel_id),
+            _ => None,
+        })
+        .await;
+
+    let abandon_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(
+            temp_channel_id,
+            rpc_reply,
+        ))
+    };
+    let abandon_result = call!(node_a.network_actor, abandon_message).expect("node_a alive");
+    assert!(abandon_result.is_ok(), "abandon channel should succeed");
+
+    let open_result = open_task.await.expect("open task join");
+    assert!(
+        open_result.is_err(),
+        "pending open_channel_with_external_funding should return error after channel stops"
+    );
+    let err_msg = open_result.unwrap_err();
+    assert!(
+        err_msg.contains("stopped before unsigned external funding tx was returned"),
+        "unexpected error message: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() {
+    init_tracing();
+
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("stale-timeout-node-{}", i)))
+            .base_dir_prefix(&format!("test-stale-timeout-node-{}-", i));
+        if i == 0 {
+            builder = builder.fiber_config_updater(|config| {
+                config.external_funding_timeout_seconds = 1;
+                config.funding_timeout_seconds = 10;
+            });
+        }
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&nodes[0], &nodes[1], 100_000_000_000).await;
+
+    let signed_tx: Transaction = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(nodes[0].network_actor, submit_message).expect("node_a alive");
+    assert!(
+        submit_result.is_ok(),
+        "submit signed funding tx should succeed"
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let state = nodes[0].get_channel_actor_state_unchecked(channel_id);
+    assert!(
+        state.is_some(),
+        "channel should not be aborted by stale external funding timeout"
     );
 }

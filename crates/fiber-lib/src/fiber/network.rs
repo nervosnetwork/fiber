@@ -4407,6 +4407,14 @@ where
         // all check passed, now begin to remove from memory and DB
         self.channels.remove(&channel_id);
         self.channels_funding_lock_script_cache.remove(&channel_id);
+        if let Some(reply) = self.pending_external_funding_replies.remove(&channel_id) {
+            let err = format!(
+                "Channel {:?} stopped before unsigned external funding tx was returned: {:?}",
+                channel_id, reason
+            );
+            warn!("{}", err);
+            let _ = reply.send(Err(err));
+        }
         for (_peer_id, connected_peer) in self.peer_session_map.iter() {
             if let Some(session_channels) = self
                 .session_channels_map
