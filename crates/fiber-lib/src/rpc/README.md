@@ -393,7 +393,7 @@ Opens a channel with external funding. The node will negotiate the channel with 
 
 ##### Returns
 
-* `temporary_channel_id` - <em>[Hash256](#type-hash256)</em>, The temporary channel ID of the channel being opened.
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel being opened.
  Use this ID to submit the signed funding transaction.
 * `unsigned_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The final unsigned funding transaction that needs to be signed.
  The user should sign this transaction with their wallet and submit it
@@ -414,14 +414,14 @@ Submits a signed funding transaction for an externally funded channel.
 
 ##### Params
 
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, The temporary channel ID returned from `open_channel_with_external_funding`.
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID returned from `open_channel_with_external_funding`.
 * `signed_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The signed funding transaction. This must be the same final transaction structure
  that was returned from `open_channel_with_external_funding`, with valid
  witnesses (signatures) added, and should be ready for direct broadcast.
 
 ##### Returns
 
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID (may be updated from temporary to final after peer exchange).
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID.
 * `funding_tx_hash` - <em>`H256`</em>, The hash of the funding transaction that was submitted.
 
 ---

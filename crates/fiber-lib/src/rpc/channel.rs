@@ -420,9 +420,9 @@ pub struct OpenChannelWithExternalFundingParams {
 /// Result of opening a channel with external funding.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OpenChannelWithExternalFundingResult {
-    /// The temporary channel ID of the channel being opened.
+    /// The channel ID of the channel being opened.
     /// Use this ID to submit the signed funding transaction.
-    pub temporary_channel_id: Hash256,
+    pub channel_id: Hash256,
 
     /// The final unsigned funding transaction that needs to be signed.
     /// The user should sign this transaction with their wallet and submit it
@@ -433,7 +433,7 @@ pub struct OpenChannelWithExternalFundingResult {
 /// Parameters for submitting a signed funding transaction for external funding.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SubmitSignedFundingTxParams {
-    /// The temporary channel ID returned from `open_channel_with_external_funding`.
+    /// The channel ID returned from `open_channel_with_external_funding`.
     pub channel_id: Hash256,
 
     /// The signed funding transaction. This must be the same final transaction structure
@@ -445,7 +445,7 @@ pub struct SubmitSignedFundingTxParams {
 /// Result of submitting a signed funding transaction.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SubmitSignedFundingTxResult {
-    /// The channel ID (may be updated from temporary to final after peer exchange).
+    /// The channel ID.
     pub channel_id: Hash256,
 
     /// The hash of the funding transaction that was submitted.
@@ -830,7 +830,7 @@ where
         };
         handle_actor_call!(self.actor, message, params).map(|response| {
             OpenChannelWithExternalFundingResult {
-                temporary_channel_id: response.channel_id,
+                channel_id: response.channel_id,
                 unsigned_funding_tx: response.unsigned_funding_tx.into(),
             }
         })
