@@ -116,7 +116,7 @@ interface OpenChannelWithExternalFundingParams {
 }
 
 interface OpenChannelWithExternalFundingResult {
-    temporary_channel_id: HexString;
+    channel_id: HexString;
     unsigned_funding_tx: CkbJsonRpcTransaction;
 }
 
