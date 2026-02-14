@@ -5016,6 +5016,7 @@ where
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,
+                external_funding: Default::default(),
             },
             inflight_payments: Default::default(),
             pending_external_funding_replies: Default::default(),
