@@ -102,8 +102,9 @@ where
         }
 
         // Now we are sure the invoice is fulfilled, and `self.tlcs` is ready to be settled.
-        // Update invoice status to Received
-        self.mark_invoice_as_received_if_still_open(&invoice_status);
+        // For non-MPP invoices, once preimage exists and a fulfilled TLC is selected,
+        // mark invoice as Paid before dispatching settlements to prevent duplicate fulfills.
+        self.mark_invoice_status_before_settlement(&invoice, &invoice_status);
 
         let mut settlements = self.try_settle_all();
         settlements.append(&mut rejected);
@@ -283,6 +284,20 @@ where
                 .update_invoice_status(&self.payment_hash, CkbInvoiceStatus::Received)
                 .expect("update invoice status failed");
         }
+    }
+
+    fn mark_invoice_status_before_settlement(
+        &self,
+        invoice: &CkbInvoice,
+        invoice_status: &CkbInvoiceStatus,
+    ) {
+        if !invoice.allow_mpp() && self.store.get_preimage(&self.payment_hash).is_some() {
+            self.store
+                .update_invoice_status(&self.payment_hash, CkbInvoiceStatus::Paid)
+                .expect("update invoice status failed");
+            return;
+        }
+        self.mark_invoice_as_received_if_still_open(invoice_status);
     }
 }
 
