@@ -6523,20 +6523,13 @@ async fn test_open_channel_with_external_funding() {
         "unsigned funding tx should have at least one output"
     );
 
-    // Verify channel state on node_a is AwaitingExternalFunding
-    let state = node_a.get_channel_actor_state(channel_id);
-    assert_eq!(
-        state.state,
-        ChannelState::AwaitingExternalFunding,
-        "channel should be in AwaitingExternalFunding state"
-    );
+    // Between open and submit for external funding, channel state is runtime-only and should
+    // not be persisted in local store.
     assert!(
-        state.external_funding,
-        "channel should be marked as external funding"
-    );
-    assert!(
-        state.unsigned_funding_tx.is_some(),
-        "unsigned funding tx should be stored in channel state"
+        node_a
+            .get_channel_actor_state_unchecked(channel_id)
+            .is_none(),
+        "channel state should not be persisted before signed external funding tx submission"
     );
 }
 
