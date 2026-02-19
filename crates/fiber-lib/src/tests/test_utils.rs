@@ -182,6 +182,8 @@ pub fn gen_rpc_config() -> RpcConfig {
             "peer".to_string(),
             "watchtower".to_string(),
         ],
+        cors_enabled: false,
+        cors_allowed_origins: vec![],
     }
 }
 

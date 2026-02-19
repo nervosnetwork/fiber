@@ -934,12 +934,15 @@ async fn test_rpc_cors_headers() {
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
-    // Create a node with RPC enabled
+    // Create a node with RPC and CORS enabled
+    let mut rpc_config = gen_rpc_config();
+    rpc_config.cors_enabled = true; // Enable CORS for this test
+
     let node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some("node-cors-test".to_string()))
             .base_dir_prefix("test-fnn-node-cors-")
-            .rpc_config(Some(gen_rpc_config()))
+            .rpc_config(Some(rpc_config))
             .build(),
     )
     .await;
@@ -1022,5 +1025,51 @@ async fn test_rpc_cors_headers() {
             .headers()
             .contains_key("access-control-allow-headers"),
         "Preflight response should contain Access-Control-Allow-Headers header"
+    );
+}
+
+#[tokio::test]
+async fn test_rpc_cors_disabled_by_default() {
+    use hyper::Request;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    // Create a node with RPC enabled but CORS disabled (default)
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-cors-disabled-test".to_string()))
+            .base_dir_prefix("test-fnn-node-cors-disabled-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    // Get the RPC server address
+    let rpc_addr = node
+        .rpc_server
+        .as_ref()
+        .map(|(_, addr)| addr)
+        .expect("RPC server should be running");
+
+    let client = Client::builder(TokioExecutor::new()).build_http();
+
+    // Test: Regular POST request should NOT have CORS headers when disabled
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("http://{}", rpc_addr))
+        .header("Content-Type", "application/json")
+        .body(String::from(
+            r#"{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}"#,
+        ))
+        .expect("Failed to build request");
+
+    let response = client.request(req).await.expect("Failed to send request");
+
+    // CORS headers should NOT be present when CORS is disabled
+    assert!(
+        !response
+            .headers()
+            .contains_key("access-control-allow-origin"),
+        "Response should NOT contain Access-Control-Allow-Origin header when CORS is disabled"
     );
 }
