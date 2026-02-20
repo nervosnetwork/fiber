@@ -30,7 +30,8 @@ fn test_udt_whitelist() {
 
     let serialized = MoleculeUdtCfgInfos::from(udt_whitelist.clone()).as_bytes();
     let deserialized =
-        UdtCfgInfos::from(MoleculeUdtCfgInfos::from_slice(&serialized).expect("invalid mol"));
+        UdtCfgInfos::try_from(MoleculeUdtCfgInfos::from_slice(&serialized).expect("invalid mol"))
+            .expect("valid UdtCfgInfos");
     assert_eq!(udt_whitelist, deserialized);
 }
 

@@ -1085,14 +1085,18 @@ fn test_convert_udt_arg_info() {
         })],
     };
     let udt_arg_info_gen = molecule_fiber::UdtArgInfo::from(udt_arg_info.clone());
-    assert_eq!(udt_arg_info, udt_arg_info_gen.clone().into());
+    assert_eq!(
+        udt_arg_info,
+        UdtArgInfo::try_from(udt_arg_info_gen.clone()).unwrap()
+    );
 
     // 0x80 is not a valid utf-8 string, so it should be converted to empty string
     let udt_arg_info_modified: UdtArgInfo = udt_arg_info_gen
         .as_builder()
         .name([0x80].pack())
         .build()
-        .into();
+        .try_into()
+        .unwrap();
     assert_eq!("", udt_arg_info_modified.name);
 }
 

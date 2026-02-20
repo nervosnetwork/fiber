@@ -1,0 +1,63 @@
+[package]
+name = "fnn-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fnn = { path = ".." }
+bincode = "1.3.3"
+molecule = "0.8.0"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_fiber_message"
+path = "fuzz_targets/fuzz_fiber_message.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_gossip_message"
+path = "fuzz_targets/fuzz_gossip_message.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_invoice"
+path = "fuzz_targets/fuzz_invoice.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_onion_packet"
+path = "fuzz_targets/fuzz_onion_packet.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_store_deserialize"
+path = "fuzz_targets/fuzz_store_deserialize.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_molecule_types"
+path = "fuzz_targets/fuzz_molecule_types.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_cursor"
+path = "fuzz_targets/fuzz_cursor.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_sphinx_packet"
+path = "fuzz_targets/fuzz_sphinx_packet.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pubkey"
+path = "fuzz_targets/fuzz_pubkey.rs"
+doc = false
