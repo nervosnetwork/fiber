@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "outDir": "./dist/",
+    "noImplicitAny": true,
+    "module": "es6",
+    "target": "ES2015",
+    "allowJs": true,
+    "moduleResolution": "node",
+    "sourceMap": true,
+    "declaration": true,
+    "declarationDir": "dist",
+    "rootDir": ".",
+    "typeRoots": [
+      "/src"
+    ],
+    "allowSyntheticDefaultImports": true
+  },
+  "exclude": [
+    "webpack.config.js",
+    "dist/**",
+    "node_modules/**"
+  ]
+}

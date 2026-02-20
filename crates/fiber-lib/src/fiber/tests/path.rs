@@ -1,0 +1,187 @@
+use crate::fiber::path::{NodeHeap, NodeHeapElement};
+use secp256k1::{PublicKey, SecretKey, SECP256K1};
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_node_heap() {
+    let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
+    let public_key1 = PublicKey::from_secret_key(SECP256K1, &secret_key1);
+
+    let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
+    let public_key2 = PublicKey::from_secret_key(SECP256K1, &secret_key2);
+
+    let mut heap = NodeHeap::new(10);
+    let node1 = NodeHeapElement {
+        node_id: public_key1.into(),
+        weight: 0,
+        tlc_min_value: 0,
+        distance: 0,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.0,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+    let node2 = NodeHeapElement {
+        node_id: public_key2.into(),
+        weight: 0,
+        distance: 0,
+        tlc_min_value: 0,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.0,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+    assert!(heap.is_empty());
+    heap.push(node1.clone());
+    heap.push(node2.clone());
+    assert!(!heap.is_empty());
+    assert_eq!(heap.pop(), Some(node1));
+    assert_eq!(heap.pop(), Some(node2));
+    assert_eq!(heap.pop(), None);
+    assert!(heap.is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_node_heap_probability() {
+    let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
+    let public_key1 = PublicKey::from_secret_key(SECP256K1, &secret_key1);
+
+    let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
+    let public_key2 = PublicKey::from_secret_key(SECP256K1, &secret_key2);
+
+    let mut heap = NodeHeap::new(10);
+    let node1 = NodeHeapElement {
+        node_id: public_key1.into(),
+        tlc_min_value: 0,
+        weight: 0,
+        distance: 0,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.0,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+    let node2 = NodeHeapElement {
+        node_id: public_key2.into(),
+        tlc_min_value: 0,
+        weight: 0,
+        distance: 0,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.5,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+    heap.push(node1.clone());
+    heap.push(node2.clone());
+    assert_eq!(heap.pop(), Some(node2));
+    assert_eq!(heap.pop(), Some(node1));
+    assert_eq!(heap.pop(), None);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_node_heap_distance() {
+    let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
+    let public_key1 = PublicKey::from_secret_key(SECP256K1, &secret_key1);
+
+    let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
+    let public_key2 = PublicKey::from_secret_key(SECP256K1, &secret_key2);
+
+    let mut heap = NodeHeap::new(10);
+    let node1 = NodeHeapElement {
+        tlc_min_value: 0,
+        node_id: public_key1.into(),
+        weight: 0,
+        distance: 10,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.0,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+    let node2 = NodeHeapElement {
+        node_id: public_key2.into(),
+        tlc_min_value: 0,
+        weight: 0,
+        distance: 2,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.0,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+    heap.push(node1.clone());
+    heap.push(node2.clone());
+    assert_eq!(heap.pop(), Some(node2));
+    assert_eq!(heap.pop(), Some(node1));
+    assert_eq!(heap.pop(), None);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_node_heap_push_or_fix() {
+    let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
+    let public_key1 = PublicKey::from_secret_key(SECP256K1, &secret_key1);
+
+    let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
+    let public_key2 = PublicKey::from_secret_key(SECP256K1, &secret_key2);
+
+    let mut heap = NodeHeap::new(10);
+    let node1 = NodeHeapElement {
+        node_id: public_key1.into(),
+        tlc_min_value: 0,
+        weight: 0,
+        distance: 10,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.0,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+    let node2 = NodeHeapElement {
+        node_id: public_key2.into(),
+        tlc_min_value: 0,
+        weight: 0,
+        distance: 2,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.0,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+
+    heap.push(node1.clone());
+    heap.push(node2.clone());
+    assert_eq!(heap.peek(), Some(node2.clone()).as_ref());
+
+    let node1_update = NodeHeapElement {
+        node_id: public_key1.into(),
+        tlc_min_value: 0,
+        weight: 0,
+        distance: 1,
+        amount_to_send: 0,
+        fee_charged: 0,
+        probability: 0.0,
+        next_hop: None,
+        incoming_tlc_expiry: 0,
+        pending_count: 0,
+    };
+
+    heap.push_or_fix(node1_update.clone());
+
+    assert_eq!(heap.pop(), Some(node1_update));
+    assert_eq!(heap.pop(), Some(node2));
+    assert_eq!(heap.pop(), None);
+}

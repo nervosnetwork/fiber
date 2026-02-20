@@ -37,8 +37,8 @@ assert {
 }
 
 script:pre-request {
-  // 10 seconds expiry
-  let expiry = "0x" + (Date.now() + 1000 * 10).toString(16);
+  // default 2/3 commitment_delay_epoch is 6 * 2/3 * 2 = 8 seconds in test environment
+  let expiry = "0x" + (Date.now() + 1000 * 9).toString(16);
   bru.setVar("expiry", expiry);
 }
 

@@ -68,7 +68,7 @@ FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' RUST_LOG='info' ./fnn -c config.yml -d
 
 FNN is still under development, the protocol and storage format may changed between versions. We strongly recommend you to close the channel before upgrading the node, otherwise, you may lose channel data and funds!
 
-1. [list all channels](./src/rpc/README.md#channel-list_channels) and [close](./src/rpc/README.md#channel-shutdown_channel) them via RPC.
+1. [list all channels](./crates/fiber-lib/src/rpc/README.md#channel-list_channels) and [close](./crates/fiber-lib/src/rpc/README.md#channel-shutdown_channel) them via RPC.
 
 2. Stop the node and remove the storage of the node:
 
@@ -96,11 +96,12 @@ fnn-migrate -p /folder-to/my-fnn/fiber/store
 ## Documentation
 
 * [Light Paper](./docs/light-paper.md)
-* [RPC Documentation](./src/rpc/README.md)
+* [Glossary](./docs/glossary.md)
+* [RPC Documentation](./crates/fiber-lib/src/rpc/README.md)
 * [P2P Message Protocol](./docs/specs/p2p-message.md)
 * [Invoice Protocol](./docs/specs/payment-invoice.md)
 
-**We are in an actively developing stage, don't hesitate to [report issues](https://github.com/nervosnetwork/fiber/issues) or ask for help in the [channel of the Nervos dev community](https://discord.gg/c5gntbFd).**
+**We are in an actively developing stage, don't hesitate to [report issues](https://github.com/nervosnetwork/fiber/issues) or ask for help in the [channel of the Nervos dev community](https://discord.gg/BF9AJ4fzs6).**
 
 ## Testnet deployment information
 

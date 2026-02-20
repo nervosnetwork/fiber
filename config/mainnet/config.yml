@@ -26,7 +26,7 @@ fiber:
             args: 0x64818d82a372312fb007c480391e1b9759d21b2c7f7959b9c177d72cdc243394
         - cell_dep:
             out_point:
-              tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 # ckb_auth
+              tx_hash: 0x95006eee7b4c0c8ad66e0514c88ed0ae43fc8db27793427de86a348ec720b9d6 # ckb_auth
               index: 0x0
             dep_type: code
     - name: CommitmentLock
@@ -41,7 +41,7 @@ fiber:
             args: 0xdb16e6dcb17f670e5fb7c556d81e522ec5edb069ad2fa3e898e7ccea6c26a39f
         - cell_dep:
             out_point:
-              tx_hash: 0x22ccb3018ca1aa7acd7b0ef7f5b01048be2525bb7364eafc8af04fd4d7279384 #ckb_auth
+              tx_hash: 0x95006eee7b4c0c8ad66e0514c88ed0ae43fc8db27793427de86a348ec720b9d6 #ckb_auth
               index: 0x0
             dep_type: code
 
@@ -56,17 +56,17 @@ ckb:
   rpc_url: "http://127.0.0.1:8114/"
   udt_whitelist:
     ## https://github.com/CKBFansDAO/xudtlogos/blob/f2557839ecde0409ba674516a62ae6752bc0daa9/public/tokens/token_list.json#L548
-    # - name: USDI
-    #  script:
-    #    code_hash: 0xbfa35a9c38a676682b65ade8f02be164d48632281477e36f8dc2f41f79e56bfc
-    #    hash_type: type
-    #    args: 0xd591ebdc69626647e056e13345fd830c8b876bb06aa07ba610479eb77153ea9f
-    #  cell_deps:
-    #    - type_id:
-    #        code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
-    #        hash_type: type
-    #        args: 0x9105ea69838511ca609518d27855c53fed1b5ffaff4cfb334f58b40627d211c4
-    #  auto_accept_amount: 10000000
+    - name: USDI
+      script:
+        code_hash: 0xbfa35a9c38a676682b65ade8f02be164d48632281477e36f8dc2f41f79e56bfc
+        hash_type: type
+        args: 0xd591ebdc69626647e056e13345fd830c8b876bb06aa07ba610479eb77153ea9f
+      cell_deps:
+        - type_id:
+            code_hash: 0x00000000000000000000000000000000000000000000000000545950455f4944
+            hash_type: type
+            args: 0x9105ea69838511ca609518d27855c53fed1b5ffaff4cfb334f58b40627d211c4
+      auto_accept_amount: 10000000
 
 services:
   - fiber

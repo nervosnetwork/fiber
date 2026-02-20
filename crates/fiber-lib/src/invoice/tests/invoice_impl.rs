@@ -1,0 +1,610 @@
+use crate::time::{Duration, SystemTime, UNIX_EPOCH};
+use bech32::ToBase32;
+use ckb_hash::blake2b_256;
+use ckb_types::packed::Script;
+use secp256k1::{
+    ecdsa::{RecoverableSignature, RecoveryId},
+    Message, Secp256k1,
+};
+
+use crate::{
+    fiber::{gen::invoice::RawCkbInvoice, types::Hash256},
+    gen_deterministic_secp256k1_keypair_tuple,
+    invoice::{
+        invoice_impl::{CkbScript, InvoiceData, SIGNATURE_U5_SIZE},
+        utils::{ar_decompress, ar_encompress},
+        Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceError, InvoiceSignature,
+    },
+};
+use crate::{
+    gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_secp256k1_private_key,
+    gen_rand_sha256_hash,
+};
+
+fn mock_invoice() -> CkbInvoice {
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(1280),
+        signature: None,
+        data: InvoiceData {
+            payment_hash: gen_rand_sha256_hash(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("description".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(1024)),
+                Attribute::FallbackAddr("address".to_string()),
+                Attribute::UdtScript(CkbScript(Script::default())),
+                Attribute::PayeePublicKey(public_key),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    invoice
+}
+
+fn mock_determined_invoice() -> CkbInvoice {
+    let (private_key, public_key) = gen_deterministic_secp256k1_keypair_tuple();
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(1280),
+        signature: None,
+        data: InvoiceData {
+            payment_hash: [3u8; 32].into(),
+            timestamp: Duration::from_secs(1024).as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcTimeout(5),
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("description".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(1024)),
+                Attribute::FallbackAddr("address".to_string()),
+                Attribute::UdtScript(CkbScript(Script::default())),
+                Attribute::PayeePublicKey(public_key),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    invoice
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_signature() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let signature = Secp256k1::new().sign_ecdsa_recoverable(
+        &Message::from_digest_slice(&[0u8; 32]).unwrap(),
+        &private_key,
+    );
+    let signature = InvoiceSignature(signature);
+    let base32 = signature.to_base32();
+    assert_eq!(base32.len(), SIGNATURE_U5_SIZE);
+
+    let decoded_signature = InvoiceSignature::from_base32(&base32).unwrap();
+    assert_eq!(decoded_signature, signature);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_ckb_invoice() {
+    let ckb_invoice = mock_invoice();
+    let ckb_invoice_clone = ckb_invoice.clone();
+    let raw_invoice: RawCkbInvoice = ckb_invoice.into();
+    let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
+    assert_eq!(decoded_invoice, ckb_invoice_clone);
+    let address = ckb_invoice_clone.to_string();
+    assert!(address.starts_with("fibb1280"));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_bc32m() {
+    let invoice = mock_invoice();
+    assert!(invoice.is_signed());
+    assert_eq!(invoice.check_signature(), Ok(()));
+
+    let address = invoice.to_string();
+    assert!(address.starts_with("fibb1280"));
+
+    let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
+    assert_eq!(decoded_invoice, invoice);
+    assert!(decoded_invoice.is_signed());
+    assert_eq!(decoded_invoice.amount(), Some(1280));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_from_str_err() {
+    let invoice = mock_invoice();
+
+    let address = invoice.to_string();
+    assert!(address.starts_with("fibb1280"));
+
+    let mut wrong = address.clone();
+    wrong.push('1');
+    let decoded_invoice = wrong.parse::<CkbInvoice>();
+    assert_eq!(
+        decoded_invoice.err(),
+        Some(InvoiceError::Bech32Error(bech32::Error::InvalidLength))
+    );
+
+    let mut wrong = address.clone();
+    // modify the values of wrong
+    wrong.replace_range(10..12, "hi");
+    let decoded_invoice = wrong.parse::<CkbInvoice>();
+    assert_eq!(
+        decoded_invoice.err(),
+        Some(InvoiceError::Bech32Error(bech32::Error::InvalidChar('i')))
+    );
+
+    let mut wrong = address;
+    // modify the values of wrong
+    wrong.replace_range(10..12, "aa");
+    let decoded_invoice = wrong.parse::<CkbInvoice>();
+    assert_eq!(
+        decoded_invoice.err(),
+        Some(InvoiceError::Bech32Error(bech32::Error::InvalidChecksum))
+    );
+
+    wrong = wrong.replace("1280", "1281");
+    let decoded_invoice = wrong.parse::<CkbInvoice>();
+    assert_eq!(
+        decoded_invoice.err(),
+        Some(InvoiceError::Bech32Error(bech32::Error::InvalidChecksum))
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_bc32m_not_same() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let signature = Secp256k1::new().sign_ecdsa_recoverable(
+        &Message::from_digest_slice(&[0u8; 32]).unwrap(),
+        &private_key,
+    );
+    let invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(1280),
+        signature: Some(InvoiceSignature(signature)),
+        data: InvoiceData {
+            payment_hash: [0u8; 32].into(),
+            timestamp: 0,
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("description hello".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(1024)),
+                Attribute::FallbackAddr("address".to_string()),
+            ],
+        },
+    };
+
+    let address = invoice.to_string();
+    let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
+    assert_eq!(decoded_invoice, invoice);
+
+    let mock_invoice = mock_invoice();
+    let mock_address = mock_invoice.to_string();
+    assert_ne!(mock_address, address);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_compress() {
+    let input = "hrp1gyqsqqq5qqqqq9gqqqqp6qqqqq0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq2qqqqqqqqqqqyvqsqqqsqqqqqvqqqqq8";
+    let bytes = input.as_bytes();
+    let compressed = ar_encompress(input.as_bytes()).unwrap();
+
+    let decompressed = ar_decompress(&compressed).unwrap();
+    let decompressed_str = std::str::from_utf8(&decompressed).unwrap();
+    assert_eq!(input, decompressed_str);
+    assert!(compressed.len() < bytes.len());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_builder() {
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
+        .add_attr(Attribute::Description("description".to_string()))
+        .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    let address = invoice.to_string();
+
+    assert_eq!(invoice, address.parse::<CkbInvoice>().unwrap());
+
+    assert_eq!(invoice.currency, Currency::Fibb);
+    assert_eq!(invoice.amount, Some(1280));
+    assert_eq!(invoice.payment_hash(), &gen_payment_hash);
+    assert_eq!(invoice.data.attrs.len(), 6);
+    assert!(invoice.check_signature().is_ok());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_check_signature() {
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
+        .add_attr(Attribute::Description("description".to_string()))
+        .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert_eq!(invoice.check_signature(), Ok(()));
+    let payee_pubkey = invoice.payee_pub_key();
+    assert_eq!(payee_pubkey, Some(&public_key));
+
+    // modify the some element then check signature will fail
+    let mut invoice_clone = invoice.clone();
+    invoice_clone.data.attrs[0] = Attribute::FinalHtlcMinimumExpiryDelta(6);
+    assert_eq!(
+        invoice_clone.check_signature(),
+        Err(InvoiceError::InvalidSignature)
+    );
+
+    let mut invoice_clone = invoice.clone();
+    invoice_clone.amount = Some(1281);
+    assert_eq!(
+        invoice_clone.check_signature(),
+        Err(InvoiceError::InvalidSignature)
+    );
+
+    // if the invoice is not signed, check_signature will skipped
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
+        .build()
+        .unwrap();
+
+    assert_eq!(invoice.check_signature(), Ok(()));
+    // modify the some element then check signature will also skip
+    let mut invoice_clone = invoice.clone();
+    invoice_clone.amount = Some(1281);
+    assert_eq!(invoice_clone.check_signature(), Ok(()));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_signature_check() {
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let (private_key, _) = gen_rand_secp256k1_keypair_tuple();
+    let public_key = gen_rand_fiber_public_key();
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key.into())
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
+        .add_attr(Attribute::Description("description".to_string()))
+        .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert_eq!(invoice.err(), Some(InvoiceError::InvalidSignature));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_builder_duplicated_attr() {
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(5))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(6))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert_eq!(
+        invoice.err(),
+        Some(InvoiceError::DuplicatedAttributeKey(format!(
+            "{:?}",
+            Attribute::FinalHtlcMinimumExpiryDelta(5)
+        )))
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_check_description_length() {
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
+    const MAX_DESCRIPTION_LEN: usize = 639;
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .description("a".repeat(MAX_DESCRIPTION_LEN + 1))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(5))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert!(invoice.is_err());
+    let message = invoice.err().unwrap().to_string();
+    assert_eq!(
+        message,
+        "Description with length of 640 is too long, max length is 639"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_builder_missing() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_preimage(gen_rand_sha256_hash())
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert_eq!(invoice.err(), None);
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert_eq!(invoice.err(), None);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_builder_preimage() {
+    let preimage = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_preimage(preimage)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    let clone_invoice = invoice.clone();
+    assert_eq!(hex::encode(invoice.payment_hash()).len(), 64);
+
+    let raw_invoice: RawCkbInvoice = invoice.into();
+    let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
+    assert_eq!(decoded_invoice, clone_invoice);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_builder_both_payment_hash_preimage() {
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(payment_hash)
+        .payment_preimage(preimage)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert_eq!(
+        invoice.err(),
+        Some(InvoiceError::BothPaymenthashAndPreimage)
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_serialize() {
+    let invoice = mock_invoice();
+    let invoice_2 = mock_invoice();
+    assert_ne!(invoice.payment_hash(), invoice_2.payment_hash());
+
+    let invoice = mock_determined_invoice();
+    let res = serde_json::to_string(&invoice);
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    assert!(res.contains("\"expiry_time\":\"0x400\""));
+    assert!(res.contains("0x3500000010000000300000003100000000000000000000000000000000000000000000000000000000000000000000000000000000"));
+    let decoded = serde_json::from_str::<CkbInvoice>(&res).unwrap();
+    assert_eq!(decoded, invoice);
+
+    // make sure bincode serialize and deserialize is correct
+    // if this test failed, it means the bincode serialize and deserialize is not compatible
+    // we need to update the `expect_check_sum` here and add a migration for the old data
+    let bincode = bincode::serialize(&invoice).unwrap();
+    eprintln!("{:?}", bincode);
+    let check_sum = blake2b_256(&bincode);
+    let expect_check_sum = [
+        168, 120, 74, 42, 101, 19, 106, 192, 101, 97, 97, 237, 107, 124, 175, 49, 149, 137, 212,
+        75, 217, 64, 239, 42, 138, 4, 219, 200, 8, 123, 112, 75,
+    ];
+    assert_eq!(check_sum, &expect_check_sum[..]);
+    eprintln!("{:?}", check_sum);
+    let decoded = bincode::deserialize::<CkbInvoice>(&bincode).unwrap();
+    assert_eq!(decoded, invoice);
+}
+
+#[test]
+fn test_invoice_timestamp() {
+    let payment_hash = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice1 = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(payment_hash)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    // sleep 1 millisecond to make sure the timestamp is different
+    std::thread::sleep(Duration::from_millis(1));
+
+    let invoice2 = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(payment_hash)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert_ne!(invoice1.data.timestamp, invoice2.data.timestamp);
+    assert_ne!(invoice1.to_string(), invoice2.to_string());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_gen_payment_hash() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let payment_preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_preimage(payment_preimage)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    let payment_hash = invoice.payment_hash();
+    let expected_hash: Hash256 = blake2b_256(payment_preimage.as_ref()).into();
+    assert_eq!(expected_hash, *payment_hash);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_builder_neither_payment_hash_nor_preimage() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert_eq!(
+        invoice.err(),
+        Some(InvoiceError::NeitherPaymenthashNorPreimage)
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_udt_script() {
+    let script = Script::default();
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .udt_type_script(script.clone())
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    assert_eq!(invoice.udt_type_script().unwrap(), &script);
+
+    let res = serde_json::to_string(&invoice);
+    assert!(res.is_ok());
+    let decoded = serde_json::from_str::<CkbInvoice>(&res.unwrap()).unwrap();
+    assert_eq!(decoded, invoice);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_check_expiry_should_not_overflow() {
+    let mut invoice = mock_invoice();
+    invoice.data.timestamp = u128::MAX;
+    assert!(!invoice.is_expired()); // should not panic
+}
+
+#[test]
+fn test_invoice_check_expired() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .expiry_time(Duration::from_secs(1))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert!(!invoice.is_expired());
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(invoice.is_expired());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_check_signature_should_not_panic() {
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+
+    let mut invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    // create a recoverable signature with invalid recovery id
+    let raw_signature = [0u8; 64];
+    let recovery_id = RecoveryId::try_from(0).expect("valid recovery id");
+    let recoverable_signature = RecoverableSignature::from_compact(&raw_signature, recovery_id)
+        .expect("signature from compact");
+    invoice.signature = Some(InvoiceSignature(recoverable_signature));
+    // check signature should not panic
+    assert!(invoice.check_signature().is_err());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_with_mpp_option() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert!(!invoice.allow_mpp());
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert!(invoice.allow_mpp());
+
+    let serialized_invoice = serde_json::to_string(&invoice).unwrap();
+    eprintln!("Serialized invoice: {}", serialized_invoice);
+    let deserialized_invoice: CkbInvoice =
+        serde_json::from_str(&serialized_invoice).expect("Failed to deserialize invoice");
+    assert_eq!(deserialized_invoice, invoice);
+    assert!(deserialized_invoice.allow_mpp());
+
+    let human_readable_invoice = invoice.to_string();
+    let parsed_invoice: CkbInvoice = human_readable_invoice
+        .parse()
+        .expect("Failed to parse invoice");
+    assert_eq!(parsed_invoice, invoice);
+    assert!(parsed_invoice.allow_mpp());
+    assert!(parsed_invoice.payment_secret().is_some());
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .allow_mpp(false)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert!(!invoice.allow_mpp());
+    let payment_secret = invoice.payment_secret();
+    assert!(payment_secret.is_none());
+}

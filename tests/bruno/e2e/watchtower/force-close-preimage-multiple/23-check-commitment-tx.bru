@@ -1,0 +1,56 @@
+meta {
+  name: check submitted commitment tx should be settled
+  type: http
+  seq: 23
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_live_cell",
+    "params": [
+      {
+        "index": "0x0",
+        "tx_hash": "{{TX_HASH}}"
+      },
+      false
+    ]
+  }
+}
+
+script:pre-request {
+  if (bru.getVar("settlement_poll_iteration") === undefined) {
+    bru.setVar("settlement_poll_iteration", 0);
+  }
+  if (bru.getVar("settlement_poll_max") === undefined) {
+    bru.setVar("settlement_poll_max", 8);
+  }
+}
+
+script:post-response {
+  console.log("generated result: ", res.body);
+  const status = res.body?.result?.status;
+  if (status !== "unknown") {
+    const iteration = bru.getVar("settlement_poll_iteration");
+    const max = bru.getVar("settlement_poll_max");
+    if (iteration >= max) {
+      throw new Error(`Settlement tx not committed after ${max} polling attempts, status=${status}`);
+    }
+    bru.setVar("settlement_poll_iteration", iteration + 1);
+    bru.setNextRequest("generate a few blocks for final settlement tx committed");
+  } else {
+    bru.setVar("settlement_poll_iteration", undefined);
+  }
+}

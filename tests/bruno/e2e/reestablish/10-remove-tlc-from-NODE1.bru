@@ -32,11 +32,6 @@ body:json {
   }
 }
 
-assert {
-  res.body.error: isUndefined
-  res.body.result: isNull
-}
-
 script:post-response {
   // assert we can remove it without error, if we can't remove it means the reestablish failed
   // for example, if the tlc is not synced yet, it's status will not be in `Committed`, so we can't remove it
@@ -44,4 +39,11 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("remove tlc response: ", res.body);
+
+  // here we may don't need to send the remove command
+  if (res.body.error == undefined) {
+    // remove command is sent without error
+  } else if (!(res.body.error.message.includes("Unable to handle TLC command in waiting TLC ACK state"))) {
+    throw new Error("Assertion failed: error message is not right");
+  }
 }

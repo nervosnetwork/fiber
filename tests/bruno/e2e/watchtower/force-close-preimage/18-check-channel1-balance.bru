@@ -1,0 +1,38 @@
+meta {
+  name: check channel1 balance, node2 should claim amount from node1 by finding node3's preimage in settlement transaction
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE1_PEERID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.result.channels[0].local_balance: eq "0x5f5e100"
+  res.body.result.channels[0].received_tlc_balance: eq "0x0"
+}
+
+script:post-response {
+  console.log(res.body.result.channels[0]);
+}

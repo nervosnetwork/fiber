@@ -5,17 +5,31 @@ GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
+.PHONY: build-metrics-prof
+build-metrics-prof:
+	RUSTFLAGS="${RUSTFLAGS} --cfg tokio_unstable -Cforce-frame-pointers=yes" cargo +nightly build --profile prof --features "metrics pprof"
+
 .PHONY: test
 test:
-	RUST_LOG=off cargo nextest run --no-fail-fast
+	RUST_LOG=off cargo nextest run --no-fail-fast -p fnn -p fiber-bin
+
+.PHONY: check
+check:
+	cargo check --locked
+	cargo check --release --locked
+	cargo check --package fnn --no-default-features
+	cd migrate && cargo check --locked
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all --all-targets --all-features -- -D warnings -A clippy::module-inception
+	cargo clippy --all-targets --all-features -p fnn -p fiber-bin -- -D warnings
+	cargo clippy -p fiber-wasm -p fiber-wasm-db-worker  -p fiber-wasm-db-common --target wasm32-unknown-unknown -- -D warnings
+
 
 .PHONY: bless
 bless:
 	cargo clippy --fix --allow-dirty --allow-staged --all --all-targets --all-features
+	cargo fmt --all
 
 .PHONY: fmt
 fmt:
@@ -34,7 +48,7 @@ coverage-run-unittests:
 	RUSTFLAGS="${RUSTFLAGS} -Cinstrument-coverage" \
 		RUST_LOG=off \
 		LLVM_PROFILE_FILE="${COVERAGE_PROFRAW_DIR}/unittests-%p-%m.profraw" \
-			cargo test --all
+			cargo test -p fnn -p fiber-bin
 
 coverage-collect-data:
 	grcov "${COVERAGE_PROFRAW_DIR}" --binary-path "${CARGO_TARGET_DIR}/debug/" \
@@ -53,24 +67,24 @@ coverage-generate-report:
 
 coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
 
-RPC_GEN_VERSION = 0.1.11
+RPC_GEN_VERSION = 0.1.17
 .PHONY: gen-rpc-doc
 gen-rpc-doc:
 	@if ! command -v fiber-rpc-gen >/dev/null 2>&1 || [ "$$(fiber-rpc-gen --version | awk '{print $$2}')" != "$(RPC_GEN_VERSION)" ]; then \
         echo "Installing fiber-rpc-gen $(RPC_GEN_VERSION)..."; \
         cargo install fiber-rpc-gen --version $(RPC_GEN_VERSION) --force; \
 	fi
-	fiber-rpc-gen ./src/
-	if grep -q "TODO: add desc" ./src/rpc/README.md; then \
+	fiber-rpc-gen ./crates/fiber-lib/src/
+	if grep -q "TODO: add desc" ./crates/fiber-lib/src/rpc/README.md; then \
         echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
 		exit 1; \
     fi
 
 .PHONY: check-dirty-rpc-doc
 check-dirty-rpc-doc: gen-rpc-doc
-	git diff --exit-code ./src/rpc/README.md
+	git diff --exit-code ./crates/fiber-lib/src/rpc/README.md
 
-MIGRATION_CHECK_VERSION := 0.2.4
+MIGRATION_CHECK_VERSION := 0.3.1
 install-migration-check:
 	@if ! command -v migration-check >/dev/null 2>&1 || [ "$$(migration-check --version | awk '{print $$2}')" != "$(MIGRATION_CHECK_VERSION)" ]; then \
 		echo "Installing migration-check $(MIGRATION_CHECK_VERSION)..."; \
@@ -79,9 +93,16 @@ install-migration-check:
 
 .PHONY: check-migrate
 check-migrate: install-migration-check
-	migration-check -s ./src -o ./src/store/.schema.json
+	migration-check -s ./crates/fiber-lib/src -o ./crates/fiber-lib/src/store/.schema.json
 
 .PHONY: update-migrate-check
 update-migrate-check: install-migration-check
-	migration-check -s ./src -o ./src/store/.schema.json -u
+	migration-check -s ./crates/fiber-lib/src -o ./crates/fiber-lib/src/store/.schema.json -u
 
+.PHONY: benchmark-test
+benchmark-test:
+	cargo criterion --features bench
+
+.PHONY: wasm-test
+wasm-test:
+	export WORKING_DIR=$(shell pwd) && cd ./.github/wasm-test-runner && npm install && node ./index.js

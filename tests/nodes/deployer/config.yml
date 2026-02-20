@@ -19,7 +19,9 @@ rpc:
     - info
     - invoice
     - peer
+    - watchtower
     - dev
+    - prof
 
 cch:
   ignore_startup_failure: true

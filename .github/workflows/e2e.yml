@@ -1,9 +1,15 @@
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 name: E2E tests
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   e2e-testing:
+    name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -16,9 +22,20 @@ jobs:
           - cross-chain-hub
           - router-pay
           - udt-router-pay
-          - watchtower
+          - watchtower/force-close
+          - watchtower/force-close-after-multiple-payments
+          - watchtower/force-close-after-open-channel
+          - watchtower/force-close-preimage
+          - watchtower/force-close-preimage-multiple
+          - watchtower/force-close-remote-with-pending-tlcs-and-stop-watchtower
+          - watchtower/force-close-remote-without-pending-tlcs-and-stop-watchtower
+          - watchtower/force-close-with-consecutive-settlement
+          - watchtower/force-close-with-pending-tlcs
+          - watchtower/force-close-with-pending-tlcs-and-stop-watchtower
+          - watchtower/force-close-with-pending-tlcs-and-udt
+          - watchtower/revocation
         release:
-          - "0.116.1"
+          - "0.202.0"
         test_env:
           - "test"
         extra_bru_args:
@@ -27,101 +44,82 @@ jobs:
           # add an extra workflow to run udt using the env file xudt-test
           - workflow: "udt"
             test_env: "xudt-test"
-            release: "0.116.1"
+            release: "0.202.0"
           # add an extra workflow to run 3-nodes-transfer with sha256 hash algorithm
           - workflow: "3-nodes-transfer"
             test_env: "test"
-            release: "0.116.1"
+            release: "0.202.0"
             extra_bru_args: "--env-var HASH_ALGORITHM=sha256"
-    name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+
+          ######################################
+          # Funding Tx Verification Test Cases
+          - workflow: "funding-tx-verification"
+            test_env: "test"
+            release: "0.202.0"
+            extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=remove_change"
+          - workflow: "funding-tx-verification"
+            test_env: "test"
+            release: "0.202.0"
+            extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=modify_change"
+          - workflow: "funding-tx-verification"
+            test_env: "test"
+            release: "0.202.0"
+            extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=fund_from_peer"
+
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.workflow }}-${{ runner.os }}
       - uses: dsherret/rust-toolchain-file@v1
-      - name: Install dependencies
-        run: |
-          version=${{ matrix.release }}
-          wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
-          sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
-          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
-            wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
-            tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
-            echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
-            wget "https://github.com/lightningnetwork/lnd/releases/download/v0.18.0-beta/lnd-linux-amd64-v0.18.0-beta.tar.gz"
-            tar -xvaf "lnd-linux-amd64-v0.18.0-beta.tar.gz"
-            echo "$(pwd)/lnd-linux-amd64-v0.18.0-beta" >> $GITHUB_PATH
-          fi
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
+        with:
+          ckb-version: ${{ matrix.release }}
+          install-bitcoin-lnd: ${{ matrix.workflow == 'cross-chain-hub' }}
+          cache-prefix: 'e2e'
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/
+            tests/deploy/udt-init/target/
+          key: e2e-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            e2e-build-${{ runner.os }}-
 
       - name: Run e2e workflow
+        id: e2eTests
         run: |
           set -euo pipefail
-
-          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
-            ./tests/deploy/lnd-init/setup-lnd.sh
-          fi
+          # Save matrix values to generate unique ID for upload-artifact
+          echo '${{ toJSON(matrix) }}' > matrix.json
+          # Create a safe workflow name for artifact upload (replace / with -)
+          SAFE_WORKFLOW_NAME="${{ matrix.workflow }}"
+          echo "SAFE_WORKFLOW_NAME=${SAFE_WORKFLOW_NAME//\//-}" >> $GITHUB_ENV
 
           # Prebuild the program so that we can run the following script faster
-          cargo build
-          cd tests/deploy/udt-init && cargo build && cd -
-          if [ ${{ matrix.workflow }} = "router-pay" ]; then
-            export START_BOOTNODE=y
-          fi
+          cargo build --locked
+          cd ./tests/deploy/udt-init && cargo build --locked && cd -
           export ON_GITHUB_ACTION=y
-          ./tests/nodes/start.sh &
-
-          # Wait for the nodes to start, the initialization takes some time
-          # check all the ports are open
+          # Pass it to tests/funding-tx-builder as args
+          export EXTRA_BRU_ARGS="${{ matrix.extra_bru_args }}"
+          ./tests/nodes/start.sh "e2e/${{ matrix.workflow }}" &
 
           # when .ports file is not generated, we will retry 20 times to check if all ports are open
-          port_file=./tests/nodes/.ports
-          retry_count=0
-          while [ $retry_count -lt 100 ]; do
-            if [ -f $port_file ]; then
-              break
-            else
-                retry_count=$((retry_count + 1))
-                echo "File $port_file not found. Retrying in 2 seconds..."
-                sleep 2
-            fi
-          done
-
-          ports=()
-          while IFS= read -r line; do
-            ports+=("$line")
-          done < ./tests/nodes/.ports
-
-          echo "Checking if all ports are open ... ${ports[@]}"
-
-          try_number=60
-          count=0
-          while [ $count -lt $try_number ]; do
-            all_open=true
-            for port in "${ports[@]}"; do
-              if ! nc -z 127.0.0.1 $port; then
-                echo "Port $port is not open yet ..."
-                all_open=false
-                break
-              fi
-            done
-            if $all_open; then
-              echo "All ports are open now ..."
-              break
-            else
-              count=$((count + 1))
-              if [ $count -eq $try_number ]; then
-                echo "Reached maximum number of tries ($try_number), exiting with status 1"
-                exit 1
-              fi
-              echo "Not all ports are open, waiting 3 seconds before retrying"
-              sleep 3
-            fi
-          done
-
+          ./tests/nodes/wait.sh
 
           (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
 
           # -n means we will exit when any of the background processes exits.
           # https://www.gnu.org/software/bash/manual/bash.html#index-wait
           wait -n
+
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.e2eTests.outcome == 'failure'
+        with:
+          name: e2e-test-${{ env.SAFE_WORKFLOW_NAME }}-${{ hashFiles('matrix.json') }}-logs
+          path: tests/nodes/*.log
+
