@@ -1,8 +1,8 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus, TLCId,
-    TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
-    XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus,
+    ReplayOrderHint, TLCId, TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS,
+    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -6498,4 +6498,398 @@ async fn test_reestablish_restores_send_nonce() {
     assert!(err_string.contains(
         "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
     ));
+}
+
+/// Bidirectional pending operations during reestablish.
+/// Tests reestablish when both nodes have pending operations.
+#[tokio::test]
+async fn test_reestablish_bidirectional_pending() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Both nodes send payments close in time to create pending operations in both directions.
+    let _payment_a = node_a.send_payment_keysend(&node_b, 1000, false).await;
+    let _payment_b = node_b.send_payment_keysend(&node_a, 1000, false).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    let state_b = node_b.get_channel_actor_state(channel_id);
+    debug!(
+        "Node A before restart: waiting_ack={}",
+        state_a.tlc_state.waiting_ack
+    );
+    debug!(
+        "Node B before restart: waiting_ack={}",
+        state_b.tlc_state.waiting_ack
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "Commitment numbers should remain symmetric"
+    );
+}
+
+/// Stress test with multiple payments and restarts.
+/// Tests repeated restart cycles with payments.
+#[tokio::test]
+async fn test_restart_stress_multiple_restarts() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let panic_unexpected_events = vec!["panic".to_string(), "panicked".to_string()];
+    node_a
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+    node_b
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+
+    let initial_balance_a = node_a.get_local_balance_from_channel(channel_id);
+    let initial_balance_b = node_b.get_local_balance_from_channel(channel_id);
+
+    for cycle in 0..5 {
+        let payment_amount = 100 * (cycle + 1) as u128;
+        let _result = node_a
+            .send_payment_keysend(&node_b, payment_amount, false)
+            .await;
+
+        let wait_ms = 100 + (cycle * 50) as u64;
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+
+        node_a.restart().await;
+        node_a
+            .add_unexpected_events(panic_unexpected_events.clone())
+            .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+
+        let state = node_a.get_channel_actor_state(channel_id);
+        assert!(
+            !state.reestablishing,
+            "Should complete reestablish in cycle {}",
+            cycle
+        );
+    }
+
+    let final_balance_a = node_a.get_local_balance_from_channel(channel_id);
+    let final_balance_b = node_b.get_local_balance_from_channel(channel_id);
+    assert_eq!(
+        final_balance_a + final_balance_b,
+        initial_balance_a + initial_balance_b,
+        "Total balance should be conserved"
+    );
+}
+
+/// Restart stress reproducer.
+/// Runs repeated payment bursts with node restart and checks unexpected events.
+#[tokio::test]
+#[ignore] // Long-running restart stress test. Run explicitly when validating restart regressions.
+async fn test_node_restart() {
+    init_tracing();
+    let (mut node_a, node_b, _channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let panic_unexpected_events = vec!["panic".to_string(), "panicked".to_string()];
+    node_a
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+    node_b
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+
+    for cycle in 0..10 {
+        debug!("=== Restart cycle {} ===", cycle);
+
+        for _i in 0..10 {
+            let _payment1 = node_a.send_payment_keysend(&node_b, 1, false).await;
+            let _payment2 = node_b.send_payment_keysend(&node_a, 1, false).await;
+        }
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+
+        debug!("Stopping node_a for restart cycle {}", cycle);
+        node_a.restart().await;
+        debug!("Starting node_a after restart cycle {}", cycle);
+        node_a
+            .add_unexpected_events(panic_unexpected_events.clone())
+            .await;
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+    }
+
+    debug!("test_node_restart completed successfully with no unexpected events");
+}
+
+/// Test that commitment numbers remain consistent after reestablish.
+#[tokio::test]
+async fn test_reestablish_commitment_number_consistency() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive several updates to move commitment numbers before restart.
+    for i in 0..5 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 1000 + i as u128, false)
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN"
+    );
+}
+
+#[tokio::test]
+async fn test_reestablish_dual_owed_ordering() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 500 + i as u128, false)
+            .await;
+        let _ = node_b
+            .send_payment_keysend(&node_a, 700 + i as u128, false)
+            .await;
+    }
+
+    let mut saw_commit_then_revoke_hint = false;
+    for _ in 0..120 {
+        if let Some(diff) = node_a.store.get_pending_commit_diff(&channel_id) {
+            if diff.replay_order_hint == Some(ReplayOrderHint::CommitThenRevoke) {
+                saw_commit_then_revoke_hint = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        saw_commit_then_revoke_hint,
+        "Expected CommitDiff replay_order_hint=CommitThenRevoke in dual-owed scenario"
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish in dual-owed scenario"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "Commitment numbers should remain symmetric after dual-owed replay"
+    );
+}
+
+/// Test legacy fallback for dual-owed reestablish (Path B1) when no CommitDiff is stored.
+/// Simulates a legacy channel by deleting CommitDiff from store before restart.
+/// The fallback should use resend_tlcs_on_reestablish instead of deterministic replay.
+#[tokio::test]
+async fn test_legacy_fallback_dual_owed_no_commit_diff() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive bidirectional payments to create dual-owed state.
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 500 + i as u128, false)
+            .await;
+        let _ = node_b
+            .send_payment_keysend(&node_a, 700 + i as u128, false)
+            .await;
+    }
+
+    // Wait for CommitDiff to appear (confirms pending commitment state).
+    let mut found_commit_diff = false;
+    for _ in 0..120 {
+        if node_a.store.get_pending_commit_diff(&channel_id).is_some() {
+            found_commit_diff = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        found_commit_diff,
+        "Expected CommitDiff to be stored before we can test the legacy path"
+    );
+
+    // Delete CommitDiff to simulate a legacy channel without stored diff.
+    node_a.store.delete_pending_commit_diff(&channel_id);
+    assert!(
+        node_a.store.get_pending_commit_diff(&channel_id).is_none(),
+        "CommitDiff should be deleted"
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish via legacy fallback"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN after legacy fallback"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN after legacy fallback"
+    );
+
+    // Verify channel is still functional after legacy reestablish.
+    let res = node_a.send_payment_keysend(&node_b, 999, true).await;
+    assert!(
+        res.is_ok(),
+        "Payment should succeed after legacy reestablish"
+    );
+}
+
+/// Test legacy fallback for single-owed reestablish (Path C) when no CommitDiff is stored.
+/// Only commitment is owed (no revoke needed).
+#[tokio::test]
+async fn test_legacy_fallback_single_owed_no_commit_diff() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive unidirectional payments to create single-owed state.
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 1000 + i as u128, false)
+            .await;
+    }
+
+    // Wait for CommitDiff to appear.
+    let mut found_commit_diff = false;
+    for _ in 0..120 {
+        if node_a.store.get_pending_commit_diff(&channel_id).is_some() {
+            found_commit_diff = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        found_commit_diff,
+        "Expected CommitDiff to be stored before we can test the legacy path"
+    );
+
+    // Delete CommitDiff to simulate a legacy channel.
+    node_a.store.delete_pending_commit_diff(&channel_id);
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish via legacy single-owed fallback"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN after legacy single-owed fallback"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN after legacy single-owed fallback"
+    );
+
+    // Verify channel is still functional.
+    let res = node_a.send_payment_keysend(&node_b, 999, true).await;
+    assert!(
+        res.is_ok(),
+        "Payment should succeed after legacy single-owed reestablish"
+    );
 }

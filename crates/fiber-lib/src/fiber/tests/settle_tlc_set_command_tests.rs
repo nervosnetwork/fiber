@@ -9,8 +9,8 @@ use tentacle::secio::PeerId;
 use crate::fiber::channel::InboundTlcStatus;
 use crate::fiber::channel::{
     AppliedFlags, ChannelActorState, ChannelActorStateStore, ChannelBasePublicKeys,
-    ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentNumbers, InMemorySigner, TLCId,
-    TlcInfo, TlcState, TlcStatus,
+    ChannelConstraints, ChannelState, ChannelTlcInfo, CommitDiff, CommitmentNumbers,
+    InMemorySigner, TLCId, TlcInfo, TlcState, TlcStatus,
 };
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::payment::PaymentCustomRecords;
@@ -170,6 +170,18 @@ impl ChannelActorStateStore for MockStore {
     fn is_tlc_settled(&self, _channel_id: &Hash256, _payment_hash: &Hash256) -> bool {
         false
     }
+
+    fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {
+        // No-op for tests
+    }
+
+    fn get_pending_commit_diff(&self, _channel_id: &Hash256) -> Option<CommitDiff> {
+        None
+    }
+
+    fn delete_pending_commit_diff(&self, _channel_id: &Hash256) {
+        // No-op for tests
+    }
 }
 
 fn create_test_invoice(payment_hash: Hash256, amount: Option<u128>, allow_mpp: bool) -> CkbInvoice {
@@ -249,6 +261,7 @@ fn create_test_channel_state_with_tlc(
         local_constraints: ChannelConstraints::default(),
         remote_constraints: ChannelConstraints::default(),
         tlc_state,
+        pending_replay_updates: vec![],
         retryable_tlc_operations: std::collections::VecDeque::new(),
         waiting_forward_tlc_tasks: HashMap::new(),
         remote_shutdown_script: None,
@@ -270,6 +283,9 @@ fn create_test_channel_state_with_tlc(
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        defer_peer_tlc_updates: false,
+        deferred_peer_tlc_updates: std::collections::VecDeque::new(),
+        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     }
