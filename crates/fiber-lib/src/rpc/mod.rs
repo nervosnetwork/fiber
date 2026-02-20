@@ -71,7 +71,8 @@ pub mod server {
     use std::sync::Arc;
     use tokio::net::TcpListener;
     use tokio::sync::RwLock;
-    use tower::Service;
+    use tower::{Service, ServiceExt};
+    use tower_http::cors::{Any, CorsLayer};
     use tracing::debug;
 
     use super::biscuit::BiscuitAuth;
@@ -111,6 +112,8 @@ pub mod server {
         addr: &str,
         auth: Option<BiscuitAuth>,
         methods: impl Into<Methods>,
+        cors_enabled: bool,
+        cors_allowed_origins: Vec<String>,
     ) -> Result<(ServerHandle, SocketAddr)> {
         let listener = TcpListener::bind(addr).await?;
         let listen_addr = listener.local_addr().expect("get local address");
@@ -186,6 +189,38 @@ pub mod server {
                         .build(methods, stop_handle);
                     async move { svc.call(req).await }
                 });
+
+                // Conditionally wrap the service with CORS layer if enabled
+                let svc = if cors_enabled {
+                    // Configure CORS to allow configured origins and handle preflight requests
+                    // Note: CORS must be the outermost layer to handle OPTIONS preflight requests
+                    // before authentication, as required by the CORS specification.
+                    let cors_layer = if cors_allowed_origins.is_empty() {
+                        // If no specific origins configured, allow all origins
+                        CorsLayer::new()
+                            .allow_origin(Any)
+                            .allow_methods(Any)
+                            .allow_headers(Any)
+                    } else {
+                        // Allow specific configured origins
+                        use tower_http::cors::AllowOrigin;
+                        let origins: Vec<_> = cors_allowed_origins
+                            .iter()
+                            .filter_map(|o| o.parse().ok())
+                            .collect();
+                        CorsLayer::new()
+                            .allow_origin(AllowOrigin::list(origins))
+                            .allow_methods(Any)
+                            .allow_headers(Any)
+                    };
+                    tower::ServiceBuilder::new()
+                        .layer(cors_layer)
+                        .service(svc)
+                        .boxed_clone()
+                } else {
+                    tower::ServiceBuilder::new().service(svc).boxed_clone()
+                };
+
                 tokio::spawn(serve_with_graceful_shutdown(
                     sock,
                     svc,
@@ -329,7 +364,14 @@ pub mod server {
             }
         }
 
-        let (handle, addr) = start_server(listening_addr, auth, modules).await?;
+        let (handle, addr) = start_server(
+            listening_addr,
+            auth,
+            modules,
+            config.cors_enabled,
+            config.cors_allowed_origins.clone(),
+        )
+        .await?;
         debug!("started listen to RPC addr {:?}", &listening_addr);
         Ok((handle, addr))
     }

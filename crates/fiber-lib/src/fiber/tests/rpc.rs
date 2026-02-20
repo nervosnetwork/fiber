@@ -927,3 +927,149 @@ async fn test_rpc_feature_check() {
         node_0.send_rpc_request("new_invoice", invoice_params).await;
     assert!(invoice_res.is_err());
 }
+
+#[tokio::test]
+async fn test_rpc_cors_headers() {
+    use hyper::Request;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    // Create a node with RPC and CORS enabled
+    let mut rpc_config = gen_rpc_config();
+    rpc_config.cors_enabled = true; // Enable CORS for this test
+
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-cors-test".to_string()))
+            .base_dir_prefix("test-fnn-node-cors-")
+            .rpc_config(Some(rpc_config))
+            .build(),
+    )
+    .await;
+
+    // Get the RPC server address
+    let rpc_addr = node
+        .rpc_server
+        .as_ref()
+        .map(|(_, addr)| addr)
+        .expect("RPC server should be running");
+
+    let client = Client::builder(TokioExecutor::new()).build_http();
+
+    // Test 1: Regular POST request should have CORS headers
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("http://{}", rpc_addr))
+        .header("Content-Type", "application/json")
+        .body(String::from(
+            r#"{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}"#,
+        ))
+        .expect("Failed to build request");
+
+    let response = client.request(req).await.expect("Failed to send request");
+
+    // Check CORS headers in response
+    assert!(
+        response
+            .headers()
+            .contains_key("access-control-allow-origin"),
+        "Response should contain Access-Control-Allow-Origin header"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
+        "*",
+        "Access-Control-Allow-Origin should be '*'"
+    );
+
+    // Test 2: OPTIONS preflight request should be handled
+    let preflight_req = Request::builder()
+        .method("OPTIONS")
+        .uri(format!("http://{}", rpc_addr))
+        .header("Origin", "http://example.com")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .body(String::new())
+        .expect("Failed to build preflight request");
+
+    let preflight_response = client
+        .request(preflight_req)
+        .await
+        .expect("Failed to send preflight request");
+
+    // Check preflight response headers
+    assert!(
+        preflight_response
+            .headers()
+            .contains_key("access-control-allow-origin"),
+        "Preflight response should contain Access-Control-Allow-Origin header"
+    );
+    assert_eq!(
+        preflight_response
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
+        "*",
+        "Preflight Access-Control-Allow-Origin should be '*'"
+    );
+    assert!(
+        preflight_response
+            .headers()
+            .contains_key("access-control-allow-methods"),
+        "Preflight response should contain Access-Control-Allow-Methods header"
+    );
+    assert!(
+        preflight_response
+            .headers()
+            .contains_key("access-control-allow-headers"),
+        "Preflight response should contain Access-Control-Allow-Headers header"
+    );
+}
+
+#[tokio::test]
+async fn test_rpc_cors_disabled_by_default() {
+    use hyper::Request;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    // Create a node with RPC enabled but CORS disabled (default)
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-cors-disabled-test".to_string()))
+            .base_dir_prefix("test-fnn-node-cors-disabled-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    // Get the RPC server address
+    let rpc_addr = node
+        .rpc_server
+        .as_ref()
+        .map(|(_, addr)| addr)
+        .expect("RPC server should be running");
+
+    let client = Client::builder(TokioExecutor::new()).build_http();
+
+    // Test: Regular POST request should NOT have CORS headers when disabled
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("http://{}", rpc_addr))
+        .header("Content-Type", "application/json")
+        .body(String::from(
+            r#"{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}"#,
+        ))
+        .expect("Failed to build request");
+
+    let response = client.request(req).await.expect("Failed to send request");
+
+    // CORS headers should NOT be present when CORS is disabled
+    assert!(
+        !response
+            .headers()
+            .contains_key("access-control-allow-origin"),
+        "Response should NOT contain Access-Control-Allow-Origin header when CORS is disabled"
+    );
+}
