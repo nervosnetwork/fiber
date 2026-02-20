@@ -106,3 +106,15 @@ benchmark-test:
 .PHONY: wasm-test
 wasm-test:
 	export WORKING_DIR=$(shell pwd) && cd ./.github/wasm-test-runner && npm install && node ./index.js
+
+FUZZ_DURATION ?= 30
+.PHONY: fuzz
+fuzz:
+	@rustup toolchain list | grep -q nightly || rustup toolchain install nightly
+	@cargo +nightly fuzz --version >/dev/null 2>&1 || cargo +nightly install cargo-fuzz
+	@cd crates/fiber-lib && \
+	for target in $$(cargo +nightly fuzz list); do \
+		echo "=== Fuzzing $$target for $(FUZZ_DURATION)s ===" && \
+		cargo +nightly fuzz run "$$target" -- -max_total_time=$(FUZZ_DURATION) || exit 1; \
+	done
+	@echo "All fuzz targets passed."
