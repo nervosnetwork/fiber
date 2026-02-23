@@ -561,33 +561,116 @@ fn test_graph_find_path_amount_failed() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_graph_find_path_direct_channel_insufficient_liquidity() {
-    // When there is only a direct channel between source and target and it has
-    // insufficient capacity, we should get an InsufficientBalance error instead
-    // of NoPathFound to give the user a more helpful error message.
-    let mut network = MockNetworkGraph::new(3);
+fn test_graph_build_route_insufficient_outbound_liquidity_non_mpp() {
+    // For a non-MPP payment the whole amount must flow through a single channel from
+    // the source.  If every outbound channel from source has less capacity than the
+    // requested amount, build_route should return InsufficientBalance early.
+    let mut network = MockNetworkGraph::new(5);
 
-    // Direct channel from node 1 to node 2 with capacity 100, but we want to send 1000
+    // Source node is 1.  It has one outbound channel with capacity 100.
     network.add_edge(1, 2, Some(100), Some(1));
-    let route = network.find_path(1, 2, 1000, 100);
-    assert!(matches!(route, Err(PathFindError::InsufficientBalance(_))));
-    let err_msg = route.unwrap_err().to_string();
+    // There is also a longer path via node 3, but its first hop is still capacity 100.
+    network.add_edge(1, 3, Some(100), Some(1));
+    network.add_edge(3, 2, Some(1000), Some(1));
+
+    let source = network.keys[1];
+    let target = network.keys[2];
+    network.set_source(source);
+
+    // Trying to pay 500 should fail early because max outbound from source is 100.
+    let payment_data = SendPaymentDataBuilder::new(target.into(), 500, Hash256::default())
+        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .max_fee_amount(Some(10))
+        .build()
+        .expect("valid payment_data");
+    let result = network.graph.build_route(500, None, None, &payment_data);
     assert!(
-        err_msg.contains("insufficient outbound liquidity"),
-        "Expected 'insufficient outbound liquidity' in: {err_msg}"
+        matches!(result, Err(PathFindError::InsufficientBalance(_))),
+        "expected InsufficientBalance, got {:?}",
+        result
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("max outbound liquidity"),
+        "Expected 'max outbound liquidity' in: {err_msg}"
     );
 
-    // When the direct channel has enough capacity, the path should succeed
-    network.add_edge(1, 2, Some(2000), Some(1));
-    let route = network.find_path(1, 2, 1000, 100);
-    assert!(route.is_ok());
+    // Adding a channel from source with sufficient capacity makes the payment possible.
+    network.add_edge(1, 4, Some(1000), Some(1));
+    network.add_edge(4, 2, Some(1000), Some(1));
+    let result = network.graph.build_route(500, None, None, &payment_data);
+    assert!(result.is_ok(), "expected Ok, got {:?}", result);
+}
 
-    // When there is no direct channel at all (only indirect), NoPathFound should be returned
-    let mut network2 = MockNetworkGraph::new(4);
-    network2.add_edge(1, 3, Some(100), Some(1));
-    network2.add_edge(3, 2, Some(100), Some(1));
-    let route = network2.find_path(1, 2, 1000, 100);
-    assert!(matches!(route, Err(PathFindError::NoPathFound)));
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_build_route_insufficient_outbound_liquidity_mpp() {
+    // For an MPP payment the amount can be split across multiple channels, so the
+    // relevant bound is the *total* outbound liquidity from source, not the max single
+    // channel.  If the total is still insufficient, build_route should fail early.
+    let mut network = MockNetworkGraph::new(4);
+
+    // Source node is 1.  It has two channels, each with capacity 300.
+    network.add_edge(1, 2, Some(300), Some(1));
+    network.add_edge(1, 3, Some(300), Some(1));
+    network.add_edge(2, 4, Some(1000), Some(1));
+    network.add_edge(3, 4, Some(1000), Some(1));
+
+    let source = network.keys[1];
+    let target = network.keys[4];
+    network.set_source(source);
+
+    // Build MPP-enabled payment data (allow_mpp=true, max_parts=4).
+    let mpp_payment = |amount: u128| {
+        SendPaymentDataBuilder::new(target.into(), amount, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .allow_mpp(true)
+            .max_parts(Some(4))
+            .max_fee_amount(Some(100))
+            .build()
+            .expect("valid payment_data")
+    };
+
+    // Paying 700 (> single channel 300 but <= total 2×300=600) should fail early for non-MPP…
+    let non_mpp = SendPaymentDataBuilder::new(target.into(), 700, Hash256::default())
+        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .max_fee_amount(Some(100))
+        .build()
+        .expect("valid payment_data");
+    let result = network.graph.build_route(700, None, None, &non_mpp);
+    assert!(
+        matches!(result, Err(PathFindError::InsufficientBalance(_))),
+        "non-MPP expected InsufficientBalance, got {:?}",
+        result
+    );
+
+    // …but should be allowed to proceed with MPP (total 600 >= 500).
+    // The early-fail check should NOT return InsufficientBalance here (it may
+    // return NoPathFound for other reasons unrelated to the early-fail check).
+    let pd = mpp_payment(500);
+    let result = network.graph.build_route(500, Some(1), None, &pd);
+    assert!(
+        !matches!(result, Err(PathFindError::InsufficientBalance(_))),
+        "MPP 500 must not be rejected by early-fail when total outbound (600) >= amount (500), got {:?}",
+        result
+    );
+
+    // Paying 700 total with MPP also fails: total outbound is only 600.
+    let pd = mpp_payment(700);
+    let result = network.graph.build_route(700, Some(1), None, &pd);
+    assert!(
+        matches!(result, Err(PathFindError::InsufficientBalance(_))),
+        "MPP 700 expected InsufficientBalance, got {:?}",
+        result
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("total outbound liquidity"),
+        "Expected 'total outbound liquidity' in: {err_msg}"
+    );
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

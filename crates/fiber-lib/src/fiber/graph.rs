@@ -1260,6 +1260,41 @@ where
             ));
         }
 
+        // Early fail: verify the source node's outbound liquidity can cover the payment amount
+        // before spending time on path-finding. This check is skipped when an explicit router
+        // is provided (the caller is responsible) and for self-payments (handled separately).
+        if payment_data.router.is_empty() && source != target {
+            let outbound_liquidities: Vec<u128> = self
+                .get_node_outbounds(source)
+                .filter(|(_, channel_info, _)| {
+                    channel_info.udt_type_script() == &payment_data.udt_type_script
+                })
+                .map(|(_, channel_info, channel_update)| {
+                    channel_update
+                        .outbound_liquidity
+                        .unwrap_or_else(|| channel_info.capacity())
+                })
+                .collect();
+
+            if payment_data.allow_mpp() {
+                // For MPP the payment can be split across all channels, so the total is the bound.
+                let total: u128 = outbound_liquidities.iter().sum();
+                if total < amount {
+                    return Err(PathFindError::InsufficientBalance(format!(
+                        "total outbound liquidity {total} is insufficient, required amount: {amount}"
+                    )));
+                }
+            } else {
+                // For a single-path payment the entire amount must flow through one channel.
+                let max = outbound_liquidities.iter().copied().max().unwrap_or(0);
+                if max < amount {
+                    return Err(PathFindError::InsufficientBalance(format!(
+                        "max outbound liquidity {max} is insufficient, required amount: {amount}"
+                    )));
+                }
+            }
+        }
+
         let path = self.resolve_route(
             source,
             amount,
@@ -2394,31 +2429,6 @@ where
                 edges_expanded,
                 started_time.elapsed(),
             );
-            // If there are direct channels from source to target but all have insufficient
-            // liquidity, return a more descriptive error to help diagnose the failure.
-            // Skip this check during max capacity searches (amount is None) since there is
-            // no specific required amount to compare against.
-            if !is_max_capacity_search {
-                let max_direct_liquidity = self
-                    .get_node_outbounds(source)
-                    .filter(|(peer, channel_info, _)| {
-                        *peer == target && &udt_type_script == channel_info.udt_type_script()
-                    })
-                    .map(|(_, channel_info, channel_update)| {
-                        channel_update
-                            .outbound_liquidity
-                            .unwrap_or_else(|| channel_info.capacity())
-                    })
-                    .max();
-                if let Some(max_liquidity) = max_direct_liquidity {
-                    if search_amount > max_liquidity {
-                        return Err(PathFindError::InsufficientBalance(format!(
-                            "direct channel to target has insufficient outbound liquidity: {} available, {} required",
-                            max_liquidity, search_amount
-                        )));
-                    }
-                }
-            }
             return Err(PathFindError::NoPathFound);
         }
         if let Some(edge) = last_edge {
