@@ -204,6 +204,20 @@ pub struct AcceptChannelResponse {
     pub new_channel_id: Hash256,
 }
 
+/// A channel that has been received from a remote peer but not yet accepted locally.
+/// These are held in `to_be_accepted_channels` waiting for a manual `accept_channel` call.
+#[derive(Debug, Clone)]
+pub struct PendingAcceptChannel {
+    /// The temporary channel ID assigned by the initiator.
+    pub channel_id: Hash256,
+    /// The peer ID of the channel initiator.
+    pub peer_id: PeerId,
+    /// The amount of CKB or UDT the initiator is contributing to the channel.
+    pub funding_amount: u128,
+    /// UDT type script, if this is a UDT channel.
+    pub udt_type_script: Option<Script>,
+}
+
 #[derive(Debug)]
 pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
@@ -365,6 +379,8 @@ pub enum NetworkActorCommand {
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
     ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
+    // Get all inbound channel requests that are waiting for `accept_channel`
+    GetPendingAcceptChannels(RpcReplyPort<Result<Vec<PendingAcceptChannel>, String>>),
 
     #[cfg(any(debug_assertions, feature = "bench"))]
     UpdateFeatures(FeatureVector),
@@ -2001,6 +2017,23 @@ where
                     })
                     .collect::<Vec<_>>();
                 let _ = rpc.send(Ok(peers));
+            }
+
+            NetworkActorCommand::GetPendingAcceptChannels(rpc) => {
+                let pending = state
+                    .to_be_accepted_channels
+                    .map
+                    .iter()
+                    .map(
+                        |(channel_id, (peer_id, open_channel))| PendingAcceptChannel {
+                            channel_id: *channel_id,
+                            peer_id: peer_id.clone(),
+                            funding_amount: open_channel.funding_amount,
+                            udt_type_script: open_channel.funding_udt_type_script.clone(),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                let _ = rpc.send(Ok(pending));
             }
 
             NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {

@@ -8,7 +8,7 @@ use crate::fiber::{
         NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags, SigningCommitmentFlags,
         UpdateCommand,
     },
-    network::{AcceptChannelCommand, OpenChannelCommand},
+    network::{AcceptChannelCommand, OpenChannelCommand, PendingAcceptChannel},
     serde_utils::{U128Hex, U64Hex},
     types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
@@ -416,6 +416,39 @@ trait ChannelRpc {
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
 }
 
+/// Convert a `PendingAcceptChannel` (inbound, not yet accepted) into a minimal `Channel`
+/// response suitable for inclusion in `list_channels(only_pending = true)`.
+///
+/// These channels are held in-memory by the network actor in `to_be_accepted_channels`.
+/// They have no `ChannelActorState` yet since `create_inbound_channel` has not been called.
+fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel, now: u64) -> Channel {
+    Channel {
+        channel_id: pending.channel_id,
+        // The accepting node is the non-initiator, so is_acceptor = true
+        is_acceptor: true,
+        is_public: false,
+        is_one_way: false,
+        channel_outpoint: None,
+        peer_id: pending.peer_id,
+        funding_udt_type_script: pending.udt_type_script.map(Into::into),
+        // Report as NegotiatingFunding since we're still awaiting local acceptance
+        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
+        // The remote peer's funding amount is what they're contributing
+        local_balance: 0,
+        remote_balance: pending.funding_amount,
+        offered_tlc_balance: 0,
+        received_tlc_balance: 0,
+        pending_tlcs: vec![],
+        latest_commitment_transaction_hash: None,
+        created_at: now,
+        enabled: false,
+        tlc_expiry_delta: 0,
+        tlc_fee_proportional_millionths: 0,
+        shutdown_transaction_hash: None,
+        failure_detail: None,
+    }
+}
+
 pub struct ChannelRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
     store: S,
@@ -679,6 +712,36 @@ where
                     shutdown_transaction_hash: None,
                     failure_detail: record.failure_detail,
                 });
+            }
+
+            // Include inbound channel requests that are waiting for acceptance
+            // (held in the network actor's `to_be_accepted_channels`).
+            let pending_accept_msg = |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(
+                    rpc_reply,
+                ))
+            };
+            let pending_accept = match call!(self.actor, pending_accept_msg) {
+                Ok(Ok(list)) => list,
+                _ => vec![],
+            };
+            let now = crate::now_timestamp_as_millis_u64();
+            for pending in pending_accept {
+                // Apply peer_id filter if provided
+                if let Some(ref filter_peer) = params.peer_id {
+                    if filter_peer != &pending.peer_id {
+                        continue;
+                    }
+                }
+                // Skip if there's already a ChannelActorState (unlikely but possible in a race)
+                if self
+                    .store
+                    .get_channel_actor_state(&pending.channel_id)
+                    .is_some()
+                {
+                    continue;
+                }
+                channels.push(pending_accept_channel_to_rpc(pending, now));
             }
         }
 
