@@ -3,7 +3,8 @@ use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
         AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
-        ChannelCommand, ChannelCommandWithId, ChannelState as RawChannelState, CloseFlags,
+        ChannelCommand, ChannelCommandWithId, ChannelOpenRecord, ChannelOpenRecordStore,
+        ChannelOpeningStatus, ChannelState as RawChannelState, CloseFlags,
         CollaboratingFundingTxFlags, NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags,
         SigningCommitmentFlags, UpdateCommand,
     },
@@ -347,6 +348,77 @@ pub struct UpdateChannelParams {
     pub tlc_fee_proportional_millionths: Option<u128>,
 }
 
+/// The status of a channel opening operation.
+// This mirrors `ChannelOpeningStatus` but is exposed in the RPC layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ChannelOpenStatus {
+    /// The `open_channel` RPC has been submitted and the `OpenChannel` message has been sent
+    /// to the peer. We are waiting for the peer to respond with an `AcceptChannel` message.
+    WaitingForPeer,
+    /// The peer accepted the channel. We are now collaborating on the funding transaction.
+    FundingTxBuilding,
+    /// The funding transaction has been submitted to the chain and is awaiting confirmation.
+    FundingTxBroadcasted,
+    /// The funding transaction has been confirmed and the channel is fully open.
+    ChannelReady,
+    /// The channel opening failed. The `failure_detail` field contains the reason.
+    Failed,
+}
+
+impl From<ChannelOpeningStatus> for ChannelOpenStatus {
+    fn from(s: ChannelOpeningStatus) -> Self {
+        match s {
+            ChannelOpeningStatus::WaitingForPeer => ChannelOpenStatus::WaitingForPeer,
+            ChannelOpeningStatus::FundingTxBuilding => ChannelOpenStatus::FundingTxBuilding,
+            ChannelOpeningStatus::FundingTxBroadcasted => ChannelOpenStatus::FundingTxBroadcasted,
+            ChannelOpeningStatus::ChannelReady => ChannelOpenStatus::ChannelReady,
+            ChannelOpeningStatus::Failed => ChannelOpenStatus::Failed,
+        }
+    }
+}
+
+/// A record describing a single outbound channel-opening attempt.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ChannelOpenInfo {
+    /// The channel ID (temporary at first, updated to the final ID once the peer accepts).
+    pub channel_id: Hash256,
+    /// The peer with which the channel opening was attempted.
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+    /// Current status of the channel opening process.
+    pub status: ChannelOpenStatus,
+    /// Human-readable reason for failure, present only when `status == FAILED`.
+    pub failure_detail: Option<String>,
+    /// Timestamp in milliseconds since the UNIX epoch when the opening was initiated.
+    #[serde_as(as = "U64Hex")]
+    pub created_at: u64,
+    /// Timestamp in milliseconds since the UNIX epoch of the last status change.
+    #[serde_as(as = "U64Hex")]
+    pub last_updated_at: u64,
+}
+
+impl From<ChannelOpenRecord> for ChannelOpenInfo {
+    fn from(r: ChannelOpenRecord) -> Self {
+        Self {
+            channel_id: r.channel_id,
+            peer_id: r.peer_id,
+            status: r.status.into(),
+            failure_detail: r.failure_detail,
+            created_at: r.created_at,
+            last_updated_at: r.last_updated_at,
+        }
+    }
+}
+
+/// Result for `list_channel_open_records`
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ListChannelOpenRecordsResult {
+    /// All tracked outbound channel-opening attempts, newest first.
+    pub channel_open_records: Vec<ChannelOpenInfo>,
+}
+
 /// RPC module for channel management.
 #[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
@@ -385,6 +457,16 @@ trait ChannelRpc {
     /// Updates a channel.
     #[method(name = "update_channel")]
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
+
+    /// Lists all outbound channel-opening records tracked by the node.
+    ///
+    /// Returns every channel-opening attempt that was initiated by the local node,
+    /// including those that are still in progress and those that ultimately failed.
+    /// Use this RPC to monitor the state of pending `open_channel` calls.
+    #[method(name = "list_channel_open_records")]
+    async fn list_channel_open_records(
+        &self,
+    ) -> Result<ListChannelOpenRecordsResult, ErrorObjectOwned>;
 }
 
 pub struct ChannelRpcServerImpl<S> {
@@ -401,7 +483,7 @@ impl<S> ChannelRpcServerImpl<S> {
 #[async_trait::async_trait]
 impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + ChannelOpenRecordStore + Send + Sync + 'static,
 {
     /// Attempts to open a channel with a peer.
     async fn open_channel(
@@ -445,10 +527,17 @@ where
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
         self.update_channel(params).await
     }
+
+    /// Lists all outbound channel-opening records tracked by the node.
+    async fn list_channel_open_records(
+        &self,
+    ) -> Result<ListChannelOpenRecordsResult, ErrorObjectOwned> {
+        self.list_channel_open_records().await
+    }
 }
 impl<S> ChannelRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + ChannelOpenRecordStore + Send + Sync + 'static,
 {
     pub async fn open_channel(
         &self,
@@ -649,5 +738,21 @@ where
             ))
         };
         handle_actor_call!(self.actor, message, params)
+    }
+
+    pub async fn list_channel_open_records(
+        &self,
+    ) -> Result<ListChannelOpenRecordsResult, ErrorObjectOwned> {
+        let mut records: Vec<ChannelOpenInfo> = self
+            .store
+            .get_channel_open_records()
+            .into_iter()
+            .map(ChannelOpenInfo::from)
+            .collect();
+        // Newest first
+        records.sort_by_key(|r| Reverse(r.created_at));
+        Ok(ListChannelOpenRecordsResult {
+            channel_open_records: records,
+        })
     }
 }

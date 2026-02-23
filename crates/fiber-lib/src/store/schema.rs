@@ -15,6 +15,7 @@
 //! | 193          | OutPoint | Direction | TimedResult                 |
 //! | 194          | Hash256              | PaymentCustomRecords        |
 //! | 224          | Hash256              | ChannelData                 |
+//! | 201          | Hash256              | ChannelOpenRecord           |
 //! | 232          | Payment_hash         | CchOrder                    |
 //! +--------------+----------------------+-----------------------------+
 
@@ -37,6 +38,7 @@ pub(crate) const ATTEMPT_CHANNEL_INDEX_PREFIX: u8 = 196;
 pub(crate) const HOLD_TLC_PREFIX: u8 = 197;
 // A shared prefix for watchtower and channel store
 pub(crate) const WATCHTOWER_TLC_SETTLED_PREFIX: u8 = 200;
+pub(crate) const CHANNEL_OPEN_RECORD_PREFIX: u8 = 201;
 #[cfg(feature = "watchtower")]
 mod watchtower {
     pub(crate) const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;

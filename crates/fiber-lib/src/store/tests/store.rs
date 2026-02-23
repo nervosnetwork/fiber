@@ -1040,3 +1040,69 @@ fn test_store_sample_channel_actor_state() {
         );
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_channel_open_record() {
+    use crate::fiber::channel::{ChannelOpenRecord, ChannelOpenRecordStore, ChannelOpeningStatus};
+    use crate::store::sample::StoreSample;
+
+    let samples = ChannelOpenRecord::samples(42);
+    assert!(!samples.is_empty());
+
+    let path = TempDir::new("channel_open_record_store");
+    let store = Store::new(path).expect("create store failed");
+
+    // Initially no records
+    assert!(store.get_channel_open_records().is_empty());
+
+    // Insert all samples
+    for sample in &samples {
+        assert!(store.get_channel_open_record(&sample.channel_id).is_none());
+        store.insert_channel_open_record(sample.clone());
+    }
+
+    // Query all
+    assert_eq!(store.get_channel_open_records().len(), samples.len());
+
+    // Query by channel_id
+    for sample in &samples {
+        let loaded = store
+            .get_channel_open_record(&sample.channel_id)
+            .expect("should find stored record");
+        assert_eq!(loaded.channel_id, sample.channel_id);
+        assert_eq!(loaded.status, sample.status);
+        assert_eq!(loaded.failure_detail, sample.failure_detail);
+    }
+
+    // Delete and verify removal
+    for sample in &samples {
+        store.delete_channel_open_record(&sample.channel_id);
+        assert!(store.get_channel_open_record(&sample.channel_id).is_none());
+    }
+    assert!(store.get_channel_open_records().is_empty());
+
+    // Test update_status helper
+    let mut record = ChannelOpenRecord::new(deterministic_hash256(42, 99), sample_peer_id());
+    assert_eq!(record.status, ChannelOpeningStatus::WaitingForPeer);
+    record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+    assert_eq!(record.status, ChannelOpeningStatus::FundingTxBuilding);
+    record.fail("test failure".to_string());
+    assert_eq!(record.status, ChannelOpeningStatus::Failed);
+    assert_eq!(record.failure_detail.as_deref(), Some("test failure"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sample_peer_id() -> tentacle::secio::PeerId {
+    use crate::store::sample::deterministic_pubkey;
+    let pubkey = deterministic_pubkey(999, 0);
+    let pk_bytes = pubkey.serialize();
+    let tentacle_pk = tentacle::secio::PublicKey::from_raw_key(pk_bytes.to_vec());
+    tentacle::secio::PeerId::from_public_key(&tentacle_pk)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn deterministic_hash256(seed: u64, index: u32) -> crate::fiber::types::Hash256 {
+    use crate::store::sample::deterministic_hash;
+    deterministic_hash(seed, index).into()
+}

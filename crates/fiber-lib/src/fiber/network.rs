@@ -52,7 +52,8 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
+    ChannelInitializationParameter, ChannelOpenRecord, ChannelOpenRecordStore,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
     PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
     RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
@@ -658,6 +659,7 @@ impl<S, C> NetworkActor<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + ChannelOpenRecordStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore
@@ -821,6 +823,14 @@ where
                             set.insert(new);
                         };
 
+                        // Update the opening record: rename from temp ID to final ID and advance status.
+                        if let Some(mut record) = state.store.get_channel_open_record(&old) {
+                            state.store.delete_channel_open_record(&old);
+                            record.channel_id = new;
+                            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+                            state.store.insert_channel_open_record(record);
+                        }
+
                         debug!("Starting funding channel");
                         // TODO: Here we implies the one who receives AcceptChannel message
                         //  (i.e. the channel initiator) will send TxUpdate message first.
@@ -849,6 +859,12 @@ where
                     "Channel ({:?}) to peer {:?} is now ready",
                     channel_id, peer_id
                 );
+
+                // Mark the opening record as ChannelReady (terminal success state).
+                if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
+                    record.update_status(ChannelOpeningStatus::ChannelReady);
+                    state.store.insert_channel_open_record(record);
+                }
 
                 // FIXME(yukang): need to make sure ChannelReady is sent after the channel is reestablished
                 state
@@ -898,6 +914,11 @@ where
                     .await?
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
+                // Advance the opening record to FundingTxBroadcasted.
+                if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
+                    record.update_status(ChannelOpeningStatus::FundingTxBroadcasted);
+                    state.store.insert_channel_open_record(record);
+                }
                 state
                     .on_funding_transaction_pending(channel_id, transaction, outpoint)
                     .await;
@@ -1011,6 +1032,23 @@ where
                 }
             }
             NetworkActorEvent::ChannelActorStopped(channel_id, reason) => {
+                // If the channel failed before reaching ChannelReady, mark the opening record as Failed.
+                if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
+                    if record.status != ChannelOpeningStatus::ChannelReady {
+                        let failure_detail = match reason {
+                            StopReason::Abandon => "Channel was abandoned".to_string(),
+                            StopReason::AbortFunding => "Funding transaction aborted".to_string(),
+                            StopReason::PeerDisConnected => {
+                                "Peer disconnected during channel opening".to_string()
+                            }
+                            StopReason::Closed => {
+                                "Channel closed before becoming ready".to_string()
+                            }
+                        };
+                        record.fail(failure_detail);
+                        state.store.insert_channel_open_record(record);
+                    }
+                }
                 state.on_channel_actor_stopped(channel_id, reason).await;
             }
             NetworkActorEvent::PaymentActorStopped(payment_hash) => {
@@ -2935,6 +2973,7 @@ impl<S, C> NetworkActorState<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + ChannelOpenRecordStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore
@@ -3299,6 +3338,11 @@ where
         .0;
         let temp_channel_id = rx.await.expect("msg received");
         self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
+
+        // Record the channel opening attempt so it can be queried via RPC.
+        let record = ChannelOpenRecord::new(temp_channel_id, peer_id);
+        self.store.insert_channel_open_record(record);
+
         Ok((channel, temp_channel_id))
     }
 
@@ -4342,6 +4386,7 @@ impl<S, C> Actor for NetworkActor<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + ChannelOpenRecordStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore
@@ -4860,6 +4905,7 @@ fn try_send_actor_message(actor: &ActorRef<NetworkActorMessage>, message: Networ
 pub async fn start_network<
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + ChannelOpenRecordStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore

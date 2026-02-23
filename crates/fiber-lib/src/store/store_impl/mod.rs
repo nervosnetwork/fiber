@@ -30,7 +30,10 @@ use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
 use crate::fiber::types::{Privkey, Pubkey};
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
+        channel::{
+            ChannelActorState, ChannelActorStateStore, ChannelOpenRecord, ChannelOpenRecordStore,
+            ChannelState,
+        },
         graph::NetworkGraphStateStore,
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PersistentNetworkActorState},
@@ -251,6 +254,7 @@ pub enum KeyValue {
     HoldTlc((Hash256, Hash256, u64), u64),
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
+    ChannelOpenRecord(Hash256, ChannelOpenRecord),
 }
 
 /// Recorded store changes.
@@ -367,6 +371,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::CchOrder(payment_hash, _data) => {
                 [&[CCH_ORDER_PREFIX], payment_hash.as_ref()].concat()
             }
+            KeyValue::ChannelOpenRecord(channel_id, _) => {
+                [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
+            }
         }
     }
 
@@ -408,6 +415,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::HoldTlc(_, expired_at) => serialize_to_vec(expired_at, "HoldTlc"),
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
+            KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
         }
     }
 }
@@ -570,6 +578,32 @@ impl ChannelActorStateStore for Store {
         ]
         .concat();
         self.get(key).is_some()
+    }
+}
+
+impl ChannelOpenRecordStore for Store {
+    fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord> {
+        let prefix = [CHANNEL_OPEN_RECORD_PREFIX];
+        self.prefix_iterator(&prefix)
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "ChannelOpenRecord"))
+            .collect()
+    }
+
+    fn get_channel_open_record(&self, channel_id: &Hash256) -> Option<ChannelOpenRecord> {
+        let key = [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "ChannelOpenRecord"))
+    }
+
+    fn insert_channel_open_record(&self, record: ChannelOpenRecord) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::ChannelOpenRecord(record.channel_id, record));
+        batch.commit();
+    }
+
+    fn delete_channel_open_record(&self, channel_id: &Hash256) {
+        let key = [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat();
+        self.delete(key);
     }
 }
 

@@ -78,7 +78,7 @@ use ractor::{
 };
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 #[cfg(test)]
@@ -7949,6 +7949,85 @@ pub trait ChannelActorStateStore {
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
     /// Check if a tlc is settled on chain
     fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool;
+}
+
+/// The status of a channel opening operation initiated by the local node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelOpeningStatus {
+    /// The `open_channel` RPC has been submitted and the `OpenChannel` message has been sent
+    /// to the peer. We are waiting for the peer to respond with an `AcceptChannel` message.
+    WaitingForPeer,
+    /// The peer accepted the channel. We are now collaborating on the funding transaction.
+    FundingTxBuilding,
+    /// The funding transaction has been submitted to the chain and is awaiting confirmation.
+    FundingTxBroadcasted,
+    /// The funding transaction has been confirmed and the channel is fully open.
+    ChannelReady,
+    /// The channel opening failed. The `failure_detail` field contains the reason.
+    Failed,
+}
+
+/// A record that tracks a single outbound channel-opening attempt.
+///
+/// Created when the local node calls `open_channel` and persisted until the channel
+/// either becomes ready or the opening definitively fails.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelOpenRecord {
+    /// The channel ID. Initially this is the temporary channel ID returned by `open_channel`.
+    /// It is updated to the final channel ID once the peer sends `AcceptChannel`.
+    pub channel_id: Hash256,
+    /// The peer we attempted to open the channel with.
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+    /// Current status of the opening process.
+    pub status: ChannelOpeningStatus,
+    /// Human-readable description of why the opening failed, set only when `status == Failed`.
+    pub failure_detail: Option<String>,
+    /// Timestamp (milliseconds since UNIX epoch) when the record was created.
+    pub created_at: u64,
+    /// Timestamp (milliseconds since UNIX epoch) of the last status update.
+    pub last_updated_at: u64,
+}
+
+impl ChannelOpenRecord {
+    /// Create a new record in the `WaitingForPeer` state.
+    pub fn new(channel_id: Hash256, peer_id: PeerId) -> Self {
+        let now = now_timestamp_as_millis_u64();
+        Self {
+            channel_id,
+            peer_id,
+            status: ChannelOpeningStatus::WaitingForPeer,
+            failure_detail: None,
+            created_at: now,
+            last_updated_at: now,
+        }
+    }
+
+    /// Transition to a new status.
+    pub fn update_status(&mut self, status: ChannelOpeningStatus) {
+        self.status = status;
+        self.last_updated_at = now_timestamp_as_millis_u64();
+    }
+
+    /// Transition to `Failed` and record the reason.
+    pub fn fail(&mut self, reason: String) {
+        self.status = ChannelOpeningStatus::Failed;
+        self.failure_detail = Some(reason);
+        self.last_updated_at = now_timestamp_as_millis_u64();
+    }
+}
+
+/// Store trait for persisting and querying outbound channel-opening records.
+pub trait ChannelOpenRecordStore {
+    /// Return all stored channel-opening records.
+    fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord>;
+    /// Return the record for the given channel ID, if any.
+    fn get_channel_open_record(&self, channel_id: &Hash256) -> Option<ChannelOpenRecord>;
+    /// Persist (insert or overwrite) a channel-opening record.
+    fn insert_channel_open_record(&self, record: ChannelOpenRecord);
+    /// Delete the record for the given channel ID.
+    fn delete_channel_open_record(&self, channel_id: &Hash256);
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
