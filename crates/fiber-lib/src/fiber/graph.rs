@@ -1262,8 +1262,8 @@ where
 
         // Early fail: verify the source node's outbound liquidity can cover the payment amount
         // before spending time on path-finding. This check is skipped when an explicit router
-        // is provided (the caller is responsible) and for self-payments (handled separately).
-        if payment_data.router.is_empty() && source != target {
+        // is provided (the caller is responsible).
+        if payment_data.router.is_empty() {
             let outbound_liquidities: Vec<u128> = self
                 .get_node_outbounds(source)
                 .filter(|(_, channel_info, _)| {
