@@ -25,7 +25,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `list_channels`](#channel-list_channels)
         * [Method `shutdown_channel`](#channel-shutdown_channel)
         * [Method `update_channel`](#channel-update_channel)
-        * [Method `list_channel_open_records`](#channel-list_channel_open_records)
     * [Module Dev](#module-dev)
         * [Method `commitment_signed`](#dev-commitment_signed)
         * [Method `add_tlc`](#dev-add_tlc)
@@ -69,8 +68,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
-    * [Type `ChannelOpenInfo`](#type-channelopeninfo)
-    * [Type `ChannelOpenStatus`](#type-channelopenstatus)
     * [Type `ChannelState`](#type-channelstate)
     * [Type `ChannelUpdateInfo`](#type-channelupdateinfo)
     * [Type `CkbInvoice`](#type-ckbinvoice)
@@ -301,6 +298,10 @@ Lists all channels.
 
 * `peer_id` - <em>`Option<PeerId>`</em>, The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
 * `include_closed` - <em>`Option<bool>`</em>, Whether to include closed channels in the list, an optional parameter, default value is false
+* `only_pending` - <em>`Option<bool>`</em>, When set to true, only return channels that are still being opened (non-final states:
+ negotiating, collaborating on funding tx, signing, awaiting tx signatures, awaiting channel
+ ready) as well as channels whose opening attempt failed. Default is false.
+ Mutually exclusive with `include_closed`.
 
 ##### Returns
 
@@ -349,26 +350,6 @@ Updates a channel.
 ##### Returns
 
 * None
-
----
-
-
-
-<a id="channel-list_channel_open_records"></a>
-#### Method `list_channel_open_records`
-
-Lists all outbound channel-opening records tracked by the node.
-
- Returns every channel-opening attempt that was initiated by the local node,
- including those that are still in progress and those that ultimately failed.
- Use this RPC to monitor the state of pending `open_channel` calls.
-
-##### Params
-* None
-
-##### Returns
-
-* `channel_open_records` - <em>Vec<[ChannelOpenInfo](#type-channelopeninfo)></em>, All tracked outbound channel-opening attempts, newest first.
 
 ---
 
@@ -1161,6 +1142,8 @@ The channel data structure
  if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
  the channel configuration of B and C, not A and B.
 * `shutdown_transaction_hash` - <em>`Option<H256>`</em>, The hash of the shutdown transaction
+* `failure_detail` - <em>`Option<String>`</em>, Human-readable reason why the channel opening failed.
+ Only present when the channel is in a failed state (e.g. abandoned or funding aborted).
 ---
 
 <a id="#type-channelinfo"></a>
@@ -1181,38 +1164,6 @@ The Channel information.
 * `capacity` - <em>`u128`</em>, The capacity of the channel.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the channel.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel.
----
-
-<a id="#type-channelopeninfo"></a>
-### Type `ChannelOpenInfo`
-
-A record describing a single outbound channel-opening attempt.
-
-
-#### Fields
-
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID (temporary at first, updated to the final ID once the peer accepts).
-* `peer_id` - <em>`PeerId`</em>, The peer with which the channel opening was attempted.
-* `status` - <em>`ChannelOpenStatus`</em>, Current status of the channel opening process.
-* `failure_detail` - <em>`Option<String>`</em>, Human-readable reason for failure, present only when `status == FAILED`.
-* `created_at` - <em>`u64`</em>, Timestamp in milliseconds since the UNIX epoch when the opening was initiated.
-* `last_updated_at` - <em>`u64`</em>, Timestamp in milliseconds since the UNIX epoch of the last status change.
----
-
-<a id="#type-channelopenstatus"></a>
-### Type `ChannelOpenStatus`
-
-The status of a channel opening operation.
-
-
-#### Enum with values of
-
-* `WaitingForPeer` - The `open_channel` RPC has been submitted and the `OpenChannel` message has been sent
- to the peer. We are waiting for the peer to respond with an `AcceptChannel` message.
-* `FundingTxBuilding` - The peer accepted the channel. We are now collaborating on the funding transaction.
-* `FundingTxBroadcasted` - The funding transaction has been submitted to the chain and is awaiting confirmation.
-* `ChannelReady` - The funding transaction has been confirmed and the channel is fully open.
-* `Failed` - The channel opening failed. The `failure_detail` field contains the reason.
 ---
 
 <a id="#type-channelstate"></a>

@@ -68,6 +68,7 @@ async fn test_rpc_basic() {
             ListChannelsParams {
                 peer_id: None,
                 include_closed: None,
+                only_pending: None,
             },
         )
         .await
@@ -343,6 +344,7 @@ async fn test_rpc_shutdown_channels() {
             ListChannelsParams {
                 peer_id: None,
                 include_closed: None,
+                only_pending: None,
             },
         )
         .await
@@ -371,6 +373,7 @@ async fn test_rpc_shutdown_channels() {
             ListChannelsParams {
                 peer_id: None,
                 include_closed: Some(true),
+                only_pending: None,
             },
         )
         .await
@@ -412,6 +415,7 @@ async fn test_rpc_shutdown_channels() {
             ListChannelsParams {
                 peer_id: None,
                 include_closed: Some(true),
+                only_pending: None,
             },
         )
         .await
@@ -602,6 +606,7 @@ async fn test_rpc_basic_with_auth() {
             ListChannelsParams {
                 peer_id: None,
                 include_closed: None,
+                only_pending: None,
             },
         )
         .await
