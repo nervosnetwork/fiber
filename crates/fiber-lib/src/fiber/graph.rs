@@ -2384,9 +2384,6 @@ where
         }
 
         if result.is_empty() || current != target {
-            // TODO check total outbound balance and return error if it's not enough
-            // this can help us early return if the payment is not possible to be sent
-            // otherwise when PathFind error is returned, we need to retry with half amount
             error!(
                 "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
                 source, target, amount, max_fee_amount
@@ -2397,6 +2394,31 @@ where
                 edges_expanded,
                 started_time.elapsed(),
             );
+            // If there are direct channels from source to target but all have insufficient
+            // liquidity, return a more descriptive error to help diagnose the failure.
+            // Skip this check during max capacity searches (amount is None) since there is
+            // no specific required amount to compare against.
+            if !is_max_capacity_search {
+                let max_direct_liquidity = self
+                    .get_node_outbounds(source)
+                    .filter(|(peer, channel_info, _)| {
+                        *peer == target && &udt_type_script == channel_info.udt_type_script()
+                    })
+                    .map(|(_, channel_info, channel_update)| {
+                        channel_update
+                            .outbound_liquidity
+                            .unwrap_or_else(|| channel_info.capacity())
+                    })
+                    .max();
+                if let Some(max_liquidity) = max_direct_liquidity {
+                    if search_amount > max_liquidity {
+                        return Err(PathFindError::InsufficientBalance(format!(
+                            "direct channel to target has insufficient outbound liquidity: {} available, {} required",
+                            max_liquidity, search_amount
+                        )));
+                    }
+                }
+            }
             return Err(PathFindError::NoPathFound);
         }
         if let Some(edge) = last_edge {

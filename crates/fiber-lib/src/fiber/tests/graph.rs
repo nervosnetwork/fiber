@@ -561,6 +561,37 @@ fn test_graph_find_path_amount_failed() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_find_path_direct_channel_insufficient_liquidity() {
+    // When there is only a direct channel between source and target and it has
+    // insufficient capacity, we should get an InsufficientBalance error instead
+    // of NoPathFound to give the user a more helpful error message.
+    let mut network = MockNetworkGraph::new(3);
+
+    // Direct channel from node 1 to node 2 with capacity 100, but we want to send 1000
+    network.add_edge(1, 2, Some(100), Some(1));
+    let route = network.find_path(1, 2, 1000, 100);
+    assert!(matches!(route, Err(PathFindError::InsufficientBalance(_))));
+    let err_msg = route.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("insufficient outbound liquidity"),
+        "Expected 'insufficient outbound liquidity' in: {err_msg}"
+    );
+
+    // When the direct channel has enough capacity, the path should succeed
+    network.add_edge(1, 2, Some(2000), Some(1));
+    let route = network.find_path(1, 2, 1000, 100);
+    assert!(route.is_ok());
+
+    // When there is no direct channel at all (only indirect), NoPathFound should be returned
+    let mut network2 = MockNetworkGraph::new(4);
+    network2.add_edge(1, 3, Some(100), Some(1));
+    network2.add_edge(3, 2, Some(100), Some(1));
+    let route = network2.find_path(1, 2, 1000, 100);
+    assert!(matches!(route, Err(PathFindError::NoPathFound)));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_graph_find_optimal_path() {
     let mut network = MockNetworkGraph::new(6);
 
