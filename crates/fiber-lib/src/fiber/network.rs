@@ -3461,6 +3461,16 @@ where
         .0;
         let new_id = rx.await.expect("msg received");
         self.on_channel_created(new_id, &peer_id, channel.clone());
+
+        // Re-key the inbound ChannelOpenRecord from the temp channel ID to the final channel ID
+        // and advance the status to FundingTxBuilding now that the channel has been accepted.
+        if let Some(mut record) = self.store.get_channel_open_record(&temp_channel_id) {
+            self.store.delete_channel_open_record(&temp_channel_id);
+            record.channel_id = new_id;
+            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+            self.store.insert_channel_open_record(record);
+        }
+
         Ok((channel, temp_channel_id, new_id))
     }
 
@@ -3935,6 +3945,23 @@ where
                 }
             }
         }
+
+        // Also fail any inbound pending channels from this peer that are still waiting for
+        // local acceptance (not yet in self.channels, no channel actor).
+        let failed_channels: Vec<Hash256> = self
+            .to_be_accepted_channels
+            .map
+            .iter()
+            .filter(|(_, (peer_id, _))| peer_id == id)
+            .map(|(channel_id, _)| *channel_id)
+            .collect();
+        for channel_id in failed_channels {
+            if let Some(mut record) = self.store.get_channel_open_record(&channel_id) {
+                record.fail("Peer disconnected during channel opening".to_string());
+                self.store.insert_channel_open_record(record);
+            }
+            self.to_be_accepted_channels.remove(&channel_id);
+        }
     }
 
     pub(crate) fn get_peer_addresses(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
@@ -4185,6 +4212,11 @@ where
 
         match result {
             Ok(_) => {
+                // Create a persistent record so the accepting side can see this pending channel
+                // via list_channels(only_pending=true) and across node restarts.
+                let record = ChannelOpenRecord::new_inbound(id, peer_id.clone());
+                self.store.insert_channel_open_record(record);
+
                 // Notify outside observers.
                 self.network
                     .send_message(NetworkActorMessage::new_notification(

@@ -7967,19 +7967,24 @@ pub enum ChannelOpeningStatus {
     Failed,
 }
 
-/// A record that tracks a single outbound channel-opening attempt.
+/// A record that tracks a channel-opening attempt — either outbound (initiated by us)
+/// or inbound (initiated by a remote peer and pending local acceptance).
 ///
-/// Created when the local node calls `open_channel` and persisted until the channel
-/// either becomes ready or the opening definitively fails.
+/// Outbound records are created when `open_channel` is called.
+/// Inbound records are created when an `OpenChannel` message is received from a peer.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelOpenRecord {
-    /// The channel ID. Initially this is the temporary channel ID returned by `open_channel`.
-    /// It is updated to the final channel ID once the peer sends `AcceptChannel`.
+    /// The channel ID. For outbound channels this is initially the temporary ID; it is
+    /// updated to the final channel ID once the peer sends `AcceptChannel`. For inbound
+    /// channels, the temp ID is replaced by the computed new ID when `accept_channel` is
+    /// called.
     pub channel_id: Hash256,
-    /// The peer we attempted to open the channel with.
+    /// The remote peer involved in this channel-opening attempt.
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
+    /// Whether the local node is the accepting side (received the `OpenChannel` request).
+    pub is_acceptor: bool,
     /// Current status of the opening process.
     pub status: ChannelOpeningStatus,
     /// Human-readable description of why the opening failed, set only when `status == Failed`.
@@ -7991,17 +7996,26 @@ pub struct ChannelOpenRecord {
 }
 
 impl ChannelOpenRecord {
-    /// Create a new record in the `WaitingForPeer` state.
+    /// Create a new outbound record in the `WaitingForPeer` state.
     pub fn new(channel_id: Hash256, peer_id: PeerId) -> Self {
         let now = now_timestamp_as_millis_u64();
         Self {
             channel_id,
             peer_id,
+            is_acceptor: false,
             status: ChannelOpeningStatus::WaitingForPeer,
             failure_detail: None,
             created_at: now,
             last_updated_at: now,
         }
+    }
+
+    /// Create a new inbound record in the `WaitingForPeer` state.
+    /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
+    pub fn new_inbound(channel_id: Hash256, peer_id: PeerId) -> Self {
+        let mut record = Self::new(channel_id, peer_id);
+        record.is_acceptor = true;
+        record
     }
 
     /// Transition to a new status.

@@ -726,7 +726,7 @@ where
                 channels.push(Channel {
                     channel_id: record.channel_id,
                     is_public: false,
-                    is_acceptor: false,
+                    is_acceptor: record.is_acceptor,
                     is_one_way: false,
                     channel_outpoint: None,
                     peer_id: record.peer_id,
