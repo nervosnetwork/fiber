@@ -590,11 +590,25 @@ where
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
         let only_pending = params.only_pending.unwrap_or_default();
+        let include_closed = params.include_closed.unwrap_or_default();
+
+        // The two filter options are mutually exclusive: `only_pending` narrows to channels
+        // that are still opening (or failed to open), while `include_closed` broadens to
+        // all channels including successfully closed ones. Allowing both simultaneously
+        // would produce confusing results.
+        if only_pending && include_closed {
+            return Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "only_pending and include_closed are mutually exclusive",
+                Some(params),
+            ));
+        }
+
         let channel_states = if only_pending {
             // For pending mode, fetch all channel states (including non-active ones
             // like ABANDONED / FUNDING_ABORTED which are "closed" but represent failed openings)
             self.store.get_channel_states(params.peer_id.clone())
-        } else if params.include_closed.unwrap_or_default() {
+        } else if include_closed {
             self.store.get_channel_states(params.peer_id.clone())
         } else {
             self.store.get_active_channel_states(params.peer_id.clone())
@@ -604,14 +618,18 @@ where
             .filter_map(|(peer_id, channel_id, _state)| {
                 self.store
                     .get_channel_actor_state(&channel_id)
-                    .map(|state| {
+                    .and_then(|state| {
                         let rpc_state: ChannelState = state.state.into();
+                        // When only_pending is set, skip channels that are not in a pending state
+                        if only_pending && !rpc_state.is_pending() {
+                            return None;
+                        }
                         // Enrich with failure_detail from ChannelOpenRecord when available
                         let failure_detail = self
                             .store
                             .get_channel_open_record(&channel_id)
                             .and_then(|r| r.failure_detail);
-                        Channel {
+                        Some(Channel {
                             channel_id,
                             is_public: state.is_public(),
                             is_acceptor: state.is_acceptor,
@@ -660,15 +678,12 @@ where
                                 .tlc_fee_proportional_millionths,
                             shutdown_transaction_hash: state.shutdown_transaction_hash,
                             failure_detail,
-                        }
+                        })
                     })
             })
             .collect();
 
         if only_pending {
-            // Keep only channels in pending states (pre-ChannelReady or failed-open)
-            channels.retain(|ch| ch.state.is_pending());
-
             // Also include failed channel-opening records whose ChannelActorState was deleted
             // (e.g. after Abandon or AbortFunding). We create minimal Channel entries for them.
             for record in self.store.get_channel_open_records() {
@@ -684,7 +699,7 @@ where
                 {
                     continue;
                 }
-                // No peer_id filter mismatch check
+                // Apply peer_id filter if provided
                 if let Some(ref filter_peer) = params.peer_id {
                     if filter_peer != &record.peer_id {
                         continue;
