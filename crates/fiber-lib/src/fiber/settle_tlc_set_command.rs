@@ -8,6 +8,7 @@ use crate::{
 
 pub struct SettleTlcSetCommand<'s, S> {
     payment_hash: Hash256,
+    is_hold_tlc_set: bool,
     tlcs: Vec<TlcSettlementContext>,
     store: &'s S,
 }
@@ -65,20 +66,44 @@ where
     S: PreimageStore + InvoiceStore + ChannelActorStateStore,
 {
     pub fn new(payment_hash: Hash256, channel_tlc_ids: Vec<(Hash256, u64)>, store: &'s S) -> Self {
+        if channel_tlc_ids.is_empty() {
+            Self::new_hold_tlc_set(payment_hash, store)
+        } else {
+            Self::new_immediate_tlc_set(payment_hash, channel_tlc_ids, store)
+        }
+    }
+
+    pub fn new_immediate_tlc_set(
+        payment_hash: Hash256,
+        channel_tlc_ids: Vec<(Hash256, u64)>,
+        store: &'s S,
+    ) -> Self {
         let tlcs: Vec<_> = channel_tlc_ids
             .into_iter()
-            .filter_map(|(channel_id, tlc_id)| {
-                let state = store.get_channel_actor_state(&channel_id)?;
-                let tlc_id = TLCId::Received(tlc_id);
-                state
-                    .get_received_tlc(tlc_id)
-                    .map(|tlc_info| TlcSettlementContext::new(tlc_info, channel_id))
-            })
+            .filter_map(|(channel_id, tlc_id)| make_sttlement_context(channel_id, tlc_id, store))
             .collect();
         Self {
             payment_hash,
             tlcs,
             store,
+            is_hold_tlc_set: false,
+        }
+    }
+
+    pub fn new_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
+        let tlcs = store
+            .get_payment_hold_tlcs(payment_hash)
+            .iter()
+            .filter_map(|hold_tlc| {
+                make_sttlement_context(hold_tlc.channel_id, hold_tlc.tlc_id, store)
+            })
+            .collect();
+
+        Self {
+            payment_hash,
+            tlcs,
+            store,
+            is_hold_tlc_set: true,
         }
     }
 
@@ -87,7 +112,7 @@ where
             self.store.get_invoice(&self.payment_hash),
             self.store.get_invoice_status(&self.payment_hash),
         ) else {
-            // TLC without invoice should not be added as hold TLC, reject them as invoice
+            // TLC without invoice should not be settled via SettleTlcSetCommand, reject them as invoice
             // canceled.
             return self.reject_all(TlcErrorCode::InvoiceCancelled);
         };
@@ -208,12 +233,16 @@ where
                     Ok(())
                 }
             }
-            // Received invoices are allowed regardless of invoice expiry - the TLCs
-            // have already arrived and we should still allow settlement.
-            CkbInvoiceStatus::Received => Ok(()),
+            CkbInvoiceStatus::Received => {
+                if self.is_hold_tlc_set {
+                    // We allow settle Received TLCs for a hold invoice because we are processing all the TLCs for the invoice and extra paid TLCs will be rejected.
+                    Ok(())
+                } else {
+                    Err(TlcErrorCode::HoldTlcTimeout)
+                }
+            }
             CkbInvoiceStatus::Expired => Err(TlcErrorCode::InvoiceExpired),
             CkbInvoiceStatus::Cancelled => Err(TlcErrorCode::InvoiceCancelled),
-            // When invoice is paid, TLCs will eventually timeout, so we reject them now with the same reason.
             CkbInvoiceStatus::Paid => Err(TlcErrorCode::HoldTlcTimeout),
         }
     }
@@ -284,6 +313,18 @@ where
                 .expect("update invoice status failed");
         }
     }
+}
+
+fn make_sttlement_context<S: ChannelActorStateStore>(
+    channel_id: Hash256,
+    tlc_id: u64,
+    store: &S,
+) -> Option<TlcSettlementContext> {
+    let state = store.get_channel_actor_state(&channel_id)?;
+    let tlc_id = TLCId::Received(tlc_id);
+    state
+        .get_received_tlc(tlc_id)
+        .map(|tlc_info| TlcSettlementContext::new(tlc_info, channel_id))
 }
 
 pub struct TlcSettlement {

@@ -1,4 +1,5 @@
 use ckb_hash::blake2b_256;
+use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
@@ -58,9 +59,6 @@ use super::channel::{
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::config::AnnouncedNodeName;
-use crate::ckb::client::CkbChainClient;
-use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
-
 use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
@@ -74,6 +72,7 @@ use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
+use crate::ckb::client::CkbChainClient;
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{
     check_udt_script, get_udt_info, get_udt_whitelist, is_udt_type_auto_accept,
@@ -101,7 +100,7 @@ use crate::fiber::types::{
     FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineHopPayload,
     TrampolineOnionPacket, TxAbort, TxSignatures,
 };
-use crate::fiber::SettleTlcSetCommand;
+use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
@@ -1548,7 +1547,7 @@ where
                 self.settle_hold_tlc_set(state, payment_hash).await;
             }
             NetworkActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
-                self.settle_tlc_set(state, payment_hash, channel_tlc_ids, false)
+                self.settle_tlc_set(state, payment_hash, channel_tlc_ids)
                     .await;
             }
             NetworkActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
@@ -2064,14 +2063,13 @@ where
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
     ) {
-        let channel_tlc_ids = self
-            .store
-            .get_payment_hold_tlcs(payment_hash)
-            .iter()
-            .map(|hold_tlc| (hold_tlc.channel_id, hold_tlc.tlc_id))
-            .collect();
-        self.settle_tlc_set(state, payment_hash, channel_tlc_ids, true)
-            .await
+        for tlc_settlement in self.settle_tlc_set(state, payment_hash, Vec::new()).await {
+            self.store.remove_payment_hold_tlc(
+                &payment_hash,
+                &tlc_settlement.channel_id(),
+                tlc_settlement.tlc_id(),
+            );
+        }
     }
 
     async fn settle_tlc_set(
@@ -2079,9 +2077,10 @@ where
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
         channel_tlc_ids: Vec<(Hash256, u64)>,
-        is_hold_tlc_set: bool,
-    ) {
+    ) -> Vec<TlcSettlement> {
         let settle_command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &self.store);
+
+        let mut success_settlements = Vec::new();
         for tlc_settlement in settle_command.run() {
             let (send, _recv) = oneshot::channel();
             let rpc_reply = RpcReplyPort::from(send);
@@ -2096,13 +2095,7 @@ where
                 .await
             {
                 Ok(_) => {
-                    if is_hold_tlc_set {
-                        self.store.remove_payment_hold_tlc(
-                            &payment_hash,
-                            &tlc_settlement.channel_id(),
-                            tlc_settlement.tlc_id(),
-                        );
-                    }
+                    success_settlements.push(tlc_settlement);
                 }
                 Err(err) => {
                     error!(
@@ -2114,6 +2107,8 @@ where
                 }
             }
         }
+
+        success_settlements
     }
 
     /// Async version of check_channel_shutdown that runs in spawned task.
