@@ -1264,9 +1264,8 @@ async fn test_network_send_payment_amount_is_too_large() {
         .await;
 
     assert!(res.is_err());
-    // because the amount is too large, we will consider balance for direct channel
-    // so fail to build a path
-    assert!(res.err().unwrap().contains("no path found"));
+    // because the amount exceeds the outbound liquidity, we fail early with an insufficient balance error
+    assert!(res.err().unwrap().contains("Insufficient balance"));
 }
 
 // FIXME: this is the case send_payment with direct channels, we should handle this case

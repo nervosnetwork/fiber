@@ -6956,7 +6956,7 @@ async fn test_send_payment_direct_channel_error_from_node_stop() {
         })
         .await;
 
-    assert!(payment.unwrap_err().contains("no path found"));
+    assert!(payment.unwrap_err().contains("Insufficient balance"));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
