@@ -7987,6 +7987,10 @@ pub struct ChannelOpenRecord {
     pub is_acceptor: bool,
     /// Current status of the opening process.
     pub status: ChannelOpeningStatus,
+    /// The local node's funding amount for the channel.
+    /// For outbound channels this is what the initiator contributes.
+    /// For inbound channels this is set to the remote peer's funding amount.
+    pub funding_amount: u128,
     /// Human-readable description of why the opening failed, set only when `status == Failed`.
     pub failure_detail: Option<String>,
     /// Timestamp (milliseconds since UNIX epoch) when the record was created.
@@ -7997,13 +8001,14 @@ pub struct ChannelOpenRecord {
 
 impl ChannelOpenRecord {
     /// Create a new outbound record in the `WaitingForPeer` state.
-    pub fn new(channel_id: Hash256, peer_id: PeerId) -> Self {
+    pub fn new(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
         let now = now_timestamp_as_millis_u64();
         Self {
             channel_id,
             peer_id,
             is_acceptor: false,
             status: ChannelOpeningStatus::WaitingForPeer,
+            funding_amount,
             failure_detail: None,
             created_at: now,
             last_updated_at: now,
@@ -8012,8 +8017,8 @@ impl ChannelOpenRecord {
 
     /// Create a new inbound record in the `WaitingForPeer` state.
     /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
-    pub fn new_inbound(channel_id: Hash256, peer_id: PeerId) -> Self {
-        let mut record = Self::new(channel_id, peer_id);
+    pub fn new_inbound(channel_id: Hash256, peer_id: PeerId, remote_funding_amount: u128) -> Self {
+        let mut record = Self::new(channel_id, peer_id, remote_funding_amount);
         record.is_acceptor = true;
         record
     }

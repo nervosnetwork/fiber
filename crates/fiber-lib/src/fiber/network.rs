@@ -3380,7 +3380,7 @@ where
         self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
 
         // Record the channel opening attempt so it can be queried via RPC.
-        let record = ChannelOpenRecord::new(temp_channel_id, peer_id);
+        let record = ChannelOpenRecord::new(temp_channel_id, peer_id, funding_amount);
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -4203,6 +4203,7 @@ where
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
         let id = open_channel.channel_id;
+        let remote_funding_amount = open_channel.funding_amount;
         let result = check_open_channel_parameters(
             &open_channel.funding_udt_type_script,
             &open_channel.shutdown_script,
@@ -4221,7 +4222,8 @@ where
             Ok(_) => {
                 // Create a persistent record so the accepting side can see this pending channel
                 // via list_channels(only_pending=true) and across node restarts.
-                let record = ChannelOpenRecord::new_inbound(id, peer_id.clone());
+                let record =
+                    ChannelOpenRecord::new_inbound(id, peer_id.clone(), remote_funding_amount);
                 self.store.insert_channel_open_record(record);
 
                 // Notify outside observers.

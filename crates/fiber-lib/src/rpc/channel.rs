@@ -699,6 +699,12 @@ where
                 if record.status == ChannelOpeningStatus::ChannelReady {
                     continue;
                 }
+                // Inbound channels still waiting for acceptance (WaitingForPeer) are covered
+                // by the to_be_accepted_channels loop below which has the actual funding amount.
+                // Skip them here to avoid duplicate entries.
+                if record.is_acceptor && record.status == ChannelOpeningStatus::WaitingForPeer {
+                    continue;
+                }
                 // If there's already a ChannelActorState for this channel it was included
                 // above (with accurate state from the actor). Skip to avoid duplicates.
                 if self
@@ -723,6 +729,13 @@ where
                     // the exact channel sub-state when the actor hasn't yet stored its state.
                     _ => ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT),
                 };
+                // For outbound channels the local node contributes funding_amount.
+                // For inbound channels (post-failure) funding_amount was the remote peer's share.
+                let (local_balance, remote_balance) = if record.is_acceptor {
+                    (0u128, record.funding_amount)
+                } else {
+                    (record.funding_amount, 0u128)
+                };
                 channels.push(Channel {
                     channel_id: record.channel_id,
                     is_public: false,
@@ -732,8 +745,8 @@ where
                     peer_id: record.peer_id,
                     funding_udt_type_script: None,
                     state: synthetic_state,
-                    local_balance: 0,
-                    remote_balance: 0,
+                    local_balance,
+                    remote_balance,
                     offered_tlc_balance: 0,
                     received_tlc_balance: 0,
                     pending_tlcs: vec![],
