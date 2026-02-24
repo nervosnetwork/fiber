@@ -684,14 +684,23 @@ where
             .collect();
 
         if only_pending {
-            // Also include failed channel-opening records whose ChannelActorState was deleted
-            // (e.g. after Abandon or AbortFunding). We create minimal Channel entries for them.
+            // Also include channel-opening records (outbound) whose ChannelActorState is not yet
+            // in the store or has been deleted. This covers two cases:
+            //
+            // 1. **WaitingForPeer** (and other in-progress statuses): the outbound channel actor
+            //    only persists its ChannelActorState when its `handle()` method is first called
+            //    (i.e., after the first message from the peer). Before that, the channel exists
+            //    only in the ChannelOpenRecord. Without this path the initiator would see nothing
+            //    when calling list_channels(only_pending=true) on an unaccepted channel.
+            //
+            // 2. **Failed**: the ChannelActorState was already deleted after Abandon/AbortFunding.
             for record in self.store.get_channel_open_records() {
-                if record.status != ChannelOpeningStatus::Failed {
+                // ChannelReady is the "done" state — those channels appear in the normal list.
+                if record.status == ChannelOpeningStatus::ChannelReady {
                     continue;
                 }
-                // If there's still a ChannelActorState for this channel, it was already included
-                // above (with the correct state from the actor state). Skip it here.
+                // If there's already a ChannelActorState for this channel it was included
+                // above (with accurate state from the actor). Skip to avoid duplicates.
                 if self
                     .store
                     .get_channel_actor_state(&record.channel_id)
@@ -705,6 +714,15 @@ where
                         continue;
                     }
                 }
+                // Map the ChannelOpenRecord status to the closest ChannelState representation.
+                let synthetic_state = match record.status {
+                    ChannelOpeningStatus::Failed => {
+                        ChannelState::Closed(CloseFlags::FUNDING_ABORTED)
+                    }
+                    // Any other in-progress status: show as NegotiatingFunding since we lack
+                    // the exact channel sub-state when the actor hasn't yet stored its state.
+                    _ => ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT),
+                };
                 channels.push(Channel {
                     channel_id: record.channel_id,
                     is_public: false,
@@ -713,7 +731,7 @@ where
                     channel_outpoint: None,
                     peer_id: record.peer_id,
                     funding_udt_type_script: None,
-                    state: ChannelState::Closed(CloseFlags::FUNDING_ABORTED),
+                    state: synthetic_state,
                     local_balance: 0,
                     remote_balance: 0,
                     offered_tlc_balance: 0,
