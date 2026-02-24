@@ -216,6 +216,8 @@ pub struct PendingAcceptChannel {
     pub funding_amount: u128,
     /// UDT type script, if this is a UDT channel.
     pub udt_type_script: Option<Script>,
+    /// Timestamp (milliseconds since UNIX epoch) when this channel request was received.
+    pub created_at: u64,
 }
 
 #[derive(Debug)]
@@ -2030,6 +2032,11 @@ where
                             peer_id: peer_id.clone(),
                             funding_amount: open_channel.funding_amount,
                             udt_type_script: open_channel.funding_udt_type_script.clone(),
+                            created_at: state
+                                .store
+                                .get_channel_open_record(channel_id)
+                                .map(|r| r.created_at)
+                                .unwrap_or_else(crate::now_timestamp_as_millis_u64),
                         },
                     )
                     .collect::<Vec<_>>();

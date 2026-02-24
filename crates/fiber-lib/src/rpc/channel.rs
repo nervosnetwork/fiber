@@ -421,7 +421,7 @@ trait ChannelRpc {
 ///
 /// These channels are held in-memory by the network actor in `to_be_accepted_channels`.
 /// They have no `ChannelActorState` yet since `create_inbound_channel` has not been called.
-fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel, now: u64) -> Channel {
+fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
     Channel {
         channel_id: pending.channel_id,
         // The accepting node is the non-initiator, so is_acceptor = true
@@ -440,7 +440,7 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel, now: u64) -> Cha
         received_tlc_balance: 0,
         pending_tlcs: vec![],
         latest_commitment_transaction_hash: None,
-        created_at: now,
+        created_at: pending.created_at,
         enabled: false,
         tlc_expiry_delta: 0,
         tlc_fee_proportional_millionths: 0,
@@ -758,7 +758,6 @@ where
                 Ok(Ok(list)) => list,
                 _ => vec![],
             };
-            let now = crate::now_timestamp_as_millis_u64();
             for pending in pending_accept {
                 // Apply peer_id filter if provided
                 if let Some(ref filter_peer) = params.peer_id {
@@ -774,7 +773,7 @@ where
                 {
                     continue;
                 }
-                channels.push(pending_accept_channel_to_rpc(pending, now));
+                channels.push(pending_accept_channel_to_rpc(pending));
             }
         }
 
