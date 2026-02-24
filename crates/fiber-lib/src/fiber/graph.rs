@@ -1260,6 +1260,41 @@ where
             ));
         }
 
+        // Early fail: verify the source node's outbound liquidity can cover the payment amount
+        // before spending time on path-finding. This check is skipped when an explicit router
+        // is provided (the caller is responsible).
+        if payment_data.router.is_empty() {
+            let outbound_liquidities: Vec<u128> = self
+                .get_node_outbounds(source)
+                .filter(|(_, channel_info, _)| {
+                    channel_info.udt_type_script() == &payment_data.udt_type_script
+                })
+                .map(|(_, channel_info, channel_update)| {
+                    channel_update
+                        .outbound_liquidity
+                        .unwrap_or_else(|| channel_info.capacity())
+                })
+                .collect();
+
+            if payment_data.allow_mpp() {
+                // For MPP the payment can be split across all channels, so the total is the bound.
+                let total: u128 = outbound_liquidities.iter().sum();
+                if total < amount {
+                    return Err(PathFindError::InsufficientBalance(format!(
+                        "total outbound liquidity {total} is insufficient, required amount: {amount}"
+                    )));
+                }
+            } else {
+                // For a single-path payment the entire amount must flow through one channel.
+                let max = outbound_liquidities.iter().copied().max().unwrap_or(0);
+                if max < amount {
+                    return Err(PathFindError::InsufficientBalance(format!(
+                        "max outbound liquidity {max} is insufficient, required amount: {amount}"
+                    )));
+                }
+            }
+        }
+
         let path = self.resolve_route(
             source,
             amount,
@@ -2384,9 +2419,6 @@ where
         }
 
         if result.is_empty() || current != target {
-            // TODO check total outbound balance and return error if it's not enough
-            // this can help us early return if the payment is not possible to be sent
-            // otherwise when PathFind error is returned, we need to retry with half amount
             error!(
                 "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
                 source, target, amount, max_fee_amount
