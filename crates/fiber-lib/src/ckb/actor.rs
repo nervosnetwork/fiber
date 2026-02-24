@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 use super::{
-    funding::{FundingContext, LiveCellsExclusionMap},
+    funding::{ExternalFundingContext, FundingContext, LiveCellsExclusionMap},
     signer::LocalSigner,
     tx_tracing_actor::{
         CkbTxTracer, CkbTxTracingActor, CkbTxTracingArguments, CkbTxTracingMessage,
@@ -46,6 +46,15 @@ pub enum CkbChainMessage {
         FundingRequest,
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
+    /// Build an unsigned funding transaction for external signing.
+    /// The user will sign this transaction with their own wallet.
+    BuildUnsignedFundingTx {
+        funding_tx: FundingTx,
+        request: FundingRequest,
+        funding_source_lock_script: packed::Script,
+        funding_cell_lock_script: packed::Script,
+        reply: RpcReplyPort<Result<FundingTx, FundingError>>,
+    },
     VerifyFundingTx {
         local_tx: packed::Transaction,
         remote_tx: packed::Transaction,
@@ -131,6 +140,27 @@ impl Actor for CkbChainActor {
                     Some(shell_script) => fund_via_shell(shell_script, tx, request, context).await,
                 };
                 let _ = reply_port.send(result);
+            }
+            CkbChainMessage::BuildUnsignedFundingTx {
+                funding_tx,
+                request,
+                funding_source_lock_script,
+                funding_cell_lock_script,
+                reply,
+            } => {
+                let context = ExternalFundingContext {
+                    rpc_url: state.config.rpc_url.clone(),
+                    funding_source_lock_script,
+                    funding_cell_lock_script,
+                };
+                let result = funding_tx
+                    .build_unsigned_for_external_funding(
+                        request,
+                        context,
+                        &mut state.live_cells_exclusion_map,
+                    )
+                    .await;
+                let _ = reply.send(result);
             }
             CkbChainMessage::VerifyFundingTx {
                 local_tx,

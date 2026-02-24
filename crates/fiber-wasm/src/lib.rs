@@ -46,6 +46,17 @@ use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 
 pub mod api;
 
+/// Re-export at crate root so fiber-js worker finds them by simple name.
+#[wasm_bindgen]
+pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
+    api::open_channel_with_external_funding(params).await
+}
+
+#[wasm_bindgen]
+pub async fn submit_signed_funding_tx(params: JsValue) -> Result<JsValue, JsValue> {
+    api::submit_signed_funding_tx(params).await
+}
+
 pub struct ExitMessage(String);
 impl Debug for ExitMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -2238,6 +2238,7 @@ dependencies = [
  "ckb-resource",
  "console_error_panic_hook",
  "fnn",
+ "js-sys",
  "jsonrpsee",
  "ractor",
  "secp256k1 0.30.0",

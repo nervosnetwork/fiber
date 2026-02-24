@@ -7,7 +7,7 @@ use crate::fiber::{
         CollaboratingFundingTxFlags, NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags,
         SigningCommitmentFlags, UpdateCommand,
     },
-    network::{AcceptChannelCommand, OpenChannelCommand},
+    network::{AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand},
     serde_utils::{U128Hex, U64Hex},
     types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
@@ -16,7 +16,7 @@ use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
-    packed::OutPoint,
+    packed::{self, OutPoint},
     prelude::{IntoTransactionView, Unpack},
     H256,
 };
@@ -186,6 +186,8 @@ pub struct ListChannelsResult {
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(NegotiatingFundingFlags),
+    /// We're waiting for the user to sign and submit the funding transaction externally.
+    AwaitingExternalFunding,
     /// We're collaborating with the other party on the funding transaction.
     CollaboratingFundingTx(CollaboratingFundingTxFlags),
     /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
@@ -209,6 +211,7 @@ impl From<RawChannelState> for ChannelState {
     fn from(state: RawChannelState) -> Self {
         match state {
             RawChannelState::NegotiatingFunding(flags) => ChannelState::NegotiatingFunding(flags),
+            RawChannelState::AwaitingExternalFunding => ChannelState::AwaitingExternalFunding,
             RawChannelState::CollaboratingFundingTx(flags) => {
                 ChannelState::CollaboratingFundingTx(flags)
             }
@@ -347,6 +350,108 @@ pub struct UpdateChannelParams {
     pub tlc_fee_proportional_millionths: Option<u128>,
 }
 
+/// Parameters for opening a channel with external funding.
+/// This allows end-users to open channels by signing the funding transaction
+/// with their own wallet instead of having the node sign automatically.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct OpenChannelWithExternalFundingParams {
+    /// The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+
+    /// The amount of CKB or UDT to fund the channel with.
+    #[serde_as(as = "U128Hex")]
+    pub funding_amount: u128,
+
+    /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+    pub public: Option<bool>,
+
+    /// The type script of the UDT to fund the channel with, an optional parameter.
+    pub funding_udt_type_script: Option<Script>,
+
+    /// The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
+    pub shutdown_script: Script,
+
+    /// The lock script that controls the funding cells. The node will collect cells with this lock script
+    /// to build the funding transaction. The user must be able to sign for this lock script.
+    pub funding_lock_script: Script,
+
+    /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
+
+    /// The fee rate for the commitment transaction, an optional parameter.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub commitment_fee_rate: Option<u64>,
+
+    /// The fee rate for the funding transaction, an optional parameter.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub funding_fee_rate: Option<u64>,
+
+    /// The expiry delta to forward a tlc, in milliseconds, default to 4 hours, which is 4 * 60 * 60 * 1000 milliseconds
+    /// Expect it >= 2/3 commitment_delay_epoch.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub tlc_expiry_delta: Option<u64>,
+
+    /// The minimum value for a TLC our side can send,
+    /// an optional parameter, default is 0, which means we can send any TLC is larger than 0.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_min_value: Option<u128>,
+
+    /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_fee_proportional_millionths: Option<u128>,
+
+    /// The maximum value in flight for TLCs, an optional parameter.
+    /// This parameter can not be updated after channel is opened.
+    #[serde_as(as = "Option<U128Hex>")]
+    pub max_tlc_value_in_flight: Option<u128>,
+
+    /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+    /// This parameter can not be updated after channel is opened.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub max_tlc_number_in_flight: Option<u64>,
+}
+
+/// Result of opening a channel with external funding.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OpenChannelWithExternalFundingResult {
+    /// The channel ID of the channel being opened.
+    /// Use this ID to submit the signed funding transaction.
+    pub channel_id: Hash256,
+
+    /// The final unsigned funding transaction that needs to be signed.
+    /// The user should sign this transaction with their wallet and submit it
+    /// using `submit_signed_funding_tx` directly, without changing structure.
+    pub unsigned_funding_tx: ckb_jsonrpc_types::Transaction,
+}
+
+/// Parameters for submitting a signed funding transaction for external funding.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SubmitSignedFundingTxParams {
+    /// The channel ID returned from `open_channel_with_external_funding`.
+    pub channel_id: Hash256,
+
+    /// The signed funding transaction. This must be the same final transaction structure
+    /// that was returned from `open_channel_with_external_funding`, with valid
+    /// witnesses (signatures) added, and should be ready for direct broadcast.
+    pub signed_funding_tx: ckb_jsonrpc_types::Transaction,
+}
+
+/// Result of submitting a signed funding transaction.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SubmitSignedFundingTxResult {
+    /// The channel ID.
+    pub channel_id: Hash256,
+
+    /// The hash of the funding transaction that was submitted.
+    pub funding_tx_hash: H256,
+}
+
 /// RPC module for channel management.
 #[cfg(not(target_arch = "wasm32"))]
 #[rpc(server)]
@@ -385,6 +490,31 @@ trait ChannelRpc {
     /// Updates a channel.
     #[method(name = "update_channel")]
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
+
+    /// Opens a channel with external funding. The node will negotiate the channel with the peer,
+    /// but the user must sign the funding transaction themselves using their own wallet.
+    ///
+    /// This is useful when the user wants to fund a channel from an external wallet
+    /// rather than having the node sign with its internal key.
+    ///
+    /// Returns a final unsigned funding transaction that the user must sign and submit
+    /// using `submit_signed_funding_tx` without changing transaction structure.
+    #[method(name = "open_channel_with_external_funding")]
+    async fn open_channel_with_external_funding(
+        &self,
+        params: OpenChannelWithExternalFundingParams,
+    ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned>;
+
+    /// Submits a signed funding transaction for an externally funded channel.
+    ///
+    /// After calling `open_channel_with_external_funding`, the user signs the returned
+    /// final unsigned transaction with their wallet and submits it here. The signed
+    /// transaction should be directly broadcastable and will not be structurally modified.
+    #[method(name = "submit_signed_funding_tx")]
+    async fn submit_signed_funding_tx(
+        &self,
+        params: SubmitSignedFundingTxParams,
+    ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned>;
 }
 
 pub struct ChannelRpcServerImpl<S> {
@@ -444,6 +574,22 @@ where
     /// Updates a channel.
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
         self.update_channel(params).await
+    }
+
+    /// Opens a channel with external funding.
+    async fn open_channel_with_external_funding(
+        &self,
+        params: OpenChannelWithExternalFundingParams,
+    ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
+        self.open_channel_with_external_funding(params).await
+    }
+
+    /// Submits a signed funding transaction for an externally funded channel.
+    async fn submit_signed_funding_tx(
+        &self,
+        params: SubmitSignedFundingTxParams,
+    ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
+        self.submit_signed_funding_tx(params).await
     }
 }
 impl<S> ChannelRpcServerImpl<S>
@@ -649,5 +795,64 @@ where
             ))
         };
         handle_actor_call!(self.actor, message, params)
+    }
+
+    /// Opens a channel with external funding.
+    pub async fn open_channel_with_external_funding(
+        &self,
+        params: OpenChannelWithExternalFundingParams,
+    ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+                OpenChannelWithExternalFundingCommand {
+                    peer_id: params.peer_id.clone(),
+                    funding_amount: params.funding_amount,
+                    public: params.public.unwrap_or(true),
+                    shutdown_script: params.shutdown_script.clone().into(),
+                    funding_lock_script: params.funding_lock_script.clone().into(),
+                    commitment_delay_epoch: params
+                        .commitment_delay_epoch
+                        .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
+                    funding_udt_type_script: params
+                        .funding_udt_type_script
+                        .clone()
+                        .map(|s| s.into()),
+                    commitment_fee_rate: params.commitment_fee_rate,
+                    funding_fee_rate: params.funding_fee_rate,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
+                    tlc_min_value: params.tlc_min_value,
+                    tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
+                    max_tlc_value_in_flight: params.max_tlc_value_in_flight,
+                    max_tlc_number_in_flight: params.max_tlc_number_in_flight,
+                },
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| {
+            OpenChannelWithExternalFundingResult {
+                channel_id: response.channel_id,
+                unsigned_funding_tx: response.unsigned_funding_tx.into(),
+            }
+        })
+    }
+
+    /// Submits a signed funding transaction for an externally funded channel.
+    pub async fn submit_signed_funding_tx(
+        &self,
+        params: SubmitSignedFundingTxParams,
+    ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
+        let channel_id = params.channel_id;
+        let signed_tx: packed::Transaction = params.signed_funding_tx.clone().into();
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+                channel_id,
+                signed_tx: signed_tx.clone(),
+                reply: rpc_reply,
+            })
+        };
+        handle_actor_call!(self.actor, message, params).map(|tx_hash| SubmitSignedFundingTxResult {
+            channel_id,
+            funding_tx_hash: tx_hash.into(),
+        })
     }
 }

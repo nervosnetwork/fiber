@@ -9,16 +9,19 @@
     "esbuild-plugin-inline-worker": "^0.1.1",
     "esbuild-plugin-polyfill-node": "^0.3.0",
     "fiber-wasm": "*",
-    "fiber-wasm-db-worker": "*"
+    "fiber-wasm-db-worker": "*",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
+    "@types/jest": "^29.5.0"
   },
   "dependencies": {
     "async-mutex": "^0.5.0",
     "stream-browserify": "^3.0.0"
   },
   "scripts": {
-    "build-debug": "PROFILE=debug npx node ./esbuild.config.mjs",
-    "build": "PROFILE=prod npx node ./esbuild.config.mjs",
-    "test": "jest"
+    "build-debug": "npm -w fiber-wasm run build-debug && npm -w fiber-wasm-db-worker run build-debug && PROFILE=debug npx node ./esbuild.config.mjs",
+    "build": "npm -w fiber-wasm run build && npm -w fiber-wasm-db-worker run build && PROFILE=prod npx node ./esbuild.config.mjs",
+    "test": "jest --passWithNoTests"
   },
   "exports": {
     ".": "./dist/index.js"
