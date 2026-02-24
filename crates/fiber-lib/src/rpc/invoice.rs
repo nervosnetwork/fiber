@@ -558,6 +558,11 @@ where
                             Some(payment_hash),
                         )
                     })?;
+                if let Some(network_actor) = &self.network_actor {
+                    let _ = network_actor.send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+                    ));
+                }
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice: invoice.into(),
