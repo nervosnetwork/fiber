@@ -298,6 +298,10 @@ Lists all channels.
 
 * `peer_id` - <em>`Option<PeerId>`</em>, The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
 * `include_closed` - <em>`Option<bool>`</em>, Whether to include closed channels in the list, an optional parameter, default value is false
+* `only_pending` - <em>`Option<bool>`</em>, When set to true, only return channels that are still being opened (non-final states:
+ negotiating, collaborating on funding tx, signing, awaiting tx signatures, awaiting channel
+ ready) as well as channels whose opening attempt failed. Default is false.
+ Mutually exclusive with `include_closed`.
 
 ##### Returns
 
@@ -1138,6 +1142,8 @@ The channel data structure
  if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
  the channel configuration of B and C, not A and B.
 * `shutdown_transaction_hash` - <em>`Option<H256>`</em>, The hash of the shutdown transaction
+* `failure_detail` - <em>`Option<String>`</em>, Human-readable reason why the channel opening failed.
+ Only present when the channel is in a failed state (e.g. abandoned or funding aborted).
 ---
 
 <a id="#type-channelinfo"></a>
