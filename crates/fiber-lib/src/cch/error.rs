@@ -14,6 +14,8 @@ pub enum CchStoreError {
 
 #[derive(Error, Debug)]
 pub enum CchError {
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
     #[error("Store error: {0}")]
     StoreError(#[from] CchStoreError),
     #[error("Outgoing invoice expiry time is too short")]

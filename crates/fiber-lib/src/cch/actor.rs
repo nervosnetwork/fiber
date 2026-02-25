@@ -512,7 +512,16 @@ impl<S: CchOrderStore> CchState<S> {
             .final_tlc_minimum_expiry_delta()
             .copied()
             .unwrap_or(0);
-        let btc_final_cltv_millis = self.config.btc_final_tlc_expiry_delta_blocks * 600 * 1000;
+        let btc_final_cltv_millis = self
+            .config
+            .btc_final_tlc_expiry_delta_blocks
+            .checked_mul(600 * 1000)
+            .ok_or_else(|| {
+                CchError::ConfigError(format!(
+                    "btc_final_tlc_expiry_delta_blocks ({}) is too large and causes overflow when converting to milliseconds",
+                    self.config.btc_final_tlc_expiry_delta_blocks
+                ))
+            })?;
         if ckb_final_tlc_millis >= btc_final_cltv_millis / 2 {
             return Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge);
         }
