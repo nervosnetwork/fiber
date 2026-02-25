@@ -2,6 +2,7 @@
 members = [
     "crates/fiber-lib",
     "crates/fiber-bin",
+    "crates/fnn-cli",
     "crates/fiber-wasm",
     "crates/fiber-wasm-db-worker",
     "crates/fiber-wasm-db-common",

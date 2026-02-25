@@ -1,3 +1,4 @@
+use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::RouterHop;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
@@ -35,8 +36,10 @@ pub struct GetPaymentCommandParams {
     pub payment_hash: Hash256,
 }
 
+/// The result of a get_payment command, which includes the payment hash, status, timestamps,
+/// error message if failed, fee paid, and custom records.
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
@@ -66,6 +69,18 @@ pub struct GetPaymentCommandResult {
     ///    `A(amount, channel) -> B -> C -> D`
     /// means A will send `amount` with `channel` to B.
     routers: Vec<SessionRoute>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ListPaymentsParams {
+    /// Filter payments by status. If not set, all payments are returned.
+    pub status: Option<PaymentStatus>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ListPaymentsResult {
+    /// The list of payments.
+    pub payments: Vec<GetPaymentCommandResult>,
 }
 
 /// The custom records to be included in the payment.
@@ -324,23 +339,30 @@ trait PaymentRpc {
         &self,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
+
+    /// Lists all payments, optionally filtered by status.
+    #[method(name = "list_payments")]
+    async fn list_payments(
+        &self,
+        params: ListPaymentsParams,
+    ) -> Result<ListPaymentsResult, ErrorObjectOwned>;
 }
 
 pub struct PaymentRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
-    _store: S,
+    store: S,
 }
 
 impl<S> PaymentRpcServerImpl<S> {
-    pub fn new(actor: ActorRef<NetworkActorMessage>, _store: S) -> Self {
-        PaymentRpcServerImpl { actor, _store }
+    pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
+        PaymentRpcServerImpl { actor, store }
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<S> PaymentRpcServer for PaymentRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
 {
     /// Sends a payment to a peer.
     async fn send_payment(
@@ -375,11 +397,19 @@ where
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         self.send_payment_with_router(params).await
     }
+
+    /// Lists all payments, optionally filtered by status.
+    async fn list_payments(
+        &self,
+        params: ListPaymentsParams,
+    ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
+        self.list_payments(params).await
+    }
 }
 
 impl<S> PaymentRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
 {
     pub async fn send_payment(
         &self,
@@ -504,5 +534,37 @@ where
             #[cfg(debug_assertions)]
             routers: response.routers.clone(),
         })
+    }
+
+    pub async fn list_payments(
+        &self,
+        params: ListPaymentsParams,
+    ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
+        let sessions = match params.status {
+            Some(status) => self.store.get_payment_sessions_with_status(status),
+            None => self.store.get_all_payment_sessions(),
+        };
+
+        let payments = sessions
+            .into_iter()
+            .map(|session| {
+                let response: crate::fiber::network::SendPaymentResponse = session.into();
+                GetPaymentCommandResult {
+                    payment_hash: response.payment_hash,
+                    status: response.status,
+                    created_at: response.created_at,
+                    last_updated_at: response.last_updated_at,
+                    failed_error: response.failed_error,
+                    fee: response.fee,
+                    custom_records: response
+                        .custom_records
+                        .map(|records| PaymentCustomRecords { data: records.data }),
+                    #[cfg(debug_assertions)]
+                    routers: response.routers.clone(),
+                }
+            })
+            .collect();
+
+        Ok(ListPaymentsResult { payments })
     }
 }

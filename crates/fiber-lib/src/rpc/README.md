@@ -47,6 +47,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `get_payment`](#payment-get_payment)
         * [Method `build_router`](#payment-build_router)
         * [Method `send_payment_with_router`](#payment-send_payment_with_router)
+        * [Method `list_payments`](#payment-list_payments)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -73,6 +74,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
     * [Type `Currency`](#type-currency)
+    * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
@@ -835,6 +837,23 @@ Sends a payment to a peer with specified router
 
 
 
+<a id="payment-list_payments"></a>
+#### Method `list_payments`
+
+Lists all payments, optionally filtered by status.
+
+##### Params
+
+* `status` - <em>Option<[PaymentStatus](#type-paymentstatus)></em>, Filter payments by status. If not set, all payments are returned.
+
+##### Returns
+
+* `payments` - <em>Vec<[GetPaymentCommandResult](#type-getpaymentcommandresult)></em>, The list of payments.
+
+---
+
+
+
 <a id="peer"></a>
 ### Module `Peer`
 RPC module for peer management.
@@ -1247,6 +1266,31 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Fibb` - The mainnet currency of CKB.
 * `Fibt` - The testnet currency of the CKB network.
 * `Fibd` - The devnet currency of the CKB network.
+---
+
+<a id="#type-getpaymentcommandresult"></a>
+### Type `GetPaymentCommandResult`
+
+The result of a get_payment command, which includes the payment hash, status, timestamps,
+ error message if failed, fee paid, and custom records.
+
+
+#### Fields
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
 ---
 
 <a id="#type-hash256"></a>
