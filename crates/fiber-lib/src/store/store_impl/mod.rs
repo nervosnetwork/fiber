@@ -722,6 +722,52 @@ impl NetworkGraphStateStore for Store {
             .collect()
     }
 
+    fn get_payment_sessions_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<PaymentStatus>,
+    ) -> Vec<PaymentSession> {
+        let prefix = [PAYMENT_SESSION_PREFIX];
+        match after {
+            Some(after_hash) => {
+                let start_key = [&[PAYMENT_SESSION_PREFIX], after_hash.as_ref()].concat();
+                // Start from the `after` key and skip it (exclusive cursor)
+                let after_hash_owned = after_hash;
+                self.prefix_iterator_with_skip_while_and_start(
+                    &prefix,
+                    IteratorMode::From(&start_key, DbDirection::Forward),
+                    Box::new(move |key| {
+                        // Skip the cursor key itself (keys are [prefix][hash])
+                        key.len() > 1 && key[1..] == *after_hash_owned.as_ref()
+                    }),
+                )
+                .filter_map(|(_key, value)| {
+                    let session: PaymentSession =
+                        deserialize_from(value.as_ref(), "PaymentSession");
+                    match status {
+                        Some(ref s) if session.status != *s => None,
+                        _ => Some(session.init_attempts(self)),
+                    }
+                })
+                .take(limit)
+                .collect()
+            }
+            None => self
+                .prefix_iterator(&prefix)
+                .filter_map(|(_key, value)| {
+                    let session: PaymentSession =
+                        deserialize_from(value.as_ref(), "PaymentSession");
+                    match status {
+                        Some(ref s) if session.status != *s => None,
+                        _ => Some(session.init_attempts(self)),
+                    }
+                })
+                .take(limit)
+                .collect(),
+        }
+    }
+
     fn insert_payment_session(&self, session: PaymentSession) {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));

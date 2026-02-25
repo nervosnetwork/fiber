@@ -71,16 +71,24 @@ pub struct GetPaymentCommandResult {
     routers: Vec<SessionRoute>,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct ListPaymentsParams {
     /// Filter payments by status. If not set, all payments are returned.
     pub status: Option<PaymentStatus>,
+    /// The maximum number of payments to return. Default is 15.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub limit: Option<u64>,
+    /// The payment hash to start returning payments after (exclusive cursor for pagination).
+    pub after: Option<Hash256>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ListPaymentsResult {
     /// The list of payments.
     pub payments: Vec<GetPaymentCommandResult>,
+    /// The last cursor for pagination. Use this as `after` in the next request to get more results.
+    pub last_cursor: Option<Hash256>,
 }
 
 /// The custom records to be included in the payment.
@@ -540,12 +548,14 @@ where
         &self,
         params: ListPaymentsParams,
     ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
-        let sessions = match params.status {
-            Some(status) => self.store.get_payment_sessions_with_status(status),
-            None => self.store.get_all_payment_sessions(),
-        };
+        let default_limit: u64 = 15;
+        let limit = params.limit.unwrap_or(default_limit) as usize;
 
-        let payments = sessions
+        let sessions =
+            self.store
+                .get_payment_sessions_with_limit(limit, params.after, params.status);
+
+        let payments: Vec<GetPaymentCommandResult> = sessions
             .into_iter()
             .map(|session| {
                 let response: crate::fiber::network::SendPaymentResponse = session.into();
@@ -565,6 +575,11 @@ where
             })
             .collect();
 
-        Ok(ListPaymentsResult { payments })
+        let last_cursor = payments.last().map(|p| p.payment_hash);
+
+        Ok(ListPaymentsResult {
+            payments,
+            last_cursor,
+        })
     }
 }

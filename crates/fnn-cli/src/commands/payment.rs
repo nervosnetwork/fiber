@@ -119,6 +119,16 @@ pub fn command() -> Command {
                     Arg::new("status")
                         .long("status")
                         .help("Filter by status: Created, Inflight, Success, or Failed"),
+                )
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .help("Maximum number of payments to return (default 15)"),
+                )
+                .arg(
+                    Arg::new("after")
+                        .long("after")
+                        .help("Pagination cursor: payment hash to start after"),
                 ),
         )
         .subcommand(
@@ -282,6 +292,13 @@ pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> 
             let mut params = json!({});
             if let Some(v) = sub.get_one::<String>("status") {
                 params["status"] = json!(v);
+            }
+            if let Some(v) = sub.get_one::<String>("limit") {
+                let val: u64 = v.parse().map_err(|_| anyhow::anyhow!("Invalid limit"))?;
+                params["limit"] = json!(to_hex_u64(val));
+            }
+            if let Some(v) = sub.get_one::<String>("after") {
+                params["after"] = json!(v);
             }
             client.call_with_params("list_payments", params).await
         }

@@ -2721,6 +2721,17 @@ pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
+    /// Get payment sessions with pagination support.
+    /// `limit`: maximum number of results to return.
+    /// `after`: if provided, start after this payment_hash (exclusive cursor).
+    /// `status`: optional status filter.
+    /// Returns (sessions, has_more) where has_more indicates if there are more results.
+    fn get_payment_sessions_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<PaymentStatus>,
+    ) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
     fn insert_payment_history_result(
         &mut self,

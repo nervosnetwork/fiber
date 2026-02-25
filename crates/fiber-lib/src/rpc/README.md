@@ -845,10 +845,13 @@ Lists all payments, optionally filtered by status.
 ##### Params
 
 * `status` - <em>Option<[PaymentStatus](#type-paymentstatus)></em>, Filter payments by status. If not set, all payments are returned.
+* `limit` - <em>`Option<u64>`</em>, The maximum number of payments to return. Default is 15.
+* `after` - <em>Option<[Hash256](#type-hash256)></em>, The payment hash to start returning payments after (exclusive cursor for pagination).
 
 ##### Returns
 
 * `payments` - <em>Vec<[GetPaymentCommandResult](#type-getpaymentcommandresult)></em>, The list of payments.
+* `last_cursor` - <em>Option<[Hash256](#type-hash256)></em>, The last cursor for pagination. Use this as `after` in the next request to get more results.
 
 ---
 
