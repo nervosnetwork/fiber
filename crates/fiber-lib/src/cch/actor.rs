@@ -596,9 +596,9 @@ impl<S: CchOrderStore> CchState<S> {
             ..Default::default()
         };
         let add_invoice_resp = client
-            .add_hold_invoice(req)
+            .add_hold_invoice(req.clone())
             .await
-            .map_err(|err| CchError::LndRpcError(err.to_string()))?
+            .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
             .into_inner();
         let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
 
