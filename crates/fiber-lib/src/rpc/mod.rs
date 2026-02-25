@@ -43,7 +43,7 @@ pub mod server {
     use crate::{
         cch::CchMessage,
         fiber::{
-            channel::ChannelActorStateStore,
+            channel::{ChannelActorStateStore, ChannelOpenRecordStore},
             graph::{NetworkGraph, NetworkGraphStateStore},
             NetworkActorMessage,
         },
@@ -81,6 +81,7 @@ pub mod server {
     #[cfg(feature = "watchtower")]
     pub trait RpcServerStore:
         ChannelActorStateStore
+        + ChannelOpenRecordStore
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
@@ -91,6 +92,7 @@ pub mod server {
     #[cfg(feature = "watchtower")]
     impl<T> RpcServerStore for T where
         T: ChannelActorStateStore
+            + ChannelOpenRecordStore
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
@@ -100,12 +102,20 @@ pub mod server {
     }
     #[cfg(not(feature = "watchtower"))]
     pub trait RpcServerStore:
-        ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+        ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + InvoiceStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
     impl<T> RpcServerStore for T where
-        T: ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+        T: ChannelActorStateStore
+            + ChannelOpenRecordStore
+            + InvoiceStore
+            + NetworkGraphStateStore
+            + GossipMessageStore
     {
     }
 

@@ -3,11 +3,12 @@ use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
         AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
-        ChannelCommand, ChannelCommandWithId, ChannelState as RawChannelState, CloseFlags,
-        CollaboratingFundingTxFlags, NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags,
-        SigningCommitmentFlags, UpdateCommand,
+        ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore, ChannelOpeningStatus,
+        ChannelState as RawChannelState, CloseFlags, CollaboratingFundingTxFlags,
+        NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags, SigningCommitmentFlags,
+        UpdateCommand,
     },
-    network::{AcceptChannelCommand, OpenChannelCommand},
+    network::{AcceptChannelCommand, OpenChannelCommand, PendingAcceptChannel},
     serde_utils::{U128Hex, U64Hex},
     types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
@@ -166,6 +167,11 @@ pub struct ListChannelsParams {
     pub peer_id: Option<PeerId>,
     /// Whether to include closed channels in the list, an optional parameter, default value is false
     pub include_closed: Option<bool>,
+    /// When set to true, only return channels that are still being opened (non-final states:
+    /// negotiating, collaborating on funding tx, signing, awaiting tx signatures, awaiting channel
+    /// ready) as well as channels whose opening attempt failed. Default is false.
+    /// Mutually exclusive with `include_closed`.
+    pub only_pending: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -203,6 +209,26 @@ pub enum ChannelState {
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
+}
+
+impl ChannelState {
+    /// Returns true if this channel is in a "pending" state — i.e. the channel-opening
+    /// flow has started but has not yet reached `ChannelReady` (and has not been closed
+    /// cooperatively or uncooperatively). This includes `NegotiatingFunding`,
+    /// `CollaboratingFundingTx`, `SigningCommitment`, `AwaitingTxSignatures`, and
+    /// `AwaitingChannelReady`, as well as `Closed(ABANDONED)` / `Closed(FUNDING_ABORTED)`.
+    pub fn is_pending(&self) -> bool {
+        matches!(
+            self,
+            ChannelState::NegotiatingFunding(_)
+                | ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::Closed(CloseFlags::ABANDONED)
+                | ChannelState::Closed(CloseFlags::FUNDING_ABORTED)
+        )
+    }
 }
 
 impl From<RawChannelState> for ChannelState {
@@ -285,6 +311,9 @@ pub struct Channel {
     pub tlc_fee_proportional_millionths: u128,
     /// The hash of the shutdown transaction
     pub shutdown_transaction_hash: Option<H256>,
+    /// Human-readable reason why the channel opening failed.
+    /// Only present when the channel is in a failed state (e.g. abandoned or funding aborted).
+    pub failure_detail: Option<String>,
 }
 
 /// The htlc data structure
@@ -387,6 +416,39 @@ trait ChannelRpc {
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
 }
 
+/// Convert a `PendingAcceptChannel` (inbound, not yet accepted) into a minimal `Channel`
+/// response suitable for inclusion in `list_channels(only_pending = true)`.
+///
+/// These channels are held in-memory by the network actor in `to_be_accepted_channels`.
+/// They have no `ChannelActorState` yet since `create_inbound_channel` has not been called.
+fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
+    Channel {
+        channel_id: pending.channel_id,
+        // The accepting node is the non-initiator, so is_acceptor = true
+        is_acceptor: true,
+        is_public: false,
+        is_one_way: false,
+        channel_outpoint: None,
+        peer_id: pending.peer_id,
+        funding_udt_type_script: pending.udt_type_script.map(Into::into),
+        // Report as NegotiatingFunding since we're still awaiting local acceptance
+        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
+        // The remote peer's funding amount is what they're contributing
+        local_balance: 0,
+        remote_balance: pending.funding_amount,
+        offered_tlc_balance: 0,
+        received_tlc_balance: 0,
+        pending_tlcs: vec![],
+        latest_commitment_transaction_hash: None,
+        created_at: pending.created_at,
+        enabled: false,
+        tlc_expiry_delta: 0,
+        tlc_fee_proportional_millionths: 0,
+        shutdown_transaction_hash: None,
+        failure_detail: None,
+    }
+}
+
 pub struct ChannelRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
     store: S,
@@ -401,7 +463,7 @@ impl<S> ChannelRpcServerImpl<S> {
 #[async_trait::async_trait]
 impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + ChannelOpenRecordStore + Send + Sync + 'static,
 {
     /// Attempts to open a channel with a peer.
     async fn open_channel(
@@ -448,7 +510,7 @@ where
 }
 impl<S> ChannelRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + ChannelOpenRecordStore + Send + Sync + 'static,
 {
     pub async fn open_channel(
         &self,
@@ -527,67 +589,207 @@ where
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
-        let channel_states = if params.include_closed.unwrap_or_default() {
-            self.store.get_channel_states(params.peer_id)
+        let only_pending = params.only_pending.unwrap_or_default();
+        let include_closed = params.include_closed.unwrap_or_default();
+
+        // The two filter options are mutually exclusive: `only_pending` narrows to channels
+        // that are still opening (or failed to open), while `include_closed` broadens to
+        // all channels including successfully closed ones. Allowing both simultaneously
+        // would produce confusing results.
+        if only_pending && include_closed {
+            return Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "only_pending and include_closed are mutually exclusive",
+                Some(params),
+            ));
+        }
+
+        let channel_states = if only_pending {
+            // For pending mode, fetch all channel states (including non-active ones
+            // like ABANDONED / FUNDING_ABORTED which are "closed" but represent failed openings)
+            self.store.get_channel_states(params.peer_id.clone())
+        } else if include_closed {
+            self.store.get_channel_states(params.peer_id.clone())
         } else {
-            self.store.get_active_channel_states(params.peer_id)
+            self.store.get_active_channel_states(params.peer_id.clone())
         };
         let mut channels: Vec<_> = channel_states
             .into_iter()
             .filter_map(|(peer_id, channel_id, _state)| {
                 self.store
                     .get_channel_actor_state(&channel_id)
-                    .map(|state| Channel {
-                        channel_id,
-                        is_public: state.is_public(),
-                        is_acceptor: state.is_acceptor,
-                        is_one_way: state.is_one_way,
-                        channel_outpoint: state.get_funding_transaction_outpoint(),
-                        peer_id,
-                        funding_udt_type_script: state
-                            .funding_udt_type_script
-                            .clone()
-                            .map(Into::into),
-                        state: state.state.into(),
-                        local_balance: state.get_local_balance(),
-                        remote_balance: state.get_remote_balance(),
-                        offered_tlc_balance: state.get_offered_tlc_balance(),
-                        received_tlc_balance: state.get_received_tlc_balance(),
-                        pending_tlcs: state
-                            .tlc_state
-                            .all_tlcs()
-                            .map(|tlc| {
-                                let id = match tlc.tlc_id {
-                                    TLCId::Offered(id) => id,
-                                    TLCId::Received(id) => id,
-                                };
-                                Htlc {
-                                    id,
-                                    amount: tlc.amount,
-                                    expiry: tlc.expiry,
-                                    payment_hash: tlc.payment_hash,
-                                    forwarding_channel_id: tlc
-                                        .forwarding_tlc
-                                        .map(|(channel_id, _)| channel_id),
-                                    forwarding_tlc_id: tlc.forwarding_tlc.map(|(_, id)| id),
-                                    status: tlc.status.clone(),
-                                }
-                            })
-                            .collect(),
-                        latest_commitment_transaction_hash: state
-                            .latest_commitment_transaction
-                            .as_ref()
-                            .map(|tx| tx.clone().into_view().hash().unpack()),
-                        created_at: state.get_created_at_in_millis(),
-                        enabled: state.local_tlc_info.enabled,
-                        tlc_expiry_delta: state.local_tlc_info.tlc_expiry_delta,
-                        tlc_fee_proportional_millionths: state
-                            .local_tlc_info
-                            .tlc_fee_proportional_millionths,
-                        shutdown_transaction_hash: state.shutdown_transaction_hash,
+                    .and_then(|state| {
+                        let rpc_state: ChannelState = state.state.into();
+                        // When only_pending is set, skip channels that are not in a pending state
+                        if only_pending && !rpc_state.is_pending() {
+                            return None;
+                        }
+                        // Enrich with failure_detail from ChannelOpenRecord when available
+                        let failure_detail = self
+                            .store
+                            .get_channel_open_record(&channel_id)
+                            .and_then(|r| r.failure_detail);
+                        Some(Channel {
+                            channel_id,
+                            is_public: state.is_public(),
+                            is_acceptor: state.is_acceptor,
+                            is_one_way: state.is_one_way,
+                            channel_outpoint: state.get_funding_transaction_outpoint(),
+                            peer_id,
+                            funding_udt_type_script: state
+                                .funding_udt_type_script
+                                .clone()
+                                .map(Into::into),
+                            state: rpc_state,
+                            local_balance: state.get_local_balance(),
+                            remote_balance: state.get_remote_balance(),
+                            offered_tlc_balance: state.get_offered_tlc_balance(),
+                            received_tlc_balance: state.get_received_tlc_balance(),
+                            pending_tlcs: state
+                                .tlc_state
+                                .all_tlcs()
+                                .map(|tlc| {
+                                    let id = match tlc.tlc_id {
+                                        TLCId::Offered(id) => id,
+                                        TLCId::Received(id) => id,
+                                    };
+                                    Htlc {
+                                        id,
+                                        amount: tlc.amount,
+                                        expiry: tlc.expiry,
+                                        payment_hash: tlc.payment_hash,
+                                        forwarding_channel_id: tlc
+                                            .forwarding_tlc
+                                            .map(|(channel_id, _)| channel_id),
+                                        forwarding_tlc_id: tlc.forwarding_tlc.map(|(_, id)| id),
+                                        status: tlc.status.clone(),
+                                    }
+                                })
+                                .collect(),
+                            latest_commitment_transaction_hash: state
+                                .latest_commitment_transaction
+                                .as_ref()
+                                .map(|tx| tx.clone().into_view().hash().unpack()),
+                            created_at: state.get_created_at_in_millis(),
+                            enabled: state.local_tlc_info.enabled,
+                            tlc_expiry_delta: state.local_tlc_info.tlc_expiry_delta,
+                            tlc_fee_proportional_millionths: state
+                                .local_tlc_info
+                                .tlc_fee_proportional_millionths,
+                            shutdown_transaction_hash: state.shutdown_transaction_hash,
+                            failure_detail,
+                        })
                     })
             })
             .collect();
+
+        if only_pending {
+            // Also include channel-opening records (outbound) whose ChannelActorState is not yet
+            // in the store or has been deleted. This covers two cases:
+            //
+            // 1. **WaitingForPeer** (and other in-progress statuses): the outbound channel actor
+            //    only persists its ChannelActorState when its `handle()` method is first called
+            //    (i.e., after the first message from the peer). Before that, the channel exists
+            //    only in the ChannelOpenRecord. Without this path the initiator would see nothing
+            //    when calling list_channels(only_pending=true) on an unaccepted channel.
+            //
+            // 2. **Failed**: the ChannelActorState was already deleted after Abandon/AbortFunding.
+            for record in self.store.get_channel_open_records() {
+                // ChannelReady is the "done" state — those channels appear in the normal list.
+                if record.status == ChannelOpeningStatus::ChannelReady {
+                    continue;
+                }
+                // Inbound channels still waiting for acceptance (WaitingForPeer) are covered
+                // by the to_be_accepted_channels loop below which has the actual funding amount.
+                // Skip them here to avoid duplicate entries.
+                if record.is_acceptor && record.status == ChannelOpeningStatus::WaitingForPeer {
+                    continue;
+                }
+                // If there's already a ChannelActorState for this channel it was included
+                // above (with accurate state from the actor). Skip to avoid duplicates.
+                if self
+                    .store
+                    .get_channel_actor_state(&record.channel_id)
+                    .is_some()
+                {
+                    continue;
+                }
+                // Apply peer_id filter if provided
+                if let Some(ref filter_peer) = params.peer_id {
+                    if filter_peer != &record.peer_id {
+                        continue;
+                    }
+                }
+                // Map the ChannelOpenRecord status to the closest ChannelState representation.
+                let synthetic_state = match record.status {
+                    ChannelOpeningStatus::Failed => {
+                        ChannelState::Closed(CloseFlags::FUNDING_ABORTED)
+                    }
+                    // Any other in-progress status: show as NegotiatingFunding since we lack
+                    // the exact channel sub-state when the actor hasn't yet stored its state.
+                    _ => ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT),
+                };
+                // For outbound channels the local node contributes funding_amount.
+                // For inbound channels (post-failure) funding_amount was the remote peer's share.
+                let (local_balance, remote_balance) = if record.is_acceptor {
+                    (0u128, record.funding_amount)
+                } else {
+                    (record.funding_amount, 0u128)
+                };
+                channels.push(Channel {
+                    channel_id: record.channel_id,
+                    is_public: false,
+                    is_acceptor: record.is_acceptor,
+                    is_one_way: false,
+                    channel_outpoint: None,
+                    peer_id: record.peer_id,
+                    funding_udt_type_script: None,
+                    state: synthetic_state,
+                    local_balance,
+                    remote_balance,
+                    offered_tlc_balance: 0,
+                    received_tlc_balance: 0,
+                    pending_tlcs: vec![],
+                    latest_commitment_transaction_hash: None,
+                    created_at: record.created_at,
+                    enabled: false,
+                    tlc_expiry_delta: 0,
+                    tlc_fee_proportional_millionths: 0,
+                    shutdown_transaction_hash: None,
+                    failure_detail: record.failure_detail,
+                });
+            }
+
+            // Include inbound channel requests that are waiting for acceptance
+            // (held in the network actor's `to_be_accepted_channels`).
+            let pending_accept_msg = |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(
+                    rpc_reply,
+                ))
+            };
+            let pending_accept = match call!(self.actor, pending_accept_msg) {
+                Ok(Ok(list)) => list,
+                _ => vec![],
+            };
+            for pending in pending_accept {
+                // Apply peer_id filter if provided
+                if let Some(ref filter_peer) = params.peer_id {
+                    if filter_peer != &pending.peer_id {
+                        continue;
+                    }
+                }
+                // Skip if there's already a ChannelActorState (unlikely but possible in a race)
+                if self
+                    .store
+                    .get_channel_actor_state(&pending.channel_id)
+                    .is_some()
+                {
+                    continue;
+                }
+                channels.push(pending_accept_channel_to_rpc(pending));
+            }
+        }
+
         // Sort by created_at in descending order
         channels.sort_by_key(|channel| Reverse(channel.created_at));
         Ok(ListChannelsResult { channels })

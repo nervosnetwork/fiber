@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 mod sample_broadcast;
 mod sample_channel;
+mod sample_channel_open;
 mod sample_holdtlc;
 mod sample_invoice;
 mod sample_network;
