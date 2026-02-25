@@ -586,7 +586,7 @@ impl<S: CchOrderStore> CchState<S> {
         let mut client = self.lnd_connection.create_invoices_client().await?;
         let req = invoicesrpc::AddHoldInvoiceRequest {
             hash: payment_hash.as_ref().to_vec(),
-            value_msat: (amount_sats * 1_000u128) as i64,
+            value_msat: ((amount_sats + fee_sats) * 1_000u128) as i64,
             expiry: outgoing_invoice_expiry_delta_seconds as i64,
             cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
             ..Default::default()
