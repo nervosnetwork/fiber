@@ -99,8 +99,16 @@ impl ActionExecutor for SendFiberOutgoingPaymentExecutor {
 
 impl SendFiberOutgoingPaymentExecutor {
     fn is_permanent_error(err: &str) -> bool {
-        // TODO: replace string matching with structured error codes from NetworkActor.
-        err.contains("InvalidParameter")
+        // InvalidParameter errors are permanent validation errors
+        if err.contains("InvalidParameter") {
+            return true;
+        }
+
+        // Additional permanent errors that won't be fixed by retrying
+        let err_lower = err.to_lowercase();
+        err_lower.contains("invalid payment request")
+            || err_lower.contains("invoice expired")
+            || err_lower.contains("payment hash mismatch")
     }
 }
 
@@ -168,7 +176,24 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
 
 impl SendLightningOutgoingPaymentExecutor {
     fn is_permanent_error(status: tonic::Status) -> bool {
-        matches!(status.code(), tonic::Code::InvalidArgument)
+        // Check for explicit invalid argument errors
+        if matches!(status.code(), tonic::Code::InvalidArgument) {
+            return true;
+        }
+
+        // LND often returns Unknown status for validation errors that are permanent.
+        // Check the error message to identify these cases.
+        if matches!(status.code(), tonic::Code::Unknown) {
+            let msg = status.message().to_lowercase();
+            // These are validation/policy errors that won't be fixed by retrying
+            return msg.contains("self-payments not allowed")
+                || msg.contains("invoice is already paid")
+                || msg.contains("invoice expired")
+                || msg.contains("incorrect payment amount")
+                || msg.contains("payment hash mismatch");
+        }
+
+        false
     }
 }
 
