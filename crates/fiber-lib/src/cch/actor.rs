@@ -458,7 +458,10 @@ impl<S: CchOrderStore> CchState<S> {
             .as_ref(),
         )
         .into();
-        let invoice_amount_sats = amount_msat.div_ceil(1_000u128) + fee_sats;
+        let invoice_amount_sats = amount_msat
+            .div_ceil(1_000u128)
+            .checked_add(fee_sats)
+            .ok_or(CchError::SendBTCOrderAmountTooLarge)?;
 
         let invoice = InvoiceBuilder::new(send_btc.currency)
             .amount(Some(invoice_amount_sats))
@@ -542,12 +545,13 @@ impl<S: CchOrderStore> CchState<S> {
         let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
             / 1_000_000u128
             + (self.config.base_fee_sats as u128);
-        if amount_sats <= fee_sats {
-            return Err(CchError::ReceiveBTCOrderAmountTooSmall);
-        }
-        if amount_sats > (i64::MAX / 1_000i64) as u128 {
-            return Err(CchError::ReceiveBTCOrderAmountTooLarge);
-        }
+        let total_msat = i64::try_from(
+            amount_sats
+                .checked_add(fee_sats)
+                .and_then(|s| s.checked_mul(1_000u128))
+                .unwrap_or(u128::MAX),
+        )
+        .map_err(|_| CchError::ReceiveBTCOrderAmountTooLarge)?;
 
         // Verify wrapped_btc_type_script matches invoice UDT type script
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
@@ -586,7 +590,7 @@ impl<S: CchOrderStore> CchState<S> {
         let mut client = self.lnd_connection.create_invoices_client().await?;
         let req = invoicesrpc::AddHoldInvoiceRequest {
             hash: payment_hash.as_ref().to_vec(),
-            value_msat: ((amount_sats + fee_sats) * 1_000u128) as i64,
+            value_msat: total_msat,
             expiry: outgoing_invoice_expiry_delta_seconds as i64,
             cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
             ..Default::default()
