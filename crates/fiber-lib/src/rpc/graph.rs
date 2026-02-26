@@ -145,7 +145,7 @@ pub struct NodeInfo {
     pub addresses: Vec<MultiAddr>,
     /// The node features supported by the node.
     pub features: Vec<String>,
-    /// The identity public key of the node.
+    /// The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
     pub node_id: Pubkey,
     #[serde_as(as = "U64Hex")]
     /// The latest timestamp set by the owner for the node announcement.
@@ -201,9 +201,9 @@ pub struct ChannelInfo {
     /// The outpoint of the channel.
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
-    /// The identity public key of the first node.
+    /// The identity public key of the first node (secp256k1 compressed, hex string).
     pub node1: Pubkey,
-    /// The identity public key of the second node.
+    /// The identity public key of the second node (secp256k1 compressed, hex string).
     pub node2: Pubkey,
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.
