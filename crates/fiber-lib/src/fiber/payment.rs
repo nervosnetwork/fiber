@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::channel::PrevTlcInfo;
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
 use super::types::{Hash256, Privkey, Pubkey, TlcErrData};
-use crate::fiber::channel::{ChannelActorStateStore, PrevTlcInfo, ProcessingChannelError};
+use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
     MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,

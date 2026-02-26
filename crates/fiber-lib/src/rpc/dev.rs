@@ -5,7 +5,9 @@ use crate::{
         channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
         hash_algorithm::HashAlgorithm,
         serde_utils::{U128Hex, U64Hex},
-        types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET},
+        types::{
+            Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+        },
         NetworkActorCommand, NetworkActorMessage,
     },
     handle_actor_cast,

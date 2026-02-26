@@ -2,8 +2,8 @@ use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
 use super::features::FeatureVector;
 use super::gen::fiber::{
-    self as molecule_fiber, ChannelUpdateOpt, CustomRecordsOpt, PaymentPreimageOpt,
-    PubNonce as Byte66, PubkeyOpt, TlcErrDataOpt, UdtCellDeps, Uint128Opt,
+    self as molecule_fiber, ChannelUpdateOpt, CustomRecordsOpt, PaymentPreimageOpt, PubkeyOpt,
+    TlcErrDataOpt,
 };
 use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
@@ -12,7 +12,7 @@ use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{
     EntityHex, PartialSignatureAsBytes, PubNonceAsBytes, SliceBase58, SliceHex, SliceHexNoPrefix,
 };
-use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
+use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::payment::{PaymentCustomRecords, USER_CUSTOM_RECORDS_MAX_INDEX};
 use serde_with::IfIsHumanReadable;
@@ -30,7 +30,7 @@ use core::fmt::{self, Formatter};
 use fiber_sphinx::{OnionErrorPacket, SphinxError};
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::secp::{Point, Scalar};
-use musig2::{BinaryEncoding, PartialSignature, PubNonce};
+use musig2::{PartialSignature, PubNonce};
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use ractor::concurrency::Duration;
@@ -64,21 +64,6 @@ bitflags::bitflags! {
     pub struct ChannelUpdateMessageFlags: u32 {
         const UPDATE_OF_NODE1 = 0;
         const UPDATE_OF_NODE2 = 1;
-    }
-}
-
-impl TryFrom<Byte66> for PubNonce {
-    type Error = Error;
-
-    fn try_from(value: Byte66) -> Result<Self, Self::Error> {
-        PubNonce::from_bytes(value.as_slice())
-            .map_err(|e| Error::Musig2(format!("Invalid PubNonce: {e}")))
-    }
-}
-
-impl From<PubNonce> for Byte66 {
-    fn from(value: PubNonce) -> Self {
-        Byte66::from_slice(&value.to_bytes()).expect("valid pubnonce serialized to 66 bytes")
     }
 }
 
@@ -467,6 +452,12 @@ pub enum Error {
     AnyHow(#[from] anyhow::Error),
 }
 
+impl From<musig2::errors::DecodeError<PubNonce>> for Error {
+    fn from(e: musig2::errors::DecodeError<PubNonce>) -> Self {
+        Error::Musig2(format!("{e}"))
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum OnionPacketError {
     #[error("Fail to deserialize the hop data")]
@@ -527,55 +518,6 @@ impl TryFrom<molecule_fiber::EcdsaSignature> for EcdsaSignature {
         Secp256k1Signature::from_compact(&signature)
             .map(Into::into)
             .map_err(Into::into)
-    }
-}
-
-impl From<XOnlyPublicKey> for molecule_gossip::SchnorrXOnlyPubkey {
-    fn from(pk: XOnlyPublicKey) -> molecule_gossip::SchnorrXOnlyPubkey {
-        molecule_gossip::SchnorrXOnlyPubkey::new_builder()
-            .set(
-                pk.serialize()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect::<Vec<Byte>>()
-                    .try_into()
-                    .expect("Public serialized to correct length"),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_gossip::SchnorrXOnlyPubkey> for XOnlyPublicKey {
-    type Error = Error;
-
-    fn try_from(pubkey: molecule_gossip::SchnorrXOnlyPubkey) -> Result<Self, Self::Error> {
-        let pubkey = pubkey.as_slice();
-        XOnlyPublicKey::from_slice(pubkey).map_err(Into::into)
-    }
-}
-
-impl From<SchnorrSignature> for molecule_gossip::SchnorrSignature {
-    fn from(signature: SchnorrSignature) -> molecule_gossip::SchnorrSignature {
-        molecule_gossip::SchnorrSignature::new_builder()
-            .set(
-                signature
-                    .to_byte_array()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect::<Vec<Byte>>()
-                    .try_into()
-                    .expect("Signature serialized to correct length"),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_gossip::SchnorrSignature> for SchnorrSignature {
-    type Error = Error;
-
-    fn try_from(signature: molecule_gossip::SchnorrSignature) -> Result<Self, Self::Error> {
-        let signature = signature.as_slice();
-        SchnorrSignature::from_slice(signature).map_err(Into::into)
     }
 }
 
@@ -1953,164 +1895,6 @@ impl NodeAnnouncement {
     }
 }
 
-impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
-    fn from(udt_cell_dep: UdtCellDep) -> Self {
-        molecule_fiber::UdtCellDep::new_builder()
-            .dep_type(udt_cell_dep.dep_type.into())
-            .out_point(udt_cell_dep.out_point.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::UdtCellDep> for UdtCellDep {
-    type Error = Error;
-
-    fn try_from(udt_cell_dep: molecule_fiber::UdtCellDep) -> Result<Self, Self::Error> {
-        Ok(UdtCellDep {
-            out_point: udt_cell_dep.out_point().into(),
-            dep_type: udt_cell_dep
-                .dep_type()
-                .try_into()
-                .map_err(|e| Error::AnyHow(anyhow!("invalid dep type: {:?}", e)))?,
-        })
-    }
-}
-
-impl From<UdtScript> for molecule_fiber::UdtScript {
-    fn from(udt_script: UdtScript) -> Self {
-        molecule_fiber::UdtScript::new_builder()
-            .code_hash(udt_script.code_hash.pack())
-            .hash_type(udt_script.hash_type.into())
-            .args(udt_script.args.pack())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::UdtScript> for UdtScript {
-    type Error = Error;
-
-    fn try_from(udt_script: molecule_fiber::UdtScript) -> Result<Self, Self::Error> {
-        Ok(UdtScript {
-            code_hash: udt_script.code_hash().unpack(),
-            hash_type: udt_script
-                .hash_type()
-                .try_into()
-                .map_err(|e| Error::AnyHow(anyhow!("invalid hash type: {:?}", e)))?,
-            args: String::from_utf8(udt_script.args().unpack())
-                .map_err(|e| Error::AnyHow(anyhow!("invalid utf8 in UdtScript args: {}", e)))?,
-        })
-    }
-}
-
-impl From<UdtDep> for molecule_fiber::UdtDep {
-    fn from(udt_dep: UdtDep) -> Self {
-        match udt_dep {
-            UdtDep {
-                cell_dep: Some(cell_dep),
-                type_id: None,
-            } => molecule_fiber::UdtDep::new_builder()
-                .set(molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep.into()))
-                .build(),
-            UdtDep {
-                cell_dep: None,
-                type_id: Some(type_id),
-            } => molecule_fiber::UdtDep::new_builder()
-                .set(molecule_fiber::UdtDepUnion::Script(type_id.into()))
-                .build(),
-            _ => panic!("invalid udt dep"),
-        }
-    }
-}
-
-impl TryFrom<molecule_fiber::UdtDep> for UdtDep {
-    type Error = Error;
-
-    fn try_from(udt_dep: molecule_fiber::UdtDep) -> Result<Self, Self::Error> {
-        match udt_dep.to_enum() {
-            molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => Ok(UdtDep {
-                cell_dep: Some(cell_dep.try_into()?),
-                type_id: None,
-            }),
-            molecule_fiber::UdtDepUnion::Script(type_id) => Ok(UdtDep {
-                cell_dep: None,
-                type_id: Some(type_id.into()),
-            }),
-        }
-    }
-}
-
-impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
-    fn from(udt_arg_info: UdtArgInfo) -> Self {
-        molecule_fiber::UdtArgInfo::new_builder()
-            .name(udt_arg_info.name.pack())
-            .script(udt_arg_info.script.into())
-            .auto_accept_amount(
-                Uint128Opt::new_builder()
-                    .set(udt_arg_info.auto_accept_amount.map(|x| x.pack()))
-                    .build(),
-            )
-            .cell_deps(
-                UdtCellDeps::new_builder()
-                    .set(
-                        udt_arg_info
-                            .cell_deps
-                            .into_iter()
-                            .map(Into::into)
-                            .collect::<Vec<_>>(),
-                    )
-                    .build(),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::UdtArgInfo> for UdtArgInfo {
-    type Error = Error;
-
-    fn try_from(udt_arg_info: molecule_fiber::UdtArgInfo) -> Result<Self, Self::Error> {
-        Ok(UdtArgInfo {
-            name: String::from_utf8(udt_arg_info.name().unpack()).unwrap_or_default(),
-            script: udt_arg_info.script().try_into()?,
-            auto_accept_amount: udt_arg_info
-                .auto_accept_amount()
-                .to_opt()
-                .map(|x| x.unpack()),
-            cell_deps: udt_arg_info
-                .cell_deps()
-                .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
-        })
-    }
-}
-
-impl From<UdtCfgInfos> for molecule_fiber::UdtCfgInfos {
-    fn from(udt_arg_info: UdtCfgInfos) -> Self {
-        molecule_fiber::UdtCfgInfos::new_builder()
-            .set(
-                udt_arg_info
-                    .0
-                    .into_iter()
-                    .map(|udt_arg_info| udt_arg_info.into())
-                    .collect(),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
-    type Error = Error;
-
-    fn try_from(udt_arg_infos: molecule_fiber::UdtCfgInfos) -> Result<Self, Self::Error> {
-        Ok(UdtCfgInfos(
-            udt_arg_infos
-                .into_iter()
-                .map(|udt_arg_info| udt_arg_info.try_into())
-                .collect::<Result<Vec<_>, _>>()?,
-        ))
-    }
-}
-
 impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
     fn from(node_announcement: NodeAnnouncement) -> Self {
         let builder = molecule_gossip::NodeAnnouncement::new_builder()
@@ -3285,29 +3069,6 @@ impl TryFrom<molecule_gossip::Cursor> for Cursor {
             timestamp,
             message_id,
         })
-    }
-}
-
-impl From<u16> for molecule_fiber::Uint16 {
-    fn from(count: u16) -> Self {
-        let le_bytes = count.to_le_bytes();
-        Self::new_builder()
-            .set(
-                le_bytes
-                    .into_iter()
-                    .map(Byte::new)
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .expect("Uint16 from u16"),
-            )
-            .build()
-    }
-}
-
-impl From<molecule_fiber::Uint16> for u16 {
-    fn from(count: molecule_fiber::Uint16) -> Self {
-        let le_bytes = count.as_slice().try_into().expect("Uint16 to u16");
-        u16::from_le_bytes(le_bytes)
     }
 }
 

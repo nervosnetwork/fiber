@@ -8015,6 +8015,12 @@ impl ChannelOpenRecord {
         }
     }
 
+    /// Create a new outbound record in the `WaitingForPeer` state.
+    /// Used when `open_channel` is called.
+    pub fn new_outbound(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
+        Self::new(channel_id, peer_id, funding_amount)
+    }
+
     /// Create a new inbound record in the `WaitingForPeer` state.
     /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
     pub fn new_inbound(channel_id: Hash256, peer_id: PeerId, remote_funding_amount: u128) -> Self {

@@ -1083,7 +1083,7 @@ fn test_store_channel_open_record() {
     assert!(store.get_channel_open_records().is_empty());
 
     // Test update_status helper
-    let mut record = ChannelOpenRecord::new(
+    let mut record = ChannelOpenRecord::new_outbound(
         deterministic_hash256(42, 99),
         sample_peer_id(),
         100_0000_0000,

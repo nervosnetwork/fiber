@@ -32,13 +32,39 @@ pub mod watchtower;
 
 pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
 
+pub use channel::{
+    AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
+    ChannelActorStateCore, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
+    ChannelOpenRecord, ChannelOpeningStatus, ChannelState, ChannelTlcInfo,
+    ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags,
+    CommitmentNumbers, InMemorySigner, InboundTlcStatus, NegotiatingFundingFlags,
+    OutboundTlcStatus, PendingNotifySettleTlc, PendingTlcs, PrevTlcInfo, PublicChannelInfo,
+    RetryableTlcOperation, RevokeAndAck, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags,
+    TLCId, TlcInfo, TlcState, TlcStatus, INITIAL_COMMITMENT_NUMBER,
+};
+
+pub use payment::{
+    Attempt, AttemptStatus, HopHint, PaymentCustomRecords, PaymentHopData, PaymentOnionPacket,
+    PaymentSession, PaymentStatus, RemoveTlcFulfill, RemoveTlcReason, RouterHop, SendPaymentData,
+    SessionRoute, SessionRouteNode, TimedResult, TlcErrPacket, TlcErrorCode, TrampolineContext,
+    NO_SHARED_SECRET, USER_CUSTOM_RECORDS_MAX_INDEX,
+};
+
 pub use protocol::{
-    feature_bits, AnnouncedNodeName, BroadcastMessage, ChannelAnnouncement, ChannelUpdate,
-    EcdsaSignature, FeatureBit, FeatureVector, NodeAnnouncement, SchnorrSignature, UdtArgInfo,
-    UdtCellDep, UdtCfgInfos, UdtDep, UdtScript,
+    feature_bits, AnnouncedNodeName, BroadcastMessage, BroadcastMessageID, ChannelAnnouncement,
+    ChannelUpdate, Cursor, EcdsaSignature, FeatureBit, FeatureVector, NodeAnnouncement,
+    SchnorrSignature, UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript, CURSOR_SIZE,
 };
 
 pub use network::PersistentNetworkActorState;
+
+pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
+
+pub use invoice::{
+    ar_decompress, ar_encompress, construct_invoice_preimage, parse_hrp, sha256, Attribute,
+    CkbInvoice, CkbInvoiceStatus, CkbScript, Currency, HashAlgorithm, InvoiceData, InvoiceError,
+    InvoiceSignature, UnknownHashAlgorithmError, VerificationError, SIGNATURE_U5_SIZE,
+};
 
 #[cfg(feature = "watchtower")]
 pub use watchtower::{ChannelData, RevocationData, SettlementData, SettlementTlc};

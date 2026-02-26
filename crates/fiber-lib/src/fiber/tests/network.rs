@@ -1,6 +1,8 @@
 use crate::fiber::channel::ChannelFlags;
 use crate::fiber::features::FeatureVector;
-use crate::fiber::types::OpenChannel;
+use crate::fiber::types::{
+    OpenChannel,
+};
 use crate::{
     ckb::{
         tests::test_utils::{

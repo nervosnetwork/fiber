@@ -9,8 +9,10 @@ use crate::gen::fiber as molecule_fiber;
 use crate::gen::gossip as molecule_gossip;
 use crate::serde_utils::EntityHex;
 use crate::{Hash256, Pubkey};
-use ckb_types::packed::{OutPoint, Script};
+use ckb_types::packed::{BytesVec, OutPoint, Script};
+use ckb_types::prelude::Pack;
 use molecule::prelude::{Builder, Byte, Entity};
+use musig2::LiftedSignature;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
 
@@ -363,6 +365,31 @@ impl std::fmt::Debug for FeatureVector {
 #[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub struct SchnorrSignature(pub secp256k1::schnorr::Signature);
 
+impl SchnorrSignature {
+    /// Returns a reference to the inner secp256k1 Schnorr signature.
+    pub fn inner(&self) -> &secp256k1::schnorr::Signature {
+        &self.0
+    }
+
+    /// Serializes the signature to a 64-byte array.
+    pub fn to_byte_array(&self) -> [u8; 64] {
+        self.0.to_byte_array()
+    }
+
+    /// Creates a SchnorrSignature from a byte slice.
+    pub fn from_slice(data: &[u8]) -> Result<Self, secp256k1::Error> {
+        secp256k1::schnorr::Signature::from_slice(data).map(SchnorrSignature)
+    }
+}
+
+impl std::ops::Deref for SchnorrSignature {
+    type Target = secp256k1::schnorr::Signature;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl From<SchnorrSignature> for secp256k1::schnorr::Signature {
     fn from(sig: SchnorrSignature) -> Self {
         sig.0
@@ -372,6 +399,12 @@ impl From<SchnorrSignature> for secp256k1::schnorr::Signature {
 impl From<secp256k1::schnorr::Signature> for SchnorrSignature {
     fn from(sig: secp256k1::schnorr::Signature) -> Self {
         Self(sig)
+    }
+}
+
+impl From<LiftedSignature> for SchnorrSignature {
+    fn from(sig: LiftedSignature) -> Self {
+        Self(secp256k1::schnorr::Signature::from(sig))
     }
 }
 
@@ -502,6 +535,100 @@ impl ChannelUpdate {
         self.channel_flags
             .contains(ChannelUpdateChannelFlags::DISABLED)
     }
+
+    /// Get the message bytes to sign (hash of unsigned molecule serialization).
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_update = ChannelUpdate {
+            signature: None,
+            chain_hash: self.chain_hash,
+            channel_outpoint: self.channel_outpoint.clone(),
+            timestamp: self.timestamp,
+            message_flags: self.message_flags,
+            channel_flags: self.channel_flags,
+            tlc_expiry_delta: self.tlc_expiry_delta,
+            tlc_minimum_value: self.tlc_minimum_value,
+            tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
+        };
+        deterministically_hash(&molecule_fiber::ChannelUpdate::from(unsigned_update))
+    }
+
+    /// Get the cursor for this channel update.
+    pub fn cursor(&self) -> Cursor {
+        Cursor::new(
+            self.timestamp,
+            BroadcastMessageID::ChannelUpdate(self.channel_outpoint.clone()),
+        )
+    }
+}
+
+impl ChannelAnnouncement {
+    /// Get the message bytes to sign (hash of unsigned molecule serialization).
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_announcement = Self {
+            node1_signature: None,
+            node2_signature: None,
+            ckb_signature: None,
+            features: self.features,
+            chain_hash: self.chain_hash,
+            channel_outpoint: self.channel_outpoint.clone(),
+            node1_id: self.node1_id,
+            node2_id: self.node2_id,
+            ckb_key: self.ckb_key,
+            capacity: self.capacity,
+            udt_type_script: self.udt_type_script.clone(),
+        };
+        deterministically_hash(&molecule_gossip::ChannelAnnouncement::from(
+            unsigned_announcement,
+        ))
+    }
+}
+
+impl NodeAnnouncement {
+    /// Get the message bytes to sign (hash of unsigned molecule serialization).
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_announcement = NodeAnnouncement {
+            signature: None,
+            features: self.features.clone(),
+            timestamp: self.timestamp,
+            node_id: self.node_id,
+            version: self.version.clone(),
+            node_name: self.node_name,
+            chain_hash: self.chain_hash,
+            addresses: self.addresses.clone(),
+            auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
+            udt_cfg_infos: self.udt_cfg_infos.clone(),
+        };
+        deterministically_hash(&molecule_gossip::NodeAnnouncement::from(
+            unsigned_announcement,
+        ))
+    }
+
+    /// Get the peer ID for this node.
+    pub fn peer_id(&self) -> tentacle_secio::PeerId {
+        tentacle_secio::PeerId::from_public_key(&self.node_id.into())
+    }
+
+    /// Get the cursor for this node announcement.
+    pub fn cursor(&self) -> Cursor {
+        Cursor::new(
+            self.timestamp,
+            BroadcastMessageID::NodeAnnouncement(self.node_id),
+        )
+    }
+
+    /// Verify the signature on this announcement.
+    pub fn verify(&self) -> bool {
+        let message = self.message_to_sign();
+        match self.signature {
+            Some(ref signature) => signature.verify(&self.node_id, &message),
+            _ => false,
+        }
+    }
+}
+
+/// Hash a molecule entity deterministically using blake2b-256.
+pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
+    ckb_hash::blake2b_256(v.as_slice())
 }
 
 // ============================================================
@@ -520,6 +647,47 @@ pub enum BroadcastMessage {
     ChannelAnnouncement(ChannelAnnouncement),
     /// Channel update message
     ChannelUpdate(ChannelUpdate),
+}
+
+impl BroadcastMessage {
+    /// Returns the cursor for this broadcast message, if applicable.
+    pub fn cursor(&self) -> Option<Cursor> {
+        match self {
+            BroadcastMessage::ChannelAnnouncement(_) => None,
+            BroadcastMessage::ChannelUpdate(channel_update) => Some(channel_update.cursor()),
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                Some(node_announcement.cursor())
+            }
+        }
+    }
+
+    /// Returns the message ID for this broadcast message.
+    pub fn message_id(&self) -> BroadcastMessageID {
+        match self {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id)
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                BroadcastMessageID::ChannelAnnouncement(
+                    channel_announcement.channel_outpoint.clone(),
+                )
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone())
+            }
+        }
+    }
+
+    /// Returns the timestamp for this broadcast message, if applicable.
+    pub fn timestamp(&self) -> Option<u64> {
+        match self {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                Some(node_announcement.timestamp)
+            }
+            BroadcastMessage::ChannelAnnouncement(_) => None,
+            BroadcastMessage::ChannelUpdate(channel_update) => Some(channel_update.timestamp),
+        }
+    }
 }
 
 // ============================================================
@@ -621,7 +789,7 @@ pub struct UdtArgInfo {
 
 /// UDT script configuration.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash, Default)]
 pub struct UdtScript {
     /// Code hash of the UDT script
     pub code_hash: ckb_types::H256,
@@ -654,6 +822,759 @@ pub struct UdtDep {
     pub type_id: Option<ckb_jsonrpc_types::Script>,
 }
 
+impl UdtDep {
+    /// Create a UdtDep with a cell dependency.
+    pub fn with_cell_dep(cell_dep: UdtCellDep) -> Self {
+        Self {
+            cell_dep: Some(cell_dep),
+            type_id: None,
+        }
+    }
+
+    /// Create a UdtDep with a type ID script.
+    pub fn with_type_id(type_id: ckb_jsonrpc_types::Script) -> Self {
+        Self {
+            cell_dep: None,
+            type_id: Some(type_id),
+        }
+    }
+}
+
 /// Collection of UDT configuration information.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash, Default)]
 pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
+
+impl std::str::FromStr for UdtCfgInfos {
+    type Err = serde_json::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        serde_json::from_str(s)
+    }
+}
+
+// ============================================================
+// BroadcastMessageID
+// ============================================================
+
+use std::cmp::Ordering;
+
+/// The ID of a broadcast message.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum BroadcastMessageID {
+    ChannelAnnouncement(OutPoint),
+    ChannelUpdate(OutPoint),
+    NodeAnnouncement(Pubkey),
+}
+
+impl Default for BroadcastMessageID {
+    fn default() -> Self {
+        BroadcastMessageID::ChannelAnnouncement(OutPoint::default())
+    }
+}
+
+// We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
+// so that we can use it as the sorting key in fn prune_messages_to_be_saved to simplify the logic.
+impl Ord for BroadcastMessageID {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (
+                BroadcastMessageID::ChannelAnnouncement(outpoint1),
+                BroadcastMessageID::ChannelAnnouncement(outpoint2),
+            ) => outpoint1.cmp(outpoint2),
+            (
+                BroadcastMessageID::ChannelUpdate(outpoint1),
+                BroadcastMessageID::ChannelUpdate(outpoint2),
+            ) => outpoint1.cmp(outpoint2),
+            (
+                BroadcastMessageID::NodeAnnouncement(node1),
+                BroadcastMessageID::NodeAnnouncement(node2),
+            ) => node1.cmp(node2),
+            (BroadcastMessageID::ChannelAnnouncement(_), _) => Ordering::Less,
+            (_, BroadcastMessageID::ChannelAnnouncement(_)) => Ordering::Greater,
+            (BroadcastMessageID::ChannelUpdate(_), BroadcastMessageID::NodeAnnouncement(_)) => {
+                Ordering::Less
+            }
+            (BroadcastMessageID::NodeAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
+                Ordering::Greater
+            }
+        }
+    }
+}
+
+impl PartialOrd for BroadcastMessageID {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// 1 byte for message type, 36 bytes for message id
+const MESSAGE_ID_SIZE: usize = 1 + 36;
+
+impl BroadcastMessageID {
+    pub fn to_bytes(&self) -> [u8; MESSAGE_ID_SIZE] {
+        let mut result = [0u8; MESSAGE_ID_SIZE];
+        match self {
+            BroadcastMessageID::ChannelAnnouncement(channel_outpoint) => {
+                result[0] = 0;
+                result[1..].copy_from_slice(&channel_outpoint.as_bytes());
+            }
+            BroadcastMessageID::ChannelUpdate(channel_outpoint) => {
+                result[0] = 1;
+                result[1..].copy_from_slice(&channel_outpoint.as_bytes());
+            }
+            BroadcastMessageID::NodeAnnouncement(node_id) => {
+                result[0] = 2;
+                let node_id = node_id.serialize();
+                result[1..1 + node_id.len()].copy_from_slice(&node_id);
+            }
+        };
+        result
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, anyhow::Error> {
+        use molecule::prelude::Entity;
+        if bytes.len() != MESSAGE_ID_SIZE {
+            anyhow::bail!("Invalid message id size: {}", bytes.len());
+        }
+        match bytes[0] {
+            0 => Ok(BroadcastMessageID::ChannelAnnouncement(
+                OutPoint::from_slice(&bytes[1..])?,
+            )),
+            1 => Ok(BroadcastMessageID::ChannelUpdate(OutPoint::from_slice(
+                &bytes[1..],
+            )?)),
+            2 => Ok(BroadcastMessageID::NodeAnnouncement(Pubkey::from_slice(
+                &bytes[1..1 + Pubkey::serialization_len()],
+            )?)),
+            _ => anyhow::bail!("Invalid message id type: {}", bytes[0]),
+        }
+    }
+}
+
+// ============================================================
+// Cursor
+// ============================================================
+
+use std::time::Duration;
+
+/// The size of a serialized cursor in bytes.
+pub const CURSOR_SIZE: usize = 45;
+
+/// A cursor for paginating broadcast messages.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Default)]
+pub struct Cursor {
+    pub timestamp: u64,
+    pub message_id: BroadcastMessageID,
+}
+
+impl Cursor {
+    pub fn new(timestamp: u64, message_id: BroadcastMessageID) -> Self {
+        Self {
+            timestamp,
+            message_id,
+        }
+    }
+
+    /// Create a new cursor which is the same as the current cursor but with a smaller timestamp.
+    /// This is useful when we want to query messages back from this cursor for a certain duration.
+    pub fn go_back_for_some_time(&self, duration: Duration) -> Self {
+        let current_timestamp = self.timestamp;
+        let duration_millis = duration.as_millis() as u64;
+        if current_timestamp > duration_millis {
+            Self {
+                timestamp: current_timestamp - duration_millis,
+                message_id: self.message_id.clone(),
+            }
+        } else {
+            Default::default()
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 45] {
+        self.timestamp
+            .to_be_bytes()
+            .into_iter()
+            .chain(self.message_id.to_bytes())
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("Must serialize cursor to 45 bytes")
+    }
+
+    /// A dummy cursor with the maximum timestamp and a dummy message id.
+    /// This is useful when we want to create a cursor after which none of the messages should be included.
+    pub fn max() -> Self {
+        Self {
+            timestamp: u64::MAX,
+            message_id: BroadcastMessageID::ChannelAnnouncement(OutPoint::default()),
+        }
+    }
+
+    pub fn is_max(&self) -> bool {
+        self.timestamp == u64::MAX
+    }
+}
+
+// ============================================================
+// Molecule Conversions
+// ============================================================
+
+use ckb_gen_types::packed::Byte32 as MByte32;
+
+fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
+    MByte32::from_slice(value.as_slice()).expect("[u8; 32] to Byte32")
+}
+
+// NodeAnnouncement molecule conversions
+
+impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
+    fn from(node_announcement: NodeAnnouncement) -> Self {
+        let builder = molecule_gossip::NodeAnnouncement::new_builder()
+            .features(node_announcement.features.bytes().pack())
+            .timestamp(node_announcement.timestamp.pack())
+            .node_id(node_announcement.node_id.into())
+            .version(node_announcement.version.pack())
+            .node_name(u8_32_as_byte_32(&node_announcement.node_name.0))
+            .chain_hash(node_announcement.chain_hash.into())
+            .auto_accept_min_ckb_funding_amount(
+                node_announcement.auto_accept_min_ckb_funding_amount.pack(),
+            )
+            .udt_cfg_infos(node_announcement.udt_cfg_infos.into())
+            .address(
+                BytesVec::new_builder()
+                    .set(
+                        node_announcement
+                            .addresses
+                            .into_iter()
+                            .map(|address| address.to_vec().pack())
+                            .collect(),
+                    )
+                    .build(),
+            );
+
+        let builder = if let Some(signature) = node_announcement.signature {
+            builder.signature(signature.into())
+        } else {
+            builder
+        };
+
+        builder.build()
+    }
+}
+
+impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
+    type Error = anyhow::Error;
+
+    fn try_from(node_announcement: molecule_gossip::NodeAnnouncement) -> Result<Self, Self::Error> {
+        use ckb_types::prelude::Unpack;
+        Ok(NodeAnnouncement {
+            signature: Some(
+                node_announcement
+                    .signature()
+                    .try_into()
+                    .map_err(|e: secp256k1::Error| anyhow::anyhow!(e))?,
+            ),
+            features: FeatureVector::from(node_announcement.features().unpack()),
+            timestamp: node_announcement.timestamp().unpack(),
+            node_id: node_announcement
+                .node_id()
+                .try_into()
+                .map_err(|e: secp256k1::Error| anyhow::anyhow!(e))?,
+            version: String::from_utf8(node_announcement.version().unpack()).unwrap_or_default(),
+            chain_hash: node_announcement.chain_hash().into(),
+            auto_accept_min_ckb_funding_amount: node_announcement
+                .auto_accept_min_ckb_funding_amount()
+                .unpack(),
+            node_name: AnnouncedNodeName::from_slice(node_announcement.node_name().as_slice())
+                .map_err(|e| anyhow::anyhow!("Invalid node_name: {}", e))?,
+            udt_cfg_infos: node_announcement.udt_cfg_infos().try_into()?,
+            addresses: node_announcement
+                .address()
+                .into_iter()
+                .map(|bytes| {
+                    tentacle_multiaddr::Multiaddr::try_from(bytes.raw_data().to_vec())
+                        .map_err(Into::into)
+                })
+                .collect::<Result<Vec<_>, anyhow::Error>>()?,
+        })
+    }
+}
+
+// UdtCfgInfos molecule conversions
+
+impl From<UdtCfgInfos> for molecule_fiber::UdtCfgInfos {
+    fn from(udt_cfg_infos: UdtCfgInfos) -> Self {
+        molecule_fiber::UdtCfgInfos::new_builder()
+            .set(
+                udt_cfg_infos
+                    .0
+                    .into_iter()
+                    .map(|udt_arg_info| udt_arg_info.into())
+                    .collect(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
+    type Error = anyhow::Error;
+
+    fn try_from(udt_cfg_infos: molecule_fiber::UdtCfgInfos) -> Result<Self, Self::Error> {
+        Ok(UdtCfgInfos(
+            udt_cfg_infos
+                .into_iter()
+                .map(|udt_arg_info| udt_arg_info.try_into())
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
+    }
+}
+
+// UdtArgInfo molecule conversions
+
+impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
+    fn from(udt_arg_info: UdtArgInfo) -> Self {
+        let builder = molecule_fiber::UdtArgInfo::new_builder()
+            .name(udt_arg_info.name.pack())
+            .script(udt_arg_info.script.into())
+            .cell_deps(
+                molecule_fiber::UdtCellDeps::new_builder()
+                    .set(udt_arg_info.cell_deps.into_iter().map(Into::into).collect())
+                    .build(),
+            );
+        let builder = if let Some(amount) = udt_arg_info.auto_accept_amount {
+            builder.auto_accept_amount(
+                molecule_fiber::Uint128Opt::new_builder()
+                    .set(Some(amount.pack()))
+                    .build(),
+            )
+        } else {
+            builder
+        };
+        builder.build()
+    }
+}
+
+impl TryFrom<molecule_fiber::UdtArgInfo> for UdtArgInfo {
+    type Error = anyhow::Error;
+
+    fn try_from(udt_arg_info: molecule_fiber::UdtArgInfo) -> Result<Self, Self::Error> {
+        use ckb_types::prelude::Unpack;
+        Ok(UdtArgInfo {
+            name: String::from_utf8(udt_arg_info.name().unpack()).unwrap_or_default(),
+            script: udt_arg_info.script().try_into()?,
+            auto_accept_amount: udt_arg_info
+                .auto_accept_amount()
+                .to_opt()
+                .map(|amount| amount.unpack()),
+            cell_deps: udt_arg_info
+                .cell_deps()
+                .into_iter()
+                .map(|cell_dep| cell_dep.try_into())
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+// UdtScript molecule conversions
+
+impl From<UdtScript> for molecule_fiber::UdtScript {
+    fn from(udt_script: UdtScript) -> Self {
+        use ckb_types::core::ScriptHashType;
+        let code_hash_bytes: [u8; 32] = udt_script.code_hash.into();
+        molecule_fiber::UdtScript::new_builder()
+            .code_hash(u8_32_as_byte_32(&code_hash_bytes))
+            .hash_type(
+                match udt_script.hash_type {
+                    ScriptHashType::Type => 1,
+                    ScriptHashType::Data => 0,
+                    ScriptHashType::Data1 => 2,
+                    ScriptHashType::Data2 => 4,
+                }
+                .into(),
+            )
+            .args(udt_script.args.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::UdtScript> for UdtScript {
+    type Error = anyhow::Error;
+
+    fn try_from(udt_script: molecule_fiber::UdtScript) -> Result<Self, Self::Error> {
+        use ckb_types::core::ScriptHashType;
+        use ckb_types::prelude::Unpack;
+        let hash_type: u8 = udt_script.hash_type().into();
+        Ok(UdtScript {
+            code_hash: ckb_types::H256::from_slice(udt_script.code_hash().as_slice())?,
+            hash_type: match hash_type {
+                0 => ScriptHashType::Data,
+                1 => ScriptHashType::Type,
+                2 => ScriptHashType::Data1,
+                4 => ScriptHashType::Data2,
+                _ => return Err(anyhow::anyhow!("Invalid hash_type: {}", hash_type)),
+            },
+            args: String::from_utf8(udt_script.args().unpack()).unwrap_or_default(),
+        })
+    }
+}
+
+// UdtDep molecule conversions
+
+impl From<UdtDep> for molecule_fiber::UdtDep {
+    fn from(udt_dep: UdtDep) -> Self {
+        match udt_dep {
+            UdtDep {
+                cell_dep: Some(cell_dep),
+                type_id: None,
+            } => molecule_fiber::UdtDep::new_builder()
+                .set(molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep.into()))
+                .build(),
+            UdtDep {
+                cell_dep: None,
+                type_id: Some(type_id),
+            } => molecule_fiber::UdtDep::new_builder()
+                .set(molecule_fiber::UdtDepUnion::Script(Script::from(type_id)))
+                .build(),
+            _ => panic!("UdtDep must have exactly one of cell_dep or type_id"),
+        }
+    }
+}
+
+impl TryFrom<molecule_fiber::UdtDep> for UdtDep {
+    type Error = anyhow::Error;
+
+    fn try_from(udt_dep: molecule_fiber::UdtDep) -> Result<Self, Self::Error> {
+        match udt_dep.to_enum() {
+            molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => Ok(UdtDep {
+                cell_dep: Some(cell_dep.try_into()?),
+                type_id: None,
+            }),
+            molecule_fiber::UdtDepUnion::Script(type_id) => Ok(UdtDep {
+                cell_dep: None,
+                type_id: Some(type_id.into()),
+            }),
+        }
+    }
+}
+
+// UdtCellDep molecule conversions
+
+impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
+    fn from(udt_cell_dep: UdtCellDep) -> Self {
+        use molecule::prelude::Entity;
+        molecule_fiber::UdtCellDep::new_builder()
+            .out_point(OutPoint::from(udt_cell_dep.out_point))
+            .dep_type(
+                match udt_cell_dep.dep_type {
+                    ckb_types::core::DepType::Code => 0u8,
+                    ckb_types::core::DepType::DepGroup => 1u8,
+                }
+                .into(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::UdtCellDep> for UdtCellDep {
+    type Error = anyhow::Error;
+
+    fn try_from(udt_cell_dep: molecule_fiber::UdtCellDep) -> Result<Self, Self::Error> {
+        let dep_type: u8 = udt_cell_dep.dep_type().into();
+        Ok(UdtCellDep {
+            out_point: udt_cell_dep.out_point().into(),
+            dep_type: match dep_type {
+                0 => ckb_types::core::DepType::Code,
+                1 => ckb_types::core::DepType::DepGroup,
+                _ => return Err(anyhow::anyhow!("Invalid dep_type: {}", dep_type)),
+            },
+        })
+    }
+}
+
+impl From<UdtCellDep> for ckb_types::packed::CellDep {
+    fn from(udt_cell_dep: UdtCellDep) -> Self {
+        let out_point: ckb_types::packed::OutPoint = udt_cell_dep.out_point.into();
+        ckb_types::packed::CellDep::new_builder()
+            .out_point(out_point)
+            .dep_type(
+                match udt_cell_dep.dep_type {
+                    ckb_types::core::DepType::Code => 0u8,
+                    ckb_types::core::DepType::DepGroup => 1u8,
+                }
+                .into(),
+            )
+            .build()
+    }
+}
+
+impl From<&UdtCellDep> for ckb_types::packed::CellDep {
+    fn from(udt_cell_dep: &UdtCellDep) -> Self {
+        let out_point: ckb_types::packed::OutPoint = udt_cell_dep.out_point.clone().into();
+        ckb_types::packed::CellDep::new_builder()
+            .out_point(out_point)
+            .dep_type(
+                match udt_cell_dep.dep_type {
+                    ckb_types::core::DepType::Code => 0u8,
+                    ckb_types::core::DepType::DepGroup => 1u8,
+                }
+                .into(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<ckb_types::packed::CellDep> for UdtCellDep {
+    type Error = anyhow::Error;
+
+    fn try_from(cell_dep: ckb_types::packed::CellDep) -> Result<Self, Self::Error> {
+        let dep_type: u8 = cell_dep.dep_type().into();
+        Ok(UdtCellDep {
+            out_point: cell_dep.out_point().into(),
+            dep_type: match dep_type {
+                0 => ckb_types::core::DepType::Code,
+                1 => ckb_types::core::DepType::DepGroup,
+                _ => return Err(anyhow::anyhow!("Invalid dep_type: {}", dep_type)),
+            },
+        })
+    }
+}
+
+// ============================================================
+// Molecule Conversions for ChannelAnnouncement
+// ============================================================
+
+impl From<ChannelAnnouncement> for molecule_gossip::ChannelAnnouncement {
+    fn from(channel_announcement: ChannelAnnouncement) -> Self {
+        let builder = molecule_gossip::ChannelAnnouncement::new_builder()
+            .features(channel_announcement.features.pack())
+            .chain_hash(channel_announcement.chain_hash.into())
+            .channel_outpoint(channel_announcement.channel_outpoint)
+            .node1_id(channel_announcement.node1_id.into())
+            .node2_id(channel_announcement.node2_id.into())
+            .capacity(channel_announcement.capacity.pack())
+            .udt_type_script(channel_announcement.udt_type_script.pack())
+            .ckb_key(channel_announcement.ckb_key.into());
+
+        let builder = if let Some(signature) = channel_announcement.node1_signature {
+            builder.node1_signature(signature.into())
+        } else {
+            builder
+        };
+
+        let builder = if let Some(signature) = channel_announcement.node2_signature {
+            builder.node2_signature(signature.into())
+        } else {
+            builder
+        };
+
+        let builder = if let Some(signature) = channel_announcement.ckb_signature {
+            builder.ckb_signature(signature.into())
+        } else {
+            builder
+        };
+
+        builder.build()
+    }
+}
+
+impl TryFrom<molecule_gossip::ChannelAnnouncement> for ChannelAnnouncement {
+    type Error = anyhow::Error;
+
+    fn try_from(
+        channel_announcement: molecule_gossip::ChannelAnnouncement,
+    ) -> Result<Self, Self::Error> {
+        use ckb_types::prelude::Unpack;
+        Ok(ChannelAnnouncement {
+            node1_signature: Some(channel_announcement.node1_signature().try_into()?),
+            node2_signature: Some(channel_announcement.node2_signature().try_into()?),
+            ckb_signature: Some(channel_announcement.ckb_signature().try_into()?),
+            features: channel_announcement.features().unpack(),
+            capacity: channel_announcement.capacity().unpack(),
+            chain_hash: channel_announcement.chain_hash().into(),
+            channel_outpoint: channel_announcement.channel_outpoint(),
+            udt_type_script: channel_announcement.udt_type_script().to_opt(),
+            node1_id: channel_announcement.node1_id().try_into()?,
+            node2_id: channel_announcement.node2_id().try_into()?,
+            ckb_key: channel_announcement.ckb_key().try_into()?,
+        })
+    }
+}
+
+// ============================================================
+// Molecule Conversions for ChannelUpdate
+// ============================================================
+
+impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
+    fn from(channel_update: ChannelUpdate) -> Self {
+        let builder = molecule_fiber::ChannelUpdate::new_builder()
+            .chain_hash(channel_update.chain_hash.into())
+            .channel_outpoint(channel_update.channel_outpoint)
+            .timestamp(channel_update.timestamp.pack())
+            .message_flags(channel_update.message_flags.bits().pack())
+            .channel_flags(channel_update.channel_flags.bits().pack())
+            .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
+            .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
+            .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack());
+
+        let builder = if let Some(signature) = channel_update.signature {
+            builder.signature(signature.into())
+        } else {
+            builder
+        };
+
+        builder.build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
+    type Error = anyhow::Error;
+
+    fn try_from(channel_update: molecule_fiber::ChannelUpdate) -> Result<Self, Self::Error> {
+        use ckb_types::prelude::Unpack;
+        Ok(ChannelUpdate {
+            signature: Some(channel_update.signature().try_into()?),
+            chain_hash: channel_update.chain_hash().into(),
+            channel_outpoint: channel_update.channel_outpoint(),
+            timestamp: channel_update.timestamp().unpack(),
+            message_flags: ChannelUpdateMessageFlags::from_bits_truncate(
+                channel_update.message_flags().unpack(),
+            ),
+            channel_flags: ChannelUpdateChannelFlags::from_bits_truncate(
+                channel_update.channel_flags().unpack(),
+            ),
+            tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
+            tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
+            tlc_fee_proportional_millionths: channel_update
+                .tlc_fee_proportional_millionths()
+                .unpack(),
+        })
+    }
+}
+
+// ============================================================
+// BroadcastMessage Ord/PartialOrd and Molecule Conversions
+// ============================================================
+
+impl Ord for BroadcastMessage {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.message_id()
+            .cmp(&other.message_id())
+            .then(self.timestamp().cmp(&other.timestamp()))
+    }
+}
+
+impl PartialOrd for BroadcastMessage {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<BroadcastMessage> for molecule_gossip::BroadcastMessageUnion {
+    fn from(fiber_broadcast_message: BroadcastMessage) -> Self {
+        match fiber_broadcast_message {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                molecule_gossip::BroadcastMessageUnion::NodeAnnouncement(node_announcement.into())
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                molecule_gossip::BroadcastMessageUnion::ChannelAnnouncement(
+                    channel_announcement.into(),
+                )
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                molecule_gossip::BroadcastMessageUnion::ChannelUpdate(channel_update.into())
+            }
+        }
+    }
+}
+
+impl TryFrom<molecule_gossip::BroadcastMessageUnion> for BroadcastMessage {
+    type Error = anyhow::Error;
+
+    fn try_from(
+        fiber_broadcast_message: molecule_gossip::BroadcastMessageUnion,
+    ) -> Result<Self, Self::Error> {
+        match fiber_broadcast_message {
+            molecule_gossip::BroadcastMessageUnion::NodeAnnouncement(node_announcement) => Ok(
+                BroadcastMessage::NodeAnnouncement(node_announcement.try_into()?),
+            ),
+            molecule_gossip::BroadcastMessageUnion::ChannelAnnouncement(channel_announcement) => {
+                Ok(BroadcastMessage::ChannelAnnouncement(
+                    channel_announcement.try_into()?,
+                ))
+            }
+            molecule_gossip::BroadcastMessageUnion::ChannelUpdate(channel_update) => {
+                Ok(BroadcastMessage::ChannelUpdate(channel_update.try_into()?))
+            }
+        }
+    }
+}
+
+impl From<BroadcastMessage> for molecule_gossip::BroadcastMessage {
+    fn from(fiber_broadcast_message: BroadcastMessage) -> Self {
+        molecule_gossip::BroadcastMessage::new_builder()
+            .set(fiber_broadcast_message)
+            .build()
+    }
+}
+
+impl TryFrom<molecule_gossip::BroadcastMessage> for BroadcastMessage {
+    type Error = anyhow::Error;
+
+    fn try_from(
+        fiber_broadcast_message: molecule_gossip::BroadcastMessage,
+    ) -> Result<Self, Self::Error> {
+        fiber_broadcast_message.to_enum().try_into()
+    }
+}
+
+// ============================================================
+// Cursor Ord/PartialOrd and Molecule Conversions
+// ============================================================
+
+impl Ord for Cursor {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.to_bytes().cmp(&other.to_bytes())
+    }
+}
+
+impl PartialOrd for Cursor {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<Cursor> for molecule_gossip::Cursor {
+    fn from(cursor: Cursor) -> Self {
+        use molecule::prelude::{Builder, Byte};
+        let serialized = cursor
+            .timestamp
+            .to_be_bytes()
+            .into_iter()
+            .chain(cursor.message_id.to_bytes())
+            .map(Byte::new)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("Must serialize cursor to 45 bytes");
+
+        molecule_gossip::Cursor::new_builder()
+            .set(serialized)
+            .build()
+    }
+}
+
+impl TryFrom<molecule_gossip::Cursor> for Cursor {
+    type Error = anyhow::Error;
+
+    fn try_from(cursor: molecule_gossip::Cursor) -> Result<Self, Self::Error> {
+        use molecule::prelude::Entity;
+        let slice = cursor.as_slice();
+        if slice.len() != CURSOR_SIZE {
+            anyhow::bail!("Invalid cursor size: {}, want {}", slice.len(), CURSOR_SIZE);
+        }
+        let timestamp = u64::from_be_bytes(slice[..8].try_into().expect("Cursor timestamp to u64"));
+        let message_id = BroadcastMessageID::from_bytes(&slice[8..])?;
+        Ok(Cursor {
+            timestamp,
+            message_id,
+        })
+    }
+}

@@ -76,7 +76,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Currency`](#type-currency)
     * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
-    * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
     * [Type `HopRequire`](#type-hoprequire)
     * [Type `Htlc`](#type-htlc)
@@ -391,7 +390,7 @@ Adds a TLC to a channel.
 * `amount` - <em>`u128`</em>, The amount of the TLC
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the TLC
 * `expiry` - <em>`u64`</em>, The expiry of the TLC
-* `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the TLC
+* `hash_algorithm` - <em>`Option<HashAlgorithm>`</em>, The hash algorithm of the TLC
 
 ##### Returns
 
@@ -529,7 +528,7 @@ Get the node information.
 * `channel_count` - <em>`u32`</em>, The number of channels associated with the node, serialized as a hexadecimal string.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.
-* `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, Configuration information for User-Defined Tokens (UDT) associated with the node.
+* `udt_cfg_infos` - <em>`UdtCfgInfos`</em>, Configuration information for User-Defined Tokens (UDT) associated with the node.
 
 ---
 
@@ -557,7 +556,7 @@ Generates a new invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
  Minimal value is 16 hours, and maximal value is 14 days.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
-* `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
+* `hash_algorithm` - <em>`Option<HashAlgorithm>`</em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
 * `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
 
@@ -1090,7 +1089,7 @@ The attributes of the invoice
 * `FallbackAddr` - <em>`String`</em>, The fallback address of the invoice
 * `UdtScript` - <em>[CkbScript](#type-ckbscript)</em>, The udt type script of the invoice
 * `PayeePublicKey` - <em>`PublicKey`</em>, The payee public key of the invoice
-* `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
+* `HashAlgorithm` - <em>`HashAlgorithm`</em>, The hash algorithm of the invoice
 * `Feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
 * `PaymentSecret` - <em>[Hash256](#type-hash256)</em>, The payment secret of the invoice
 ---
@@ -1305,18 +1304,6 @@ A 256-bit hash digest, used as identifier of channel, payment, transaction hash 
 
 ---
 
-<a id="#type-hashalgorithm"></a>
-### Type `HashAlgorithm`
-
-HashAlgorithm is the hash algorithm used in the hash lock.
-
-
-#### Enum with values of
-
-* `CkbHash` - The default hash algorithm, CkbHash
-* `Sha256` - The sha256 hash algorithm
----
-
 <a id="#type-hophint"></a>
 ### Type `HopHint`
 
@@ -1401,7 +1388,7 @@ The Node information.
  When a Node is online this timestamp will be updated to the latest value.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - <em>`u64`</em>, The minimum CKB funding amount for automatically accepting open channel requests.
-* `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, The UDT configuration infos of the node.
+* `udt_cfg_infos` - <em>`UdtCfgInfos`</em>, The UDT configuration infos of the node.
 ---
 
 <a id="#type-paymentcustomrecords"></a>
@@ -1576,7 +1563,7 @@ Data needed to authorize and execute a Time-Locked Contract (TLC) settlement tra
 #### Fields
 
 * `tlc_id` - <em>[TLCId](#type-tlcid)</em>, The ID of the TLC (either offered or received)
-* `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm used for the TLC
+* `hash_algorithm` - <em>`HashAlgorithm`</em>, The hash algorithm used for the TLC
 * `payment_amount` - <em>`u128`</em>, The amount of CKB/UDT involved in the TLC
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the payment preimage
 * `expiry` - <em>`u64`</em>, The expiry time for the TLC in milliseconds
@@ -1617,9 +1604,9 @@ The UDT argument info which is used to identify the UDT configuration
 #### Fields
 
 * `name` - <em>`String`</em>, The name of the UDT.
-* `script` - <em>[UdtScript](#type-udtscript)</em>, The script of the UDT.
+* `script` - <em>`UdtScript`</em>, The script of the UDT.
 * `auto_accept_amount` - <em>`Option<u128>`</em>, The minimum amount of the UDT that can be automatically accepted.
-* `cell_deps` - <em>Vec<[UdtDep](#type-udtdep)></em>, The cell deps of the UDT.
+* `cell_deps` - <em>`Vec<UdtDep>`</em>, The cell deps of the UDT.
 ---
 
 <a id="#type-udtcelldep"></a>
@@ -1651,7 +1638,7 @@ Udt script on-chain dependencies.
 
 #### Fields
 
-* `cell_dep` - <em>Option<[UdtCellDep](#type-udtcelldep)></em>, cell dep described by out_point.
+* `cell_dep` - <em>`Option<UdtCellDep>`</em>, cell dep described by out_point.
 * `type_id` - <em>`Option<Script>`</em>, cell dep described by type ID.
 ---
 

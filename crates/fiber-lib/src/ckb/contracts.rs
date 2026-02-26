@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-use super::config::{UdtArgInfo, UdtCfgInfos};
+use super::config::{UdtArgInfo, UdtCfgInfos, UdtCfgInfosExt};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Contract {

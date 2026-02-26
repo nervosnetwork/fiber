@@ -2,13 +2,16 @@
 
 use crate::gen::fiber as molecule_fiber;
 use crate::gen::gossip as molecule_gossip;
+use crate::protocol::{EcdsaSignature, SchnorrSignature};
 use crate::serde_utils::{SliceBase58, SliceHex, SliceHexNoPrefix};
+use bitcoin::hashes::Hash as _;
 use ckb_gen_types::packed::Byte32 as MByte32;
 use ckb_types::H256;
 use molecule::prelude::{Builder, Byte, Entity};
-use musig2::secp::Scalar;
+use musig2::secp::{Point, Scalar};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, IfIsHumanReadable};
+use tentacle_secio::PeerId;
 
 // ============================================================
 // Hash256
@@ -135,6 +138,20 @@ impl From<H256> for Hash256 {
     }
 }
 
+// Hash256 <-> bitcoin/lightning hashes
+
+impl From<lightning_invoice::Sha256> for Hash256 {
+    fn from(value: lightning_invoice::Sha256) -> Self {
+        Hash256(*value.0.as_byte_array())
+    }
+}
+
+impl From<bitcoin::hashes::sha256::Hash> for Hash256 {
+    fn from(value: bitcoin::hashes::sha256::Hash) -> Self {
+        Hash256(value.to_byte_array())
+    }
+}
+
 // ============================================================
 // Pubkey
 // ============================================================
@@ -175,6 +192,23 @@ impl Pubkey {
         bytes.copy_from_slice(slice);
         Ok(Pubkey(bytes))
     }
+
+    /// Tweak the public key by adding `scalar * G` where G is the generator point.
+    pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
+        let scalar = scalar.into();
+        let scalar = Scalar::from_slice(&scalar)
+            .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
+        // Convert to Point, perform operation, then serialize back
+        let result = Point::from(self) + scalar.base_point_mul();
+        let point = result.not_inf().expect("valid public key");
+        secp256k1::PublicKey::from(point).into()
+    }
+
+    /// Get the tentacle PeerId for this public key.
+    pub fn tentacle_peer_id(&self) -> PeerId {
+        let pubkey = (*self).into();
+        PeerId::from_public_key(&pubkey)
+    }
 }
 
 // Pubkey <-> secp256k1::PublicKey
@@ -196,6 +230,44 @@ impl From<&Pubkey> for secp256k1::PublicKey {
     fn from(val: &Pubkey) -> Self {
         secp256k1::PublicKey::from_slice(&val.0)
             .expect("Pubkey should always contain valid serialized public key")
+    }
+}
+
+// Pubkey <-> musig2::secp::Point
+
+impl From<Pubkey> for Point {
+    fn from(val: Pubkey) -> Self {
+        let pk: secp256k1::PublicKey = val.into();
+        pk.into()
+    }
+}
+
+impl From<&Pubkey> for Point {
+    fn from(val: &Pubkey) -> Self {
+        let pk: secp256k1::PublicKey = val.into();
+        pk.into()
+    }
+}
+
+impl From<Point> for Pubkey {
+    fn from(point: Point) -> Self {
+        secp256k1::PublicKey::from(point).into()
+    }
+}
+
+// Pubkey <-> tentacle_secio::PublicKey
+
+impl From<tentacle_secio::PublicKey> for Pubkey {
+    fn from(pk: tentacle_secio::PublicKey) -> Self {
+        secp256k1::PublicKey::from_slice(pk.inner_ref())
+            .expect("valid tentacle pubkey can be converted to secp pubkey")
+            .into()
+    }
+}
+
+impl From<Pubkey> for tentacle_secio::PublicKey {
+    fn from(pk: Pubkey) -> Self {
+        tentacle_secio::PublicKey::from_raw_key(pk.serialize().to_vec())
     }
 }
 
@@ -271,6 +343,35 @@ impl Privkey {
         let secret_key = self.0;
         let keypair = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &secret_key);
         secp256k1::XOnlyPublicKey::from_keypair(&keypair).0
+    }
+
+    /// Sign a message with ECDSA.
+    pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
+        let message = secp256k1::Message::from_digest(message);
+        secp256k1::SECP256K1.sign_ecdsa(&message, &self.0).into()
+    }
+
+    /// Sign a message with Schnorr signature.
+    #[cfg(feature = "tracing")]
+    pub fn sign_schnorr(&self, message: [u8; 32]) -> SchnorrSignature {
+        let secret_key = self.0;
+        let keypair = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &secret_key);
+        let sig = secp256k1::SECP256K1.sign_schnorr(&message, &keypair);
+        tracing::trace!(
+            "Schnorr signing message {:?} (pub key {:?}), Signature: {:?}",
+            message,
+            keypair.public_key(),
+            &sig
+        );
+        sig.into()
+    }
+
+    /// Sign a message with Schnorr signature.
+    #[cfg(not(feature = "tracing"))]
+    pub fn sign_schnorr(&self, message: [u8; 32]) -> SchnorrSignature {
+        let secret_key = self.0;
+        let keypair = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &secret_key);
+        secp256k1::SECP256K1.sign_schnorr(&message, &keypair).into()
     }
 }
 
