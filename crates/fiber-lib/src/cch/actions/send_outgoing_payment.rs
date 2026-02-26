@@ -109,6 +109,7 @@ impl SendFiberOutgoingPaymentExecutor {
         err_lower.contains("invalid payment request")
             || err_lower.contains("invoice expired")
             || err_lower.contains("payment hash mismatch")
+            || err_lower.contains("no path found")
     }
 }
 
@@ -190,7 +191,9 @@ impl SendLightningOutgoingPaymentExecutor {
                 || msg.contains("invoice is already paid")
                 || msg.contains("invoice expired")
                 || msg.contains("incorrect payment amount")
-                || msg.contains("payment hash mismatch");
+                || msg.contains("payment hash mismatch")
+                || msg.contains("no route")
+                || msg.contains("unable to find a path to destination");
         }
 
         false
