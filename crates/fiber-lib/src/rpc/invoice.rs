@@ -282,11 +282,7 @@ impl<S> InvoiceRpcServerImpl<S> {
             );
 
             // restrict currency to be the same as network
-            let currency = match config.chain.as_str() {
-                "mainnet" => Currency::Fibb,
-                "testnet" => Currency::Fibt,
-                _ => Currency::Fibd,
-            };
+            let currency = config.currency();
 
             (
                 Some(keypair),

@@ -1,6 +1,6 @@
 #[cfg(target_arch = "wasm32")]
 use crate::fiber::KeyPair;
-use crate::{ckb::contracts::Contract, Result};
+use crate::{ckb::contracts::Contract, invoice::Currency, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
     clap::{self},
@@ -466,6 +466,15 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
 static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
 
 impl FiberConfig {
+    /// Returns the CKB invoice currency corresponding to the configured chain.
+    pub fn currency(&self) -> Currency {
+        match self.chain.as_str() {
+            "mainnet" => Currency::Fibb,
+            "testnet" => Currency::Fibt,
+            _ => Currency::Fibd,
+        }
+    }
+
     pub fn base_dir(&self) -> &PathBuf {
         self.base_dir.as_ref().expect("have set base dir")
     }
