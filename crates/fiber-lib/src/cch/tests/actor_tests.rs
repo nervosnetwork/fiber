@@ -358,7 +358,10 @@ async fn setup_test_harness() -> TestHarness {
     setup_test_harness_with_store(MockCchOrderStore::new()).await
 }
 
-async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness {
+async fn setup_test_harness_with_config_and_store(
+    config: CchConfig,
+    store: MockCchOrderStore,
+) -> TestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 
     let mock_state = MockNetworkState {
@@ -370,13 +373,6 @@ async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
         .await
         .expect("spawn mock network actor");
-
-    let config = CchConfig {
-        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
-        min_outgoing_invoice_expiry_delta_seconds: 60,
-        ..Default::default()
-    };
 
     let args = CchArgs {
         config,
@@ -399,6 +395,16 @@ async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness 
         event_port,
         mock_state,
     }
+}
+
+async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+    setup_test_harness_with_config_and_store(config, store).await
 }
 
 /// Create a test Lightning invoice with a specific payment hash
@@ -736,4 +742,261 @@ async fn test_resume_skips_final_orders() {
     let order2 = harness.get_order(payment_hash2).await.unwrap();
     assert_eq!(order2.status, CchOrderStatus::Failed);
     assert_eq!(order2.failure_reason, Some("Test failure".to_string()));
+}
+
+// =============================================================================
+// Insufficient Expiry Delta Tests (#1000)
+// =============================================================================
+
+/// Create a test Lightning invoice with a custom min_final_cltv_expiry_delta.
+fn create_test_lightning_invoice_with_cltv(
+    payment_hash: Hash256,
+    min_final_cltv: u64,
+) -> lightning_invoice::Bolt11Invoice {
+    use bitcoin::hashes::Hash as _;
+    use lightning_invoice::{Currency as LnCurrency, InvoiceBuilder as LnInvoiceBuilder};
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let private_key = bitcoin::secp256k1::SecretKey::from_slice(&[43u8; 32]).unwrap();
+    let payment_hash_btc = bitcoin::hashes::sha256::Hash::from_slice(payment_hash.as_ref())
+        .expect("valid 32-byte hash");
+    let payment_secret = lightning_invoice::PaymentSecret([0u8; 32]);
+    let duration_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time");
+
+    LnInvoiceBuilder::new(LnCurrency::Bitcoin)
+        .description("test invoice".to_string())
+        .payment_hash(payment_hash_btc)
+        .payment_secret(payment_secret)
+        .duration_since_epoch(duration_since_epoch)
+        .min_final_cltv_expiry_delta(min_final_cltv)
+        .amount_milli_satoshis(100_000_000)
+        .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
+        .expect("build lightning invoice")
+}
+
+/// Create a test Fiber invoice with a custom final_tlc_minimum_expiry_delta (in milliseconds).
+fn create_test_fiber_invoice_with_expiry(
+    payment_hash: Hash256,
+    final_tlc_expiry_delta_ms: u64,
+) -> CkbInvoice {
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(100000),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(final_tlc_expiry_delta_ms),
+                Attribute::Description("test".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::PayeePublicKey(public_key),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    invoice
+}
+
+/// Tests that a SendBTC order fails when the incoming CKB TLC does not have enough
+/// remaining time to safely settle after the outgoing BTC payment completes.
+///
+/// Scenario: The order was created a long time ago, so the remaining incoming time
+/// is too short to cover the outgoing BTC payment's min_final_cltv_expiry_delta.
+///
+/// This addresses issue #1000: the check accounts for elapsed time since order creation,
+/// not just comparing final expiry deltas statically.
+#[tokio::test]
+async fn test_send_btc_fails_insufficient_expiry_delta() {
+    let (_, payment_hash) = create_valid_preimage_pair(250);
+    let store = MockCchOrderStore::new();
+
+    // Create a BTC invoice with min_final_cltv_expiry_delta = 36 blocks (= 21,600 seconds)
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 36);
+
+    // Use a config with ckb_final_tlc_expiry_delta_seconds = 50,000 seconds (~14 hours).
+    // Initial static check: 36 * 600 = 21,600 < 50,000 / 2 = 25,000 → passes.
+    // But if the order was created 20,000 seconds ago:
+    //   remaining = 50,000 - 20,000 = 30,000 seconds
+    //   max_outgoing = 30,000 / 2 = 15,000 seconds
+    //   needed = 21,600 seconds
+    //   15,000 < 21,600 → fails!
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ckb_final_tlc_expiry_delta_seconds: 50_000,
+        ..Default::default()
+    };
+
+    // Create an order with created_at 20,000 seconds in the past
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now - 20_000,
+        expiry_delta_seconds: 100_000, // large enough not to expire
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: lightning_invoice.to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    // The CchActor should detect the IncomingAccepted order on startup, dispatch
+    // SendOutgoingPayment, and the expiry check should fail the order.
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::Failed);
+    assert!(order.failure_reason.is_some());
+    let reason = order.failure_reason.unwrap();
+    assert!(
+        reason.contains("Insufficient HTLC expiry delta"),
+        "Expected expiry delta failure message, got: {}",
+        reason,
+    );
+}
+
+/// Tests that a ReceiveBTC order fails when the incoming BTC HTLC does not have enough
+/// remaining time for the outgoing CKB payment's final TLC expiry delta.
+///
+/// Scenario: The outgoing CKB invoice has a very large final_tlc_minimum_expiry_delta
+/// that exceeds half the remaining incoming time.
+#[tokio::test]
+async fn test_receive_btc_fails_insufficient_expiry_delta() {
+    let (_, payment_hash) = create_valid_preimage_pair(251);
+    let store = MockCchOrderStore::new();
+
+    // Create a CKB invoice with a very large final TLC expiry delta (100,000 seconds = 100M ms)
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 100_000_000);
+
+    // Use a config with btc_final_tlc_expiry_delta_blocks = 180 blocks (= 108,000 seconds).
+    // If order was just created:
+    //   remaining = 108,000 seconds
+    //   max_outgoing = 54,000 seconds
+    //   outgoing needs 100,000 seconds
+    //   54,000 < 100,000 → fails!
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now,
+        expiry_delta_seconds: 200_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: fiber_invoice.to_string(),
+        incoming_invoice: CchInvoice::Lightning(lightning_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    // The CchActor should detect the IncomingAccepted order on startup, dispatch
+    // SendOutgoingPayment, and the expiry check should fail the order.
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::Failed);
+    assert!(order.failure_reason.is_some());
+    let reason = order.failure_reason.unwrap();
+    assert!(
+        reason.contains("Insufficient HTLC expiry delta"),
+        "Expected expiry delta failure message, got: {}",
+        reason,
+    );
+}
+
+/// Tests that a SendBTC order succeeds when there is sufficient remaining incoming time
+/// to cover the outgoing payment's CLTV plus settle the incoming payment.
+/// This verifies that the expiry check doesn't incorrectly reject valid orders.
+#[tokio::test]
+async fn test_send_btc_passes_sufficient_expiry_delta() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(252);
+    let store = MockCchOrderStore::new();
+
+    // Create a BTC invoice with small min_final_cltv_expiry_delta = 3 blocks (= 1,800 seconds)
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 3);
+
+    // Use a config with ckb_final_tlc_expiry_delta_seconds = 100,000 seconds.
+    // Even with 10,000 seconds elapsed:
+    //   remaining = 100,000 - 10,000 = 90,000 seconds
+    //   max_outgoing = 45,000 seconds
+    //   needed = 3 * 600 = 1,800 seconds
+    //   45,000 > 1,800 → passes ✓
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ckb_final_tlc_expiry_delta_seconds: 100_000,
+        ..Default::default()
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now - 10_000,
+        expiry_delta_seconds: 200_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: lightning_invoice.to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    // The order should NOT fail from the expiry check. Since outgoing is Lightning (BTC),
+    // the SendLightningOutgoingPaymentExecutor will try to call LND (which isn't running).
+    // That will cause a transient error and retry, but the order should NOT be Failed.
+    // Wait briefly and confirm the order is NOT in Failed state.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_ne!(
+        order.status,
+        CchOrderStatus::Failed,
+        "Order should not have failed - expiry check should have passed. \
+         Failure reason: {:?}",
+        order.failure_reason,
+    );
 }

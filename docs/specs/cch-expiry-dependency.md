@@ -22,3 +22,21 @@ CCH validates that the outgoing invoice's final CLTV/TLC expiry is less than hal
 - **ReceiveBTC** (Lightning → Fiber): The Fiber invoice's `final_tlc_minimum_expiry_delta` must be less than `btc_final_tlc_expiry_delta_blocks / 2` (converted to milliseconds).
 
 If this validation fails, the swap is rejected with an error indicating the final expiry delta exceeds the safe limit for cross-chain swaps.
+
+## Outgoing Payment Route Expiry Check
+
+The static validation above only compares the **final** expiry deltas, which represent the minimum expiry at the last hop. However, when the outgoing payment is routed through multiple intermediate nodes, each hop adds its own expiry delta. The total route expiry at the first hop can be significantly larger than the final expiry delta alone.
+
+To prevent fund loss from this scenario, CCH performs a dynamic expiry check when dispatching the outgoing payment (after the incoming payment is accepted):
+
+1. **Compute remaining incoming time**: `incoming_final_expiry_delta - (now - order.created_at)`. This is a conservative lower bound on the incoming TLC/HTLC's remaining time, since the TLC was accepted at or after order creation.
+
+2. **Allocate half for outgoing**: The maximum allowed outgoing route expiry is `remaining / 2`. The other half is reserved for CCH to settle the incoming payment after receiving the preimage.
+
+3. **Validate sufficiency**: If the allocated time is less than the outgoing invoice's minimum final expiry delta, the order is failed immediately — routing is impossible without exceeding the safe limit.
+
+4. **Cap the outgoing route**: The computed limit is enforced on the outgoing payment:
+   - **BTC (LND)**: Set `cltv_limit` on `SendPaymentRequest` to `max_outgoing_seconds / 600` blocks.
+   - **CKB (Fiber)**: Set `tlc_expiry_limit` on `SendPaymentCommand` to `max_outgoing_seconds * 1000` milliseconds.
+
+This ensures that even in the worst case — where the outgoing payment settles at the very last moment before its route expiry — CCH still has enough time to settle the incoming payment.
