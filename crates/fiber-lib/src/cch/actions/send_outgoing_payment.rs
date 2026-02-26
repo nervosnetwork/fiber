@@ -152,7 +152,7 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
             Some(Err(err)) => {
                 let failure_reason =
                     format!("SendLightningOutgoingPaymentExecutor failure: {:?}", err);
-                if Self::is_permanent_error(err) {
+                if Self::is_permanent_error(&err) {
                     CchTrackingEvent::PaymentChanged {
                         payment_hash: self.payment_hash,
                         payment_preimage: None,
@@ -160,6 +160,10 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
                         failure_reason: Some(failure_reason),
                     }
                 } else {
+                    tracing::warn!(
+                        "SendLightningOutgoingPaymentExecutor transient error, will retry. code: {}, error: {}",
+                        err.code(), err.message()
+                    );
                     return Err(anyhow!(failure_reason));
                 }
             }
@@ -176,7 +180,7 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
 }
 
 impl SendLightningOutgoingPaymentExecutor {
-    fn is_permanent_error(status: tonic::Status) -> bool {
+    fn is_permanent_error(status: &tonic::Status) -> bool {
         // Check for explicit invalid argument errors
         if matches!(status.code(), tonic::Code::InvalidArgument) {
             return true;
