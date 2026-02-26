@@ -34,7 +34,9 @@ use tentacle::secio::PeerId;
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenChannelParams {
-    /// The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
+    /// The peer ID to open a channel with (base58 string, derived from the peer's `Pubkey`).
+    /// The peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
+    /// You can obtain a peer's `peer_id` from the `list_peers` RPC.
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
 
@@ -162,7 +164,8 @@ pub struct AcceptChannelResult {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct ListChannelsParams {
-    /// The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
+    /// The peer ID to list channels for (base58 string, derived from the peer's `Pubkey`).
+    /// An optional parameter, if not provided, all channels will be listed.
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub peer_id: Option<PeerId>,
     /// Whether to include closed channels in the list, an optional parameter, default value is false
@@ -269,7 +272,7 @@ pub struct Channel {
     #[serde_as(as = "Option<EntityHex>")]
     /// The outpoint of the channel
     pub channel_outpoint: Option<OutPoint>,
-    /// The peer ID of the channel
+    /// The peer ID of the channel counterparty (base58 string, derived from the peer's `Pubkey`).
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     /// The UDT type script of the channel

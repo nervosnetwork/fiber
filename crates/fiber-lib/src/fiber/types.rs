@@ -323,8 +323,13 @@ impl Privkey {
     }
 }
 
-/// The public key for a Node
-/// It stores the serialized form ([u8; 33]) directly for fast comparison and hashing
+/// A compressed secp256k1 public key (33 bytes), used as the primary identity of a node.
+/// In the RPC interface this value is also referred to as `node_id`.
+/// It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
+///
+/// Note: `Pubkey` is different from `PeerId`. A `PeerId` is derived by hashing the
+/// public key and is used only for P2P transport connections. You can obtain both
+/// values from the `list_peers` or `node_info` RPC.
 #[serde_as]
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHexNoPrefix, [_; 33]>")] pub [u8; 33]);
