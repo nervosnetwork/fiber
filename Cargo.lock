@@ -2288,6 +2288,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-types"
+version = "0.7.1"
+dependencies = [
+ "anyhow",
+ "bech32 0.9.1",
+ "bincode 1.3.3",
+ "bitcoin",
+ "bitflags 2.11.0",
+ "bs58",
+ "ckb-gen-types",
+ "ckb-hash",
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "hex",
+ "molecule 0.8.0",
+ "musig2",
+ "paste",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_with",
+ "tentacle-multiaddr",
+ "tentacle-secio",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "fiber-wasm"
 version = "0.1.0"
 dependencies = [

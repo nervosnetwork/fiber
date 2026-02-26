@@ -6,6 +6,7 @@ members = [
     "crates/fiber-wasm",
     "crates/fiber-wasm-db-worker",
     "crates/fiber-wasm-db-common",
+    "crates/fiber-types",
 ]
 resolver = "2"
 default-members = ["crates/fiber-bin", "crates/fiber-lib"]
