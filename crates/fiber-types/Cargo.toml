@@ -41,8 +41,8 @@ tentacle-multiaddr = "0.3"
 # CKB JSON-RPC types (for serializable wrappers)
 ckb-jsonrpc-types = "0.202.0"
 
-# Logging (optional, for sign_schnorr tracing)
-tracing = { version = "0.1", optional = true }
+# Logging
+tracing = "0.1"
 
 # Other
 anyhow = "1.0.81"
@@ -50,12 +50,16 @@ bitflags = { version = "2.5.0", features = ["serde"] }
 thiserror = "1.0.58"
 num_enum = "0.7"
 strum = { version = "0.26", features = ["derive"] }
-lightning-invoice = "0.32"
+lightning-invoice = "0.33"
 serde_json = "1.0"
 
 # Invoice encoding
 arcode = "0.2.4"
 nom = "7.1.3"
+
+# WASM-compatible time (used on wasm32 targets instead of std::time)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1.0"
 
 [features]
 default = ["watchtower"]

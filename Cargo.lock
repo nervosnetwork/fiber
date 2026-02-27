@@ -2304,7 +2304,7 @@ dependencies = [
  "ckb-types",
  "fiber-sphinx",
  "hex",
- "lightning-invoice 0.32.0",
+ "lightning-invoice",
  "molecule 0.8.0",
  "musig2",
  "nom",
@@ -2319,6 +2319,7 @@ dependencies = [
  "tentacle-secio",
  "thiserror 1.0.69",
  "tracing",
+ "web-time",
 ]
 
 [[package]]
@@ -2444,7 +2445,7 @@ dependencies = [
  "hyper-util",
  "indicatif",
  "jsonrpsee",
- "lightning-invoice 0.33.2",
+ "lightning-invoice",
  "lnd-grpc-tonic-client",
  "metrics",
  "metrics-exporter-prometheus",
@@ -3748,35 +3749,13 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "lightning-invoice"
-version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90ab9f6ea77e20e3129235e62a2e6bd64ed932363df104e864ee65ccffb54a8f"
-dependencies = [
- "bech32 0.9.1",
- "bitcoin",
- "lightning-types 0.1.0",
-]
-
-[[package]]
-name = "lightning-invoice"
 version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11209f386879b97198b2bfc9e9c1e5d42870825c6bd4376f17f95357244d6600"
 dependencies = [
  "bech32 0.11.1",
  "bitcoin",
- "lightning-types 0.2.0",
-]
-
-[[package]]
-name = "lightning-types"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1083b8d9137000edf3bfcb1ff011c0d25e0cdd2feb98cc21d6765e64a494148f"
-dependencies = [
- "bech32 0.9.1",
- "bitcoin",
- "hex-conservative",
+ "lightning-types",
 ]
 
 [[package]]

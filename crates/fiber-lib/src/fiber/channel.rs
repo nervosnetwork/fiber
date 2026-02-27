@@ -1,7 +1,10 @@
 use super::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
 };
-use super::types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, UpdateTlcInfo};
+use super::types::{
+    new_channel_announcement_unsigned, new_channel_update_unsigned, ChannelUpdateChannelFlags,
+    ChannelUpdateMessageFlags, UpdateTlcInfo,
+};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -3195,40 +3198,7 @@ pub struct TlcInfo {
 }
 
 // When we are forwarding a TLC, we need to know the previous TLC information.
-// This struct keeps the information of the previous TLC.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
-pub struct PrevTlcInfo {
-    pub(crate) prev_channel_id: Hash256,
-    // The TLC is always a received TLC because we are forwarding it.
-    pub(crate) prev_tlc_id: u64,
-    pub(crate) forwarding_fee: u128,
-    pub(crate) shared_secret: Option<[u8; 32]>,
-}
-
-impl PrevTlcInfo {
-    pub fn new(prev_channel_id: Hash256, prev_tlc_id: u64, forwarding_fee: u128) -> Self {
-        Self {
-            prev_channel_id,
-            prev_tlc_id,
-            forwarding_fee,
-            shared_secret: None,
-        }
-    }
-
-    pub fn new_with_shared_secret(
-        prev_channel_id: Hash256,
-        prev_tlc_id: u64,
-        forwarding_fee: u128,
-        shared_secret: [u8; 32],
-    ) -> Self {
-        Self {
-            prev_channel_id,
-            prev_tlc_id,
-            forwarding_fee,
-            shared_secret: Some(shared_secret),
-        }
-    }
-}
+pub use fiber_types::PrevTlcInfo;
 
 impl Debug for TlcInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -4459,7 +4429,7 @@ impl ChannelActorState {
                     (self.remote_pubkey, self.local_pubkey)
                 };
 
-                ChannelAnnouncement::new_unsigned(
+                new_channel_announcement_unsigned(
                     &node1_id,
                     &node2_id,
                     channel_outpoint,
@@ -4722,7 +4692,7 @@ impl ChannelActorState {
             ChannelUpdateMessageFlags::UPDATE_OF_NODE2
         };
 
-        self.is_public().then_some(ChannelUpdate::new_unsigned(
+        self.is_public().then_some(new_channel_update_unsigned(
             self.must_get_funding_transaction_outpoint(),
             now_timestamp_as_millis_u64(),
             message_flags,

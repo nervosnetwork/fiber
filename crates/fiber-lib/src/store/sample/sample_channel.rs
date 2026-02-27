@@ -17,7 +17,8 @@ use crate::fiber::channel::{
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::types::{
     ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
-    PaymentOnionPacket, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, TlcErrPacket,
+    PaymentOnionPacket, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, SchnorrSignature,
+    TlcErrPacket,
 };
 use crate::store::schema::CHANNEL_ACTOR_STATE_PREFIX;
 
@@ -143,7 +144,7 @@ impl ChannelActorState {
         let channel_announcement = ChannelAnnouncement {
             node1_signature: Some(deterministic_ecdsa_signature(seed, 210)),
             node2_signature: Some(deterministic_ecdsa_signature(seed, 211)),
-            ckb_signature: Some(deterministic_schnorr_signature(seed, 212)),
+            ckb_signature: Some(SchnorrSignature(deterministic_schnorr_signature(seed, 212))),
             features: 0,
             chain_hash: deterministic_hash256(seed, 213),
             channel_outpoint: outpoint.clone(),

@@ -125,6 +125,9 @@ pub enum InvoiceError {
 /// Size of the signature in u5 encoding.
 pub const SIGNATURE_U5_SIZE: usize = 104;
 
+/// Maximum allowed length for an invoice description.
+pub const MAX_DESCRIPTION_LENGTH: usize = 639;
+
 /// Encodes bytes and returns the compressed form.
 /// This is used for encoding the invoice data, to make the final Invoice encoded address shorter.
 pub fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
@@ -502,6 +505,26 @@ impl FromBase32 for InvoiceSignature {
     }
 }
 
+impl InvoiceSignature {
+    /// Parse an `InvoiceSignature` from base32-encoded data, returning `InvoiceError` on failure.
+    pub fn from_base32_checked(signature: &[u5]) -> Result<Self, InvoiceError> {
+        if signature.len() != SIGNATURE_U5_SIZE {
+            return Err(InvoiceError::InvalidSliceLength(
+                "InvoiceSignature::from_base32_checked()".into(),
+            ));
+        }
+        let recoverable_signature_bytes =
+            Vec::<u8>::from_base32(signature).expect("bytes from base32");
+        let sig = &recoverable_signature_bytes[0..64];
+        let recovery_id = RecoveryId::try_from(recoverable_signature_bytes[64] as i32)
+            .expect("Recovery ID from i32");
+
+        Ok(InvoiceSignature(
+            RecoverableSignature::from_compact(sig, recovery_id).expect("signature from compact"),
+        ))
+    }
+}
+
 // ============================================================
 // Attribute
 // ============================================================
@@ -604,13 +627,25 @@ impl CkbInvoice {
         base32
     }
 
-    /// Checks if the signature is valid for the included payee public key.
+    /// Check that the invoice is signed correctly and that key recovery works.
     pub fn check_signature(&self) -> Result<(), InvoiceError> {
-        if self.validate_signature() {
-            Ok(())
-        } else {
-            Err(InvoiceError::InvalidSignature)
+        if self.signature.is_none() {
+            return Ok(());
         }
+        match self.recover_payee_pub_key() {
+            Err(secp256k1::Error::InvalidRecoveryId) => {
+                return Err(InvoiceError::InvalidRecoveryId)
+            }
+            Err(secp256k1::Error::InvalidSignature) => return Err(InvoiceError::InvalidSignature),
+            Err(e) => panic!("no other error may occur, got {:?}", e),
+            Ok(_) => {}
+        }
+
+        if !self.validate_signature() {
+            return Err(InvoiceError::InvalidSignature);
+        }
+
+        Ok(())
     }
 
     fn validate_signature(&self) -> bool {
@@ -678,6 +713,165 @@ impl CkbInvoice {
                 _ => None,
             })
             .next()
+    }
+
+    /// Returns whether the invoice has a signature.
+    pub fn is_signed(&self) -> bool {
+        self.signature.is_some()
+    }
+
+    /// Returns the payment hash of the invoice.
+    pub fn payment_hash(&self) -> &Hash256 {
+        &self.data.payment_hash
+    }
+
+    /// Returns the amount of the invoice.
+    pub fn amount(&self) -> Option<u128> {
+        self.amount
+    }
+
+    /// Returns the UDT type script if set in the invoice attributes.
+    pub fn udt_type_script(&self) -> Option<&PackedScript> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::UdtScript(script) => Some(&script.0),
+                _ => None,
+            })
+            .next()
+    }
+
+    /// Returns the expiry time if set in the invoice attributes.
+    pub fn expiry_time(&self) -> Option<&Duration> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::ExpiryTime(val) => Some(val),
+                _ => None,
+            })
+            .next()
+    }
+
+    /// Returns the description if set in the invoice attributes.
+    pub fn description(&self) -> Option<&String> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::Description(val) => Some(val),
+                _ => None,
+            })
+            .next()
+    }
+
+    /// Returns the final TLC minimum expiry delta if set in the invoice attributes.
+    pub fn final_tlc_minimum_expiry_delta(&self) -> Option<&u64> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::FinalHtlcMinimumExpiryDelta(val) => Some(val),
+                _ => None,
+            })
+            .next()
+    }
+
+    /// Returns the fallback address if set in the invoice attributes.
+    pub fn fallback_address(&self) -> Option<&String> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::FallbackAddr(val) => Some(val),
+                _ => None,
+            })
+            .next()
+    }
+
+    /// Returns the hash algorithm if set in the invoice attributes.
+    pub fn hash_algorithm(&self) -> Option<&HashAlgorithm> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::HashAlgorithm(val) => Some(val),
+                _ => None,
+            })
+            .next()
+    }
+
+    /// Returns the payment secret if set in the invoice attributes.
+    pub fn payment_secret(&self) -> Option<&Hash256> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::PaymentSecret(val) => Some(val),
+                _ => None,
+            })
+            .next()
+    }
+
+    /// Returns whether the invoice allows MPP (multi-part payments).
+    pub fn allow_mpp(&self) -> bool {
+        self.data
+            .attrs
+            .iter()
+            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_basic_mpp()))
+    }
+
+    /// Returns whether the invoice allows trampoline routing.
+    pub fn allow_trampoline_routing(&self) -> bool {
+        self.data
+            .attrs
+            .iter()
+            .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_trampoline_routing()))
+    }
+
+    /// Returns whether the invoice has expired based on the current time.
+    pub fn is_expired(&self) -> bool {
+        self.expiry_time().is_some_and(|expiry| {
+            self.data
+                .timestamp
+                .checked_add(expiry.as_millis())
+                .is_some_and(|expiry_time| {
+                    let now = crate::crate_time::UNIX_EPOCH
+                        .elapsed()
+                        .expect("Duration since unix epoch")
+                        .as_millis();
+                    expiry_time < now
+                })
+        })
+    }
+
+    /// Returns whether the TLC expiry is too soon for the given invoice.
+    pub fn is_tlc_expire_too_soon(&self, tlc_expiry: u64) -> bool {
+        let now = crate::crate_time::UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_millis();
+        let required_expiry = now
+            + (self
+                .final_tlc_minimum_expiry_delta()
+                .cloned()
+                .unwrap_or_default() as u128);
+        (tlc_expiry as u128) < required_expiry
+    }
+
+    /// Updates the invoice signature using the provided signing function.
+    pub fn update_signature<F>(&mut self, sign_function: F) -> Result<(), InvoiceError>
+    where
+        F: FnOnce(&secp256k1::Message) -> RecoverableSignature,
+    {
+        let hash = self.hash();
+        let message =
+            secp256k1::Message::from_digest_slice(&hash).expect("message from digest slice");
+        let signature = sign_function(&message);
+        self.signature = Some(InvoiceSignature(signature));
+        self.check_signature()?;
+        Ok(())
     }
 }
 
@@ -923,5 +1117,59 @@ impl From<InvoiceAttr> for Attribute {
 impl From<anyhow::Error> for InvoiceError {
     fn from(_err: anyhow::Error) -> Self {
         InvoiceError::InvalidSignature
+    }
+}
+
+impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
+    type Error = InvoiceError;
+
+    fn try_from(invoice: gen_invoice::RawCkbInvoice) -> Result<Self, Self::Error> {
+        Ok(CkbInvoice {
+            currency: (u8::from(invoice.currency()))
+                .try_into()
+                .map_err(|e: UnknownCurrencyError| InvoiceError::UnknownCurrency(e.0))?,
+            amount: invoice.amount().to_opt().map(|x| x.unpack()),
+            signature: invoice.signature().to_opt().map(|x| {
+                InvoiceSignature::from_base32_checked(
+                    &x.as_bytes()
+                        .into_iter()
+                        .map(|x| u5::try_from_u8(x).expect("u5 from u8"))
+                        .collect::<Vec<u5>>(),
+                )
+                .expect("signature must be present")
+            }),
+            data: InvoiceData::try_from(invoice.data()).map_err(InvoiceError::MoleculeError)?,
+        })
+    }
+}
+
+impl From<CkbInvoice> for gen_invoice::RawCkbInvoice {
+    fn from(invoice: CkbInvoice) -> Self {
+        gen_invoice::RawCkbInvoiceBuilder::default()
+            .currency((invoice.currency as u8).into())
+            .amount(
+                gen_invoice::AmountOpt::new_builder()
+                    .set(invoice.amount.map(|x| x.pack()))
+                    .build(),
+            )
+            .signature(
+                gen_invoice::SignatureOpt::new_builder()
+                    .set({
+                        invoice.signature.map(|x| {
+                            let bytes: [Byte; SIGNATURE_U5_SIZE] = x
+                                .to_base32()
+                                .iter()
+                                .map(|x| u8_to_byte(x.to_u8()))
+                                .collect::<Vec<_>>()
+                                .as_slice()
+                                .try_into()
+                                .expect("[Byte; 104] from [Byte] slice");
+                            gen_invoice::Signature::new_builder().set(bytes).build()
+                        })
+                    })
+                    .build(),
+            )
+            .data(invoice.data.into())
+            .build()
     }
 }

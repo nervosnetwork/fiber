@@ -352,7 +352,6 @@ impl Privkey {
     }
 
     /// Sign a message with Schnorr signature.
-    #[cfg(feature = "tracing")]
     pub fn sign_schnorr(&self, message: [u8; 32]) -> SchnorrSignature {
         let secret_key = self.0;
         let keypair = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &secret_key);
@@ -364,14 +363,6 @@ impl Privkey {
             &sig
         );
         sig.into()
-    }
-
-    /// Sign a message with Schnorr signature.
-    #[cfg(not(feature = "tracing"))]
-    pub fn sign_schnorr(&self, message: [u8; 32]) -> SchnorrSignature {
-        let secret_key = self.0;
-        let keypair = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &secret_key);
-        secp256k1::SECP256K1.sign_schnorr(&message, &keypair).into()
     }
 }
 

@@ -54,7 +54,7 @@ use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, AddTlcCommand,
     AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelOpenRecord, ChannelOpeningStatus, ChannelOpenRecordStore, ChannelState, ChannelTlcInfo,
+    ChannelOpenRecord, ChannelOpenRecordStore, ChannelOpeningStatus, ChannelState, ChannelTlcInfo,
     CloseFlags, OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
     PublicChannelInfo, RemoveTlcCommand, RetryableTlcOperation, RevocationData, SettlementData,
     ShuttingDownFlags, StopReason, TLCId, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
@@ -65,9 +65,9 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, TlcErr, TlcErrorCode,
+    new_node_announcement, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
+    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
+    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
@@ -1356,15 +1356,13 @@ where
                                     }
                                 }
 
-                                let Some(payment_preimage) =
-                                    self.store.get_preimage(&payment_hash)
+                                let Some(payment_preimage) = self.store.get_preimage(&payment_hash)
                                 else {
                                     continue;
                                 };
                                 debug!(
                                     "Found payment preimage for channel {:?} tlc {:?}",
-                                    channel_id,
-                                    id
+                                    channel_id, id
                                 );
                                 if self
                                     .store
@@ -1514,12 +1512,24 @@ where
                                 .tlc_state
                                 .get_expired_offered_tlcs(expect_expiry)
                                 .filter_map(|tlc| {
-                                    tlc.forwarding_tlc.map(|(forwarding_channel_id, forwarding_tlc_id)| {
-                                        (forwarding_channel_id, forwarding_tlc_id, tlc.payment_hash, tlc.shared_secret)
-                                    })
+                                    tlc.forwarding_tlc.map(
+                                        |(forwarding_channel_id, forwarding_tlc_id)| {
+                                            (
+                                                forwarding_channel_id,
+                                                forwarding_tlc_id,
+                                                tlc.payment_hash,
+                                                tlc.shared_secret,
+                                            )
+                                        },
+                                    )
                                 })
                                 .collect();
-                            for (forwarding_channel_id, forwarding_tlc_id, payment_hash, shared_secret) in expired_tlcs
+                            for (
+                                forwarding_channel_id,
+                                forwarding_tlc_id,
+                                payment_hash,
+                                shared_secret,
+                            ) in expired_tlcs
                             {
                                 if self.store.is_tlc_settled(&channel_id, &payment_hash) {
                                     let (send, _recv) = oneshot::channel();
@@ -3046,7 +3056,7 @@ where
             _ => {
                 let node_name = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
-                let announcement = NodeAnnouncement::new(
+                let announcement = new_node_announcement(
                     node_name,
                     self.features.clone(),
                     addresses,

@@ -32,39 +32,17 @@ pub mod watchtower;
 
 pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
 
-pub use channel::{
-    AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
-    ChannelActorStateCore, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
-    ChannelOpenRecord, ChannelOpeningStatus, ChannelState, ChannelTlcInfo,
-    ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags,
-    CommitmentNumbers, InMemorySigner, InboundTlcStatus, NegotiatingFundingFlags,
-    OutboundTlcStatus, PendingNotifySettleTlc, PendingTlcs, PrevTlcInfo, PublicChannelInfo,
-    RetryableTlcOperation, RevokeAndAck, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags,
-    TLCId, TlcInfo, TlcState, TlcStatus, INITIAL_COMMITMENT_NUMBER,
-};
+pub use channel::*;
 
-pub use payment::{
-    Attempt, AttemptStatus, HopHint, PaymentCustomRecords, PaymentHopData, PaymentOnionPacket,
-    PaymentSession, PaymentStatus, RemoveTlcFulfill, RemoveTlcReason, RouterHop, SendPaymentData,
-    SessionRoute, SessionRouteNode, TimedResult, TlcErrPacket, TlcErrorCode, TrampolineContext,
-    NO_SHARED_SECRET, USER_CUSTOM_RECORDS_MAX_INDEX,
-};
+pub use payment::*;
 
-pub use protocol::{
-    feature_bits, AnnouncedNodeName, BroadcastMessage, BroadcastMessageID, ChannelAnnouncement,
-    ChannelUpdate, Cursor, EcdsaSignature, FeatureBit, FeatureVector, NodeAnnouncement,
-    SchnorrSignature, UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript, CURSOR_SIZE,
-};
+pub use protocol::*;
 
 pub use network::PersistentNetworkActorState;
 
 pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
 
-pub use invoice::{
-    ar_decompress, ar_encompress, construct_invoice_preimage, parse_hrp, sha256, Attribute,
-    CkbInvoice, CkbInvoiceStatus, CkbScript, Currency, HashAlgorithm, InvoiceData, InvoiceError,
-    InvoiceSignature, UnknownHashAlgorithmError, VerificationError, SIGNATURE_U5_SIZE,
-};
+pub use invoice::*;
 
 #[cfg(feature = "watchtower")]
 pub use watchtower::{ChannelData, RevocationData, SettlementData, SettlementTlc};
@@ -77,6 +55,27 @@ pub use serde_utils::{
 // Re-export tentacle types for external use
 pub use tentacle_multiaddr::Multiaddr;
 pub use tentacle_secio::PeerId;
+
+// ============================================================
+// WASM-compatible time
+// ============================================================
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use std::time as crate_time;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web_time as crate_time;
+
+// ============================================================
+// Utility functions
+// ============================================================
+
+/// Get the current timestamp as milliseconds since the Unix epoch.
+pub fn now_timestamp_as_millis_u64() -> u64 {
+    crate_time::SystemTime::now()
+        .duration_since(crate_time::UNIX_EPOCH)
+        .expect("Duration since unix epoch")
+        .as_millis() as u64
+}
 
 // ============================================================
 // Store serialization utilities

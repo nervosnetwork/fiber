@@ -1,10 +1,12 @@
 //! Payment-related types.
 
 use crate::gen::fiber as molecule_fiber;
+use crate::{EntityHex, Pubkey, SliceHex};
 use ckb_types::prelude::{Pack, Unpack};
-use molecule::prelude::{Builder, Entity};
+use molecule::prelude::{Builder, Byte, Entity};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::collections::HashMap;
 use strum::{AsRefStr, EnumString};
 
@@ -197,6 +199,297 @@ impl std::fmt::Display for TlcErrPacket {
 }
 
 // ============================================================
+// TlcErr / TlcErrData
+// ============================================================
+
+use crate::protocol::ChannelUpdate;
+use ckb_types::packed::OutPoint;
+use std::fmt::Display;
+
+/// Extra data attached to a TLC error.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TlcErrData {
+    ChannelFailed {
+        #[serde_as(as = "EntityHex")]
+        channel_outpoint: OutPoint,
+        channel_update: Option<ChannelUpdate>,
+        node_id: Pubkey,
+    },
+    NodeFailed {
+        node_id: Pubkey,
+    },
+    TrampolineFailed {
+        node_id: Pubkey,
+        #[serde_as(as = "SliceHex")]
+        inner_error_packet: Vec<u8>,
+    },
+}
+
+/// Structured TLC error with error code and optional extra data.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TlcErr {
+    pub error_code: TlcErrorCode,
+    pub extra_data: Option<TlcErrData>,
+}
+
+impl Display for TlcErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.extra_data {
+            Some(TlcErrData::TrampolineFailed {
+                node_id,
+                inner_error_packet,
+            }) => write!(
+                f,
+                "{} (TrampolineFailed node_id={:?} inner_error_packet_len={})",
+                self.error_code_as_str(),
+                node_id,
+                inner_error_packet.len()
+            ),
+            _ => write!(f, "{}", self.error_code_as_str()),
+        }
+    }
+}
+
+impl TlcErr {
+    pub fn new(error_code: TlcErrorCode) -> Self {
+        TlcErr {
+            error_code,
+            extra_data: None,
+        }
+    }
+
+    pub fn new_node_fail(error_code: TlcErrorCode, node_id: Pubkey) -> Self {
+        TlcErr {
+            error_code,
+            extra_data: Some(TlcErrData::NodeFailed { node_id }),
+        }
+    }
+
+    pub fn new_channel_fail(
+        error_code: TlcErrorCode,
+        node_id: Pubkey,
+        channel_outpoint: OutPoint,
+        channel_update: Option<ChannelUpdate>,
+    ) -> Self {
+        TlcErr {
+            error_code,
+            extra_data: Some(TlcErrData::ChannelFailed {
+                node_id,
+                channel_outpoint,
+                channel_update,
+            }),
+        }
+    }
+
+    pub fn error_node_id(&self) -> Option<Pubkey> {
+        match &self.extra_data {
+            Some(TlcErrData::NodeFailed { node_id }) => Some(*node_id),
+            Some(TlcErrData::ChannelFailed { node_id, .. }) => Some(*node_id),
+            Some(TlcErrData::TrampolineFailed { node_id, .. }) => Some(*node_id),
+            _ => None,
+        }
+    }
+
+    pub fn error_channel_outpoint(&self) -> Option<OutPoint> {
+        match &self.extra_data {
+            Some(TlcErrData::ChannelFailed {
+                channel_outpoint, ..
+            }) => Some(channel_outpoint.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn error_code(&self) -> TlcErrorCode {
+        self.error_code
+    }
+
+    pub fn error_code_as_str(&self) -> String {
+        let error_code: TlcErrorCode = self.error_code;
+        error_code.as_ref().to_string()
+    }
+
+    pub fn error_code_as_u16(&self) -> u16 {
+        self.error_code.into()
+    }
+
+    pub fn set_extra_data(&mut self, extra_data: TlcErrData) {
+        self.extra_data = Some(extra_data);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        molecule_fiber::TlcErr::try_from(self.clone())
+            .expect("TlcErr serialization should not fail for valid TlcErr")
+            .as_slice()
+            .to_vec()
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        molecule_fiber::TlcErr::from_slice(data)
+            .ok()
+            .and_then(|e| TlcErr::try_from(e).ok())
+    }
+}
+
+impl TryFrom<TlcErrData> for molecule_fiber::TlcErrData {
+    type Error = anyhow::Error;
+
+    fn try_from(tlc_err_data: TlcErrData) -> Result<Self, Self::Error> {
+        match tlc_err_data {
+            TlcErrData::ChannelFailed {
+                channel_outpoint,
+                channel_update,
+                node_id,
+            } => Ok(molecule_fiber::ChannelFailed::new_builder()
+                .channel_outpoint(channel_outpoint)
+                .channel_update(
+                    molecule_fiber::ChannelUpdateOpt::new_builder()
+                        .set(channel_update.map(|x| x.into()))
+                        .build(),
+                )
+                .node_id(node_id.into())
+                .build()
+                .into()),
+            TlcErrData::NodeFailed { node_id } => Ok(molecule_fiber::NodeFailed::new_builder()
+                .node_id(node_id.into())
+                .build()
+                .into()),
+            TlcErrData::TrampolineFailed {
+                node_id,
+                inner_error_packet,
+            } => Ok(molecule_fiber::TrampolineFailed::new_builder()
+                .node_id(node_id.into())
+                .inner_error_packet(inner_error_packet.pack())
+                .build()
+                .into()),
+        }
+    }
+}
+
+impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
+    type Error = anyhow::Error;
+
+    fn try_from(tlc_err_data: molecule_fiber::TlcErrData) -> Result<Self, Self::Error> {
+        match tlc_err_data.to_enum() {
+            molecule_fiber::TlcErrDataUnion::ChannelFailed(channel_failed) => {
+                Ok(TlcErrData::ChannelFailed {
+                    channel_outpoint: channel_failed.channel_outpoint(),
+                    channel_update: channel_failed
+                        .channel_update()
+                        .to_opt()
+                        .map(|x| x.try_into())
+                        .transpose()?,
+                    node_id: channel_failed.node_id().try_into()?,
+                })
+            }
+            molecule_fiber::TlcErrDataUnion::NodeFailed(node_failed) => {
+                Ok(TlcErrData::NodeFailed {
+                    node_id: node_failed.node_id().try_into()?,
+                })
+            }
+            molecule_fiber::TlcErrDataUnion::TrampolineFailed(trampoline_failed) => {
+                Ok(TlcErrData::TrampolineFailed {
+                    node_id: trampoline_failed.node_id().try_into()?,
+                    inner_error_packet: trampoline_failed.inner_error_packet().unpack(),
+                })
+            }
+        }
+    }
+}
+
+impl TryFrom<TlcErr> for molecule_fiber::TlcErr {
+    type Error = anyhow::Error;
+
+    fn try_from(tlc_err: TlcErr) -> Result<Self, Self::Error> {
+        Ok(molecule_fiber::TlcErr::new_builder()
+            .error_code(tlc_err.error_code_as_u16().into())
+            .extra_data(
+                molecule_fiber::TlcErrDataOpt::new_builder()
+                    .set(tlc_err.extra_data.map(|data| data.try_into()).transpose()?)
+                    .build(),
+            )
+            .build())
+    }
+}
+
+impl TryFrom<molecule_fiber::TlcErr> for TlcErr {
+    type Error = anyhow::Error;
+
+    fn try_from(tlc_err: molecule_fiber::TlcErr) -> Result<Self, Self::Error> {
+        let code: u16 = tlc_err.error_code().into();
+        let error_code = TlcErrorCode::try_from(code)
+            .map_err(|_| anyhow::anyhow!("Invalid TLC error code: {}", code))?;
+        let extra_data = tlc_err
+            .extra_data()
+            .to_opt()
+            .map(|data| data.try_into())
+            .transpose()?;
+        Ok(TlcErr {
+            error_code,
+            extra_data,
+        })
+    }
+}
+
+// ============================================================
+// TlcErrPacket extended methods
+// ============================================================
+
+/// Always decrypting 27 times so the erroring node cannot learn its relative position in the route
+/// by performing a timing analysis if the sender were to retry the same route multiple times.
+const ERROR_DECODING_PASSES: usize = 27;
+
+impl TlcErrPacket {
+    /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
+    /// Use all zeros for the origin node. Takes a structured `TlcErr` and serializes it.
+    pub fn new(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
+        let payload = tlc_fail.serialize();
+        Self::from_payload(payload, shared_secret)
+    }
+
+    /// Decode the onion error packet using the session key and hop public keys.
+    pub fn decode(
+        &self,
+        session_key: &[u8; 32],
+        hops_public_keys: Vec<crate::Pubkey>,
+    ) -> Option<TlcErr> {
+        use secp256k1::{PublicKey, SecretKey};
+
+        if self.is_plaintext() {
+            let error = TlcErr::deserialize(&self.onion_packet[32..]);
+            if error.is_some() {
+                return error;
+            }
+        }
+
+        let hops_public_keys: Vec<PublicKey> = hops_public_keys
+            .iter()
+            .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
+            .collect();
+        let session_key = SecretKey::from_slice(session_key)
+            .inspect_err(|err| {
+                tracing::error!(
+                    target: "fnn::fiber::types::TlcErrPacket",
+                    "decode session_key error={} key={}",
+                    err,
+                    hex::encode(session_key)
+                )
+            })
+            .ok()?;
+        OnionErrorPacket::from_bytes(self.onion_packet.clone())
+            .parse(hops_public_keys, session_key, TlcErr::deserialize)
+            .map(|(error, hop_index)| {
+                for _ in hop_index..ERROR_DECODING_PASSES {
+                    OnionErrorPacket::from_bytes(self.onion_packet.clone())
+                        .xor_cipher_stream(&NO_SHARED_SECRET);
+                }
+                error
+            })
+    }
+}
+
+// ============================================================
 // PaymentOnionPacket
 // ============================================================
 
@@ -250,9 +543,7 @@ pub struct RemoveTlcFulfill {
 // SessionRouteNode
 // ============================================================
 
-use crate::{EntityHex, Pubkey, U128Hex};
-use ckb_types::packed::OutPoint;
-use serde_with::serde_as;
+use crate::U128Hex;
 
 /// The node and channel information in a payment route hop.
 #[serde_as]
@@ -407,6 +698,54 @@ pub struct SessionRoute {
     pub nodes: Vec<SessionRouteNode>,
 }
 
+impl SessionRoute {
+    // Create a new route from the source to the target with the given payment hops.
+    // The payment hops are the hops that the payment will go through.
+    // for a payment route A -> B -> C -> D
+    // the `payment_hops` is [B, C, D], which is a convenient way for onion routing.
+    // here we need to create a session route with source, which is A -> B -> C -> D
+    pub fn new(source: Pubkey, target: Pubkey, payment_hops: &[PaymentHopData]) -> Self {
+        let nodes = std::iter::once(source)
+            .chain(
+                payment_hops
+                    .iter()
+                    .map(|hop| hop.next_hop.unwrap_or(target)),
+            )
+            .zip(payment_hops)
+            .map(|(pubkey, hop)| SessionRouteNode {
+                pubkey,
+                channel_outpoint: OutPoint::new(
+                    if hop.funding_tx_hash != Hash256::default() {
+                        hop.funding_tx_hash.into()
+                    } else {
+                        Hash256::default().into()
+                    },
+                    0,
+                ),
+                amount: hop.amount,
+            })
+            .collect();
+        Self { nodes }
+    }
+
+    pub fn receiver_amount(&self) -> u128 {
+        self.nodes.last().map_or(0, |s| s.amount)
+    }
+
+    pub fn fee(&self) -> u128 {
+        let first_amount = self.nodes.first().map_or(0, |s| s.amount);
+        let last_amount = self.receiver_amount();
+        debug_assert!(first_amount >= last_amount);
+        first_amount - last_amount
+    }
+
+    pub fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
+        self.nodes
+            .iter()
+            .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
+    }
+}
+
 // ============================================================
 // PaymentHopData
 // ============================================================
@@ -427,9 +766,108 @@ pub struct PaymentHopData {
     pub custom_records: Option<PaymentCustomRecords>,
 }
 
+/// Helper to store the trampoline onion packet inside `custom_records`.
+///
+/// This embeds the trampoline onion bytes as a custom record entry so that the molecule
+/// `PaymentHopData` schema stays at 7 fields — matching v0.6.1 — and old onion packets
+/// created before trampoline support can still be deserialized.
+pub struct TrampolineOnionData;
+
+impl TrampolineOnionData {
+    /// Custom record key for embedded trampoline onion data.
+    /// `BasicMppPaymentData` uses `USER_CUSTOM_RECORDS_MAX_INDEX + 1` (65536).
+    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
+
+    pub fn write(data: Vec<u8>, custom_records: &mut PaymentCustomRecords) {
+        custom_records.data.insert(Self::CUSTOM_RECORD_KEY, data);
+    }
+
+    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Vec<u8>> {
+        custom_records.data.get(&Self::CUSTOM_RECORD_KEY).cloned()
+    }
+}
+
 impl PaymentHopData {
     pub fn next_hop(&self) -> Option<Pubkey> {
         self.next_hop
+    }
+
+    /// Returns the trampoline onion bytes embedded in `custom_records`, if present.
+    pub fn trampoline_onion(&self) -> Option<Vec<u8>> {
+        self.custom_records
+            .as_ref()
+            .and_then(TrampolineOnionData::read)
+    }
+
+    /// Embeds a trampoline onion packet into `custom_records`.
+    pub fn set_trampoline_onion(&mut self, data: Vec<u8>) {
+        let cr = self.custom_records.get_or_insert_with(Default::default);
+        TrampolineOnionData::write(data, cr);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        molecule_fiber::PaymentHopData::from(self.clone())
+            .as_bytes()
+            .to_vec()
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        molecule_fiber::PaymentHopData::from_slice(data)
+            .ok()
+            .map(|x| x.into())
+    }
+}
+
+impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
+    fn from(payment_hop_data: PaymentHopData) -> Self {
+        molecule_fiber::PaymentHopData::new_builder()
+            .amount(payment_hop_data.amount.pack())
+            .expiry(payment_hop_data.expiry.pack())
+            .payment_preimage(
+                molecule_fiber::PaymentPreimageOpt::new_builder()
+                    .set(payment_hop_data.payment_preimage.map(|x| x.into()))
+                    .build(),
+            )
+            .hash_algorithm(Byte::new(payment_hop_data.hash_algorithm as u8))
+            .funding_tx_hash(payment_hop_data.funding_tx_hash.into())
+            .next_hop(
+                molecule_fiber::PubkeyOpt::new_builder()
+                    .set(payment_hop_data.next_hop.map(|x| x.into()))
+                    .build(),
+            )
+            .custom_records(
+                molecule_fiber::CustomRecordsOpt::new_builder()
+                    .set(payment_hop_data.custom_records.map(|x| x.into()))
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
+    fn from(payment_hop_data: molecule_fiber::PaymentHopData) -> Self {
+        let custom_records: Option<PaymentCustomRecords> =
+            payment_hop_data.custom_records().to_opt().map(|x| x.into());
+
+        PaymentHopData {
+            amount: payment_hop_data.amount().unpack(),
+            expiry: payment_hop_data.expiry().unpack(),
+            payment_preimage: payment_hop_data
+                .payment_preimage()
+                .to_opt()
+                .map(|x| x.into()),
+            hash_algorithm: payment_hop_data
+                .hash_algorithm()
+                .try_into()
+                .unwrap_or_default(),
+            funding_tx_hash: payment_hop_data.funding_tx_hash().into(),
+            next_hop: payment_hop_data
+                .next_hop()
+                .to_opt()
+                .map(|x| x.try_into())
+                .and_then(Result::ok),
+            custom_records,
+        }
     }
 }
 
@@ -472,6 +910,75 @@ impl std::fmt::Debug for Attempt {
             .field("last_updated_at", &self.last_updated_at)
             .field("last_error", &self.last_error)
             .finish()
+    }
+}
+
+impl Attempt {
+    pub fn set_inflight_status(&mut self) {
+        self.status = AttemptStatus::Inflight;
+        self.last_error = None;
+    }
+
+    pub fn set_success_status(&mut self) {
+        self.status = AttemptStatus::Success;
+        self.last_error = None;
+    }
+
+    pub fn set_failed_status(&mut self, error: &str, retryable: bool) {
+        self.last_error = Some(error.to_string());
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+        if !retryable || self.tried_times > self.try_limit {
+            self.status = AttemptStatus::Failed;
+        } else {
+            self.status = AttemptStatus::Retrying;
+            self.tried_times += 1;
+        }
+    }
+
+    pub fn update_route(&mut self, new_route_hops: Vec<PaymentHopData>) {
+        self.route_hops = new_route_hops;
+        let sender = self.route.nodes[0].pubkey;
+        let receiver = self.route.nodes.last().unwrap().pubkey;
+        self.route = SessionRoute::new(sender, receiver, &self.route_hops);
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status == AttemptStatus::Success
+    }
+
+    pub fn is_inflight(&self) -> bool {
+        self.status == AttemptStatus::Inflight
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.status == AttemptStatus::Failed
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.status != AttemptStatus::Failed
+    }
+
+    pub fn is_retrying(&self) -> bool {
+        self.status == AttemptStatus::Retrying
+    }
+
+    pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
+        self.first_hop_channel_outpoint()
+            .map(|x| x.eq(out_point))
+            .unwrap_or_default()
+    }
+
+    pub fn first_hop_channel_outpoint(&self) -> Option<&OutPoint> {
+        self.route.nodes.first().map(|x| &x.channel_outpoint)
+    }
+
+    pub fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
+        self.route.channel_outpoints()
+    }
+
+    pub fn hops_public_keys(&self) -> Vec<Pubkey> {
+        // Skip the first node, which is the sender.
+        self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
     }
 }
 

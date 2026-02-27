@@ -1,5 +1,5 @@
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
-use bech32::ToBase32;
+use bech32::{FromBase32, ToBase32};
 use ckb_hash::blake2b_256;
 use ckb_types::packed::Script;
 use secp256k1::{

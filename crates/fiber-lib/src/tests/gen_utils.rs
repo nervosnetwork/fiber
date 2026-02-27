@@ -8,12 +8,16 @@ use secp256k1::{Keypair, PublicKey, SecretKey, XOnlyPublicKey, SECP256K1};
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
 use crate::fiber::features::FeatureVector;
 use crate::fiber::types::{
-    ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, EcdsaSignature,
+    new_channel_update_unsigned, ChannelUpdate, ChannelUpdateChannelFlags,
+    ChannelUpdateMessageFlags, EcdsaSignature,
 };
 use crate::{
     fiber::{
         config::AnnouncedNodeName,
-        types::{ChannelAnnouncement, NodeAnnouncement, Privkey, Pubkey},
+        types::{
+            new_channel_announcement_unsigned, new_node_announcement, ChannelAnnouncement,
+            NodeAnnouncement, Privkey, Pubkey,
+        },
     },
     now_timestamp_as_millis_u64,
 };
@@ -78,7 +82,7 @@ pub fn gen_rand_node_announcement() -> (Privkey, NodeAnnouncement) {
 }
 
 pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
-    NodeAnnouncement::new(
+    new_node_announcement(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
@@ -128,7 +132,7 @@ impl ChannelTestContext {
         let funding_tx = create_funding_tx(&xonly).await;
         let outpoint = funding_tx.output_pts_iter().next().unwrap();
         let capacity: u64 = funding_tx.output(0).unwrap().capacity().unpack();
-        let mut channel_announcement = ChannelAnnouncement::new_unsigned(
+        let mut channel_announcement = new_channel_announcement_unsigned(
             &node1_sk.pubkey(),
             &node2_sk.pubkey(),
             outpoint.clone(),
@@ -164,7 +168,7 @@ impl ChannelTestContext {
         timestamp: Option<u64>,
     ) -> ChannelUpdate {
         let timestamp = timestamp.unwrap_or(now_timestamp_as_millis_u64());
-        let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
+        let mut unsigned_channel_update = new_channel_update_unsigned(
             self.channel_announcement.channel_outpoint.clone(),
             timestamp,
             ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
@@ -188,7 +192,7 @@ impl ChannelTestContext {
         timestamp: Option<u64>,
     ) -> ChannelUpdate {
         let timestamp = timestamp.unwrap_or(now_timestamp_as_millis_u64());
-        let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
+        let mut unsigned_channel_update = new_channel_update_unsigned(
             self.channel_announcement.channel_outpoint.clone(),
             timestamp,
             ChannelUpdateMessageFlags::UPDATE_OF_NODE2,

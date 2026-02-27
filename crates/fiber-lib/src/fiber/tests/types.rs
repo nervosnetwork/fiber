@@ -6,11 +6,12 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error, Hash256,
-            NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData, PaymentOnionPacket,
-            PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrData,
-            TlcErrPacket, TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket,
-            NO_SHARED_SECRET, ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
+            new_node_announcement, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error,
+            Hash256, NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData,
+            PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey,
+            TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
+            TrampolineOnionPacket, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
+            ONION_PACKET_VERSION_V1,
         },
         PaymentCustomRecords,
     },
@@ -755,7 +756,7 @@ fn test_tlc_error_code() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = NodeAnnouncement::new(
+    let node_announcement = new_node_announcement(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
@@ -774,7 +775,7 @@ fn test_create_and_verify_node_announcement() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = NodeAnnouncement::new(
+    let node_announcement = new_node_announcement(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],

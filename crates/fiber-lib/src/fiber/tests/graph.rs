@@ -6,14 +6,15 @@ use crate::fiber::graph::PathFindError;
 use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{SendPaymentData, SendPaymentDataBuilder};
 use crate::fiber::types::{
-    ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey, TrampolineOnionPacket,
+    new_channel_update_unsigned, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey,
+    TrampolineOnionPacket,
 };
 use crate::{
     fiber::{
         graph::{NetworkGraph, RouterHop},
         network::get_chain_hash,
         payment::SendPaymentCommand,
-        types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
+        types::{new_node_announcement, ChannelAnnouncement, Hash256},
     },
     store::Store,
 };
@@ -56,7 +57,7 @@ impl MockNetworkGraph {
         let (store, _dir) = generate_store();
         let keypairs = generate_key_pairs(node_num + 1);
         let (secret_key1, public_key1) = keypairs[0];
-        store.save_node_announcement(NodeAnnouncement::new(
+        store.save_node_announcement(new_node_announcement(
             "node0".into(),
             FeatureVector::default(),
             vec![],
@@ -66,7 +67,7 @@ impl MockNetworkGraph {
         ));
         for (i, keypair) in keypairs.iter().enumerate().skip(1) {
             let (sk, _pk) = keypair;
-            store.save_node_announcement(NodeAnnouncement::new(
+            store.save_node_announcement(new_node_announcement(
                 format!("node{i}").as_str().into(),
                 FeatureVector::default(),
                 vec![],
@@ -150,7 +151,7 @@ impl MockNetworkGraph {
                 features: 0,
             },
         );
-        self.store.save_channel_update(ChannelUpdate::new_unsigned(
+        self.store.save_channel_update(new_channel_update_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
@@ -164,7 +165,7 @@ impl MockNetworkGraph {
             fee_rate.unwrap_or(0),
         ));
         if let Some(fee_rate) = other_fee_rate {
-            self.store.save_channel_update(ChannelUpdate::new_unsigned(
+            self.store.save_channel_update(new_channel_update_unsigned(
                 channel_outpoint.clone(),
                 now_timestamp_as_millis_u64(),
                 if node_a_is_node1 {

@@ -874,6 +874,9 @@ impl Default for BroadcastMessageID {
 
 // We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
 // so that we can use it as the sorting key in fn prune_messages_to_be_saved to simplify the logic.
+// We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
+// so that we can use it as the sorting key in fn prune_messages_to_be_saved to simplify the logic.
+// Ordering: NodeAnnouncement < ChannelAnnouncement < ChannelUpdate
 impl Ord for BroadcastMessageID {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
@@ -889,13 +892,14 @@ impl Ord for BroadcastMessageID {
                 BroadcastMessageID::NodeAnnouncement(node1),
                 BroadcastMessageID::NodeAnnouncement(node2),
             ) => node1.cmp(node2),
-            (BroadcastMessageID::ChannelAnnouncement(_), _) => Ordering::Less,
-            (_, BroadcastMessageID::ChannelAnnouncement(_)) => Ordering::Greater,
-            (BroadcastMessageID::ChannelUpdate(_), BroadcastMessageID::NodeAnnouncement(_)) => {
+            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Less,
+            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Greater,
+            (
+                BroadcastMessageID::ChannelAnnouncement(_),
+                BroadcastMessageID::NodeAnnouncement(_),
+            ) => Ordering::Greater,
+            (BroadcastMessageID::ChannelAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
                 Ordering::Less
-            }
-            (BroadcastMessageID::NodeAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
-                Ordering::Greater
             }
         }
     }
@@ -998,6 +1002,18 @@ impl Cursor {
             .collect::<Vec<_>>()
             .try_into()
             .expect("Must serialize cursor to 45 bytes")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, anyhow::Error> {
+        if bytes.len() != CURSOR_SIZE {
+            anyhow::bail!("Invalid cursor size: {}, want {}", bytes.len(), CURSOR_SIZE);
+        }
+        let timestamp = u64::from_be_bytes(bytes[..8].try_into().expect("Cursor timestamp to u64"));
+        let message_id = BroadcastMessageID::from_bytes(&bytes[8..])?;
+        Ok(Cursor {
+            timestamp,
+            message_id,
+        })
     }
 
     /// A dummy cursor with the maximum timestamp and a dummy message id.
