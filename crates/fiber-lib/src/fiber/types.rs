@@ -1,14 +1,14 @@
 use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
 use super::config::AnnouncedNodeName;
 use super::features::FeatureVector;
-use super::gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt};
-use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::get_chain_hash;
-use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{PartialSignatureAsBytes, PubNonceAsBytes};
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::payment::PaymentCustomRecords;
+use fiber_types::gen::fiber::PubNonceOpt;
+use fiber_types::gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt};
+use fiber_types::gen::gossip::{self as molecule_gossip};
 
 use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
@@ -700,45 +700,8 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevokeAndAck {
-    pub channel_id: Hash256,
-    #[serde_as(as = "PartialSignatureAsBytes")]
-    pub revocation_partial_signature: PartialSignature,
-    pub next_per_commitment_point: Pubkey,
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_revocation_nonce: PubNonce,
-}
-
-impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
-    fn from(revoke_and_ack: RevokeAndAck) -> Self {
-        molecule_fiber::RevokeAndAck::new_builder()
-            .channel_id(revoke_and_ack.channel_id.into())
-            .revocation_partial_signature(partial_signature_to_molecule(
-                revoke_and_ack.revocation_partial_signature,
-            ))
-            .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
-            .next_revocation_nonce(revoke_and_ack.next_revocation_nonce.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
-    type Error = Error;
-
-    fn try_from(revoke_and_ack: molecule_fiber::RevokeAndAck) -> Result<Self, Self::Error> {
-        Ok(RevokeAndAck {
-            channel_id: revoke_and_ack.channel_id().into(),
-            revocation_partial_signature: PartialSignature::from_slice(
-                revoke_and_ack.revocation_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
-            next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,
-            next_revocation_nonce: revoke_and_ack.next_revocation_nonce().try_into()?,
-        })
-    }
-}
+// Re-export RevokeAndAck from fiber_types (struct + molecule impls live there)
+pub use fiber_types::RevokeAndAck;
 
 // Re-export payment error types from fiber_types
 pub use fiber_types::{

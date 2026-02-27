@@ -277,7 +277,10 @@ where
                                                 );
 
                                                 let x_only_aggregated_pubkey =
-                                                    channel_data_x_only_aggregated_pubkey(&channel_data, false);
+                                                    channel_data_x_only_aggregated_pubkey(
+                                                        &channel_data,
+                                                        false,
+                                                    );
                                                 if blake160(&x_only_aggregated_pubkey).0
                                                     == pub_key_hash
                                                 {
@@ -1639,7 +1642,9 @@ impl Htlc {
                 (true, true) | (false, false) => {
                     self.remote_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
                 }
-                _ => self.local_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc),
+                _ => {
+                    self.local_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
+                }
             };
             (payment_hash_matches && pubkey_hash_matches).then_some(&settlement_tlc.local_key)
         })

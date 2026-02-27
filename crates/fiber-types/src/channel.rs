@@ -1140,13 +1140,13 @@ pub struct PendingNotifySettleTlc {
 }
 
 // ============================================================
-// ChannelActorStateCore
+// ChannelActorData
 // ============================================================
 
+use crate::crate_time::SystemTime;
 use ckb_types::packed::Transaction;
 use ckb_types::H256;
 use std::collections::{HashMap, VecDeque};
-use std::time::SystemTime;
 
 /// The core serializable state of a channel actor.
 ///
@@ -1154,7 +1154,7 @@ use std::time::SystemTime;
 /// Runtime-only fields (like actor references) are managed separately in fiber-lib.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
-pub struct ChannelActorStateCore {
+pub struct ChannelActorData {
     pub state: ChannelState,
     /// The data below are only relevant if the channel is public.
     pub public_channel_info: Option<PublicChannelInfo>,

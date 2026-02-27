@@ -1,10 +1,10 @@
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtCfgInfosExt, UdtDep, UdtScript};
-use crate::fiber::gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
 use ckb_jsonrpc_types::OutPoint;
 use ckb_types::core::{DepType, ScriptHashType};
 use ckb_types::packed::Script;
 use ckb_types::prelude::{Builder, Pack};
 use ckb_types::H256;
+use fiber_types::gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
 use hex;
 use molecule::prelude::Entity;
 

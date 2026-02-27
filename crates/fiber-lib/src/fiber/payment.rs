@@ -1404,10 +1404,8 @@ where
             };
 
             let channel_stats = GraphChannelStat::new(Some(channel_stats));
-            let payment_state = SendPaymentState::with_channel_stats(
-                session.request.clone(),
-                channel_stats,
-            );
+            let payment_state =
+                SendPaymentState::with_channel_stats(session.request.clone(), channel_stats);
             #[cfg(not(target_arch = "wasm32"))]
             let hops = self
                 .build_route_in_spawn_task(amount, None, max_fee, payment_state)
@@ -1499,12 +1497,7 @@ where
                 .await;
             #[cfg(target_arch = "wasm32")]
             let build_route_result = self
-                .build_route(
-                    target_amount,
-                    amount_low_bound,
-                    max_fee,
-                    payment_state,
-                )
+                .build_route(target_amount, amount_low_bound, max_fee, payment_state)
                 .await;
 
             match build_route_result {
@@ -1556,11 +1549,7 @@ where
                             if let Some(sent_node) =
                                 graph.get_channel_sent_node(channel_outpoint, *from)
                             {
-                                channel_stats.add_channel(
-                                    channel_outpoint,
-                                    sent_node,
-                                    *amount,
-                                );
+                                channel_stats.add_channel(channel_outpoint, sent_node, *amount);
                             }
                         }
                     }

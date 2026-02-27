@@ -32,15 +32,14 @@ use crate::{
         key::blake2b_hash_with_salt,
         network::SendOnionPacketCommand,
         network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
-        serde_utils::{EntityHex, PubNonceAsBytes},
         types::{
             peeled_packet_mpp_custom_records, AcceptChannel, AddTlc, AnnouncementSignatures,
             BasicMppPaymentData, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelReady,
             ChannelUpdate, ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage,
             FiberMessage, Hash256, HoldTlc, OpenChannel, PeeledPaymentOnionPacket, Privkey, Pubkey,
-            ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-            Shutdown, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
-            TrampolineOnionPacket, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
+            ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, Shutdown, TlcErr,
+            TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket,
+            TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -61,12 +60,12 @@ use ckb_types::{
 };
 pub use fiber_types::{
     AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
-    ChannelBasePublicKeys, ChannelConstraints, ChannelFlags, ChannelOpenRecord,
+    ChannelActorData, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags, ChannelOpenRecord,
     ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, CollaboratingFundingTxFlags,
     CommitmentNumbers, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PendingTlcs,
-    PublicChannelInfo, RetryableTlcOperation, RevocationData, SettlementData, SettlementTlc,
-    ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcInfo, TlcState, TlcStatus,
-    INITIAL_COMMITMENT_NUMBER,
+    PublicChannelInfo, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
+    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcInfo,
+    TlcState, TlcStatus, INITIAL_COMMITMENT_NUMBER,
 };
 use molecule::prelude::{Builder, Entity};
 #[cfg(test)]
@@ -86,8 +85,7 @@ use ractor::{
 };
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::iter;
 #[cfg(test)]
 use std::{
@@ -3058,168 +3056,77 @@ fn pending_notify_hold_expiry_duration(
     )
 }
 
-#[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+/// Wrapper around [`ChannelActorData`] that adds runtime-only fields.
+///
+/// All 42 persistable fields live in the embedded `core`.
+/// Thanks to `Deref<Target = ChannelActorData>` (and `DerefMut`),
+/// existing code that accesses `self.field` continues to work transparently.
+///
+/// Serialization delegates entirely to `ChannelActorData`,
+/// preserving the exact same bincode wire format as before.
+#[derive(Clone)]
 pub struct ChannelActorState {
-    pub state: ChannelState,
-    // The data below are only relevant if the channel is public.
-    pub public_channel_info: Option<PublicChannelInfo>,
+    /// All persistable channel state fields.
+    pub core: ChannelActorData,
 
-    pub local_tlc_info: ChannelTlcInfo,
-    pub remote_tlc_info: Option<ChannelTlcInfo>,
+    // --- Runtime-only fields (not serialized) ---
 
-    // The local public key used to establish p2p network connection.
-    pub local_pubkey: Pubkey,
-    // The remote public key used to establish p2p network connection.
-    pub remote_pubkey: Pubkey,
-
-    pub id: Hash256,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub funding_tx: Option<Transaction>,
-
-    pub funding_tx_confirmed_at: Option<(H256, u32, u64)>,
-
-    #[serde_as(as = "Option<EntityHex>")]
-    pub funding_udt_type_script: Option<Script>,
-
-    // Is this channel initially inbound?
-    // An inbound channel is one where the counterparty is the funder of the channel.
-    pub is_acceptor: bool,
-
-    // Is this channel one-way?
-    // Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
-    pub is_one_way: bool,
-
-    // TODO: consider transaction fee while building the commitment transaction.
-    // The invariant here is that the sum of `to_local_amount` and `to_remote_amount`
-    // should be equal to the total amount of the channel.
-    // The changes of both `to_local_amount` and `to_remote_amount`
-    // will always happen after a revoke_and_ack message is sent/received.
-    // This means that while calculating the amounts for commitment transactions,
-    // processing add_tlc command and messages, we need to take into account that
-    // the amounts are not decremented/incremented yet.
-
-    // The amount of CKB/UDT that we own in the channel.
-    // This value will only change after we have resolved a tlc.
-    pub to_local_amount: u128,
-    // The amount of CKB/UDT that the remote owns in the channel.
-    // This value will only change after we have resolved a tlc.
-    pub to_remote_amount: u128,
-
-    // these two amounts used to keep the minimal ckb amount for the two parties
-    // TLC operations will not affect these two amounts, only used to keep the commitment transactions
-    // to be valid, so that any party can close the channel at any time.
-    // Note: the values are different for the UDT scenario
-    pub local_reserved_ckb_amount: u64,
-    pub remote_reserved_ckb_amount: u64,
-
-    // The commitment fee rate is used to calculate the fee for the commitment transactions.
-    // The side who want to submit the commitment transaction will pay fee
-    pub commitment_fee_rate: u64,
-
-    // The delay time for the commitment transaction, this value is set by the initiator of the channel.
-    // It must be a relative EpochNumberWithFraction in u64 format.
-    pub commitment_delay_epoch: u64,
-
-    // The fee rate used for funding transaction, the initiator may set it as `funding_fee_rate` option,
-    // if it's not set, DEFAULT_FEE_RATE will be used as default value, two sides will use the same fee rate
-    pub funding_fee_rate: u64,
-
-    // Signer is used to sign the commitment transactions.
-    pub signer: InMemorySigner,
-
-    // Cached channel public keys for easier of access.
-    pub local_channel_public_keys: ChannelBasePublicKeys,
-
-    // Commitment numbers that are used to derive keys.
-    // This value is guaranteed to be 0 when channel is just created.
-    pub commitment_numbers: CommitmentNumbers,
-
-    pub local_constraints: ChannelConstraints,
-    pub remote_constraints: ChannelConstraints,
-
-    // Below are fields that are only usable after the channel is funded,
-    // (or at some point of the state).
-
-    // all the TLC related information
-    pub tlc_state: TlcState,
-
-    // the retryable tlc operations that are waiting to be processed.
-    pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
-    pub waiting_forward_tlc_tasks: HashMap<TLCId, [u8; 32]>,
-
-    // The remote and local lock script for close channel, they are setup during the channel establishment.
-    #[serde_as(as = "Option<EntityHex>")]
-    pub remote_shutdown_script: Option<Script>,
-    #[serde_as(as = "EntityHex")]
-    pub local_shutdown_script: Script,
-
-    // Basically the latest remote nonce sent by the peer with the CommitmentSigned message,
-    // but we will only update this field after we have sent a RevokeAndAck to the peer.
-    // With above guarantee, we can be sure the results of the sender obtaining its latest local nonce
-    // and the receiver obtaining its latest remote nonce are the same.
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_committed_remote_nonce: Option<PubNonce>,
-
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_verify: Option<PubNonce>,
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_send: Option<PubNonce>,
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_next: Option<PubNonce>,
-
-    // The latest commitment transaction we're holding,
-    // it can be broadcasted to blockchain by us to force close the channel.
-    #[serde_as(as = "Option<EntityHex>")]
-    pub latest_commitment_transaction: Option<Transaction>,
-
-    // All the commitment point that are sent from the counterparty.
-    // We need to save all these points to derive the keys for the commitment transactions.
-    // The length of this vector is at most the maximum number of flighting tlcs.
-    pub remote_commitment_points: Vec<(u64, Pubkey)>,
-    pub remote_channel_public_keys: Option<ChannelBasePublicKeys>,
-
-    // The shutdown info for both local and remote, they are setup by the shutdown command or message.
-    pub local_shutdown_info: Option<ShutdownInfo>,
-    pub remote_shutdown_info: Option<ShutdownInfo>,
-
-    // Transaction hash of the shutdown transaction
-    // The shutdown transaction can be COOPERATIVE or UNCOOPERATIVE
-    pub shutdown_transaction_hash: Option<H256>,
-
-    // A flag to indicate whether the channel is reestablishing,
-    // we won't process any messages until the channel is reestablished.
-    pub reestablishing: bool,
-    pub last_revoke_ack_msg: Option<RevokeAndAck>,
-
-    pub created_at: SystemTime,
-
-    // the time stamp we last sent an message to the peer, used to check if the peer is still alive
-    // we will disconnect the peer if we haven't sent any message to the peer for a long time
-    // currently we only have set commitment_signed as the heartbeat message,
-    #[serde(skip)]
+    // The time stamp we last sent a message to the peer, used to check if the peer is still alive.
+    // We will disconnect the peer if we haven't sent any message to the peer for a long time.
+    // Currently we only have set commitment_signed as the heartbeat message.
     pub waiting_peer_response: Option<u64>,
 
-    #[serde(skip)]
     pub network: Option<ActorRef<NetworkActorMessage>>,
 
     // The handle for scheduled channel update broadcasting.
     // We will use this handle to cancel the scheduled task when the channel is closed,
     // create a new handle when we broadcast a new channel update message.
     // The arc here is only used to implement the clone trait for the ChannelActorState.
-    #[serde(skip)]
     pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
 
     // The TLC set ready to be settled
-    #[serde(skip)]
     pub pending_notify_settle_tlcs: Vec<PendingNotifySettleTlc>,
 
-    #[serde(skip)]
     pub ephemeral_config: ChannelEphemeralConfig,
 
     // signing key
-    #[serde(skip)]
     pub private_key: Option<Privkey>,
+}
+
+impl std::ops::Deref for ChannelActorState {
+    type Target = ChannelActorData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl std::ops::DerefMut for ChannelActorState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
+}
+
+impl Serialize for ChannelActorState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Delegate to ChannelActorData — runtime-only fields are not serialized.
+        self.core.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChannelActorState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let core = ChannelActorData::deserialize(deserializer)?;
+        Ok(Self {
+            core,
+            waiting_peer_response: None,
+            network: None,
+            scheduled_channel_update_handle: None,
+            pending_notify_settle_tlcs: vec![],
+            ephemeral_config: Default::default(),
+            private_key: None,
+        })
+    }
 }
 
 // This struct holds the channel information that are only relevant when the channel
@@ -3891,57 +3798,59 @@ impl ChannelActorState {
         );
 
         let mut state = Self {
-            state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
-            public_channel_info,
-            local_tlc_info,
-            remote_tlc_info: None,
-            local_pubkey,
-            remote_pubkey,
-            funding_tx: None,
-            funding_tx_confirmed_at: None,
-            is_acceptor: true,
-            is_one_way,
-            funding_udt_type_script,
-            to_local_amount: local_value,
-            to_remote_amount: remote_value,
-            commitment_fee_rate,
-            commitment_delay_epoch,
-            funding_fee_rate,
-            id: channel_id,
-            tlc_state: Default::default(),
-            retryable_tlc_operations: Default::default(),
-            waiting_forward_tlc_tasks: Default::default(),
-            local_shutdown_script,
-            local_channel_public_keys: local_base_pubkeys,
-            signer,
-            remote_channel_public_keys: Some(remote_pubkeys),
-            commitment_numbers: Default::default(),
-            remote_shutdown_script: Some(remote_shutdown_script),
-            last_committed_remote_nonce: Some(remote_nonce),
-            remote_revocation_nonce_for_send: Some(remote_revocation_nonce.clone()),
-            remote_revocation_nonce_for_verify: Some(remote_revocation_nonce.clone()),
-            remote_revocation_nonce_for_next: None,
-            remote_commitment_points: vec![
-                (1, first_commitment_point),
-                (2, second_commitment_point),
-            ],
-            local_shutdown_info: None,
-            remote_shutdown_info: None,
-            shutdown_transaction_hash: None,
-            local_reserved_ckb_amount,
-            remote_reserved_ckb_amount,
-            local_constraints: ChannelConstraints::new(
-                local_max_tlc_value_in_flight,
-                local_max_tlc_number_in_flight,
-            ),
-            remote_constraints: ChannelConstraints::new(
-                remote_max_tlc_value_in_flight,
-                remote_max_tlc_number_in_flight,
-            ),
-            latest_commitment_transaction: None,
-            reestablishing: false,
-            last_revoke_ack_msg: None,
-            created_at: SystemTime::now(),
+            core: ChannelActorData {
+                state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+                public_channel_info,
+                local_tlc_info,
+                remote_tlc_info: None,
+                local_pubkey,
+                remote_pubkey,
+                funding_tx: None,
+                funding_tx_confirmed_at: None,
+                is_acceptor: true,
+                is_one_way,
+                funding_udt_type_script,
+                to_local_amount: local_value,
+                to_remote_amount: remote_value,
+                commitment_fee_rate,
+                commitment_delay_epoch,
+                funding_fee_rate,
+                id: channel_id,
+                tlc_state: Default::default(),
+                retryable_tlc_operations: Default::default(),
+                waiting_forward_tlc_tasks: Default::default(),
+                local_shutdown_script,
+                local_channel_public_keys: local_base_pubkeys,
+                signer,
+                remote_channel_public_keys: Some(remote_pubkeys),
+                commitment_numbers: Default::default(),
+                remote_shutdown_script: Some(remote_shutdown_script),
+                last_committed_remote_nonce: Some(remote_nonce),
+                remote_revocation_nonce_for_send: Some(remote_revocation_nonce.clone()),
+                remote_revocation_nonce_for_verify: Some(remote_revocation_nonce.clone()),
+                remote_revocation_nonce_for_next: None,
+                remote_commitment_points: vec![
+                    (1, first_commitment_point),
+                    (2, second_commitment_point),
+                ],
+                local_shutdown_info: None,
+                remote_shutdown_info: None,
+                shutdown_transaction_hash: None,
+                local_reserved_ckb_amount,
+                remote_reserved_ckb_amount,
+                local_constraints: ChannelConstraints::new(
+                    local_max_tlc_value_in_flight,
+                    local_max_tlc_number_in_flight,
+                ),
+                remote_constraints: ChannelConstraints::new(
+                    remote_max_tlc_value_in_flight,
+                    remote_max_tlc_number_in_flight,
+                ),
+                latest_commitment_transaction: None,
+                reestablishing: false,
+                last_revoke_ack_msg: None,
+                created_at: SystemTime::now(),
+            },
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
@@ -3980,52 +3889,54 @@ impl ChannelActorState {
         let local_pubkeys = signer.get_base_public_keys();
         let temp_channel_id = derive_temp_channel_id_from_tlc_key(&local_pubkeys.tlc_base_key);
         let state = Self {
-            state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
-            public_channel_info,
-            local_tlc_info,
-            remote_tlc_info: None,
-            local_pubkey,
-            remote_pubkey,
-            funding_tx: None,
-            funding_tx_confirmed_at: None,
-            funding_udt_type_script,
-            is_acceptor: false,
-            is_one_way,
-            to_local_amount,
-            to_remote_amount: 0,
-            commitment_fee_rate,
-            commitment_delay_epoch,
-            funding_fee_rate,
-            id: temp_channel_id,
-            tlc_state: Default::default(),
-            retryable_tlc_operations: Default::default(),
-            waiting_forward_tlc_tasks: Default::default(),
-            signer,
-            local_channel_public_keys: local_pubkeys,
-            local_constraints: ChannelConstraints::new(
-                local_max_tlc_value_in_flight,
-                local_max_tlc_number_in_flight,
-            ),
-            // these values will update after accept channel peer message handled
-            remote_constraints: ChannelConstraints::default(),
-            remote_channel_public_keys: None,
-            last_committed_remote_nonce: None,
-            remote_revocation_nonce_for_send: None,
-            remote_revocation_nonce_for_verify: None,
-            remote_revocation_nonce_for_next: None,
-            commitment_numbers: Default::default(),
-            remote_commitment_points: vec![],
-            local_shutdown_script: shutdown_script,
-            remote_shutdown_script: None,
-            local_shutdown_info: None,
-            remote_shutdown_info: None,
-            shutdown_transaction_hash: None,
-            local_reserved_ckb_amount,
-            remote_reserved_ckb_amount: 0,
-            latest_commitment_transaction: None,
-            reestablishing: false,
-            last_revoke_ack_msg: None,
-            created_at: SystemTime::now(),
+            core: ChannelActorData {
+                state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
+                public_channel_info,
+                local_tlc_info,
+                remote_tlc_info: None,
+                local_pubkey,
+                remote_pubkey,
+                funding_tx: None,
+                funding_tx_confirmed_at: None,
+                funding_udt_type_script,
+                is_acceptor: false,
+                is_one_way,
+                to_local_amount,
+                to_remote_amount: 0,
+                commitment_fee_rate,
+                commitment_delay_epoch,
+                funding_fee_rate,
+                id: temp_channel_id,
+                tlc_state: Default::default(),
+                retryable_tlc_operations: Default::default(),
+                waiting_forward_tlc_tasks: Default::default(),
+                signer,
+                local_channel_public_keys: local_pubkeys,
+                local_constraints: ChannelConstraints::new(
+                    local_max_tlc_value_in_flight,
+                    local_max_tlc_number_in_flight,
+                ),
+                // these values will update after accept channel peer message handled
+                remote_constraints: ChannelConstraints::default(),
+                remote_channel_public_keys: None,
+                last_committed_remote_nonce: None,
+                remote_revocation_nonce_for_send: None,
+                remote_revocation_nonce_for_verify: None,
+                remote_revocation_nonce_for_next: None,
+                commitment_numbers: Default::default(),
+                remote_commitment_points: vec![],
+                local_shutdown_script: shutdown_script,
+                remote_shutdown_script: None,
+                local_shutdown_info: None,
+                remote_shutdown_info: None,
+                shutdown_transaction_hash: None,
+                local_reserved_ckb_amount,
+                remote_reserved_ckb_amount: 0,
+                latest_commitment_transaction: None,
+                reestablishing: false,
+                last_revoke_ack_msg: None,
+                created_at: SystemTime::now(),
+            },
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
@@ -5335,8 +5246,8 @@ impl ChannelActorState {
             let sign_ctx = self.get_funding_sign_context();
 
             let (Some(local_shutdown_info), Some(remote_shutdown_info)) = (
-                self.local_shutdown_info.as_mut(),
-                self.remote_shutdown_info.as_ref(),
+                self.core.local_shutdown_info.as_mut(),
+                self.core.remote_shutdown_info.as_ref(),
             ) else {
                 unreachable!("shutdown info checked above")
             };
@@ -5969,8 +5880,10 @@ impl ChannelActorState {
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
-        self.remote_commitment_points
-            .push((self.get_local_commitment_number(), commitment_point));
+        let local_commitment_number = self.core.commitment_numbers.get_local();
+        self.core
+            .remote_commitment_points
+            .push((local_commitment_number, commitment_point));
 
         debug_assert!(
             self.remote_commitment_points.len()
@@ -6065,8 +5978,10 @@ impl ChannelActorState {
 
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
-        self.tlc_state
-            .update_for_revoke_and_ack(self.commitment_numbers);
+        let commitment_numbers = self.core.commitment_numbers;
+        self.core
+            .tlc_state
+            .update_for_revoke_and_ack(commitment_numbers);
         self.set_waiting_ack(myself, false);
 
         let tlcs = self.get_active_tlcs_for_settlement(true);

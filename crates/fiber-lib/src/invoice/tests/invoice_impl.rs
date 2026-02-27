@@ -1,6 +1,6 @@
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::{
-    fiber::{gen::invoice::RawCkbInvoice, types::Hash256},
+    fiber::types::Hash256,
     gen_deterministic_secp256k1_keypair_tuple,
     invoice::{
         invoice_impl::{CkbScript, InvoiceData, SIGNATURE_U5_SIZE},
@@ -15,6 +15,7 @@ use crate::{
 use bech32::{FromBase32, ToBase32};
 use ckb_hash::blake2b_256;
 use ckb_types::packed::Script;
+use fiber_types::gen::invoice::RawCkbInvoice;
 use secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
     Message, Secp256k1,

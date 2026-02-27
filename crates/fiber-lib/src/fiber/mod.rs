@@ -12,8 +12,6 @@ pub mod profiling;
 pub mod serde_utils;
 pub mod types;
 
-pub use fiber_types::gen;
-
 mod fee;
 mod in_flight_ckb_tx_actor;
 mod key;
