@@ -4,7 +4,7 @@ use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::features::FeatureVector;
 use crate::fiber::types::{
     BroadcastMessage, ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags,
-    ChannelUpdateMessageFlags, NodeAnnouncement,
+    ChannelUpdateMessageFlags, NodeAnnouncement, SchnorrSignature,
 };
 use crate::store::schema::BROADCAST_MESSAGE_PREFIX;
 
@@ -47,7 +47,7 @@ fn sample_channel_announcement(seed: u64) -> BroadcastMessage {
     BroadcastMessage::ChannelAnnouncement(ChannelAnnouncement {
         node1_signature: Some(deterministic_ecdsa_signature(seed, 10)),
         node2_signature: Some(deterministic_ecdsa_signature(seed, 11)),
-        ckb_signature: Some(deterministic_schnorr_signature(seed, 12)),
+        ckb_signature: Some(SchnorrSignature(deterministic_schnorr_signature(seed, 12))),
         features: 0,
         chain_hash: deterministic_hash256(seed, 13),
         channel_outpoint: deterministic_outpoint(seed, 14),

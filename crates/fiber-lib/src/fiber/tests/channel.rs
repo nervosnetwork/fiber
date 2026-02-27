@@ -1,4 +1,5 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
+use crate::fiber::channel::InMemorySignerExt;
 use crate::fiber::channel::{
     AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus, TLCId,
     TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
@@ -258,11 +259,11 @@ async fn test_create_channel_with_remote_tlc_info() {
         let node_b_channel_state = node_b.store.get_channel_actor_state(&channel_id).unwrap();
 
         assert_eq!(
-            Some(node_a_channel_state.local_tlc_info),
+            Some(node_a_channel_state.local_tlc_info.clone()),
             node_b_channel_state.remote_tlc_info
         );
         assert_eq!(
-            Some(node_b_channel_state.local_tlc_info),
+            Some(node_b_channel_state.local_tlc_info.clone()),
             node_a_channel_state.remote_tlc_info
         );
     }

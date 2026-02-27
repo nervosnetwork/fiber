@@ -10,8 +10,8 @@ use fnn::fiber::gossip::GossipMessageStore;
 use fnn::fiber::graph::{GraphChannelStat, NetworkGraph};
 use fnn::fiber::network::get_chain_hash;
 use fnn::fiber::types::{
-    ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
-    NodeAnnouncement, Pubkey,
+    new_channel_update_unsigned, new_node_announcement, ChannelAnnouncement,
+    ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey,
 };
 use fnn::store::Store;
 use fnn::tests::create_n_nodes_network;
@@ -104,7 +104,7 @@ fn build_graph_for_find_path_bench(
     }
 
     for (i, (sk, _pk)) in keypairs.iter().enumerate() {
-        store.save_node_announcement(NodeAnnouncement::new(
+        store.save_node_announcement(new_node_announcement(
             format!("node{i}").as_str().into(),
             FeatureVector::default(),
             vec![],
@@ -277,7 +277,7 @@ fn build_graph_for_find_path_bench(
             },
         );
 
-        store.save_channel_update(ChannelUpdate::new_unsigned(
+        store.save_channel_update(new_channel_update_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
@@ -290,7 +290,7 @@ fn build_graph_for_find_path_bench(
             0,                        // tlc_minimum_value
             0, // tlc_fee_proportional_millionths (fee rate, should be small, not capacity!)
         ));
-        store.save_channel_update(ChannelUpdate::new_unsigned(
+        store.save_channel_update(new_channel_update_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {

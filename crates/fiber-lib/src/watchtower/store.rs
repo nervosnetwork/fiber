@@ -1,17 +1,17 @@
 use ckb_sdk::util::blake160;
 use ckb_types::packed::Script;
 use musig2::{secp::Point, KeyAggContext};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 use crate::{
     ckb::contracts::{get_script_by_contract, Contract},
     fiber::{
         channel::{RevocationData, SettlementData},
-        serde_utils::EntityHex,
         types::{Hash256, NodeId, Privkey, Pubkey},
     },
 };
+
+// ChannelData is defined in fiber-types and re-exported from here via mod.rs
+pub use fiber_types::ChannelData;
 
 pub trait WatchtowerStore {
     /// Get the channels that are currently being watched by the watchtower
@@ -73,57 +73,40 @@ pub trait WatchtowerStore {
     fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]);
 }
 
-/// The data of a channel that the watchtower is monitoring
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ChannelData {
-    pub channel_id: Hash256,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub funding_udt_type_script: Option<Script>,
-    /// The local party's private key used to settle the commitment transaction
-    pub local_settlement_key: Privkey,
-    /// The remote party's public key used to settle the commitment transaction
-    pub remote_settlement_key: Pubkey,
-    /// The local party's funding public key
-    pub local_funding_pubkey: Pubkey,
-    /// The remote party's funding public key
-    pub remote_funding_pubkey: Pubkey,
-    pub remote_settlement_data: SettlementData,
-    // There might be a corner case that the remote node has received the commitment message from the local node,
-    // but the local node hasn't received the revocation message from the remote node yet, then the remote node
-    // may force close the channel with the latest commitment transaction, in this case, the watchtower
-    // should have pending_remote_settlement_data to settle the remote commitment transaction.
-    pub pending_remote_settlement_data: SettlementData,
-    pub local_settlement_data: SettlementData,
-    pub revocation_data: Option<RevocationData>,
+/// Compute the x-only aggregated public key for a channel.
+///
+/// Free function replacement for `ChannelData::x_only_aggregated_pubkey()` because the method
+/// depends on `musig2::KeyAggContext` which is used with `ckb_sdk` types not in fiber-types.
+pub fn channel_data_x_only_aggregated_pubkey(cd: &ChannelData, for_remote: bool) -> [u8; 32] {
+    let keys = if for_remote {
+        vec![cd.remote_funding_pubkey, cd.local_funding_pubkey]
+    } else {
+        vec![cd.local_funding_pubkey, cd.remote_funding_pubkey]
+    };
+
+    KeyAggContext::new(keys)
+        .map(|key_agg_ctx| key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly())
+        .unwrap_or_default()
 }
 
-impl ChannelData {
-    pub fn x_only_aggregated_pubkey(&self, for_remote: bool) -> [u8; 32] {
-        let keys = if for_remote {
-            vec![self.remote_funding_pubkey, self.local_funding_pubkey]
-        } else {
-            vec![self.local_funding_pubkey, self.remote_funding_pubkey]
-        };
+/// Compute the local settlement pubkey hash for a channel.
+///
+/// Free function replacement for `ChannelData::local_settlement_pubkey_hash()`.
+pub fn channel_data_local_settlement_pubkey_hash(cd: &ChannelData) -> [u8; 20] {
+    blake160(cd.local_settlement_key.pubkey().serialize().as_ref()).0
+}
 
-        KeyAggContext::new(keys)
-            .map(|key_agg_ctx| key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly())
-            .unwrap_or_default()
-    }
+/// Compute the funding transaction lock script for a channel.
+///
+/// Free function replacement for `ChannelData::funding_tx_lock()`.
+pub fn channel_data_funding_tx_lock(cd: &ChannelData) -> Script {
+    let mut keys = [cd.local_funding_pubkey, cd.remote_funding_pubkey];
+    keys.sort();
 
-    pub fn local_settlement_pubkey_hash(&self) -> [u8; 20] {
-        blake160(self.local_settlement_key.pubkey().serialize().as_ref()).0
-    }
+    let x_only_agg_pubkey = KeyAggContext::new(keys)
+        .map(|key_agg_ctx| key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly())
+        .unwrap_or_default();
+    let pubkey_hash = blake160(&x_only_agg_pubkey);
 
-    pub fn funding_tx_lock(&self) -> Script {
-        let mut keys = [self.local_funding_pubkey, self.remote_funding_pubkey];
-        keys.sort();
-
-        let x_only_agg_pubkey = KeyAggContext::new(keys)
-            .map(|key_agg_ctx| key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly())
-            .unwrap_or_default();
-        let pubkey_hash = blake160(&x_only_agg_pubkey);
-
-        get_script_by_contract(Contract::FundingLock, pubkey_hash.as_bytes())
-    }
+    get_script_by_contract(Contract::FundingLock, pubkey_hash.as_bytes())
 }

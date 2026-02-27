@@ -1,14 +1,6 @@
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
-use bech32::ToBase32;
-use ckb_hash::blake2b_256;
-use ckb_types::packed::Script;
-use secp256k1::{
-    ecdsa::{RecoverableSignature, RecoveryId},
-    Message, Secp256k1,
-};
-
 use crate::{
-    fiber::{gen::invoice::RawCkbInvoice, types::Hash256},
+    fiber::types::Hash256,
     gen_deterministic_secp256k1_keypair_tuple,
     invoice::{
         invoice_impl::{CkbScript, InvoiceData, SIGNATURE_U5_SIZE},
@@ -19,6 +11,14 @@ use crate::{
 use crate::{
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_secp256k1_private_key,
     gen_rand_sha256_hash,
+};
+use bech32::{FromBase32, ToBase32};
+use ckb_hash::blake2b_256;
+use ckb_types::packed::Script;
+use fiber_types::gen::invoice::RawCkbInvoice;
+use secp256k1::{
+    ecdsa::{RecoverableSignature, RecoveryId},
+    Message, Secp256k1,
 };
 
 fn mock_invoice() -> CkbInvoice {

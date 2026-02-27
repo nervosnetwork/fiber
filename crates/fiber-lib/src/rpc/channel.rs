@@ -676,7 +676,7 @@ where
                             tlc_fee_proportional_millionths: state
                                 .local_tlc_info
                                 .tlc_fee_proportional_millionths,
-                            shutdown_transaction_hash: state.shutdown_transaction_hash,
+                            shutdown_transaction_hash: state.shutdown_transaction_hash.clone(),
                             failure_detail,
                         })
                     })

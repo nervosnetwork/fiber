@@ -1,7 +1,6 @@
 pub mod channel;
 pub mod config;
 pub mod features;
-pub mod gen;
 pub mod gossip;
 pub mod graph;
 pub mod hash_algorithm;
@@ -20,6 +19,7 @@ mod path;
 mod settle_tlc_set_command;
 
 pub use config::FiberConfig;
+pub use fiber_types::*;
 pub use in_flight_ckb_tx_actor::{
     InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage, InFlightCkbTxKind,
 };
@@ -28,7 +28,7 @@ pub use network::{
     start_network, NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     NetworkServiceEvent,
 };
-pub use payment::PaymentCustomRecords;
+pub use payment::{HopHint, PaymentCustomRecords};
 pub use settle_tlc_set_command::SettleTlcSetCommand;
 
 pub(crate) const ASSUME_NETWORK_ACTOR_ALIVE: &str = "network actor must be alive";
