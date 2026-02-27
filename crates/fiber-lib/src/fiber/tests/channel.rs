@@ -6627,7 +6627,7 @@ async fn test_restart_stress_multiple_restarts() {
 #[ignore] // Long-running restart stress test. Run explicitly when validating restart regressions.
 async fn test_node_restart() {
     init_tracing();
-    let (mut node_a, node_b, _channel_id) =
+    let (mut node_a, node_b, channel_id) =
         create_nodes_with_established_channel(100000000000, 100000000000, true).await;
     let panic_unexpected_events = vec!["panic".to_string(), "panicked".to_string()];
     node_a
@@ -6684,6 +6684,24 @@ async fn test_node_restart() {
             node_b_unexpected_events
         );
     }
+
+    // Verify no stuck TLCs after all restart cycles.
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    let state_b = node_b.get_channel_actor_state(channel_id);
+    let tlc_count_a = state_a.tlc_state.all_tlcs().count();
+    let tlc_count_b = state_b.tlc_state.all_tlcs().count();
+    assert_eq!(
+        tlc_count_a,
+        0,
+        "node_a channel {:?} still has {} stuck TLCs",
+        channel_id, tlc_count_a
+    );
+    assert_eq!(
+        tlc_count_b,
+        0,
+        "node_b channel {:?} still has {} stuck TLCs",
+        channel_id, tlc_count_b
+    );
 
     debug!("test_node_restart completed successfully with no unexpected events");
 }
