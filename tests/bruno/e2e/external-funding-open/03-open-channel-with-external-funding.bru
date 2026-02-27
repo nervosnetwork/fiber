@@ -1,0 +1,91 @@
+meta {
+  name: Node1 open channel with external funding to Node3
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "open_channel_with_external_funding",
+    "params": [
+      {
+        "peer_id": "{{NODE3_PEERID}}",
+        "funding_amount": "0xba43b7400",
+        "public": true,
+        "shutdown_script": {},
+        "funding_lock_script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const fundingAmount = bru.getEnvVar("EXTERNAL_FUNDING_AMOUNT") || "0x8bb2c9700";
+  const usePreopen = bru.getEnvVar("EXTERNAL_FUNDING_USE_PREOPEN");
+  if (usePreopen === "1") {
+    const body = req.getBody();
+    body.method = "node_info";
+    body.params = [];
+    req.setBody(body);
+    bru.setVar("EXTERNAL_FUNDING_AMOUNT", fundingAmount);
+    return;
+  }
+
+  const script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  const body = req.getBody();
+  body.params[0].funding_amount = fundingAmount;
+  body.params[0].shutdown_script = script;
+  body.params[0].funding_lock_script = script;
+  req.setBody(body);
+  bru.setVar("EXTERNAL_FUNDING_AMOUNT", fundingAmount);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  const usePreopen = bru.getEnvVar("EXTERNAL_FUNDING_USE_PREOPEN");
+  if (usePreopen === "1") {
+    const channelId = bru.getEnvVar("EXTERNAL_FUNDING_PREOPEN_CHANNEL_ID");
+    const unsignedTxRaw = bru.getEnvVar("EXTERNAL_FUNDING_PREOPEN_UNSIGNED_TX");
+    if (!channelId || !unsignedTxRaw) {
+      throw new Error("Missing EXTERNAL_FUNDING_PREOPEN_CHANNEL_ID or EXTERNAL_FUNDING_PREOPEN_UNSIGNED_TX");
+    }
+
+    let tx;
+    try {
+      tx = JSON.parse(unsignedTxRaw);
+    } catch (err) {
+      throw new Error(`EXTERNAL_FUNDING_PREOPEN_UNSIGNED_TX is not valid JSON: ${String(err)}`);
+    }
+    if (!tx.outputs || tx.outputs.length === 0) {
+      throw new Error("Assertion failed: preopen unsigned_funding_tx.outputs should not be empty");
+    }
+
+    bru.setVar("EXTERNAL_FUNDING_CHANNEL_ID", channelId);
+    bru.setVar("EXTERNAL_FUNDING_UNSIGNED_TX", tx);
+    return;
+  }
+
+  const tx = res.body.result.unsigned_funding_tx;
+  if (!tx.outputs || tx.outputs.length === 0) {
+    throw new Error("Assertion failed: unsigned_funding_tx.outputs should not be empty");
+  }
+  bru.setVar("EXTERNAL_FUNDING_CHANNEL_ID", res.body.result.channel_id);
+  bru.setVar("EXTERNAL_FUNDING_UNSIGNED_TX", tx);
+}

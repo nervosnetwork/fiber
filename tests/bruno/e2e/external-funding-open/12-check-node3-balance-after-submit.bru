@@ -1,0 +1,86 @@
+meta {
+  name: check node3 balance after submit
+  type: http
+  seq: 17
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const script = bru.getVar("NODE3_FUNDING_SCRIPT");
+  const body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (status !== "submitted") {
+    console.log(
+      `[external-funding-open] skip node3 post-submit balance check because submit status is ${String(status)}`,
+    );
+    return;
+  }
+
+  const before = BigInt(bru.getVar("NODE3_BALANCE_BEFORE"));
+  const after = BigInt(res.body.result.capacity);
+  const diff = after - before;
+
+  bru.setVar("NODE3_BALANCE_AFTER", res.body.result.capacity);
+  bru.setVar("NODE3_BALANCE_DIFF", diff.toString());
+  console.log(
+    `[external-funding-open] Node3 balance: before=${before} after=${after} diff(after-before)=${diff} status=${status}`,
+  );
+
+  if (after !== before) {
+    throw new Error(
+      `Assertion failed: node3 balance should stay unchanged right after open/submit, before=${before}, after=${after}`,
+    );
+  }
+
+  const node1Before = bru.getVar("NODE1_BALANCE_BEFORE");
+  const node1After = bru.getVar("NODE1_BALANCE_AFTER");
+  const node1Diff = bru.getVar("NODE1_BALANCE_DIFF");
+  const node2Before = bru.getVar("NODE2_BALANCE_BEFORE");
+  const node2After = bru.getVar("NODE2_BALANCE_AFTER");
+  const node2Diff = bru.getVar("NODE2_BALANCE_DIFF");
+  const node3Before = bru.getVar("NODE3_BALANCE_BEFORE");
+  const node3After = bru.getVar("NODE3_BALANCE_AFTER");
+  const node3Diff = bru.getVar("NODE3_BALANCE_DIFF");
+  const submitStatus = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS") || "unknown";
+  const channelId = bru.getVar("EXTERNAL_FUNDING_CHANNEL_ID") || "unknown";
+
+  console.log("[external-funding-open] Balance summary:");
+  console.log(`  submit_status=${submitStatus} channel_id=${channelId}`);
+  console.log(`  Node1: before=${node1Before} after=${node1After} diff(after-before)=${node1Diff}`);
+  console.log(`  Node2: before=${node2Before} after=${node2After} diff(after-before)=${node2Diff}`);
+  console.log(`  Node3: before=${node3Before} after=${node3After} diff(after-before)=${node3Diff}`);
+}

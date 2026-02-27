@@ -1,0 +1,73 @@
+meta {
+  name: submit signed funding tx by node2 key
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "submit_signed_funding_tx",
+    "params": [
+      {
+        "channel_id": "{{EXTERNAL_FUNDING_CHANNEL_ID}}",
+        "signed_funding_tx": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const signedTxVar = bru.getVar("EXTERNAL_FUNDING_SIGNED_TX") || bru.getEnvVar("EXTERNAL_FUNDING_SIGNED_TX");
+  if (!signedTxVar) {
+    bru.setVar("EXTERNAL_FUNDING_SUBMIT_STATUS", "missing_signed_tx");
+    bru.setVar("FUNDING_TX_COMMITTED", "false");
+    throw new Error(
+      "Missing EXTERNAL_FUNDING_SIGNED_TX. Provide a node2-signed funding tx JSON for success-only flow.",
+    );
+  }
+
+  let signedTx;
+  if (typeof signedTxVar === "string") {
+    try {
+      signedTx = JSON.parse(signedTxVar);
+    } catch (err) {
+      throw new Error(`EXTERNAL_FUNDING_SIGNED_TX is not valid JSON: ${String(err)}`);
+    }
+  } else {
+    signedTx = signedTxVar;
+  }
+
+  if (!signedTx || !Array.isArray(signedTx.witnesses)) {
+    throw new Error("EXTERNAL_FUNDING_SIGNED_TX must be a signed transaction object with witnesses");
+  }
+
+  const body = req.getBody();
+  body.params[0].signed_funding_tx = signedTx;
+  req.setBody(body);
+}
+
+script:post-response {
+  if (res.body.error) {
+    throw new Error(`Assertion failed: submit_signed_funding_tx should succeed in success-only flow, got ${res.body.error.message}`);
+  }
+
+  if (!res.body.result || !res.body.result.funding_tx_hash || !res.body.result.channel_id) {
+    throw new Error("Assertion failed: expected successful submit result with channel_id and funding_tx_hash");
+  }
+  bru.setVar("EXTERNAL_FUNDING_SUBMIT_STATUS", "submitted");
+  bru.setVar("EXTERNAL_FUNDING_TX_HASH", res.body.result.funding_tx_hash);
+  bru.setVar("FUNDING_TX_COMMITTED", "false");
+}

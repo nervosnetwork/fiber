@@ -1,0 +1,65 @@
+meta {
+  name: check node1 balance after close
+  type: http
+  seq: 24
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  const body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (status !== "submitted") {
+    console.log(
+      `[external-funding-open] skip node1 post-close balance check because submit status is ${String(status)}`,
+    );
+    return;
+  }
+
+  const beforeOpen = BigInt(bru.getVar("NODE1_BALANCE_BEFORE"));
+  const afterClose = BigInt(res.body.result.capacity);
+  const diff = afterClose - beforeOpen;
+
+  bru.setVar("NODE1_BALANCE_AFTER_CLOSE", res.body.result.capacity);
+  bru.setVar("NODE1_BALANCE_DIFF_CLOSE", diff.toString());
+
+  if (beforeOpen !== afterClose) {
+    throw new Error(
+      `Assertion failed: node1 balance should stay unchanged after close, before_open=${beforeOpen}, after_close=${afterClose}`,
+    );
+  }
+}

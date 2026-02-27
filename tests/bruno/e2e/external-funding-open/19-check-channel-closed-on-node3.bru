@@ -1,0 +1,58 @@
+meta {
+  name: check channel closed on node1
+  type: http
+  seq: 23
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE3_PEERID}}",
+        "include_closed": true
+      }
+    ]
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (status !== "submitted") {
+    console.log(
+      `[external-funding-open] skip closed-channel check because submit status is ${String(status)}`,
+    );
+    return;
+  }
+
+  if (res.body.error) {
+    throw new Error(`Assertion failed: list_channels failed: ${res.body.error.message}`);
+  }
+
+  const channels = (res.body.result && res.body.result.channels) || [];
+  const channelId = bru.getVar("EXTERNAL_FUNDING_CHANNEL_ID");
+  const ch = channels.find((c) => c.channel_id === channelId);
+  if (!ch) {
+    throw new Error(`Assertion failed: channel ${channelId} not found in include_closed list`);
+  }
+  if (!ch.state || ch.state.state_name !== "CLOSED") {
+    throw new Error(`Assertion failed: expected channel state CLOSED, got ${JSON.stringify(ch.state)}`);
+  }
+}

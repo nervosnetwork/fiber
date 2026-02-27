@@ -1,0 +1,61 @@
+meta {
+  name: shutdown external funding channel from node1
+  type: http
+  seq: 21
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "shutdown_channel",
+    "params": [
+      {
+        "channel_id": "{{EXTERNAL_FUNDING_CHANNEL_ID}}",
+        "close_script": {},
+        "fee_rate": "0x3FC"
+      }
+    ]
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:pre-request {
+  const script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  const body = req.getBody();
+  body.params[0].close_script = script;
+  req.setBody(body);
+}
+
+script:post-response {
+  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (status !== "submitted") {
+    console.log(
+      `[external-funding-open] skip shutdown because submit status is ${String(status)}`,
+    );
+    return;
+  }
+
+  if (res.body.error) {
+    throw new Error(`Assertion failed: shutdown_channel should succeed, got ${res.body.error.message}`);
+  }
+  if (res.body.result !== null) {
+    throw new Error("Assertion failed: expected null result for shutdown_channel");
+  }
+  console.log("[external-funding-open] shutdown_channel accepted on node1");
+  await new Promise((r) => setTimeout(r, 1000));
+}

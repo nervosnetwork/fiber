@@ -1,0 +1,79 @@
+meta {
+  name: node1 send payment to node3
+  type: http
+  seq: 20
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "send_payment",
+    "params": [
+      {
+        "invoice": "{{EXTERNAL_FUNDING_INVOICE}}"
+      }
+    ]
+  }
+}
+
+vars:post-response {
+  max_iterations: 8
+}
+
+script:pre-request {
+  if (bru.getVar("send_payment_iteration") === undefined) {
+    bru.setVar("send_payment_iteration", 0);
+  }
+}
+
+script:post-response {
+  const axios = require("axios");
+  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (status !== "submitted") {
+    console.log(
+      `[external-funding-open] skip payment because submit status is ${String(status)}`,
+    );
+    return;
+  }
+  if (res.body.error) {
+    const msg = String(res.body.error.message || "");
+    const i = bru.getVar("send_payment_iteration");
+    const n = bru.getVar("max_iterations");
+    if (msg.includes("no path found") && i + 1 < n) {
+      try {
+        await axios.post(bru.getEnvVar("NODE1_RPC_URL"), {
+          id: "reconnect-42",
+          jsonrpc: "2.0",
+          method: "connect_peer",
+          params: [{ address: bru.getEnvVar("NODE3_ADDR") }],
+        }, {
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+        });
+      } catch (_) {
+        // reconnect may fail when already connected; safe to ignore
+      }
+      console.log(
+        `[external-funding-open] send_payment route not ready yet, retry ${i + 1}/${n}`,
+      );
+      bru.setVar("send_payment_iteration", i + 1);
+      await new Promise((r) => setTimeout(r, 1800));
+      bru.setNextRequest("node1 send payment to node3");
+      return;
+    }
+    throw new Error(`Assertion failed: send_payment should succeed, got ${msg}`);
+  }
+  bru.setVar("send_payment_iteration", 0);
+  await new Promise((r) => setTimeout(r, 1000));
+}

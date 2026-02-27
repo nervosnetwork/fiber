@@ -1,0 +1,78 @@
+meta {
+  name: check node3 balance after close
+  type: http
+  seq: 26
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const script = bru.getVar("NODE3_FUNDING_SCRIPT");
+  const body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (status !== "submitted") {
+    console.log(
+      `[external-funding-open] skip node3 post-close balance check because submit status is ${String(status)}`,
+    );
+    return;
+  }
+
+  const beforeOpen = BigInt(bru.getVar("NODE3_BALANCE_BEFORE"));
+  const afterClose = BigInt(res.body.result.capacity);
+  const diff = afterClose - beforeOpen;
+
+  bru.setVar("NODE3_BALANCE_AFTER_CLOSE", res.body.result.capacity);
+  bru.setVar("NODE3_BALANCE_DIFF_CLOSE", diff.toString());
+
+  if (afterClose <= beforeOpen) {
+    throw new Error(
+      `Assertion failed: node3 balance should increase after close, before_open=${beforeOpen}, after_close=${afterClose}`,
+    );
+  }
+
+  const submitStatus = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS") || "unknown";
+  console.log("[external-funding-open] Balance summary after close:");
+  console.log(`  submit_status=${submitStatus}`);
+  console.log(
+    `  Node1: before_open=${bru.getVar("NODE1_BALANCE_BEFORE")} after_close=${bru.getVar("NODE1_BALANCE_AFTER_CLOSE")} diff=${bru.getVar("NODE1_BALANCE_DIFF_CLOSE")}`,
+  );
+  console.log(
+    `  Node2: before_open=${bru.getVar("NODE2_BALANCE_BEFORE")} after_close=${bru.getVar("NODE2_BALANCE_AFTER_CLOSE")} diff=${bru.getVar("NODE2_BALANCE_DIFF_CLOSE")}`,
+  );
+  console.log(
+    `  Node3: before_open=${bru.getVar("NODE3_BALANCE_BEFORE")} after_close=${bru.getVar("NODE3_BALANCE_AFTER_CLOSE")} diff=${bru.getVar("NODE3_BALANCE_DIFF_CLOSE")}`,
+  );
+}

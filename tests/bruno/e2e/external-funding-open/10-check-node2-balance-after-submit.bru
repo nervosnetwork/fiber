@@ -1,0 +1,95 @@
+meta {
+  name: check node2 balance after submit
+  type: http
+  seq: 15
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  const body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (status !== "submitted") {
+    console.log(
+      `[external-funding-open] skip node2 post-submit balance check because submit status is ${String(status)}`,
+    );
+    bru.setVar("NODE2_BALANCE_AFTER", res.body && res.body.result ? res.body.result.capacity : "");
+    bru.setVar("NODE2_BALANCE_DIFF", "0");
+    return;
+  }
+
+  const capacity = res.body && res.body.result && res.body.result.capacity;
+  if (capacity === undefined) {
+    throw new Error(
+      `Assertion failed: get_cells_capacity has no result.capacity, response=${JSON.stringify(res.body)}`,
+    );
+  }
+
+  const before = BigInt(bru.getVar("NODE2_BALANCE_BEFORE"));
+  const after = BigInt(capacity);
+  const diff = after - before;
+  const fundingAmount = BigInt(bru.getVar("EXTERNAL_FUNDING_AMOUNT"));
+
+  bru.setVar("NODE2_BALANCE_AFTER", capacity);
+  bru.setVar("NODE2_BALANCE_DIFF", diff.toString());
+  console.log(
+    `[external-funding-open] Node2 balance: before=${before} after=${after} diff(after-before)=${diff} status=${status || "unknown"}`,
+  );
+
+  if (bru.getVar("FUNDING_TX_COMMITTED") !== "true") {
+    throw new Error("Assertion failed: funding tx is not marked committed before node2 balance check");
+  }
+
+  if (after > before) {
+    throw new Error(
+      `Assertion failed: node2 balance should not increase after submit, before=${before}, after=${after}`,
+    );
+  }
+
+  const spent = before - after;
+  if (spent === BigInt(0)) {
+    throw new Error(
+      `Assertion failed: funding tx committed but node2 balance unchanged, before=${before}, after=${after}`,
+    );
+  }
+
+  if (spent < fundingAmount) {
+    throw new Error(
+      `Assertion failed: expected spent amount >= funding amount, spent=${spent}, funding_amount=${fundingAmount}`,
+    );
+  }
+}

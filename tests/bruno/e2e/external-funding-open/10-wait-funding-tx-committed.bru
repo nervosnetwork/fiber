@@ -1,0 +1,83 @@
+meta {
+  name: wait funding tx committed
+  type: http
+  seq: 14
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_transaction",
+    "params": [
+      "{{EXTERNAL_FUNDING_TX_HASH}}"
+    ]
+  }
+}
+
+vars:post-response {
+  max_iterations: 20
+}
+
+script:pre-request {
+  if (bru.getVar("funding_tx_wait_iteration") === undefined) {
+    bru.setVar("funding_tx_wait_iteration", 0);
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const submitStatus = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (submitStatus !== "submitted") {
+    console.log(
+      `[external-funding-open] skip wait funding tx committed because submit status is ${String(submitStatus)}`,
+    );
+    bru.setVar("FUNDING_TX_COMMITTED", "false");
+    return;
+  }
+
+  const txHash = bru.getVar("EXTERNAL_FUNDING_TX_HASH");
+  if (!txHash) {
+    throw new Error("Assertion failed: missing EXTERNAL_FUNDING_TX_HASH for submitted funding tx");
+  }
+
+  const i = bru.getVar("funding_tx_wait_iteration");
+  const n = bru.getVar("max_iterations");
+  const txStatus = res.body && res.body.result && res.body.result.tx_status && res.body.result.tx_status.status;
+
+  if (txStatus === "committed") {
+    bru.setVar("FUNDING_TX_COMMITTED", "true");
+    bru.setVar("funding_tx_wait_iteration", 0);
+    console.log(`[external-funding-open] funding tx committed: ${txHash}`);
+    await new Promise((r) => setTimeout(r, 1200));
+    return;
+  }
+
+  if (i + 1 < n) {
+    bru.setVar("funding_tx_wait_iteration", i + 1);
+    console.log(
+      `[external-funding-open] funding tx not committed yet (status=${String(txStatus)}), retry ${i + 1}/${n}`,
+    );
+    await new Promise((r) => setTimeout(r, 1200));
+    bru.setNextRequest("wait funding tx committed");
+    return;
+  }
+
+  throw new Error(
+    `Assertion failed: funding tx ${txHash} not committed after ${n} checks, last_status=${String(txStatus)}`,
+  );
+}
