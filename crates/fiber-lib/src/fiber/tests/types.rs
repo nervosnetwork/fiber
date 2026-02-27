@@ -6,7 +6,7 @@ use crate::{
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            new_node_announcement, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error,
+            new_node_announcement, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor,
             Hash256, NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData,
             PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey,
             TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
@@ -555,10 +555,7 @@ fn test_payment_onion_packet_peel_unknown_version() {
     // Verify it's specifically an UnknownVersion error
     let err = result.unwrap_err();
     assert!(
-        matches!(
-            err,
-            Error::OnionPacket(OnionPacketError::UnknownVersion(99))
-        ),
+        matches!(err, OnionPacketError::UnknownVersion(99)),
         "Expected UnknownVersion(99) error, got: {:?}",
         err
     );

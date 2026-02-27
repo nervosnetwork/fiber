@@ -1,4 +1,6 @@
 // Re-export all invoice types from fiber-types.
+#[cfg(test)]
+pub use fiber_types::SIGNATURE_U5_SIZE;
 pub use fiber_types::{
     Attribute, CkbInvoice, CkbInvoiceStatus, CkbScript, Currency, InvoiceData, InvoiceError,
     InvoiceSignature, MAX_DESCRIPTION_LENGTH,

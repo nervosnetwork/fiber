@@ -8,7 +8,7 @@ use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{PartialSignatureAsBytes, PubNonceAsBytes};
 use crate::ckb::contracts::get_udt_whitelist;
-use crate::fiber::payment::{PaymentCustomRecords, USER_CUSTOM_RECORDS_MAX_INDEX};
+use crate::fiber::payment::PaymentCustomRecords;
 
 use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
@@ -35,6 +35,11 @@ use thiserror::Error;
 pub use fiber_types::{EcdsaSignature, Hash256, NodeId, Privkey, Pubkey, SchnorrSignature};
 // Re-export bitflags types from fiber_types
 pub use fiber_types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags};
+// Re-export payment onion types from fiber_types
+pub use fiber_types::{
+    CurrentPaymentHopData, OnionPacketError, PaymentOnionPacket, PaymentSphinxCodec,
+    PeeledPaymentOnionPacket, ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
+};
 
 /// The error type wrap various ser/de errors.
 #[derive(Error, Debug)]
@@ -49,7 +54,7 @@ pub enum Error {
     #[error("Musig2 error: {0}")]
     Musig2(String),
     #[error("Invalid onion packet")]
-    OnionPacket(#[from] OnionPacketError),
+    OnionPacket(#[from] fiber_types::OnionPacketError),
     #[error("Error: {0}")]
     AnyHow(#[from] anyhow::Error),
 }
@@ -66,17 +71,7 @@ impl From<std::convert::Infallible> for Error {
     }
 }
 
-#[derive(Error, Debug)]
-pub enum OnionPacketError {
-    #[error("Fail to deserialize the hop data")]
-    InvalidHopData,
-
-    #[error("Unknown onion packet version: {0}")]
-    UnknownVersion(u8),
-
-    #[error("Sphinx protocol error")]
-    Sphinx(#[from] SphinxError),
-}
+// OnionPacketError is re-exported from fiber_types via pub use fiber_types::*
 
 #[derive(Clone, Debug)]
 pub struct Init {
@@ -1910,53 +1905,7 @@ macro_rules! impl_traits {
 
 impl_traits!(FiberMessage);
 
-#[derive(Eq, PartialEq, Debug)]
-/// Bolt04 basic MPP payment data record
-pub struct BasicMppPaymentData {
-    pub payment_secret: Hash256,
-    pub total_amount: u128,
-}
-
-impl BasicMppPaymentData {
-    // record type for payment data record in bolt04
-    // custom records key from 65536 is reserved for internal usage
-    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 1;
-
-    pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
-        Self {
-            payment_secret,
-            total_amount,
-        }
-    }
-
-    fn to_vec(&self) -> Vec<u8> {
-        let mut vec = Vec::new();
-        vec.extend_from_slice(self.payment_secret.as_ref());
-        vec.extend_from_slice(&self.total_amount.to_le_bytes());
-        vec
-    }
-
-    pub fn write(&self, custom_records: &mut PaymentCustomRecords) {
-        custom_records
-            .data
-            .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
-    }
-
-    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Self> {
-        custom_records
-            .data
-            .get(&Self::CUSTOM_RECORD_KEY)
-            .and_then(|data| {
-                if data.len() != 32 + 16 {
-                    return None;
-                }
-                let secret: [u8; 32] = data[..32].try_into().unwrap();
-                let payment_secret = Hash256::from(secret);
-                let total_amount = u128::from_le_bytes(data[32..].try_into().unwrap());
-                Some(Self::new(payment_secret, total_amount))
-            })
-    }
-}
+pub use fiber_types::BasicMppPaymentData;
 
 /// Trampoline onion hop payload.
 ///
@@ -2317,315 +2266,18 @@ impl TrampolineOnionPacket {
     }
 }
 
+use fiber_types::molecule_table_data_len;
 pub use fiber_types::PaymentHopData;
-use fiber_types::TrampolineOnionData;
 
-const PACKET_DATA_LEN: usize = 6500;
+// PaymentOnionPacket, PeeledPaymentOnionPacket, CurrentPaymentHopData,
+// PaymentSphinxCodec, OnionPacketError, and helper functions are now in fiber-types.
+// They are re-exported via `pub use fiber_types::*;` in mod.rs.
 
-#[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CurrentPaymentHopData {
-    pub amount: u128,
-    pub expiry: u64,
-    pub payment_preimage: Option<Hash256>,
-    pub hash_algorithm: HashAlgorithm,
-    pub funding_tx_hash: Hash256,
-    pub custom_records: Option<PaymentCustomRecords>,
-}
-
-impl From<PaymentHopData> for CurrentPaymentHopData {
-    fn from(hop: PaymentHopData) -> Self {
-        CurrentPaymentHopData {
-            amount: hop.amount,
-            expiry: hop.expiry,
-            payment_preimage: hop.payment_preimage,
-            hash_algorithm: hop.hash_algorithm,
-            funding_tx_hash: hop.funding_tx_hash,
-            custom_records: hop.custom_records,
-        }
-    }
-}
-
-impl From<CurrentPaymentHopData> for PaymentHopData {
-    fn from(hop: CurrentPaymentHopData) -> Self {
-        PaymentHopData {
-            amount: hop.amount,
-            expiry: hop.expiry,
-            payment_preimage: hop.payment_preimage,
-            hash_algorithm: hop.hash_algorithm,
-            funding_tx_hash: hop.funding_tx_hash,
-            custom_records: hop.custom_records,
-            next_hop: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PaymentOnionPacket {
-    // The encrypted packet
-    data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PeeledPaymentOnionPacket {
-    /// The decrypted hop data for the current hop.
-    pub current: CurrentPaymentHopData,
-    /// The shared secret for `current` used for returning error. Set to all zeros for the origin node
-    /// who has no shared secret.
-    pub shared_secret: [u8; 32],
-    /// The packet for the next hop.
-    pub next: Option<PaymentOnionPacket>,
-}
-
-pub(crate) struct PaymentSphinxCodec;
-
-impl PaymentSphinxCodec {
-    /// Packs hop data according to the specified onion packet version.
-    /// - Version 0: Prepends u64 BE length header before molecule data.
-    /// - Version 1: Returns molecule-serialized data directly (uses molecule's native u32 LE length).
-    pub(crate) fn pack_hop_data(version: u8, hop_data: &PaymentHopData) -> Vec<u8> {
-        match version {
-            ONION_PACKET_VERSION_V0 => pack_len_prefixed(hop_data.serialize()),
-            ONION_PACKET_VERSION_V1 => hop_data.serialize(),
-            other => {
-                debug_assert!(
-                    false,
-                    "Unknown onion packet version {} passed to pack_hop_data; defaulting to v1",
-                    other
-                );
-                hop_data.serialize()
-            }
-        }
-    }
-
-    /// Unpacks hop data according to the specified onion packet version.
-    /// - Version 0: Skips u64 BE length header, deserializes molecule data.
-    /// - Version 1: Deserializes molecule data directly (using molecule's u32 LE length).
-    /// - Unknown versions: Returns None to fail fast and avoid silent misparsing.
-    pub(crate) fn unpack_hop_data(version: u8, buf: &[u8]) -> Option<PaymentHopData> {
-        match version {
-            ONION_PACKET_VERSION_V0 => {
-                let payload = unpack_len_prefixed_payload(buf)?;
-                PaymentHopData::deserialize(payload)
-            }
-            ONION_PACKET_VERSION_V1 => {
-                let len = molecule_table_data_len(buf)?;
-                if buf.len() < len {
-                    return None;
-                }
-                PaymentHopData::deserialize(&buf[..len])
-            }
-            _ => None,
-        }
-    }
-}
-
-impl SphinxOnionCodec for PaymentSphinxCodec {
-    type Decoded = PaymentHopData;
-    type Current = CurrentPaymentHopData;
-
-    const PACKET_DATA_LEN: usize = PACKET_DATA_LEN;
-    // Send v1, accept both v0 and v1 for backward compatibility
-    const CURRENT_VERSION: u8 = ONION_PACKET_VERSION_V1;
-
-    fn pack(decoded: &Self::Decoded) -> Vec<u8> {
-        Self::pack_hop_data(Self::CURRENT_VERSION, decoded)
-    }
-
-    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded> {
-        Self::unpack_hop_data(version, buf)
-    }
-
-    fn to_current(decoded: Self::Decoded) -> Self::Current {
-        decoded.into()
-    }
-
-    fn is_version_allowed(version: u8) -> bool {
-        // Accept both v0 and v1 for backward compatibility
-        version <= ONION_PACKET_VERSION_V1
-    }
-
-    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize> {
-        match version {
-            ONION_PACKET_VERSION_V0 => len_with_u64_header(buf),
-            ONION_PACKET_VERSION_V1 => molecule_table_data_len(buf),
-            _ => None,
-        }
-    }
-}
-
-impl CurrentPaymentHopData {
-    /// Returns the trampoline onion bytes embedded in `custom_records`, if present.
-    pub fn trampoline_onion(&self) -> Option<Vec<u8>> {
-        self.custom_records
-            .as_ref()
-            .and_then(TrampolineOnionData::read)
-    }
-
-    /// Embeds a trampoline onion packet into `custom_records`.
-    pub fn set_trampoline_onion(&mut self, data: Vec<u8>) {
-        let cr = self.custom_records.get_or_insert_with(Default::default);
-        TrampolineOnionData::write(data, cr);
-    }
-}
-
-impl PeeledPaymentOnionPacket {
-    pub fn mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
-        self.current
-            .custom_records
-            .as_ref()
-            .and_then(BasicMppPaymentData::read)
-    }
-}
-
-impl PaymentOnionPacket {
-    pub fn new(data: Vec<u8>) -> Self {
-        Self { data }
-    }
-
-    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
-        fiber_sphinx::OnionPacket::from_bytes(self.data)
-            .map_err(|err| Error::OnionPacket(err.into()))
-    }
-
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.data
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.data
-    }
-}
-
-impl PaymentOnionPacket {
-    /// Peels the next layer of the onion packet using the privkey of the current node.
-    ///
-    /// Returns errors when:
-    /// - This is the packet for the last hop.
-    /// - Fail to peel the packet using the given private key.
-    pub fn peel<C: Verification>(
-        self,
-        peeler: &Privkey,
-        assoc_data: Option<&[u8]>,
-        secp_ctx: &Secp256k1<C>,
-    ) -> Result<PeeledPaymentOnionPacket, Error> {
-        let peeled =
-            peel_sphinx_onion::<C, PaymentSphinxCodec>(self.data, peeler, assoc_data, secp_ctx)?;
-        Ok(PeeledPaymentOnionPacket {
-            current: peeled.current,
-            next: peeled.next.map(PaymentOnionPacket::new),
-            shared_secret: peeled.shared_secret,
-        })
-    }
-}
-
-impl PeeledPaymentOnionPacket {
-    /// - `hops_info`: the first is the instruction for the origin node itself.
-    ///   Remaining elements are for each node to receive the packet.
-    pub fn create<C: Signing>(
-        session_key: Privkey,
-        mut hops_infos: Vec<PaymentHopData>,
-        assoc_data: Option<Vec<u8>>,
-        secp_ctx: &Secp256k1<C>,
-    ) -> Result<Self, Error> {
-        if hops_infos.is_empty() {
-            return Err(Error::OnionPacket(SphinxError::HopsIsEmpty.into()));
-        }
-
-        let hops_path: Vec<Pubkey> = hops_infos
-            .iter()
-            .map(|h| h.next_hop())
-            .take_while(Option::is_some)
-            .map(|opt| opt.expect("must be some"))
-            .collect();
-
-        // Keep the original hop ordering for payloads.
-        let current = hops_infos.remove(0);
-        let payloads = hops_infos;
-
-        let next = if !hops_path.is_empty() {
-            Some(PaymentOnionPacket::new(create_sphinx_onion::<
-                C,
-                PaymentSphinxCodec,
-            >(
-                session_key,
-                hops_path,
-                payloads,
-                assoc_data,
-                secp_ctx,
-            )?))
-        } else {
-            None
-        };
-
-        Ok(PeeledPaymentOnionPacket {
-            current: current.into(),
-            next,
-            // Use all zeros for the sender
-            shared_secret: NO_SHARED_SECRET,
-        })
-    }
-
-    /// Returns true if this is the peeled packet for the last destination.
-    pub fn is_last(&self) -> bool {
-        self.next.is_none()
-    }
-}
-
-/// Onion packet version with u64 BE length header for hop data.
-pub const ONION_PACKET_VERSION_V0: u8 = 0;
-/// Onion packet version with molecule's native u32 LE length for hop data.
-pub const ONION_PACKET_VERSION_V1: u8 = 1;
-
-/// Length of the u64 BE header used in v0 hop data format.
-const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
-
-/// Packs data with u64 BE length header (v0 format).
-/// Used by Trampoline (bincode serialization) and v0 payment hop data.
-fn pack_len_prefixed(mut payload: Vec<u8>) -> Vec<u8> {
-    let mut packed = (payload.len() as u64).to_be_bytes().to_vec();
-    packed.append(&mut payload);
-    packed
-}
-
-/// Unpacks length-prefixed payload (v0 format): [u64 BE length][data].
-fn unpack_len_prefixed_payload(buf: &[u8]) -> Option<&[u8]> {
-    let len = len_with_u64_header(buf)?;
-    if buf.len() < len {
-        return None;
-    }
-    buf.get(HOP_DATA_HEAD_LEN..len)
-}
-
-/// Returns the total length with u64 BE header: [u64 BE length] + data.
-/// Used by v0 format (Trampoline and legacy payment hop data).
-fn len_with_u64_header(buf: &[u8]) -> Option<usize> {
-    if buf.len() < HOP_DATA_HEAD_LEN {
-        return None;
-    }
-    let len = u64::from_be_bytes(
-        buf[0..HOP_DATA_HEAD_LEN]
-            .try_into()
-            .expect("u64 from slice"),
-    );
-    // Safe conversion: check value fits in usize and addition won't overflow.
-    // Note: Caller (fiber-sphinx) is responsible for validating len against packet bounds.
-    usize::try_from(len).ok()?.checked_add(HOP_DATA_HEAD_LEN)
-}
-
-/// Returns the total length from molecule's native u32 LE header.
-/// Used by v1 format (current payment hop data).
-fn molecule_table_data_len(buf: &[u8]) -> Option<usize> {
-    if buf.len() < molecule::NUMBER_SIZE {
-        return None;
-    }
-    let len = molecule::unpack_number(buf) as usize;
-    // Molecule size must be at least NUMBER_SIZE (4 bytes for the length header itself).
-    // Reject malformed data claiming a smaller size.
-    if len < molecule::NUMBER_SIZE {
-        return None;
-    }
-    Some(len)
+/// Helper free function to extract MPP custom records from a peeled payment onion packet.
+pub fn peeled_packet_mpp_custom_records(
+    peeled: &PeeledPaymentOnionPacket,
+) -> Option<BasicMppPaymentData> {
+    peeled.mpp_custom_records()
 }
 
 /// Returns the total length of a molecule enum where all branches are tables.

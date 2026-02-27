@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use ckb_types::packed::{OutPoint, Script};
 use tentacle::secio::PeerId;
 
+use crate::fiber::channel::InMemorySignerExt;
 use crate::fiber::channel::InboundTlcStatus;
 use crate::fiber::channel::{
     AppliedFlags, ChannelActorState, ChannelActorStateStore, ChannelBasePublicKeys,

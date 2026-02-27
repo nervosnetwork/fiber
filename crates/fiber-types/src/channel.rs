@@ -142,25 +142,39 @@ impl TLCId {
     }
 }
 
-/// The status of an outbound TLC
+/// The status of an outbound tlc
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum OutboundTlcStatus {
+    // Offered tlc created and sent to remote party
     LocalAnnounced,
+    // Received ACK from remote party for this offered tlc
     Committed,
+    // Remote party removed this tlc
     RemoteRemoved,
+    // We received another RemoveTlc message from peer when we are waiting for the ack of the last one.
+    // So we need another ACK to confirm the removal.
     RemoveWaitPrevAck,
+    // We have sent commitment signed to peer and waiting ACK for confirming this RemoveTlc
     RemoveWaitAck,
+    // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
     RemoveAckConfirmed,
 }
 
-/// The status of an inbound TLC
+/// The status of an inbound tlc
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum InboundTlcStatus {
+    // Received tlc from remote party, but not committed yet
     RemoteAnnounced,
+    // We received another AddTlc peer message when we are waiting for the ack of the last one.
+    // So we need another ACK to confirm the addition.
     AnnounceWaitPrevAck,
+    // We have sent commitment signed to peer and waiting ACK for confirming this AddTlc
     AnnounceWaitAck,
+    // We have received ACK from peer and Committed this tlc
     Committed,
+    // We have removed this tlc, but haven't received ACK from peer
     LocalRemoved,
+    // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
     RemoveAckConfirmed,
 }
 
@@ -456,31 +470,32 @@ impl PrevTlcInfo {
 use crate::invoice::HashAlgorithm;
 use crate::payment::{PaymentOnionPacket, RemoveTlcReason};
 
-/// Information about a TLC (Time-Locked Contract).
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TlcInfo {
     pub status: TlcStatus,
     pub tlc_id: TLCId,
     pub amount: u128,
     pub payment_hash: Hash256,
-    /// Bolt04 total amount of the payment, must exist if payment secret is set.
+    /// bolt04 total amount of the payment, must exist if payment secret is set
     pub total_amount: Option<u128>,
-    /// Bolt04 payment secret, only exists for last hop in multi-path payment.
+    /// bolt04 payment secret, only exists for last hop in multi-path payment
     pub payment_secret: Option<Hash256>,
-    /// The attempt id associated with the tlc, only on outbound tlc.
-    /// Only exists for first hop in multi-path payment.
+    /// The attempt id associate with the tlc, only on outbound tlc
+    /// only exists for first hop in multi-path payment
     pub attempt_id: Option<u64>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
-    /// The onion packet for multi-hop payment.
+    // the onion packet for multi-hop payment
     pub onion_packet: Option<PaymentOnionPacket>,
     /// Shared secret used in forwarding.
+    ///
     /// Save it to backward errors. Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
     #[serde(default)]
     pub is_trampoline_hop: bool,
     pub created_at: CommitmentNumbers,
     pub removed_reason: Option<RemoveTlcReason>,
+
     /// Note: `forwarding_tlc` is used to track the tlc chain for a multi-tlc payment.
     ///
     /// For an outbound tlc, this field records the previous (upstream) tlc,
@@ -488,6 +503,24 @@ pub struct TlcInfo {
     ///
     /// For an inbound tlc, this field records the next (downstream) tlc,
     /// so we can continue tracking the forwarding path.
+    ///
+    /// Example:
+    ///
+    ///   Node A ---------> Node B ------------> Node C ------------> Node D
+    ///   tlc_1  ---------> tlc_1(in) ---------> tlc_2(in) ---------> tlc_3
+    ///                     tlc_2(out)           tlc_3(out)
+    ///                forwarding_tlc        forwarding_tlc
+    ///
+    ///   forwarding_tlc relations:
+    ///
+    ///   - Node B:
+    ///     - inbound: tlc_1.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///     - outbound: tlc_2.forwarding_tlc = Some((channel_AB, tlc1_id))
+    ///
+    ///   - Node C:
+    ///     - inbound: tlc_2.forwarding_tlc = Some((channel_CD, tlc3_id))
+    ///     - outbound: tlc_3.forwarding_tlc = Some((channel_BC, tlc2_id))
+    ///
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
@@ -617,6 +650,243 @@ impl TlcState {
             self.received_tlcs.tlcs.len(),
         )
     }
+
+    #[cfg(debug_assertions)]
+    pub fn debug(&self) {
+        let format_tlc_list = |tlcs: &[TlcInfo]| -> String {
+            if tlcs.is_empty() {
+                "    <none>".to_string()
+            } else {
+                tlcs.iter()
+                    .map(|tlc| format!("    {}", tlc.log()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
+        let offered_str = format_tlc_list(&self.offered_tlcs.tlcs);
+        let received_str = format_tlc_list(&self.received_tlcs.tlcs);
+
+        if offered_str.contains("<none>") && received_str.contains("<none>") {
+            tracing::info!("TlcState: <none>");
+        } else {
+            tracing::info!(
+                "TlcState:\n  Offered:\n{}\n  Received:\n{}",
+                offered_str,
+                received_str
+            );
+        }
+    }
+
+    pub fn get_mut(&mut self, tlc_id: &TLCId) -> Option<&mut TlcInfo> {
+        self.offered_tlcs
+            .tlcs
+            .iter_mut()
+            .find(|tlc| tlc.tlc_id == *tlc_id)
+            .or_else(|| {
+                self.received_tlcs
+                    .tlcs
+                    .iter_mut()
+                    .find(|tlc| tlc.tlc_id == *tlc_id)
+            })
+    }
+
+    pub fn get(&self, tlc_id: &TLCId) -> Option<&TlcInfo> {
+        if tlc_id.is_offered() {
+            self.offered_tlcs
+                .tlcs
+                .iter()
+                .find(|tlc| tlc.tlc_id == *tlc_id)
+        } else {
+            self.received_tlcs
+                .tlcs
+                .iter()
+                .find(|tlc| tlc.tlc_id == *tlc_id)
+        }
+    }
+
+    pub fn get_committed_received_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.received_tlcs.tlcs.iter().filter(|tlc| {
+            debug_assert!(tlc.is_received());
+            matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
+        })
+    }
+
+    pub fn get_expired_offered_tlcs(
+        &self,
+        expect_expiry: u64,
+    ) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs.tlcs.iter().filter(move |tlc| {
+            tlc.outbound_status() != OutboundTlcStatus::LocalAnnounced
+                && tlc.removed_confirmed_at.is_none()
+                && tlc.expiry < expect_expiry
+        })
+    }
+
+    pub fn get_next_offering(&self) -> u64 {
+        self.offered_tlcs.get_next_id()
+    }
+
+    pub fn get_next_received(&self) -> u64 {
+        self.received_tlcs.get_next_id()
+    }
+
+    pub fn increment_offering(&mut self) {
+        self.offered_tlcs.increment_next_id();
+    }
+
+    pub fn increment_received(&mut self) {
+        self.received_tlcs.increment_next_id();
+    }
+
+    pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
+        self.waiting_ack = waiting_ack;
+    }
+
+    pub fn all_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs
+            .tlcs
+            .iter()
+            .chain(self.received_tlcs.tlcs.iter())
+    }
+
+    pub fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
+        if tlc_id.is_offered() {
+            self.offered_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
+        } else {
+            self.received_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
+        }
+    }
+
+    pub fn add_offered_tlc(&mut self, tlc: TlcInfo) {
+        self.offered_tlcs.add_tlc(tlc);
+    }
+
+    pub fn add_received_tlc(&mut self, tlc: TlcInfo) {
+        self.received_tlcs.add_tlc(tlc);
+    }
+
+    pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
+        let tlc = self.get_mut(&TLCId::Received(tlc_id)).expect("get tlc");
+        assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
+        tlc.removed_reason = Some(reason);
+        tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
+        tlc.payment_hash
+    }
+
+    pub fn set_offered_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
+        let tlc = self.get_mut(&TLCId::Offered(tlc_id)).expect("get tlc");
+        assert_eq!(tlc.outbound_status(), OutboundTlcStatus::Committed);
+        tlc.removed_reason = Some(reason);
+        tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
+        tlc.payment_hash
+    }
+
+    pub fn commitment_signed_tlcs(&self, for_remote: bool) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs
+            .tlcs
+            .iter()
+            .filter(move |tlc| match tlc.outbound_status() {
+                OutboundTlcStatus::LocalAnnounced => for_remote,
+                OutboundTlcStatus::Committed => true,
+                OutboundTlcStatus::RemoteRemoved => for_remote,
+                OutboundTlcStatus::RemoveWaitPrevAck => for_remote,
+                OutboundTlcStatus::RemoveWaitAck => false,
+                OutboundTlcStatus::RemoveAckConfirmed => false,
+            })
+            .chain(
+                self.received_tlcs
+                    .tlcs
+                    .iter()
+                    .filter(move |tlc| match tlc.inbound_status() {
+                        InboundTlcStatus::RemoteAnnounced => !for_remote,
+                        InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
+                        InboundTlcStatus::AnnounceWaitAck => true,
+                        InboundTlcStatus::Committed => true,
+                        InboundTlcStatus::LocalRemoved => !for_remote,
+                        InboundTlcStatus::RemoveAckConfirmed => false,
+                    }),
+            )
+    }
+
+    pub fn update_for_commitment_signed(&mut self) -> bool {
+        for tlc in self.offered_tlcs.tlcs.iter_mut() {
+            if tlc.outbound_status() == OutboundTlcStatus::RemoteRemoved {
+                let status = if self.waiting_ack {
+                    OutboundTlcStatus::RemoveWaitPrevAck
+                } else {
+                    OutboundTlcStatus::RemoveWaitAck
+                };
+                tlc.status = TlcStatus::Outbound(status);
+            }
+        }
+        for tlc in self.received_tlcs.tlcs.iter_mut() {
+            if tlc.inbound_status() == InboundTlcStatus::RemoteAnnounced {
+                let status = if self.waiting_ack {
+                    InboundTlcStatus::AnnounceWaitPrevAck
+                } else {
+                    InboundTlcStatus::AnnounceWaitAck
+                };
+                tlc.status = TlcStatus::Inbound(status)
+            }
+        }
+        self.need_another_commitment_signed()
+    }
+
+    pub fn update_for_revoke_and_ack(&mut self, commitment_number: CommitmentNumbers) {
+        for tlc in self.offered_tlcs.tlcs.iter_mut() {
+            match tlc.outbound_status() {
+                OutboundTlcStatus::LocalAnnounced => {
+                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
+                }
+                OutboundTlcStatus::RemoveWaitPrevAck => {
+                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck);
+                }
+                OutboundTlcStatus::RemoveWaitAck => {
+                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
+                    tlc.removed_confirmed_at = Some(commitment_number.get_local());
+                }
+                _ => {}
+            }
+        }
+
+        for tlc in self.received_tlcs.tlcs.iter_mut() {
+            match tlc.inbound_status() {
+                InboundTlcStatus::AnnounceWaitPrevAck => {
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
+                }
+                InboundTlcStatus::AnnounceWaitAck => {
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::Committed);
+                }
+                InboundTlcStatus::LocalRemoved => {
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
+                    tlc.removed_confirmed_at = Some(commitment_number.get_remote());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn need_another_commitment_signed(&self) -> bool {
+        self.offered_tlcs.tlcs.iter().any(|tlc| {
+            let status = tlc.outbound_status();
+            matches!(
+                status,
+                OutboundTlcStatus::LocalAnnounced
+                    | OutboundTlcStatus::RemoteRemoved
+                    | OutboundTlcStatus::RemoveWaitPrevAck
+                    | OutboundTlcStatus::RemoveWaitAck
+            )
+        }) || self.received_tlcs.tlcs.iter().any(|tlc| {
+            let status = tlc.inbound_status();
+            matches!(
+                status,
+                InboundTlcStatus::RemoteAnnounced
+                    | InboundTlcStatus::AnnounceWaitPrevAck
+                    | InboundTlcStatus::AnnounceWaitAck
+            )
+        })
+    }
 }
 
 // ============================================================
@@ -714,7 +984,12 @@ pub struct RevokeAndAck {
 
 use crate::protocol::{ChannelAnnouncement, ChannelUpdate, EcdsaSignature};
 
-/// Information about a public channel including announcement signatures.
+// This struct holds the channel information that are only relevant when the channel
+// is public. The information includes signatures to the channel announcement message,
+// our config for the channel that will be published to the network (via ChannelUpdate).
+// For ChannelUpdate config, only information on our side are saved here because we have no
+// control to the config on the counterparty side. And they will publish
+// the config to the network via another ChannelUpdate message.
 #[serde_as]
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct PublicChannelInfo {
@@ -775,30 +1050,80 @@ impl fmt::Debug for InMemorySigner {
 use serde_with::DisplayFromStr;
 use tentacle_secio::PeerId;
 
-/// Tracks the opening status of a channel from the local node's perspective.
+/// A record that tracks a channel-opening attempt — either outbound (initiated by us)
+/// or inbound (initiated by a remote peer and pending local acceptance).
 ///
 /// Outbound records are created when `open_channel` is called.
 /// Inbound records are created when an `OpenChannel` message is received from a peer.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelOpenRecord {
-    /// The channel ID.
+    /// The channel ID. For outbound channels this is initially the temporary ID; it is
+    /// updated to the final channel ID once the peer sends `AcceptChannel`. For inbound
+    /// channels, the temp ID is replaced by the computed new ID when `accept_channel` is
+    /// called.
     pub channel_id: Hash256,
     /// The remote peer involved in this channel-opening attempt.
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
-    /// Whether the local node is the accepting side.
+    /// Whether the local node is the accepting side (received the `OpenChannel` request).
     pub is_acceptor: bool,
     /// Current status of the opening process.
     pub status: ChannelOpeningStatus,
     /// The local node's funding amount for the channel.
+    /// For outbound channels this is what the initiator contributes.
+    /// For inbound channels this is set to the remote peer's funding amount.
     pub funding_amount: u128,
-    /// Human-readable description of why the opening failed.
+    /// Human-readable description of why the opening failed, set only when `status == Failed`.
     pub failure_detail: Option<String>,
     /// Timestamp (milliseconds since UNIX epoch) when the record was created.
     pub created_at: u64,
     /// Timestamp (milliseconds since UNIX epoch) of the last status update.
     pub last_updated_at: u64,
+}
+
+impl ChannelOpenRecord {
+    /// Create a new outbound record in the `WaitingForPeer` state.
+    pub fn new(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
+        let now = crate::now_timestamp_as_millis_u64();
+        Self {
+            channel_id,
+            peer_id,
+            is_acceptor: false,
+            status: ChannelOpeningStatus::WaitingForPeer,
+            funding_amount,
+            failure_detail: None,
+            created_at: now,
+            last_updated_at: now,
+        }
+    }
+
+    /// Create a new outbound record in the `WaitingForPeer` state.
+    /// Used when `open_channel` is called.
+    pub fn new_outbound(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
+        Self::new(channel_id, peer_id, funding_amount)
+    }
+
+    /// Create a new inbound record in the `WaitingForPeer` state.
+    /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
+    pub fn new_inbound(channel_id: Hash256, peer_id: PeerId, remote_funding_amount: u128) -> Self {
+        let mut record = Self::new(channel_id, peer_id, remote_funding_amount);
+        record.is_acceptor = true;
+        record
+    }
+
+    /// Transition to a new status.
+    pub fn update_status(&mut self, status: ChannelOpeningStatus) {
+        self.status = status;
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+    }
+
+    /// Transition to `Failed` and record the reason.
+    pub fn fail(&mut self, reason: String) {
+        self.status = ChannelOpeningStatus::Failed;
+        self.failure_detail = Some(reason);
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+    }
 }
 
 // ============================================================

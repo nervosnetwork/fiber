@@ -1,4 +1,5 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
+use crate::fiber::channel::InMemorySignerExt;
 use crate::fiber::channel::{
     AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus, TLCId,
     TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,

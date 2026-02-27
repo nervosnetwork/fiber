@@ -3372,6 +3372,7 @@ where
                         tlc_expiry_delta,
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
+                        now_timestamp_as_millis_u64(),
                     ),
                     public_channel_info: public.then_some(PublicChannelInfo::new()),
                     is_one_way: one_way,
@@ -3464,6 +3465,7 @@ where
                         tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
+                        now_timestamp_as_millis_u64(),
                     ),
                     public_channel_info: open_channel
                         .is_public()

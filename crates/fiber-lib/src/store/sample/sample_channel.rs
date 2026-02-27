@@ -9,6 +9,7 @@ use ckb_types::packed::{Script, Transaction};
 use musig2::secp::MaybeScalar;
 use musig2::SecNonceBuilder;
 
+use crate::fiber::channel::InMemorySignerExt;
 use crate::fiber::channel::{
     AddTlcCommand, AppliedFlags, ChannelActorState, ChannelBasePublicKeys, ChannelConstraints,
     ChannelState, ChannelTlcInfo, CommitmentNumbers, InMemorySigner, PendingTlcs, PrevTlcInfo,

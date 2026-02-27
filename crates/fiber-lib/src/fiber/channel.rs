@@ -29,19 +29,16 @@ use crate::{
             calculate_commitment_tx_fee, calculate_shutdown_tx_fee, calculate_tlc_forward_fee,
             shutdown_tx_size,
         },
-        hash_algorithm::HashAlgorithm,
         key::blake2b_hash_with_salt,
         network::SendOnionPacketCommand,
         network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
-        serde_utils::{
-            CompactSignatureAsBytes, EntityHex, PartialSignatureAsBytes, PubNonceAsBytes,
-        },
+        serde_utils::{EntityHex, PubNonceAsBytes},
         types::{
-            AcceptChannel, AddTlc, AnnouncementSignatures, BasicMppPaymentData,
-            BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelReady, ChannelUpdate,
-            ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
-            Hash256, HoldTlc, OpenChannel, PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey,
-            Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
+            peeled_packet_mpp_custom_records, AcceptChannel, AddTlc, AnnouncementSignatures,
+            BasicMppPaymentData, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelReady,
+            ChannelUpdate, ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage,
+            FiberMessage, Hash256, HoldTlc, OpenChannel, PeeledPaymentOnionPacket, Privkey, Pubkey,
+            ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
             Shutdown, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
             TrampolineOnionPacket, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
         },
@@ -51,7 +48,6 @@ use crate::{
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
-use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{util::blake160, Since, SinceType};
 use ckb_types::{
@@ -62,6 +58,15 @@ use ckb_types::{
     packed::{self, Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
     H256,
+};
+pub use fiber_types::{
+    AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
+    ChannelBasePublicKeys, ChannelConstraints, ChannelFlags, ChannelOpenRecord,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, CollaboratingFundingTxFlags,
+    CommitmentNumbers, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PendingTlcs,
+    PublicChannelInfo, RetryableTlcOperation, RevocationData, SettlementData, SettlementTlc,
+    ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcInfo, TlcState, TlcStatus,
+    INITIAL_COMMITMENT_NUMBER,
 };
 use molecule::prelude::{Builder, Entity};
 #[cfg(test)]
@@ -81,7 +86,7 @@ use ractor::{
 };
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 #[cfg(test)]
@@ -109,12 +114,6 @@ pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 // - `pubkey`: 32 bytes, x only aggregated public key
 // - `signature`: 64 bytes, aggregated signature
 pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
-
-// Some part of the code liberally gets previous commitment number, which is
-// the current commitment number minus 1. We deliberately set initial commitment number to 1,
-// so that we can get previous commitment point/number without checking if the channel
-// is funded or not.
-pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
 // The current goal throughput is about 20 TPS, set interval to 100 to limit retryable task
 // triggered 10 times per second, plus we also trigger `apply_retryable_tlc_operations` when
@@ -235,44 +234,7 @@ pub enum TxCollaborationCommand {
     TxComplete(),
 }
 
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
-pub struct AddTlcCommand {
-    pub amount: u128,
-    pub payment_hash: Hash256,
-    /// The attempt id associate with the tlc
-    pub attempt_id: Option<u64>,
-    pub expiry: u64,
-    pub hash_algorithm: HashAlgorithm,
-    /// Onion packet for the next node
-    pub onion_packet: Option<PaymentOnionPacket>,
-    /// Shared secret used in forwarding.
-    ///
-    /// Save it for outbound (offered) TLC to backward errors.
-    /// Use all zeros when no shared secrets are available.
-    pub shared_secret: [u8; 32],
-    /// Whether this outbound TLC is the trampoline-boundary hop.
-    ///
-    /// When a downstream failure happens beyond a trampoline boundary, the error packet is
-    /// encrypted for the inner (trampoline-originated) route and becomes opaque to upstream
-    /// senders. We use this flag to decide whether to wrap downstream failures into
-    /// `TlcErrData::TrampolineFailed` using the *outer* shared secret for this hop.
-    pub is_trampoline_hop: bool,
-    pub previous_tlc: Option<PrevTlcInfo>,
-}
-
-impl Debug for AddTlcCommand {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AddTlcCommand")
-            .field("amount", &self.amount)
-            .field("payment_hash", &self.payment_hash)
-            .field("attempt_id", &self.attempt_id)
-            .field("expiry", &self.expiry)
-            .field("hash_algorithm", &self.hash_algorithm)
-            .field("is_trampoline_hop", &self.is_trampoline_hop)
-            .field("previous_tlc", &self.previous_tlc)
-            .finish()
-    }
-}
+// AddTlcCommand is re-exported from fiber_types via crate::fiber::*
 
 #[derive(Debug, Clone)]
 pub struct RemoveTlcCommand {
@@ -1174,7 +1136,7 @@ where
         let forward_amount = peeled_onion_packet.current.amount;
         let mut final_payment_preimage = peeled_onion_packet.current.payment_preimage;
         let mut final_custom_records = peeled_onion_packet.current.custom_records.clone();
-        let mut mpp_record = peeled_onion_packet.mpp_custom_records();
+        let mut mpp_record = peeled_packet_mpp_custom_records(peeled_onion_packet);
 
         if let Some(TrampolineHopPayload::Final {
             final_amount,
@@ -2866,9 +2828,11 @@ where
         // try to settle down tlc set
         for pending_notify_tlc in pending_notify_tlcs {
             // Hold the tlc
-            if pending_notify_tlc.should_hold() {
-                let expiry_duration =
-                    pending_notify_tlc.hold_expiry_duration(now_timestamp_as_millis_u64());
+            if pending_notify_should_hold(&pending_notify_tlc) {
+                let expiry_duration = pending_notify_hold_expiry_duration(
+                    &pending_notify_tlc,
+                    now_timestamp_as_millis_u64(),
+                );
                 self.store.insert_payment_hold_tlc(
                     pending_notify_tlc.payment_hash,
                     HoldTlc {
@@ -2991,286 +2955,17 @@ where
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitmentNumbers {
-    local: u64,
-    remote: u64,
-}
+// CommitmentNumbers is re-exported from fiber_types via crate::fiber::*
 
-impl Default for CommitmentNumbers {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// TLCId is re-exported from fiber_types via crate::fiber::*
 
-impl CommitmentNumbers {
-    pub fn new() -> Self {
-        Self {
-            local: INITIAL_COMMITMENT_NUMBER,
-            remote: INITIAL_COMMITMENT_NUMBER,
-        }
-    }
+// OutboundTlcStatus, InboundTlcStatus, TlcStatus, AppliedFlags
+// are re-exported from fiber_types via crate::fiber::*
 
-    pub fn get_local(&self) -> u64 {
-        self.local
-    }
-
-    pub fn get_remote(&self) -> u64 {
-        self.remote
-    }
-
-    pub fn increment_local(&mut self) {
-        self.local += 1;
-    }
-
-    pub fn increment_remote(&mut self) {
-        self.remote += 1;
-    }
-}
-
-/// The id of a tlc, it can be either offered or received.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash)]
-pub enum TLCId {
-    /// Offered tlc id
-    Offered(u64),
-    /// Received tlc id
-    Received(u64),
-}
-
-impl From<TLCId> for u64 {
-    fn from(id: TLCId) -> u64 {
-        match id {
-            TLCId::Offered(id) => id,
-            TLCId::Received(id) => id,
-        }
-    }
-}
-
-impl TLCId {
-    pub fn is_offered(&self) -> bool {
-        matches!(self, TLCId::Offered(_))
-    }
-
-    pub fn is_received(&self) -> bool {
-        !self.is_offered()
-    }
-
-    pub fn flip(&self) -> Self {
-        match self {
-            TLCId::Offered(id) => TLCId::Received(*id),
-            TLCId::Received(id) => TLCId::Offered(*id),
-        }
-    }
-
-    pub fn flip_mut(&mut self) {
-        *self = self.flip();
-    }
-}
-
-/// The status of an outbound tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub enum OutboundTlcStatus {
-    // Offered tlc created and sent to remote party
-    LocalAnnounced,
-    // Received ACK from remote party for this offered tlc
-    Committed,
-    // Remote party removed this tlc
-    RemoteRemoved,
-    // We received another RemoveTlc message from peer when we are waiting for the ack of the last one.
-    // So we need another ACK to confirm the removal.
-    RemoveWaitPrevAck,
-    // We have sent commitment signed to peer and waiting ACK for confirming this RemoveTlc
-    RemoveWaitAck,
-    // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
-    RemoveAckConfirmed,
-}
-
-/// The status of an inbound tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub enum InboundTlcStatus {
-    // Received tlc from remote party, but not committed yet
-    RemoteAnnounced,
-    // We received another AddTlc peer message when we are waiting for the ack of the last one.
-    // So we need another ACK to confirm the addition.
-    AnnounceWaitPrevAck,
-    // We have sent commitment signed to peer and waiting ACK for confirming this AddTlc
-    AnnounceWaitAck,
-    // We have received ACK from peer and Committed this tlc
-    Committed,
-    // We have removed this tlc, but haven't received ACK from peer
-    LocalRemoved,
-    // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
-    RemoveAckConfirmed,
-}
-
-/// The status of a tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub enum TlcStatus {
-    /// Outbound tlc
-    Outbound(OutboundTlcStatus),
-    /// Inbound tlc
-    Inbound(InboundTlcStatus),
-}
-
-impl TlcStatus {
-    pub fn as_outbound_status(&self) -> OutboundTlcStatus {
-        match self {
-            TlcStatus::Outbound(status) => status.clone(),
-            _ => {
-                unreachable!("unexpected status")
-            }
-        }
-    }
-
-    pub fn as_inbound_status(&self) -> InboundTlcStatus {
-        match self {
-            TlcStatus::Inbound(status) => status.clone(),
-            _ => {
-                unreachable!("unexpected status ")
-            }
-        }
-    }
-}
-
-bitflags! {
-    #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-    #[serde(transparent)]
-    pub struct AppliedFlags: u8 {
-        const ADD = 1;
-        const REMOVE = 1 << 1;
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct TlcInfo {
-    pub status: TlcStatus,
-    pub tlc_id: TLCId,
-    pub amount: u128,
-    pub payment_hash: Hash256,
-    /// bolt04 total amount of the payment, must exist if payment secret is set
-    pub total_amount: Option<u128>,
-    /// bolt04 payment secret, only exists for last hop in multi-path payment
-    pub payment_secret: Option<Hash256>,
-    /// The attempt id associate with the tlc, only on outbound tlc
-    /// only exists for first hop in multi-path payment
-    pub attempt_id: Option<u64>,
-    pub expiry: u64,
-    pub hash_algorithm: HashAlgorithm,
-    // the onion packet for multi-hop payment
-    pub onion_packet: Option<PaymentOnionPacket>,
-    /// Shared secret used in forwarding.
-    ///
-    /// Save it to backward errors. Use all zeros when no shared secrets are available.
-    pub shared_secret: [u8; 32],
-    #[serde(default)]
-    pub is_trampoline_hop: bool,
-    pub created_at: CommitmentNumbers,
-    pub removed_reason: Option<RemoveTlcReason>,
-
-    /// Note: `forwarding_tlc` is used to track the tlc chain for a multi-tlc payment.
-    ///
-    /// For an outbound tlc, this field records the previous (upstream) tlc,
-    /// so we can walk backward when removing tlcs.
-    ///
-    /// For an inbound tlc, this field records the next (downstream) tlc,
-    /// so we can continue tracking the forwarding path.
-    ///
-    /// Example:
-    ///
-    ///   Node A ---------> Node B ------------> Node C ------------> Node D
-    ///   tlc_1  ---------> tlc_1(in) ---------> tlc_2(in) ---------> tlc_3
-    ///                     tlc_2(out)           tlc_3(out)
-    ///                forwarding_tlc        forwarding_tlc
-    ///
-    ///   forwarding_tlc relations:
-    ///
-    ///   - Node B:
-    ///     - inbound: tlc_1.forwarding_tlc = Some((channel_BC, tlc2_id))
-    ///     - outbound: tlc_2.forwarding_tlc = Some((channel_AB, tlc1_id))
-    ///
-    ///   - Node C:
-    ///     - inbound: tlc_2.forwarding_tlc = Some((channel_CD, tlc3_id))
-    ///     - outbound: tlc_3.forwarding_tlc = Some((channel_BC, tlc2_id))
-    ///
-    pub forwarding_tlc: Option<(Hash256, u64)>,
-    pub removed_confirmed_at: Option<u64>,
-    pub applied_flags: AppliedFlags,
-}
+// TlcInfo is re-exported from fiber_types via crate::fiber::*
 
 // When we are forwarding a TLC, we need to know the previous TLC information.
 pub use fiber_types::PrevTlcInfo;
-
-impl Debug for TlcInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TlcInfo")
-            .field("tlc_id", &self.tlc_id)
-            .field("status", &self.status)
-            .field("amount", &self.amount)
-            .field("total_amount", &self.total_amount)
-            .field("removed_reason", &self.removed_reason)
-            .field("payment_hash", &self.payment_hash)
-            .field("removed_confirmed_at", &self.removed_confirmed_at)
-            .field("applied_flags", &self.applied_flags)
-            .finish()
-    }
-}
-
-impl TlcInfo {
-    pub fn log(&self) -> String {
-        format!(
-            "id: {:?} status: {:?} amount: {:?} removed: {:?} hash: {:?} ",
-            &self.tlc_id, self.status, self.amount, self.removed_reason, self.payment_hash,
-        )
-    }
-
-    pub fn id(&self) -> u64 {
-        self.tlc_id.into()
-    }
-
-    pub fn is_offered(&self) -> bool {
-        self.tlc_id.is_offered()
-    }
-
-    pub fn is_received(&self) -> bool {
-        !self.is_offered()
-    }
-
-    pub fn get_commitment_numbers(&self) -> CommitmentNumbers {
-        self.created_at
-    }
-
-    pub fn flip_mut(&mut self) {
-        self.tlc_id.flip_mut();
-    }
-
-    pub fn outbound_status(&self) -> OutboundTlcStatus {
-        self.status.as_outbound_status()
-    }
-
-    pub fn inbound_status(&self) -> InboundTlcStatus {
-        self.status.as_inbound_status()
-    }
-
-    pub fn is_fail_remove_confirmed(&self) -> bool {
-        matches!(self.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
-            && matches!(
-                self.status,
-                TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
-                    | TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck)
-                    | TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
-            )
-    }
-
-    /// Get the value for the field `htlc_type` in commitment lock witness.
-    /// - Lowest 1 bit: 0 if the tlc is offered by the remote party, 1 otherwise.
-    /// - High 7 bits:
-    ///     - 0: ckb hash
-    ///     - 1: sha256
-    pub fn get_htlc_type(&self) -> u8 {
-        let offered_flag = if self.is_offered() { 0u8 } else { 1u8 };
-        ((self.hash_algorithm as u8) << 1) + offered_flag
-    }
-}
 
 impl From<TlcInfo> for TlcNotifyInfo {
     fn from(tlc: TlcInfo) -> Self {
@@ -3283,427 +2978,84 @@ impl From<TlcInfo> for TlcNotifyInfo {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug, Hash)]
-pub enum RetryableTlcOperation {
-    RemoveTlc(TLCId, RemoveTlcReason),
-    AddTlc(AddTlcCommand),
+/// Build the witness bytes for a settlement transaction.
+///
+/// Free function replacement for `SettlementData::to_witness()` because the method
+/// depends on `blake160` from `ckb_sdk` which is not available in fiber-types.
+pub fn settlement_data_to_witness(
+    data: &SettlementData,
+    for_remote: bool,
+    local_settlement_key: Privkey,
+    remote_settlement_key: Pubkey,
+) -> Vec<u8> {
+    let mut vec = Vec::new();
+    vec.push(data.tlcs.len() as u8);
+    for tlc in &data.tlcs {
+        vec.extend_from_slice(&settlement_tlc_to_witness(tlc, for_remote));
+    }
+    if for_remote {
+        vec.extend_from_slice(blake160(&remote_settlement_key.serialize()).as_ref());
+        vec.extend_from_slice(data.remote_amount.to_le_bytes().as_ref());
+        vec.extend_from_slice(blake160(&local_settlement_key.pubkey().serialize()).as_ref());
+        vec.extend_from_slice(data.local_amount.to_le_bytes().as_ref());
+    } else {
+        vec.extend_from_slice(blake160(&local_settlement_key.pubkey().serialize()).as_ref());
+        vec.extend_from_slice(data.local_amount.to_le_bytes().as_ref());
+        vec.extend_from_slice(blake160(&remote_settlement_key.serialize()).as_ref());
+        vec.extend_from_slice(data.remote_amount.to_le_bytes().as_ref());
+    }
+    vec
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
-pub struct PendingTlcs {
-    pub tlcs: Vec<TlcInfo>,
-    pub next_tlc_id: u64,
+/// Build the witness bytes for a single TLC in a settlement transaction.
+///
+/// Free function replacement for `SettlementTlc::to_witness()`.
+pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
+    let mut vec = Vec::new();
+    let offered_flag = if tlc.tlc_id.is_offered() { 0u8 } else { 1u8 };
+    vec.push(((tlc.hash_algorithm as u8) << 1) + offered_flag);
+    vec.extend_from_slice(&tlc.payment_amount.to_le_bytes());
+    vec.extend_from_slice(&tlc.payment_hash.as_ref()[0..20]);
+    if for_remote {
+        vec.extend_from_slice(blake160(&tlc.remote_key.serialize()).as_ref());
+        vec.extend_from_slice(blake160(&tlc.local_key.pubkey().serialize()).as_ref());
+    } else {
+        vec.extend_from_slice(blake160(&tlc.local_key.pubkey().serialize()).as_ref());
+        vec.extend_from_slice(blake160(&tlc.remote_key.serialize()).as_ref());
+    }
+
+    let since = Since::new(SinceType::Timestamp, tlc.expiry / 1000, false);
+    vec.extend_from_slice(&since.value().to_le_bytes());
+    vec
 }
 
-impl PendingTlcs {
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut TlcInfo> {
-        self.tlcs.iter_mut()
-    }
-
-    pub fn get_next_id(&self) -> u64 {
-        self.next_tlc_id
-    }
-
-    pub fn increment_next_id(&mut self) {
-        self.next_tlc_id += 1;
-    }
-
-    pub fn add_tlc(&mut self, tlc: TlcInfo) {
-        self.tlcs.push(tlc);
-    }
-}
-
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct TlcState {
-    pub offered_tlcs: PendingTlcs,
-    pub received_tlcs: PendingTlcs,
-    pub waiting_ack: bool,
-}
-
-impl TlcState {
-    pub fn info(&self) -> String {
-        format!(
-            "offer_tlcs: {:?} received_tlcs: {:?}",
-            self.offered_tlcs.tlcs.len(),
-            self.received_tlcs.tlcs.len(),
-        )
-    }
-    #[cfg(any(debug_assertions, feature = "bench"))]
-    pub fn debug(&self) {
-        let format_tlc_list = |tlcs: &[TlcInfo]| -> String {
-            if tlcs.is_empty() {
-                "    <none>".to_string()
-            } else {
-                tlcs.iter()
-                    .map(|tlc| format!("    {}", tlc.log()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        };
-
-        let offered_str = format_tlc_list(&self.offered_tlcs.tlcs);
-        let received_str = format_tlc_list(&self.received_tlcs.tlcs);
-
-        if offered_str.contains("<none>") && received_str.contains("<none>") {
-            info!("TlcState: <none>");
-        } else {
-            info!(
-                "TlcState:\n  Offered:\n{}\n  Received:\n{}",
-                offered_str, received_str
-            );
-        }
-    }
-
-    pub fn get_mut(&mut self, tlc_id: &TLCId) -> Option<&mut TlcInfo> {
-        self.offered_tlcs
-            .tlcs
-            .iter_mut()
-            .find(|tlc| tlc.tlc_id == *tlc_id)
-            .or_else(|| {
-                self.received_tlcs
-                    .tlcs
-                    .iter_mut()
-                    .find(|tlc| tlc.tlc_id == *tlc_id)
-            })
-    }
-
-    pub fn get(&self, tlc_id: &TLCId) -> Option<&TlcInfo> {
-        if tlc_id.is_offered() {
-            self.offered_tlcs
-                .tlcs
-                .iter()
-                .find(|tlc| tlc.tlc_id == *tlc_id)
-        } else {
-            self.received_tlcs
-                .tlcs
-                .iter()
-                .find(|tlc| tlc.tlc_id == *tlc_id)
-        }
-    }
-
-    pub fn get_committed_received_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
-        self.received_tlcs.tlcs.iter().filter(|tlc| {
-            debug_assert!(tlc.is_received());
-            matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
-        })
-    }
-    pub fn get_expired_offered_tlcs(
-        &self,
-        expect_expiry: u64,
-    ) -> impl Iterator<Item = &TlcInfo> + '_ {
-        self.offered_tlcs.tlcs.iter().filter(move |tlc| {
-            tlc.outbound_status() != OutboundTlcStatus::LocalAnnounced
-                && tlc.removed_confirmed_at.is_none()
-                && tlc.expiry < expect_expiry
-        })
-    }
-
-    pub fn get_next_offering(&self) -> u64 {
-        self.offered_tlcs.get_next_id()
-    }
-
-    pub fn get_next_received(&self) -> u64 {
-        self.received_tlcs.get_next_id()
-    }
-
-    pub fn increment_offering(&mut self) {
-        self.offered_tlcs.increment_next_id();
-    }
-
-    pub fn increment_received(&mut self) {
-        self.received_tlcs.increment_next_id();
-    }
-
-    pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
-        self.waiting_ack = waiting_ack;
-    }
-
-    pub fn all_tlcs(&self) -> impl Iterator<Item = &TlcInfo> + '_ {
-        self.offered_tlcs
-            .tlcs
-            .iter()
-            .chain(self.received_tlcs.tlcs.iter())
-    }
-
-    pub fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
-        if tlc_id.is_offered() {
-            self.offered_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
-        } else {
-            self.received_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
-        }
-    }
-
-    pub fn add_offered_tlc(&mut self, tlc: TlcInfo) {
-        self.offered_tlcs.add_tlc(tlc);
-    }
-
-    pub fn add_received_tlc(&mut self, tlc: TlcInfo) {
-        self.received_tlcs.add_tlc(tlc);
-    }
-
-    pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
-        let tlc = self.get_mut(&TLCId::Received(tlc_id)).expect("get tlc");
-        assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
-        tlc.removed_reason = Some(reason);
-        tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
-        tlc.payment_hash
-    }
-
-    pub fn set_offered_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
-        let tlc = self.get_mut(&TLCId::Offered(tlc_id)).expect("get tlc");
-        assert_eq!(tlc.outbound_status(), OutboundTlcStatus::Committed);
-        tlc.removed_reason = Some(reason);
-        tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
-        tlc.payment_hash
-    }
-
-    pub fn commitment_signed_tlcs(&self, for_remote: bool) -> impl Iterator<Item = &TlcInfo> + '_ {
-        self.offered_tlcs
-            .tlcs
-            .iter()
-            .filter(move |tlc| match tlc.outbound_status() {
-                OutboundTlcStatus::LocalAnnounced => for_remote,
-                OutboundTlcStatus::Committed => true,
-                OutboundTlcStatus::RemoteRemoved => for_remote,
-                OutboundTlcStatus::RemoveWaitPrevAck => for_remote,
-                OutboundTlcStatus::RemoveWaitAck => false,
-                OutboundTlcStatus::RemoveAckConfirmed => false,
-            })
-            .chain(
-                self.received_tlcs
-                    .tlcs
-                    .iter()
-                    .filter(move |tlc| match tlc.inbound_status() {
-                        InboundTlcStatus::RemoteAnnounced => !for_remote,
-                        InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
-                        InboundTlcStatus::AnnounceWaitAck => true,
-                        InboundTlcStatus::Committed => true,
-                        InboundTlcStatus::LocalRemoved => !for_remote,
-                        InboundTlcStatus::RemoveAckConfirmed => false,
-                    }),
-            )
-    }
-
-    pub fn update_for_commitment_signed(&mut self) -> bool {
-        for tlc in self.offered_tlcs.tlcs.iter_mut() {
-            if tlc.outbound_status() == OutboundTlcStatus::RemoteRemoved {
-                let status = if self.waiting_ack {
-                    OutboundTlcStatus::RemoveWaitPrevAck
-                } else {
-                    OutboundTlcStatus::RemoveWaitAck
-                };
-                tlc.status = TlcStatus::Outbound(status);
-            }
-        }
-        for tlc in self.received_tlcs.tlcs.iter_mut() {
-            if tlc.inbound_status() == InboundTlcStatus::RemoteAnnounced {
-                let status = if self.waiting_ack {
-                    InboundTlcStatus::AnnounceWaitPrevAck
-                } else {
-                    InboundTlcStatus::AnnounceWaitAck
-                };
-                tlc.status = TlcStatus::Inbound(status)
-            }
-        }
-        self.need_another_commitment_signed()
-    }
-
-    pub fn update_for_revoke_and_ack(&mut self, commitment_number: CommitmentNumbers) {
-        for tlc in self.offered_tlcs.tlcs.iter_mut() {
-            match tlc.outbound_status() {
-                OutboundTlcStatus::LocalAnnounced => {
-                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
-                }
-                OutboundTlcStatus::RemoveWaitPrevAck => {
-                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck);
-                }
-                OutboundTlcStatus::RemoveWaitAck => {
-                    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
-                    tlc.removed_confirmed_at = Some(commitment_number.get_local());
-                }
-                _ => {}
-            }
-        }
-
-        for tlc in self.received_tlcs.tlcs.iter_mut() {
-            match tlc.inbound_status() {
-                InboundTlcStatus::AnnounceWaitPrevAck => {
-                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
-                }
-                InboundTlcStatus::AnnounceWaitAck => {
-                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::Committed);
-                }
-                InboundTlcStatus::LocalRemoved => {
-                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
-                    tlc.removed_confirmed_at = Some(commitment_number.get_remote());
-                }
-                _ => {}
-            }
-        }
-    }
-
-    pub fn need_another_commitment_signed(&self) -> bool {
-        self.offered_tlcs.tlcs.iter().any(|tlc| {
-            let status = tlc.outbound_status();
-            matches!(
-                status,
-                OutboundTlcStatus::LocalAnnounced
-                    | OutboundTlcStatus::RemoteRemoved
-                    | OutboundTlcStatus::RemoveWaitPrevAck
-                    | OutboundTlcStatus::RemoveWaitAck
-            )
-        }) || self.received_tlcs.tlcs.iter().any(|tlc| {
-            let status = tlc.inbound_status();
-            matches!(
-                status,
-                InboundTlcStatus::RemoteAnnounced
-                    | InboundTlcStatus::AnnounceWaitPrevAck
-                    | InboundTlcStatus::AnnounceWaitAck
-            )
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
-pub struct ChannelConstraints {
-    // The maximum value can be in pending
-    pub max_tlc_value_in_flight: u128,
-    // The maximum number of tlcs that we can accept.
-    pub max_tlc_number_in_flight: u64,
-}
-
-impl ChannelConstraints {
-    pub fn new(max_tlc_value_in_flight: u128, max_tlc_number_in_flight: u64) -> Self {
-        Self {
-            max_tlc_value_in_flight,
-            max_tlc_number_in_flight,
-        }
-    }
-}
-
-/// Data needed to revoke an outdated commitment transaction.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct RevocationData {
-    /// The commitment transaction version number that was revoked
-    pub commitment_number: u64,
-    /// The aggregated signature from both parties that authorizes the revocation
-    #[serde_as(as = "CompactSignatureAsBytes")]
-    pub aggregated_signature: CompactSignature,
-    /// The output cell from the revoked commitment transaction
-    #[serde_as(as = "EntityHex")]
-    pub output: CellOutput,
-    /// The associated data for the output cell (e.g., UDT amount for token transfers)
-    #[serde_as(as = "EntityHex")]
-    pub output_data: Bytes,
-}
-
-/// Data needed to authorize and execute a settlement transaction.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SettlementData {
-    /// The total amount of CKB/UDT being settled for the local party
-    pub local_amount: u128,
-    /// The total amount of CKB/UDT being settled for the remote party
-    pub remote_amount: u128,
-    /// The list of pending Time-Locked Contracts (TLCs) included in this settlement
-    pub tlcs: Vec<SettlementTlc>,
-}
-
-impl SettlementData {
-    pub fn to_witness(
-        &self,
-        for_remote: bool,
-        local_settlement_key: Privkey,
-        remote_settlement_key: Pubkey,
-    ) -> Vec<u8> {
-        let mut vec = Vec::new();
-        vec.push(self.tlcs.len() as u8);
-        for tlc in &self.tlcs {
-            vec.extend_from_slice(&tlc.to_witness(for_remote));
-        }
-        if for_remote {
-            vec.extend_from_slice(blake160(&remote_settlement_key.serialize()).as_ref());
-            vec.extend_from_slice(self.remote_amount.to_le_bytes().as_ref());
-            vec.extend_from_slice(blake160(&local_settlement_key.pubkey().serialize()).as_ref());
-            vec.extend_from_slice(self.local_amount.to_le_bytes().as_ref());
-        } else {
-            vec.extend_from_slice(blake160(&local_settlement_key.pubkey().serialize()).as_ref());
-            vec.extend_from_slice(self.local_amount.to_le_bytes().as_ref());
-            vec.extend_from_slice(blake160(&remote_settlement_key.serialize()).as_ref());
-            vec.extend_from_slice(self.remote_amount.to_le_bytes().as_ref());
-        }
-        vec
-    }
-}
-
-/// Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SettlementTlc {
-    /// The ID of the TLC (either offered or received)
-    pub tlc_id: TLCId,
-    /// The hash algorithm used for the TLC
-    pub hash_algorithm: HashAlgorithm,
-    /// The amount of CKB/UDT involved in the TLC
-    pub payment_amount: u128,
-    /// The hash of the payment preimage
-    pub payment_hash: Hash256,
-    /// The expiry time for the TLC in milliseconds
-    pub expiry: u64,
-    /// The local party's private key used to sign the TLC
-    pub local_key: Privkey,
-    /// The remote party's public key used to verify the TLC
-    pub remote_key: Pubkey,
-}
-
-impl SettlementTlc {
-    pub fn to_witness(&self, for_remote: bool) -> Vec<u8> {
-        let mut vec = Vec::new();
-        let offered_flag = if self.tlc_id.is_offered() { 0u8 } else { 1u8 };
-        vec.push(((self.hash_algorithm as u8) << 1) + offered_flag);
-        vec.extend_from_slice(&self.payment_amount.to_le_bytes());
-        vec.extend_from_slice(&self.payment_hash.as_ref()[0..20]);
-        if for_remote {
-            vec.extend_from_slice(blake160(&self.remote_key.serialize()).as_ref());
-            vec.extend_from_slice(blake160(&self.local_key.pubkey().serialize()).as_ref());
-        } else {
-            vec.extend_from_slice(blake160(&self.local_key.pubkey().serialize()).as_ref());
-            vec.extend_from_slice(blake160(&self.remote_key.serialize()).as_ref());
-        }
-
-        let since = Since::new(SinceType::Timestamp, self.expiry / 1000, false);
-        vec.extend_from_slice(&since.value().to_le_bytes());
-        vec
-    }
-
-    pub fn local_pubkey_hash(&self) -> [u8; 20] {
-        blake160(&self.local_key.pubkey().serialize()).0
-    }
+/// Get the local pubkey hash for a settlement TLC.
+///
+/// Free function replacement for `SettlementTlc::local_pubkey_hash()`.
+pub fn settlement_tlc_local_pubkey_hash(tlc: &SettlementTlc) -> [u8; 20] {
+    blake160(&tlc.local_key.pubkey().serialize()).0
 }
 
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PendingNotifySettleTlc {
-    pub payment_hash: Hash256,
-    pub tlc_id: u64,
-    /// The expire time if the TLC should be held.
-    pub hold_expire_at: Option<u64>,
+pub use fiber_types::PendingNotifySettleTlc;
+
+/// Check if a PendingNotifySettleTlc should be held.
+fn pending_notify_should_hold(tlc: &PendingNotifySettleTlc) -> bool {
+    tlc.hold_expire_at.is_some()
 }
 
-impl PendingNotifySettleTlc {
-    fn should_hold(&self) -> bool {
-        self.hold_expire_at.is_some()
-    }
-
-    fn hold_expiry_duration(&self, now_millis_since_unix_epoch: u64) -> Duration {
-        Duration::from_millis(
-            self.hold_expire_at
-                .unwrap_or_default()
-                .saturating_sub(now_millis_since_unix_epoch),
-        )
-    }
+/// Get the remaining hold expiry duration for a PendingNotifySettleTlc.
+fn pending_notify_hold_expiry_duration(
+    tlc: &PendingNotifySettleTlc,
+    now_millis_since_unix_epoch: u64,
+) -> Duration {
+    Duration::from_millis(
+        tlc.hold_expire_at
+            .unwrap_or_default()
+            .saturating_sub(now_millis_since_unix_epoch),
+    )
 }
 
 #[serde_as]
@@ -3870,84 +3222,13 @@ pub struct ChannelActorState {
     pub private_key: Option<Privkey>,
 }
 
-#[serde_as]
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
-pub struct ShutdownInfo {
-    #[serde_as(as = "EntityHex")]
-    pub close_script: Script,
-    pub fee_rate: u64,
-    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
-    pub signature: Option<PartialSignature>,
-}
-
-// This struct holds the TLC information for the channel participants.
-// We can update this information through the channel update message.
-#[serde_as]
-#[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ChannelTlcInfo {
-    // The timestamp when the following information is updated.
-    pub timestamp: u64,
-
-    // Whether this channel is enabled for TLC forwarding or not.
-    pub enabled: bool,
-
-    // The fee rate for TLC transfers. We only have these values set when
-    // this is a public channel. Both sides may set this value differently.
-    // This is a fee that is paid by the sender of the TLC.
-    // The detailed calculation for the fee of forwarding tlcs is
-    // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
-    pub tlc_fee_proportional_millionths: u128,
-
-    // The expiry delta timestamp, in milliseconds, for the TLC.
-    pub tlc_expiry_delta: u64,
-
-    /// The minimal TLC value we can receive in relay TLC
-    pub tlc_minimum_value: u128,
-}
-
-impl ChannelTlcInfo {
-    pub fn new(
-        tlc_min_value: u128,
-        tlc_expiry_delta: u64,
-        tlc_fee_proportional_millionths: u128,
-    ) -> Self {
-        Self {
-            tlc_minimum_value: tlc_min_value,
-            tlc_expiry_delta,
-            tlc_fee_proportional_millionths,
-            enabled: true,
-            timestamp: now_timestamp_as_millis_u64(),
-        }
-    }
-}
-
 // This struct holds the channel information that are only relevant when the channel
 // is public. The information includes signatures to the channel announcement message,
 // our config for the channel that will be published to the network (via ChannelUpdate).
 // For ChannelUpdate config, only information on our side are saved here because we have no
 // control to the config on the counterparty side. And they will publish
 // the config to the network via another ChannelUpdate message.
-#[serde_as]
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct PublicChannelInfo {
-    // Channel announcement signatures, may be empty for private channel.
-    #[serde_as(as = "Option<(_, PartialSignatureAsBytes)>")]
-    pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
-    #[serde_as(as = "Option<(_, PartialSignatureAsBytes)>")]
-    pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
-
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_channel_announcement_nonce: Option<PubNonce>,
-
-    pub channel_announcement: Option<ChannelAnnouncement>,
-    pub channel_update: Option<ChannelUpdate>,
-}
-
-impl PublicChannelInfo {
-    pub fn new() -> Self {
-        Default::default()
-    }
-}
+// PublicChannelInfo is re-exported from fiber_types via crate::fiber::*
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ClosedChannel {}
@@ -4062,97 +3343,6 @@ impl ProcessingChannelError {
     }
 }
 
-bitflags! {
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct ChannelFlags: u8 {
-        const PUBLIC = 1;
-        const ONE_WAY = 1 << 1;
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct NegotiatingFundingFlags: u32 {
-        const OUR_INIT_SENT = 1;
-        const THEIR_INIT_SENT = 1 << 1;
-        const INIT_SENT = NegotiatingFundingFlags::OUR_INIT_SENT.bits() | NegotiatingFundingFlags::THEIR_INIT_SENT.bits();
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct CollaboratingFundingTxFlags: u32 {
-        const AWAITING_REMOTE_TX_COLLABORATION_MSG = 1;
-        const PREPARING_LOCAL_TX_COLLABORATION_MSG = 1 << 1;
-        const OUR_TX_COMPLETE_SENT = 1 << 2;
-        const THEIR_TX_COMPLETE_SENT = 1 << 3;
-        const COLLABORATION_COMPLETED = CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT.bits() | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT.bits();
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct SigningCommitmentFlags: u32 {
-        const OUR_COMMITMENT_SIGNED_SENT = 1;
-        const THEIR_COMMITMENT_SIGNED_SENT = 1 << 1;
-        const COMMITMENT_SIGNED_SENT = SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT.bits() | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT.bits();
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct AwaitingTxSignaturesFlags: u32 {
-        const OUR_TX_SIGNATURES_SENT = 1;
-        const THEIR_TX_SIGNATURES_SENT = 1 << 1;
-        const TX_SIGNATURES_SENT = AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT.bits() | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT.bits();
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct AwaitingChannelReadyFlags: u32 {
-        const OUR_CHANNEL_READY = 1;
-        const THEIR_CHANNEL_READY = 1 << 1;
-        const CHANNEL_READY = AwaitingChannelReadyFlags::OUR_CHANNEL_READY.bits() | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY.bits();
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct ShuttingDownFlags: u32 {
-        /// Indicates that we have sent a `shutdown` message.
-        const OUR_SHUTDOWN_SENT = 1;
-        /// Indicates that they have sent a `shutdown` message.
-        const THEIR_SHUTDOWN_SENT = 1 << 1;
-        /// Indicates that both we and they have sent `shutdown` messages,
-        /// but some HTLCs are still pending to be resolved.
-        const AWAITING_PENDING_TLCS = ShuttingDownFlags::OUR_SHUTDOWN_SENT.bits() | ShuttingDownFlags::THEIR_SHUTDOWN_SENT.bits();
-        /// Indicates all pending HTLCs are resolved, and this channel will be dropped.
-        const DROPPING_PENDING = 1 << 2;
-        /// Indicates we have submitted a commitment transaction, waiting for confirmation
-        const WAITING_COMMITMENT_CONFIRMATION = 1 << 3;
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct CloseFlags: u32 {
-        /// Indicates that channel is closed cooperatively.
-        const COOPERATIVE = 1;
-        /// Indicates that channel is closed uncooperatively, initiated by local forcibly.
-        const UNCOOPERATIVE_LOCAL = 1 << 1;
-        /// Indicates that channel is abandoned.
-        const ABANDONED = 1 << 2;
-        /// Channel is closed because of aborted funding.
-        const FUNDING_ABORTED = 1 << 3;
-        /// Indicates that channel is closed uncooperatively, initiated by remote forcibly.
-        const UNCOOPERATIVE_REMOTE = 1 << 4;
-        /// Indicates on-chain settlement for the channel is still in progress.
-        const WAITING_ONCHAIN_SETTLEMENT = 1 << 5;
-    }
-}
-
-impl ShuttingDownFlags {
-    fn is_ok_for_commitment_operation(&self) -> bool {
-        !self.contains(ShuttingDownFlags::DROPPING_PENDING)
-            && !self.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
-    }
-}
-
 // Depending on the state of the channel, we may process the commitment_signed command differently.
 // Below are all the channel state flags variants that we may encounter
 // in normal commitment_signed processing flow.
@@ -4161,54 +3351,6 @@ enum CommitmentSignedFlags {
     SigningCommitment(SigningCommitmentFlags),
     PendingShutdown(),
     ChannelReady(),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChannelState {
-    /// We are negotiating the parameters required for the channel prior to funding it.
-    NegotiatingFunding(NegotiatingFundingFlags),
-    /// We're collaborating with the other party on the funding transaction.
-    CollaboratingFundingTx(CollaboratingFundingTxFlags),
-    /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
-    SigningCommitment(SigningCommitmentFlags),
-    /// We've received and sent `commitment_signed` and are now waiting for both
-    /// party to collaborate on creating a valid funding transaction.
-    AwaitingTxSignatures(AwaitingTxSignaturesFlags),
-    /// We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
-    /// funding transaction to confirm.
-    AwaitingChannelReady(AwaitingChannelReadyFlags),
-    /// Both we and our counterparty consider the funding transaction confirmed and the channel is
-    /// now operational.
-    ChannelReady,
-    /// We've successfully negotiated a `closing_signed` dance, the channel is now in the process of being shutdown.
-    ShuttingDown(ShuttingDownFlags),
-    /// This channel is closed.
-    Closed(CloseFlags),
-}
-
-impl ChannelState {
-    fn is_closed(&self) -> bool {
-        matches!(
-            self,
-            ChannelState::Closed(_)
-                | ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
-        )
-    }
-
-    /// Can only abort funding when the channel is funding and our signatures have not sent yet.
-    fn can_abort_funding(&self) -> bool {
-        match self {
-            ChannelState::NegotiatingFunding(_)
-            | ChannelState::CollaboratingFundingTx(_)
-            | ChannelState::SigningCommitment(_) => true,
-            ChannelState::AwaitingTxSignatures(flags)
-                if !flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
-            {
-                true
-            }
-            _ => false,
-        }
-    }
 }
 
 fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
@@ -7539,7 +6681,8 @@ impl ChannelActorState {
 
         let (local_settlement_key, remote_settlement_key) = self.get_settlement_keys();
         commitment_lock_script_args.extend_from_slice(
-            blake160(&settlement_data.to_witness(
+            blake160(&settlement_data_to_witness(
+                &settlement_data,
                 for_remote,
                 local_settlement_key,
                 remote_settlement_key,
@@ -7921,98 +7064,6 @@ pub trait ChannelActorStateStore {
     fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool;
 }
 
-/// The status of a channel opening operation initiated by the local node.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChannelOpeningStatus {
-    /// The `open_channel` RPC has been submitted and the `OpenChannel` message has been sent
-    /// to the peer. We are waiting for the peer to respond with an `AcceptChannel` message.
-    WaitingForPeer,
-    /// The peer accepted the channel. We are now collaborating on the funding transaction.
-    FundingTxBuilding,
-    /// The funding transaction has been submitted to the chain and is awaiting confirmation.
-    FundingTxBroadcasted,
-    /// The funding transaction has been confirmed and the channel is fully open.
-    ChannelReady,
-    /// The channel opening failed. The `failure_detail` field contains the reason.
-    Failed,
-}
-
-/// A record that tracks a channel-opening attempt — either outbound (initiated by us)
-/// or inbound (initiated by a remote peer and pending local acceptance).
-///
-/// Outbound records are created when `open_channel` is called.
-/// Inbound records are created when an `OpenChannel` message is received from a peer.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChannelOpenRecord {
-    /// The channel ID. For outbound channels this is initially the temporary ID; it is
-    /// updated to the final channel ID once the peer sends `AcceptChannel`. For inbound
-    /// channels, the temp ID is replaced by the computed new ID when `accept_channel` is
-    /// called.
-    pub channel_id: Hash256,
-    /// The remote peer involved in this channel-opening attempt.
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
-    /// Whether the local node is the accepting side (received the `OpenChannel` request).
-    pub is_acceptor: bool,
-    /// Current status of the opening process.
-    pub status: ChannelOpeningStatus,
-    /// The local node's funding amount for the channel.
-    /// For outbound channels this is what the initiator contributes.
-    /// For inbound channels this is set to the remote peer's funding amount.
-    pub funding_amount: u128,
-    /// Human-readable description of why the opening failed, set only when `status == Failed`.
-    pub failure_detail: Option<String>,
-    /// Timestamp (milliseconds since UNIX epoch) when the record was created.
-    pub created_at: u64,
-    /// Timestamp (milliseconds since UNIX epoch) of the last status update.
-    pub last_updated_at: u64,
-}
-
-impl ChannelOpenRecord {
-    /// Create a new outbound record in the `WaitingForPeer` state.
-    pub fn new(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
-        let now = now_timestamp_as_millis_u64();
-        Self {
-            channel_id,
-            peer_id,
-            is_acceptor: false,
-            status: ChannelOpeningStatus::WaitingForPeer,
-            funding_amount,
-            failure_detail: None,
-            created_at: now,
-            last_updated_at: now,
-        }
-    }
-
-    /// Create a new outbound record in the `WaitingForPeer` state.
-    /// Used when `open_channel` is called.
-    pub fn new_outbound(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
-        Self::new(channel_id, peer_id, funding_amount)
-    }
-
-    /// Create a new inbound record in the `WaitingForPeer` state.
-    /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
-    pub fn new_inbound(channel_id: Hash256, peer_id: PeerId, remote_funding_amount: u128) -> Self {
-        let mut record = Self::new(channel_id, peer_id, remote_funding_amount);
-        record.is_acceptor = true;
-        record
-    }
-
-    /// Transition to a new status.
-    pub fn update_status(&mut self, status: ChannelOpeningStatus) {
-        self.status = status;
-        self.last_updated_at = now_timestamp_as_millis_u64();
-    }
-
-    /// Transition to `Failed` and record the reason.
-    pub fn fail(&mut self, reason: String) {
-        self.status = ChannelOpeningStatus::Failed;
-        self.failure_detail = Some(reason);
-        self.last_updated_at = now_timestamp_as_millis_u64();
-    }
-}
-
 /// Store trait for persisting and querying outbound channel-opening records.
 pub trait ChannelOpenRecordStore {
     /// Return all stored channel-opening records.
@@ -8180,17 +7231,6 @@ impl Musig2SignContext {
     }
 }
 
-/// One counterparty's public keys which do not change over the life of a channel.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelBasePublicKeys {
-    /// The public key which is used to sign all commitment transactions, as it appears in the
-    /// on-chain channel lock-in 2-of-2 multisig output.
-    pub funding_pubkey: Pubkey,
-    /// The base point which is used (with derive_public_key) to derive a per-commitment public key
-    /// which is used to encumber HTLC-in-flight outputs.
-    pub tlc_base_key: Pubkey,
-}
-
 impl From<&OpenChannel> for ChannelBasePublicKeys {
     fn from(value: &OpenChannel) -> Self {
         ChannelBasePublicKeys {
@@ -8244,26 +7284,27 @@ impl std::fmt::Display for Musig2Context {
     }
 }
 
-/// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
-///
-/// This implementation performs no policy checks and is insufficient by itself as
-/// a secure external signer.
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct InMemorySigner {
-    /// Holder secret key in the 2-of-2 multisig script of a channel. This key also backs the
-    /// holder's anchor output in a commitment transaction, if one is present.
-    pub funding_key: Privkey,
-    /// Holder HTLC secret key used in commitment transaction HTLC outputs.
-    pub tlc_base_key: Privkey,
-    /// SecNonce used to generate valid signature in musig.
-    // TODO: use rust's ownership to make sure musig_nonce is used once.
-    pub musig2_base_nonce: Privkey,
-    /// Seed to derive above keys (per commitment).
-    pub commitment_seed: [u8; 32],
+pub use fiber_types::InMemorySigner;
+
+/// Extension trait providing methods for `InMemorySigner` that depend on
+/// fiber-lib-only functions (key derivation, ckb_hash, Musig2Context).
+pub trait InMemorySignerExt {
+    /// Generate an `InMemorySigner` from a seed.
+    fn generate_from_seed(params: &[u8]) -> InMemorySigner;
+    /// Get the base public keys for this signer.
+    fn get_base_public_keys(&self) -> ChannelBasePublicKeys;
+    /// Returns the commitment point for the given commitment number.
+    fn get_commitment_point(&self, commitment_number: u64) -> Pubkey;
+    /// Returns the commitment secret for the given commitment number.
+    fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32];
+    /// Derive the TLC key for the given commitment number.
+    fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey;
+    /// Derive a musig2 nonce for the given commitment number and context.
+    fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce;
 }
 
-impl InMemorySigner {
-    pub fn generate_from_seed(params: &[u8]) -> Self {
+impl InMemorySignerExt for InMemorySigner {
+    fn generate_from_seed(params: &[u8]) -> InMemorySigner {
         let seed = ckb_hash::blake2b_256(params);
 
         let commitment_seed = {
@@ -8284,7 +7325,7 @@ impl InMemorySigner {
         let tlc_base_key = key_derive(funding_key.as_ref(), b"HTLC base key");
         let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
 
-        Self {
+        InMemorySigner {
             funding_key,
             tlc_base_key,
             musig2_base_nonce,
@@ -8303,20 +7344,20 @@ impl InMemorySigner {
     ///
     /// The commitment point is the public key derived from the commitment seed and the commitment number.
     /// The commitment point is used to derive the pubkeys used in the TLC (htlc and revocation outputs).
-    pub fn get_commitment_point(&self, commitment_number: u64) -> Pubkey {
+    fn get_commitment_point(&self, commitment_number: u64) -> Pubkey {
         get_commitment_point(&self.commitment_seed, commitment_number)
     }
 
-    pub fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32] {
+    fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32] {
         get_commitment_secret(&self.commitment_seed, commitment_number)
     }
 
-    pub fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {
+    fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {
         let per_commitment_point = self.get_commitment_point(new_commitment_number);
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 
-    pub fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce {
+    fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce {
         let commitment_point = self.get_commitment_point(commitment_number);
         let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
 

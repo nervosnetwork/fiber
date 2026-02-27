@@ -51,7 +51,6 @@ fn minimal_send_payment_data(seed: u64) -> SendPaymentData {
         dry_run: false,
         trampoline_hops: None,
         trampoline_context: None,
-        channel_stats: Default::default(),
     }
 }
 
@@ -101,7 +100,6 @@ fn full_send_payment_data(seed: u64) -> SendPaymentData {
             previous_tlcs: vec![],
             hash_algorithm: HashAlgorithm::CkbHash,
         }),
-        channel_stats: Default::default(),
     }
 }
 

@@ -21,7 +21,6 @@ use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::payment::{Attempt, PaymentSession, PaymentStatus};
-use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::PaymentHopData;
 use crate::fiber::types::Privkey;
@@ -453,6 +452,53 @@ impl GraphChannelStat {
     }
 }
 
+/// A wrapper that combines `SendPaymentData` (the user's payment request) with
+/// `GraphChannelStat` (runtime channel usage state for path-finding).
+///
+/// Graph methods accept `&SendPaymentState` instead of `&SendPaymentData`.
+/// Thanks to `Deref<Target = SendPaymentData>`, all payment data fields
+/// are accessible directly (e.g., `state.target_pubkey`), while the
+/// runtime-only `channel_stats` field lives on this wrapper.
+#[derive(Clone, Debug)]
+pub struct SendPaymentState {
+    /// The underlying payment request data.
+    pub request: SendPaymentData,
+    /// Runtime channel usage statistics for path-finding (overlay on global stats).
+    pub channel_stats: GraphChannelStat,
+}
+
+impl SendPaymentState {
+    /// Create a new `SendPaymentState` with default (empty) channel stats.
+    pub fn new(request: SendPaymentData) -> Self {
+        Self {
+            request,
+            channel_stats: Default::default(),
+        }
+    }
+
+    /// Create a new `SendPaymentState` with specific channel stats.
+    pub fn with_channel_stats(request: SendPaymentData, channel_stats: GraphChannelStat) -> Self {
+        Self {
+            request,
+            channel_stats,
+        }
+    }
+}
+
+impl std::ops::Deref for SendPaymentState {
+    type Target = SendPaymentData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+impl From<SendPaymentData> for SendPaymentState {
+    fn from(request: SendPaymentData) -> Self {
+        Self::new(request)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
     // Whether to always process gossip messages for our own channels.
@@ -517,27 +563,8 @@ pub enum PathFindError {
     Other(String),
 }
 
-/// A router hop information for a payment, a paymenter router is an array of RouterHop,
-/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
-/// Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
-#[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RouterHop {
-    /// The node that is sending the TLC to the next node.
-    pub(crate) target: Pubkey,
-    /// The channel of this hop used to receive TLC
-    #[serde_as(as = "EntityHex")]
-    pub(crate) channel_outpoint: OutPoint,
-    /// The amount that the source node will transfer to the target node.
-    /// We have already added up all the fees along the path, so this amount can be used directly for the TLC.
-    #[serde_as(as = "U128Hex")]
-    pub(crate) amount_received: u128,
-    /// The expiry for the TLC that the source node sends to the target node.
-    /// We have already added up all the expiry deltas along the path,
-    /// the only thing missing is current time. So the expiry is the current time plus the expiry delta.
-    #[serde_as(as = "U64Hex")]
-    pub(crate) incoming_tlc_expiry: u64,
-}
+// RouterHop is defined in fiber-types and re-exported here for backward compatibility
+pub use fiber_types::RouterHop;
 
 #[derive(Debug)]
 struct ResolvedRoute {
@@ -1245,7 +1272,7 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         info!(
             "entered build_route: amount: {}, amount_low_bound: {:?}, max_fee_amount: {:?}",
@@ -1325,7 +1352,7 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<ResolvedRoute, PathFindError> {
         if !payment_data.router.is_empty() {
             // If a router is explicitly provided, use it.
@@ -1383,7 +1410,7 @@ where
         source: Pubkey,
         final_amount: u128,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<ResolvedRoute, PathFindError> {
         let target = payment_data.target_pubkey;
         let max_fee_amount = max_fee_amount.or(payment_data.max_fee_amount);
@@ -1598,7 +1625,7 @@ where
         source: Pubkey,
         amount: u128,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<Vec<RouterHop>, PathFindError> {
         #[cfg(any(feature = "metrics", test))]
         {
@@ -1623,7 +1650,7 @@ where
 
     pub fn find_path_max_capacity(
         &self,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<u128, PathFindError> {
         #[cfg(any(feature = "metrics", test))]
         {
@@ -1657,7 +1684,7 @@ where
         amount: u128,
         amount_low_bound: u128,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<(Vec<RouterHop>, u128), PathFindError> {
         debug!(
             "find_path_in_range (max capacity) for amount: {} low_bound: {} max_fee_amount: {:?}",
@@ -1741,7 +1768,7 @@ where
         source: Pubkey,
         lower_bound: u128,
         upper_bound: u128,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> (Vec<RouterHop>, u128) {
         if let Ok(res) = self.probe_max_capacity_for_route(source, upper_bound, route, payment_data)
         {
@@ -1772,7 +1799,7 @@ where
         source: Pubkey,
         amount: u128,
         route: &[RouterHop],
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<std::vec::Vec<RouterHop>, PathFindError> {
         self.inner_find_path(
             source,
@@ -1794,7 +1821,7 @@ where
         &self,
         route: &Vec<RouterHop>,
         amount: u128,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
         trampoline_payload: Option<Vec<u8>>,
         final_hop_expiry_delta_override: Option<u64>,
     ) -> Vec<PaymentHopData> {

@@ -12,6 +12,7 @@ use crate::fiber::fee::{calculate_fee_with_base, calculate_tlc_forward_fee};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{
     GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
+    SendPaymentState,
 };
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::{
@@ -84,8 +85,6 @@ pub struct SendPaymentData {
     pub trampoline_hops: Option<Vec<Pubkey>>,
     #[serde(default)]
     pub trampoline_context: Option<TrampolineContext>,
-    #[serde(skip)]
-    pub channel_stats: GraphChannelStat,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -110,7 +109,6 @@ pub struct SendPaymentDataBuilder {
     dry_run: bool,
     trampoline_hops: Option<Vec<Pubkey>>,
     trampoline_context: Option<TrampolineContext>,
-    channel_stats: GraphChannelStat,
 }
 
 impl SendPaymentDataBuilder {
@@ -223,11 +221,6 @@ impl SendPaymentDataBuilder {
 
     pub fn trampoline_context(mut self, trampoline_context: Option<TrampolineContext>) -> Self {
         self.trampoline_context = trampoline_context;
-        self
-    }
-
-    pub fn channel_stats(mut self, channel_stats: GraphChannelStat) -> Self {
-        self.channel_stats = channel_stats;
         self
     }
 
@@ -383,7 +376,6 @@ impl SendPaymentDataBuilder {
             allow_mpp: self.allow_mpp,
             dry_run: self.dry_run,
             trampoline_hops: self.trampoline_hops,
-            channel_stats: self.channel_stats,
             trampoline_context: self.trampoline_context,
         })
     }
@@ -546,7 +538,6 @@ impl SendPaymentData {
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
             .trampoline_hops(command.trampoline_hops)
-            .channel_stats(Default::default())
             .build()
     }
 
@@ -1200,7 +1191,7 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        request: SendPaymentData,
+        request: SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let network_graph = self.network_graph.clone();
         tokio::task::spawn_blocking(move || {
@@ -1218,7 +1209,7 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        request: SendPaymentData,
+        request: SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let network_graph = self.network_graph.clone();
         let graph = network_graph.read().await;
@@ -1412,10 +1403,14 @@ where
                 graph.channel_stats()
             };
 
-            session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
+            let channel_stats = GraphChannelStat::new(Some(channel_stats));
+            let payment_state = SendPaymentState::with_channel_stats(
+                session.request.clone(),
+                channel_stats,
+            );
             #[cfg(not(target_arch = "wasm32"))]
             let hops = self
-                .build_route_in_spawn_task(amount, None, max_fee, session.request.clone())
+                .build_route_in_spawn_task(amount, None, max_fee, payment_state)
                 .await
                 .map_err(|e| {
                     Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
@@ -1423,7 +1418,7 @@ where
 
             #[cfg(target_arch = "wasm32")]
             let hops = self
-                .build_route(amount, None, max_fee, session.request.clone())
+                .build_route(amount, None, max_fee, payment_state)
                 .await
                 .map_err(|e| {
                     Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
@@ -1455,7 +1450,7 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
-        session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
+        let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
         let amount_low_bound = Some(1);
         let mut attempt_id = session.attempts_count() as u64;
         let mut target_amount = remain_amount;
@@ -1465,7 +1460,10 @@ where
         if session.max_parts() > 1 && !is_self_pay {
             let path_max = {
                 let graph = self.network_graph.read().await;
-                graph.find_path_max_capacity(&session.request)?
+                graph.find_path_max_capacity(&SendPaymentState::with_channel_stats(
+                    session.request.clone(),
+                    channel_stats.clone(),
+                ))?
             };
             if path_max * (session.max_parts() as u128) < remain_amount {
                 let error = "Failed to build enough routes for MPP payment".to_string();
@@ -1486,13 +1484,17 @@ where
                 session.max_parts(),
                 max_fee,
             );
+            let payment_state = SendPaymentState::with_channel_stats(
+                session.request.clone(),
+                channel_stats.clone(),
+            );
             #[cfg(not(target_arch = "wasm32"))]
             let build_route_result = self
                 .build_route_in_spawn_task(
                     target_amount,
                     amount_low_bound,
                     max_fee,
-                    session.request.clone(),
+                    payment_state.clone(),
                 )
                 .await;
             #[cfg(target_arch = "wasm32")]
@@ -1501,7 +1503,7 @@ where
                     target_amount,
                     amount_low_bound,
                     max_fee,
-                    session.request.clone(),
+                    payment_state,
                 )
                 .await;
 
@@ -1554,7 +1556,7 @@ where
                             if let Some(sent_node) =
                                 graph.get_channel_sent_node(channel_outpoint, *from)
                             {
-                                session.request.channel_stats.add_channel(
+                                channel_stats.add_channel(
                                     channel_outpoint,
                                     sent_node,
                                     *amount,
