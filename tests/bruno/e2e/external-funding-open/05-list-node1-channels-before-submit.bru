@@ -1,0 +1,52 @@
+meta {
+  name: list node3 channels before submit signed tx
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE1_PEERID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  if (bru.getEnvVar("EXTERNAL_FUNDING_USE_PREOPEN") === "1") {
+    console.log("[external-funding-open] skip strict pre-submit list check on node3 in preopen mode");
+    return;
+  }
+
+  const channels = res.body.result.channels || [];
+  if (channels.length === 0) {
+    throw new Error("Assertion failed: expected at least one channel on node3 before submit");
+  }
+  const hasNonReady = channels.some(
+    (c) => c.state && c.state.state_name !== "ChannelReady",
+  );
+  if (!hasNonReady) {
+    throw new Error("Assertion failed: expected a non-ready channel before submit_signed_funding_tx on node3");
+  }
+}

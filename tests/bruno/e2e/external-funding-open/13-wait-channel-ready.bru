@@ -1,0 +1,83 @@
+meta {
+  name: wait channel ready between node1 and node3
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE3_PEERID}}"
+      }
+    ]
+  }
+}
+
+vars:post-response {
+  max_iterations: 20
+}
+
+script:pre-request {
+  if (bru.getVar("channel_ready_wait_iteration") === undefined) {
+    bru.setVar("channel_ready_wait_iteration", 0);
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
+  if (status !== "submitted") {
+    console.log(
+      `[external-funding-open] skip wait channel ready because submit status is ${String(status)}`,
+    );
+    return;
+  }
+  if (bru.getVar("FUNDING_TX_COMMITTED") !== "true") {
+    throw new Error("Assertion failed: funding tx is not committed before waiting channel ready");
+  }
+
+  const i = bru.getVar("channel_ready_wait_iteration");
+  const n = bru.getVar("max_iterations");
+  const channels = (res.body && res.body.result && res.body.result.channels) || [];
+  const channelId = bru.getVar("EXTERNAL_FUNDING_CHANNEL_ID");
+  const ch = channels.find((c) => c.channel_id === channelId);
+  const stateName = ch && ch.state && ch.state.state_name;
+
+  if (stateName === "ChannelReady" || stateName === "CHANNEL_READY") {
+    bru.setVar("channel_ready_wait_iteration", 0);
+    console.log(`[external-funding-open] channel is ready: ${channelId}`);
+    return;
+  }
+
+  if (i + 1 < n) {
+    console.log(
+      `[external-funding-open] waiting ChannelReady, retry ${i + 1}/${n}, current_state=${String(stateName)}`,
+    );
+    bru.setVar("channel_ready_wait_iteration", i + 1);
+    await new Promise((r) => setTimeout(r, 1500));
+    bru.setNextRequest("wait channel ready between node1 and node3");
+    return;
+  }
+
+  throw new Error(
+    `Assertion failed: channel not ready after ${n} checks, channel_id=${channelId}, last_state=${String(stateName)}`,
+  );
+}
