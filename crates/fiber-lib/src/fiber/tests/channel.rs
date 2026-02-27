@@ -6690,14 +6690,12 @@ async fn test_node_restart() {
     let tlc_count_a = state_a.tlc_state.all_tlcs().count();
     let tlc_count_b = state_b.tlc_state.all_tlcs().count();
     assert_eq!(
-        tlc_count_a,
-        0,
+        tlc_count_a, 0,
         "node_a channel {:?} still has {} stuck TLCs",
         channel_id, tlc_count_a
     );
     assert_eq!(
-        tlc_count_b,
-        0,
+        tlc_count_b, 0,
         "node_b channel {:?} still has {} stuck TLCs",
         channel_id, tlc_count_b
     );
@@ -6959,22 +6957,36 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
     // For self-payments the sender == receiver, so net balance across each node's
     // two channels should stay the same (minus routing fees paid to intermediaries).
     // Total across all channels should be strictly conserved.
-    let initial_total =
-        initial_a_ch0 + initial_a_ch3 +
-        initial_b_ch0 + initial_b_ch1 +
-        initial_c_ch1 + initial_c_ch2 +
-        initial_d_ch2 + initial_d_ch3;
+    let initial_total = initial_a_ch0
+        + initial_a_ch3
+        + initial_b_ch0
+        + initial_b_ch1
+        + initial_c_ch1
+        + initial_c_ch2
+        + initial_d_ch2
+        + initial_d_ch3;
 
     // Fire off 100 self-payments from each node (fire-and-forget, don't wait)
     let payment_amount = 1000; // small amount so routing has enough capacity
     let num_payments = 100u32;
 
-    debug!("=== Sending {} self-payments from each of 4 nodes ===", num_payments);
+    debug!(
+        "=== Sending {} self-payments from each of 4 nodes ===",
+        num_payments
+    );
     for i in 0..num_payments {
-        let _ = node_a.send_payment_keysend_to_self(payment_amount, false).await;
-        let _ = node_b.send_payment_keysend_to_self(payment_amount, false).await;
-        let _ = node_c.send_payment_keysend_to_self(payment_amount, false).await;
-        let _ = node_d.send_payment_keysend_to_self(payment_amount, false).await;
+        let _ = node_a
+            .send_payment_keysend_to_self(payment_amount, false)
+            .await;
+        let _ = node_b
+            .send_payment_keysend_to_self(payment_amount, false)
+            .await;
+        let _ = node_c
+            .send_payment_keysend_to_self(payment_amount, false)
+            .await;
+        let _ = node_d
+            .send_payment_keysend_to_self(payment_amount, false)
+            .await;
         if i % 20 == 0 {
             debug!("Sent batch {}/{}", i, num_payments);
         }
@@ -6984,12 +6996,18 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Check no unexpected events before restart
-    for (name, node) in [("A", &node_a), ("B", &node_b), ("C", &node_c), ("D", &node_d)] {
+    for (name, node) in [
+        ("A", &node_a),
+        ("B", &node_b),
+        ("C", &node_c),
+        ("D", &node_d),
+    ] {
         let events = node.get_triggered_unexpected_events().await;
         assert!(
             events.is_empty(),
             "node {} got unexpected events before restart: {:?}",
-            name, events
+            name,
+            events
         );
     }
 
@@ -7005,12 +7023,18 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
     tokio::time::sleep(Duration::from_secs(30)).await;
 
     // Verify: no unexpected events after restart
-    for (name, node) in [("A", &node_a), ("B", &node_b), ("C", &node_c), ("D", &node_d)] {
+    for (name, node) in [
+        ("A", &node_a),
+        ("B", &node_b),
+        ("C", &node_c),
+        ("D", &node_d),
+    ] {
         let events = node.get_triggered_unexpected_events().await;
         assert!(
             events.is_empty(),
             "node {} got unexpected events after restart: {:?}",
-            name, events
+            name,
+            events
         );
     }
 
@@ -7019,14 +7043,16 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
         let state = node_a.get_channel_actor_state(ch);
         assert!(
             !state.reestablishing,
-            "Node A channel {:?} still reestablishing", ch
+            "Node A channel {:?} still reestablishing",
+            ch
         );
     }
     for ch in [channels[2], channels[3]] {
         let state = node_d.get_channel_actor_state(ch);
         assert!(
             !state.reestablishing,
-            "Node D channel {:?} still reestablishing", ch
+            "Node D channel {:?} still reestablishing",
+            ch
         );
     }
 
@@ -7055,15 +7081,14 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
     }
 
     // Verify: total balance across all channels is conserved
-    let final_total =
-        node_a.get_local_balance_from_channel(channels[0]) +
-        node_a.get_local_balance_from_channel(channels[3]) +
-        node_b.get_local_balance_from_channel(channels[0]) +
-        node_b.get_local_balance_from_channel(channels[1]) +
-        node_c.get_local_balance_from_channel(channels[1]) +
-        node_c.get_local_balance_from_channel(channels[2]) +
-        node_d.get_local_balance_from_channel(channels[2]) +
-        node_d.get_local_balance_from_channel(channels[3]);
+    let final_total = node_a.get_local_balance_from_channel(channels[0])
+        + node_a.get_local_balance_from_channel(channels[3])
+        + node_b.get_local_balance_from_channel(channels[0])
+        + node_b.get_local_balance_from_channel(channels[1])
+        + node_c.get_local_balance_from_channel(channels[1])
+        + node_c.get_local_balance_from_channel(channels[2])
+        + node_d.get_local_balance_from_channel(channels[2])
+        + node_d.get_local_balance_from_channel(channels[3]);
     assert_eq!(
         initial_total, final_total,
         "Total balance across all channels should be conserved.\n  initial: {}\n  final:   {}",
