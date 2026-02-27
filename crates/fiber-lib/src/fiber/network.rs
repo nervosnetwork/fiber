@@ -1,4 +1,5 @@
 use ckb_hash::blake2b_256;
+use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
@@ -52,15 +53,13 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
+    ChannelInitializationParameter, ChannelOpenRecord, ChannelOpenRecordStore,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
     PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
     RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::config::AnnouncedNodeName;
-use crate::ckb::client::CkbChainClient;
-use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
-
 use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
@@ -74,6 +73,7 @@ use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
+use crate::ckb::client::CkbChainClient;
 use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{
     check_udt_script, get_udt_info, get_udt_whitelist, is_udt_type_auto_accept,
@@ -101,7 +101,7 @@ use crate::fiber::types::{
     FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineHopPayload,
     TrampolineOnionPacket, TxAbort, TxSignatures,
 };
-use crate::fiber::SettleTlcSetCommand;
+use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
@@ -201,6 +201,22 @@ pub struct OpenChannelResponse {
 pub struct AcceptChannelResponse {
     pub old_channel_id: Hash256,
     pub new_channel_id: Hash256,
+}
+
+/// A channel that has been received from a remote peer but not yet accepted locally.
+/// These are held in `to_be_accepted_channels` waiting for a manual `accept_channel` call.
+#[derive(Debug, Clone)]
+pub struct PendingAcceptChannel {
+    /// The temporary channel ID assigned by the initiator.
+    pub channel_id: Hash256,
+    /// The peer ID of the channel initiator.
+    pub peer_id: PeerId,
+    /// The amount of CKB or UDT the initiator is contributing to the channel.
+    pub funding_amount: u128,
+    /// UDT type script, if this is a UDT channel.
+    pub udt_type_script: Option<Script>,
+    /// Timestamp (milliseconds since UNIX epoch) when this channel request was received.
+    pub created_at: u64,
 }
 
 #[derive(Debug)]
@@ -364,6 +380,8 @@ pub enum NetworkActorCommand {
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
     ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
+    // Get all inbound channel requests that are waiting for `accept_channel`
+    GetPendingAcceptChannels(RpcReplyPort<Result<Vec<PendingAcceptChannel>, String>>),
 
     #[cfg(any(debug_assertions, feature = "bench"))]
     UpdateFeatures(FeatureVector),
@@ -658,6 +676,7 @@ impl<S, C> NetworkActor<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + ChannelOpenRecordStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore
@@ -821,6 +840,14 @@ where
                             set.insert(new);
                         };
 
+                        // Update the opening record: rename from temp ID to final ID and advance status.
+                        if let Some(mut record) = state.store.get_channel_open_record(&old) {
+                            state.store.delete_channel_open_record(&old);
+                            record.channel_id = new;
+                            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+                            state.store.insert_channel_open_record(record);
+                        }
+
                         debug!("Starting funding channel");
                         // TODO: Here we implies the one who receives AcceptChannel message
                         //  (i.e. the channel initiator) will send TxUpdate message first.
@@ -849,6 +876,12 @@ where
                     "Channel ({:?}) to peer {:?} is now ready",
                     channel_id, peer_id
                 );
+
+                // Mark the opening record as ChannelReady (terminal success state).
+                if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
+                    record.update_status(ChannelOpeningStatus::ChannelReady);
+                    state.store.insert_channel_open_record(record);
+                }
 
                 // FIXME(yukang): need to make sure ChannelReady is sent after the channel is reestablished
                 state
@@ -898,6 +931,11 @@ where
                     .await?
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
+                // Advance the opening record to FundingTxBroadcasted.
+                if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
+                    record.update_status(ChannelOpeningStatus::FundingTxBroadcasted);
+                    state.store.insert_channel_open_record(record);
+                }
                 state
                     .on_funding_transaction_pending(channel_id, transaction, outpoint)
                     .await;
@@ -1011,6 +1049,23 @@ where
                 }
             }
             NetworkActorEvent::ChannelActorStopped(channel_id, reason) => {
+                // If the channel failed before reaching ChannelReady, mark the opening record as Failed.
+                if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
+                    if record.status != ChannelOpeningStatus::ChannelReady {
+                        let failure_detail = match reason {
+                            StopReason::Abandon => "Channel was abandoned".to_string(),
+                            StopReason::AbortFunding => "Funding transaction aborted".to_string(),
+                            StopReason::PeerDisConnected => {
+                                "Peer disconnected during channel opening".to_string()
+                            }
+                            StopReason::Closed => {
+                                "Channel closed before becoming ready".to_string()
+                            }
+                        };
+                        record.fail(failure_detail);
+                        state.store.insert_channel_open_record(record);
+                    }
+                }
                 state.on_channel_actor_stopped(channel_id, reason).await;
             }
             NetworkActorEvent::PaymentActorStopped(payment_hash) => {
@@ -1548,7 +1603,7 @@ where
                 self.settle_hold_tlc_set(state, payment_hash).await;
             }
             NetworkActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
-                self.settle_tlc_set(state, payment_hash, channel_tlc_ids, false)
+                self.settle_tlc_set(state, payment_hash, channel_tlc_ids)
                     .await;
             }
             NetworkActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
@@ -1965,6 +2020,28 @@ where
                 let _ = rpc.send(Ok(peers));
             }
 
+            NetworkActorCommand::GetPendingAcceptChannels(rpc) => {
+                let pending = state
+                    .to_be_accepted_channels
+                    .map
+                    .iter()
+                    .map(
+                        |(channel_id, (peer_id, open_channel))| PendingAcceptChannel {
+                            channel_id: *channel_id,
+                            peer_id: peer_id.clone(),
+                            funding_amount: open_channel.funding_amount,
+                            udt_type_script: open_channel.funding_udt_type_script.clone(),
+                            created_at: state
+                                .store
+                                .get_channel_open_record(channel_id)
+                                .map(|r| r.created_at)
+                                .unwrap_or_else(crate::now_timestamp_as_millis_u64),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                let _ = rpc.send(Ok(pending));
+            }
+
             NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
                 let _ = reply.send(self.settle_invoice(&myself, hash, preimage));
             }
@@ -2064,14 +2141,13 @@ where
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
     ) {
-        let channel_tlc_ids = self
-            .store
-            .get_payment_hold_tlcs(payment_hash)
-            .iter()
-            .map(|hold_tlc| (hold_tlc.channel_id, hold_tlc.tlc_id))
-            .collect();
-        self.settle_tlc_set(state, payment_hash, channel_tlc_ids, true)
-            .await
+        for tlc_settlement in self.settle_tlc_set(state, payment_hash, Vec::new()).await {
+            self.store.remove_payment_hold_tlc(
+                &payment_hash,
+                &tlc_settlement.channel_id(),
+                tlc_settlement.tlc_id(),
+            );
+        }
     }
 
     async fn settle_tlc_set(
@@ -2079,9 +2155,10 @@ where
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
         channel_tlc_ids: Vec<(Hash256, u64)>,
-        is_hold_tlc_set: bool,
-    ) {
+    ) -> Vec<TlcSettlement> {
         let settle_command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &self.store);
+
+        let mut success_settlements = Vec::new();
         for tlc_settlement in settle_command.run() {
             let (send, _recv) = oneshot::channel();
             let rpc_reply = RpcReplyPort::from(send);
@@ -2096,13 +2173,7 @@ where
                 .await
             {
                 Ok(_) => {
-                    if is_hold_tlc_set {
-                        self.store.remove_payment_hold_tlc(
-                            &payment_hash,
-                            &tlc_settlement.channel_id(),
-                            tlc_settlement.tlc_id(),
-                        );
-                    }
+                    success_settlements.push(tlc_settlement);
                 }
                 Err(err) => {
                     error!(
@@ -2114,6 +2185,8 @@ where
                 }
             }
         }
+
+        success_settlements
     }
 
     /// Async version of check_channel_shutdown that runs in spawned task.
@@ -2935,6 +3008,7 @@ impl<S, C> NetworkActorState<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + ChannelOpenRecordStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore
@@ -3299,6 +3373,11 @@ where
         .0;
         let temp_channel_id = rx.await.expect("msg received");
         self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
+
+        // Record the channel opening attempt so it can be queried via RPC.
+        let record = ChannelOpenRecord::new(temp_channel_id, peer_id, funding_amount);
+        self.store.insert_channel_open_record(record);
+
         Ok((channel, temp_channel_id))
     }
 
@@ -3384,6 +3463,16 @@ where
         .0;
         let new_id = rx.await.expect("msg received");
         self.on_channel_created(new_id, &peer_id, channel.clone());
+
+        // Re-key the inbound ChannelOpenRecord from the temp channel ID to the final channel ID
+        // and advance the status to FundingTxBuilding now that the channel has been accepted.
+        if let Some(mut record) = self.store.get_channel_open_record(&temp_channel_id) {
+            self.store.delete_channel_open_record(&temp_channel_id);
+            record.channel_id = new_id;
+            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+            self.store.insert_channel_open_record(record);
+        }
+
         Ok((channel, temp_channel_id, new_id))
     }
 
@@ -3860,6 +3949,23 @@ where
                 }
             }
         }
+
+        // Also fail any inbound pending channels from this peer that are still waiting for
+        // local acceptance (not yet in self.channels, no channel actor).
+        let failed_channels: Vec<Hash256> = self
+            .to_be_accepted_channels
+            .map
+            .iter()
+            .filter(|(_, (peer_id, _))| peer_id == id)
+            .map(|(channel_id, _)| *channel_id)
+            .collect();
+        for channel_id in failed_channels {
+            if let Some(mut record) = self.store.get_channel_open_record(&channel_id) {
+                record.fail("Peer disconnected during channel opening".to_string());
+                self.store.insert_channel_open_record(record);
+            }
+            self.to_be_accepted_channels.remove(&channel_id);
+        }
     }
 
     pub(crate) fn get_peer_addresses(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
@@ -4094,6 +4200,7 @@ where
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
         let id = open_channel.channel_id;
+        let remote_funding_amount = open_channel.funding_amount;
         let result = check_open_channel_parameters(
             &open_channel.funding_udt_type_script,
             &open_channel.shutdown_script,
@@ -4110,6 +4217,12 @@ where
 
         match result {
             Ok(_) => {
+                // Create a persistent record so the accepting side can see this pending channel
+                // via list_channels(only_pending=true) and across node restarts.
+                let record =
+                    ChannelOpenRecord::new_inbound(id, peer_id.clone(), remote_funding_amount);
+                self.store.insert_channel_open_record(record);
+
                 // Notify outside observers.
                 self.network
                     .send_message(NetworkActorMessage::new_notification(
@@ -4344,6 +4457,7 @@ impl<S, C> Actor for NetworkActor<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + ChannelOpenRecordStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore
@@ -4862,6 +4976,7 @@ fn try_send_actor_message(actor: &ActorRef<NetworkActorMessage>, message: Networ
 pub async fn start_network<
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + ChannelOpenRecordStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore

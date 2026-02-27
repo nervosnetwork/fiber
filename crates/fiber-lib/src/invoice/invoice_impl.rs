@@ -415,13 +415,12 @@ impl<'de> Deserialize<'de> for InvoiceSignature {
     {
         let signature_hex: String = String::deserialize(deserializer)?;
         let signature_bytes = hex::decode(signature_hex).map_err(serde::de::Error::custom)?;
-        let signature = InvoiceSignature::from_base32(
-            &signature_bytes
-                .iter()
-                .map(|x| u5::try_from_u8(*x).expect("u5 from u8"))
-                .collect::<Vec<u5>>(),
-        );
-        signature.map_err(serde::de::Error::custom)
+        let base32_values = signature_bytes
+            .iter()
+            .map(|x| u5::try_from_u8(*x))
+            .collect::<Result<Vec<u5>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        InvoiceSignature::from_base32(&base32_values).map_err(serde::de::Error::custom)
     }
 }
 

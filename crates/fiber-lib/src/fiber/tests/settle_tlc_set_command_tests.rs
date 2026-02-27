@@ -28,6 +28,7 @@ struct MockStore {
     invoices: RefCell<HashMap<Hash256, CkbInvoice>>,
     invoice_statuses: RefCell<HashMap<Hash256, CkbInvoiceStatus>>,
     preimages: RefCell<HashMap<Hash256, Hash256>>,
+    hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
 }
 
@@ -37,8 +38,22 @@ impl MockStore {
             invoices: RefCell::new(HashMap::new()),
             invoice_statuses: RefCell::new(HashMap::new()),
             preimages: RefCell::new(HashMap::new()),
+            hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
         }
+    }
+
+    fn with_hold_tlc(self, payment_hash: Hash256, channel_id: Hash256, tlc_id: u64) -> Self {
+        self.hold_tlcs
+            .borrow_mut()
+            .entry(payment_hash)
+            .or_default()
+            .push(HoldTlc {
+                channel_id,
+                tlc_id,
+                hold_expire_at: 0,
+            });
+        self
     }
 
     fn with_invoice(self, invoice: CkbInvoice, status: CkbInvoiceStatus) -> Self {
@@ -146,21 +161,29 @@ impl ChannelActorStateStore for MockStore {
         None
     }
 
-    fn insert_payment_hold_tlc(&self, _payment_hash: Hash256, _hold_tlc: HoldTlc) {
-        // No-op for tests
+    fn insert_payment_hold_tlc(&self, payment_hash: Hash256, hold_tlc: HoldTlc) {
+        self.hold_tlcs
+            .borrow_mut()
+            .entry(payment_hash)
+            .or_default()
+            .push(hold_tlc);
     }
 
-    fn remove_payment_hold_tlc(
-        &self,
-        _payment_hash: &Hash256,
-        _channel_id: &Hash256,
-        _tlc_id: u64,
-    ) {
-        // No-op for tests
+    fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64) {
+        self.hold_tlcs
+            .borrow_mut()
+            .entry(*payment_hash)
+            .and_modify(|v| {
+                v.retain(|h| h.channel_id != *channel_id || h.tlc_id != tlc_id);
+            });
     }
 
-    fn get_payment_hold_tlcs(&self, _payment_hash: Hash256) -> Vec<HoldTlc> {
-        vec![]
+    fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
+        self.hold_tlcs
+            .borrow()
+            .get(&payment_hash)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
@@ -488,6 +511,7 @@ fn test_received_invoice_proceeds_to_settlement() {
     let store = MockStore::new()
         .with_invoice(invoice, CkbInvoiceStatus::Received)
         .with_preimage(payment_hash, preimage)
+        .with_hold_tlc(payment_hash, channel_id, 0)
         .with_channel_state(create_test_channel_state_with_tlc(
             channel_id,
             0,
@@ -496,9 +520,8 @@ fn test_received_invoice_proceeds_to_settlement() {
             None,
         ));
 
-    let channel_tlc_ids = vec![(channel_id, 0)];
-
-    let command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &store);
+    // Use hold path (empty channel_tlc_ids) so Received is allowed (hold-invoice re-entry with preimage).
+    let command = SettleTlcSetCommand::new(payment_hash, vec![], &store);
     let settlements = command.run();
 
     assert_eq!(settlements.len(), 1);
@@ -1012,6 +1035,7 @@ fn test_received_invoice_can_be_settled_after_invoice_expiry() {
     let store = MockStore::new()
         .with_invoice(invoice, CkbInvoiceStatus::Received)
         .with_preimage(payment_hash, preimage)
+        .with_hold_tlc(payment_hash, channel_id, 0)
         .with_channel_state(create_test_channel_state_with_tlc(
             channel_id,
             0,
@@ -1020,9 +1044,8 @@ fn test_received_invoice_can_be_settled_after_invoice_expiry() {
             None,
         ));
 
-    let channel_tlc_ids = vec![(channel_id, 0)];
-
-    let command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &store);
+    // Use hold path so Received is allowed (hold-invoice re-entry; invoice expiry is ignored for Received).
+    let command = SettleTlcSetCommand::new(payment_hash, vec![], &store);
     let settlements = command.run();
 
     // Should still succeed with fulfill (not fail)

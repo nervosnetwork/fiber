@@ -2,7 +2,7 @@
 build = "src/build.rs"
 edition = "2021"
 name = "fnn"
-version = "0.7.0-rc1"
+version = "0.7.1"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -92,6 +92,7 @@ tokio = { version = "1", features = [
   "process",
 ] }
 tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors"] }
 tokio-metrics = { version = "0.4.5", optional = true, features = ["metrics-rs-integration"] }
 metrics = { version = "0.24.2", optional = true }
 metrics-exporter-prometheus = { version = "0.17.2", optional = true }
@@ -137,6 +138,7 @@ tempfile = "3.10.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 jsonrpsee = { version = "0.25.1", features = [
   "server",
   "macros",

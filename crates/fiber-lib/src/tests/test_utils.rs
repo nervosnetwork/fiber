@@ -182,6 +182,8 @@ pub fn gen_rpc_config() -> RpcConfig {
             "peer".to_string(),
             "watchtower".to_string(),
         ],
+        cors_enabled: false,
+        cors_allowed_origins: vec![],
     }
 }
 
@@ -762,6 +764,11 @@ impl NetworkNode {
         self.store
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
             .expect("cancel success");
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SettleHoldTlcSet(*payment_hash),
+            ))
+            .expect("network actor alive");
     }
 
     pub fn get_payment_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {

@@ -3415,9 +3415,7 @@ async fn test_send_mpp_with_reverse_node_send_back() {
         .send_mpp_payment(&node_2, 20000000000, Some(16))
         .await;
     eprintln!("res: {:?}", res);
-    assert!(res
-        .unwrap_err()
-        .contains("Failed to build enough routes for MPP payment"));
+    assert!(res.unwrap_err().contains("Insufficient balance"));
 
     // now node 2 send back to node 0 20000000000 CKB
     for _ in 0..2 {
