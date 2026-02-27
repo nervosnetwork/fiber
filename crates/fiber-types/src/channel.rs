@@ -103,12 +103,12 @@ bitflags! {
 // TLC types
 // ============================================================
 
-/// The id of a TLC, it can be either offered or received.
+/// The id of a tlc, it can be either offered or received.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash)]
 pub enum TLCId {
-    /// Offered TLC id
+    /// Offered tlc id
     Offered(u64),
-    /// Received TLC id
+    /// Received tlc id
     Received(u64),
 }
 
@@ -178,12 +178,12 @@ pub enum InboundTlcStatus {
     RemoveAckConfirmed,
 }
 
-/// The status of a TLC
+/// The status of a tlc
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum TlcStatus {
-    /// Outbound TLC
+    /// Outbound tlc
     Outbound(OutboundTlcStatus),
-    /// Inbound TLC
+    /// Inbound tlc
     Inbound(InboundTlcStatus),
 }
 

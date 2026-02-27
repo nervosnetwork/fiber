@@ -158,8 +158,8 @@ impl From<bitcoin::hashes::sha256::Hash> for Hash256 {
 
 const PUBKEY_SIZE: usize = 33;
 
-/// The public key for a Node.
-/// It stores the serialized form ([u8; 33]) directly for fast comparison and hashing.
+/// The public key for a Node
+/// It stores the serialized form ([u8; 33]) directly for fast comparison and hashing
 #[serde_as]
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHexNoPrefix, [_; 33]>")] pub [u8; 33]);
@@ -313,7 +313,7 @@ impl TryFrom<molecule_fiber::Pubkey> for Pubkey {
 // Privkey
 // ============================================================
 
-/// A wrapper for secp256k1 secret key.
+/// A wrapper for secp256k1 secret key
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Privkey(pub secp256k1::SecretKey);
 

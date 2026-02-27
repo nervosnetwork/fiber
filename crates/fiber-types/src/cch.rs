@@ -8,13 +8,13 @@ use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
-/// The status of a cross-chain hub order.
+/// The status of a cross-chain hub order, will update as the order progresses.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CchOrderStatus {
     /// Order is created and waiting for the incoming invoice to collect enough TLCs.
     Pending = 0,
-    /// The incoming invoice collected the required TLCs.
+    /// The incoming invoice collected the required TLCs and is ready to send outgoing payment to obtain the preimage.
     IncomingAccepted = 1,
     /// The outgoing payment is in flight.
     OutgoingInFlight = 2,

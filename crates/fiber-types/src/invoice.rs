@@ -217,7 +217,7 @@ pub fn parse_hrp(input: &str) -> Result<(Currency, Option<u128>), InvoiceError> 
 // Invoice status
 // ============================================================
 
-/// The status of a CKB invoice.
+/// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CkbInvoiceStatus {
     /// The invoice is open and can be paid.
@@ -248,7 +248,7 @@ impl Display for CkbInvoiceStatus {
 // Currency
 // ============================================================
 
-/// The currency of the invoice, can also represent the CKB network chain.
+/// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum Currency {
     /// The mainnet currency of CKB.
@@ -374,7 +374,7 @@ pub struct CkbScript(#[serde_as(as = "EntityHex")] pub PackedScript);
 // InvoiceSignature
 // ============================================================
 
-/// Recoverable signature for an invoice.
+/// Recoverable signature
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvoiceSignature(pub RecoverableSignature);
 

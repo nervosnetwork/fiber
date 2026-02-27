@@ -14,12 +14,23 @@ use strum::{AsRefStr, EnumString};
 // Payment status
 // ============================================================
 
-/// The status of a payment.
+/// The status of a payment, will update as the payment progresses.
+/// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
+///
+/// **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PaymentStatus {
+    /// Initial status. A payment session is created, but no HTLC has been dispatched.
     Created,
+    /// The first hop AddTlc is sent successfully and waiting for the response.
+    ///
+    /// > **MPP Logic**: Status `Inflight` means at least one attempt is still not in `Success`, payment needs more retrying or waiting for HTLC settlement.
     Inflight,
+    /// The payment is finished. All related HTLCs are successfully settled,
+    /// and the aggregate amount equals the total requested amount.
     Success,
+    /// The payment session has terminated. HTLCs have failed and the target
+    /// amount cannot be fulfilled after exhausting all retries.
     Failed,
 }
 
@@ -1022,16 +1033,16 @@ pub struct RemoveTlcFulfill {
 
 use crate::U128Hex;
 
-/// The node and channel information in a payment route hop.
+/// The node and channel information in a payment route hop
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRouteNode {
-    /// The public key of the node.
+    /// the public key of the node
     pub pubkey: Pubkey,
-    /// The amount for this hop.
+    /// the amount for this hop
     #[serde_as(as = "U128Hex")]
     pub amount: u128,
-    /// The channel outpoint for this hop.
+    /// the channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
 }
@@ -1042,16 +1053,15 @@ pub struct SessionRouteNode {
 
 use crate::U64Hex;
 
-/// A router hop information for a payment.
-/// A payment router is an array of RouterHop.
-/// A router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
-/// Improper hop hint may make payment fail, for example the specified channel does not have enough capacity.
+/// A router hop information for a payment, a paymenter router is an array of RouterHop,
+/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
+/// Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RouterHop {
     /// The node that is sending the TLC to the next node.
     pub target: Pubkey,
-    /// The channel of this hop used to receive TLC.
+    /// The channel of this hop used to receive TLC
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
     /// The amount that the source node will transfer to the target node.
@@ -1166,12 +1176,13 @@ impl From<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
 
 /// The router is a list of nodes that the payment will go through.
 /// We store in the payment session and then will use it to track the payment history.
+/// The router is a list of nodes that the payment will go through.
 /// For example:
 ///    `A(amount, channel) -> B -> C -> D`
 /// means A will send `amount` with `channel` to B.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SessionRoute {
-    /// The nodes in the route.
+    /// the nodes in the route
     pub nodes: Vec<SessionRouteNode>,
 }
 
