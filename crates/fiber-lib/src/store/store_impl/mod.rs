@@ -18,7 +18,6 @@ pub use browser_test::{Batch, DbDirection, IteratorMode, Store};
 use std::path::Path;
 
 use super::db_migrate::DbMigrate;
-use super::schema::*;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrder, CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
@@ -51,6 +50,7 @@ use crate::{
 };
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
+use fiber_types::schema::*;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

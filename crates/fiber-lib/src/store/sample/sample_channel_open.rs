@@ -1,6 +1,6 @@
 /// StoreSample implementation for `ChannelOpenRecord` (prefix 201).
 use crate::fiber::channel::{ChannelOpenRecord, ChannelOpeningStatus};
-use crate::store::schema::CHANNEL_OPEN_RECORD_PREFIX;
+use fiber_types::schema::CHANNEL_OPEN_RECORD_PREFIX;
 use tentacle::secio::PeerId;
 
 use super::{deterministic_hash256, deterministic_pubkey, StoreSample};

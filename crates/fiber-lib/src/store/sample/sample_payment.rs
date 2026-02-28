@@ -10,7 +10,7 @@ use crate::fiber::payment::{
     SessionRoute, SessionRouteNode, TrampolineContext,
 };
 use crate::fiber::types::PaymentHopData;
-use crate::store::schema::{ATTEMPT_PREFIX, PAYMENT_CUSTOM_RECORD_PREFIX, PAYMENT_SESSION_PREFIX};
+use fiber_types::schema::{ATTEMPT_PREFIX, PAYMENT_CUSTOM_RECORD_PREFIX, PAYMENT_SESSION_PREFIX};
 
 use super::{
     deterministic_hash, deterministic_hash256, deterministic_outpoint, deterministic_pubkey,

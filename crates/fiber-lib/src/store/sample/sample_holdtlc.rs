@@ -1,6 +1,6 @@
 /// StoreSample implementation for `HoldTlc`.
 use crate::fiber::types::HoldTlc;
-use crate::store::schema::HOLD_TLC_PREFIX;
+use fiber_types::schema::HOLD_TLC_PREFIX;
 
 use super::{deterministic_hash256, StoreSample};
 

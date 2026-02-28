@@ -22,7 +22,7 @@ use crate::fiber::types::{
     PaymentOnionPacket, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, SchnorrSignature,
     TlcErrPacket,
 };
-use crate::store::schema::CHANNEL_ACTOR_STATE_PREFIX;
+use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
 
 use super::{
     deterministic_ecdsa_signature, deterministic_hash, deterministic_hash256,

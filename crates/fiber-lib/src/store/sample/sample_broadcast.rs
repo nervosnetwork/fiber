@@ -5,8 +5,8 @@ use crate::fiber::types::{
     BroadcastMessage, ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags,
     ChannelUpdateMessageFlags, NodeAnnouncement, SchnorrSignature,
 };
-use crate::store::schema::BROADCAST_MESSAGE_PREFIX;
 use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::schema::BROADCAST_MESSAGE_PREFIX;
 
 use super::{
     deterministic_ecdsa_signature, deterministic_hash256, deterministic_outpoint,
