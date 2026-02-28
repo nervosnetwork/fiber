@@ -1,16 +1,10 @@
-use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
-use super::features::FeatureVector;
+use super::channel::{ChannelActorState, ChannelActorStateStore};
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, BuildRouterCommand};
 use super::path::NodeHeap;
-use super::payment::{HopHint, SendPaymentData};
-use super::types::{
-    BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
-    NodeAnnouncement,
-};
-use super::types::{Cursor, Pubkey, TlcErr};
-use crate::ckb::config::UdtCfgInfos;
+use super::payment::SendPaymentDataExt;
+use super::types::BroadcastMessageWithTimestamp;
 use crate::fiber::channel::DEFAULT_FEE_RATE;
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
@@ -19,15 +13,16 @@ use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
-use crate::fiber::payment::{Attempt, PaymentSession, PaymentStatus};
-use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::PaymentHopData;
-use crate::fiber::types::Privkey;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use fiber_types::protocol::AnnouncedNodeName;
-pub use fiber_types::RouterHop;
+use fiber_types::{
+    Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelTlcInfo, ChannelUpdate, Cursor,
+    FeatureVector, Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession,
+    PaymentStatus, Privkey, Pubkey, RouterHop, SendPaymentData, TlcErr, U128Hex, U64Hex,
+    UdtCfgInfos,
+};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use secp256k1::SECP256K1;

@@ -4,13 +4,12 @@
 /// - `Attempt` (prefix 195)
 use std::collections::HashMap;
 
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::payment::{
-    Attempt, AttemptStatus, PaymentCustomRecords, PaymentSession, PaymentStatus, SendPaymentData,
-    SessionRoute, SessionRouteNode, TrampolineContext,
+use crate::fiber::{
+    Attempt, AttemptStatus, PaymentCustomRecords, PaymentHopData, PaymentSession, PaymentStatus,
+    SendPaymentData, SessionRoute, SessionRouteNode, TrampolineContext,
 };
-use crate::fiber::types::PaymentHopData;
 use fiber_types::schema::{ATTEMPT_PREFIX, PAYMENT_CUSTOM_RECORD_PREFIX, PAYMENT_SESSION_PREFIX};
+use fiber_types::HashAlgorithm;
 
 use super::{
     deterministic_hash, deterministic_hash256, deterministic_outpoint, deterministic_pubkey,
@@ -56,8 +55,8 @@ fn minimal_send_payment_data(seed: u64) -> SendPaymentData {
 
 /// Helper: build a fully-populated `SendPaymentData`.
 fn full_send_payment_data(seed: u64) -> SendPaymentData {
-    use crate::fiber::graph::RouterHop;
-    use crate::fiber::payment::HopHint;
+    use crate::fiber::HopHint;
+    use crate::fiber::RouterHop;
 
     // Use single entry to guarantee deterministic HashMap serialization.
     let mut custom_records_data = HashMap::new();
@@ -117,7 +116,7 @@ fn sample_session_minimal(seed: u64) -> PaymentSession {
 }
 
 fn sample_session_full(seed: u64) -> PaymentSession {
-    use crate::fiber::types::TlcErrorCode;
+    use crate::fiber::TlcErrorCode;
 
     PaymentSession {
         request: full_send_payment_data(seed),

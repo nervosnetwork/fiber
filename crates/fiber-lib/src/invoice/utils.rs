@@ -1,14 +1,14 @@
 // These are used internally in other modules and tests.
 #[allow(unused_imports)]
 pub(crate) use fiber_types::{
-    ar_decompress, ar_encompress, construct_invoice_preimage, parse_hrp, SIGNATURE_U5_SIZE,
+    ar_decompress, ar_encompress, construct_invoice_preimage, parse_hrp, Currency,
+    SIGNATURE_U5_SIZE,
 };
 
 #[cfg(test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_parse_hrp() {
-    use super::invoice_impl::Currency;
     use super::InvoiceError;
 
     let res = parse_hrp("fibb1280");

@@ -1,13 +1,8 @@
-#[cfg(test)]
-pub use fiber_types::SIGNATURE_U5_SIZE;
-pub use fiber_types::{
-    Attribute, CkbInvoice, CkbInvoiceStatus, CkbScript, Currency, InvoiceData, InvoiceError,
-    InvoiceSignature, MAX_DESCRIPTION_LENGTH,
+use fiber_types::{
+    Attribute, CkbInvoice, CkbScript, Currency, FeatureVector, Hash256, HashAlgorithm, InvoiceData,
+    InvoiceError, MAX_DESCRIPTION_LENGTH,
 };
 
-use crate::fiber::features::FeatureVector;
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::Hash256;
 use crate::time::UNIX_EPOCH;
 use secp256k1::{ecdsa::RecoverableSignature, Message, PublicKey};
 use std::time::Duration;

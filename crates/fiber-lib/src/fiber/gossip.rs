@@ -48,13 +48,16 @@ use super::{
     config::DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
     network::{check_chain_hash, get_chain_hash, GossipMessageWithPeerId, GOSSIP_PROTOCOL_ID},
     types::{
-        BroadcastMessage, BroadcastMessageID, BroadcastMessageQuery, BroadcastMessageQueryFlags,
-        BroadcastMessageWithTimestamp, BroadcastMessagesFilter, BroadcastMessagesFilterResult,
-        ChannelAnnouncement, ChannelOnchainInfo, ChannelUpdate, Cursor, GetBroadcastMessages,
-        GetBroadcastMessagesResult, GossipMessage, Hash256, NodeAnnouncement, Pubkey,
-        QueryBroadcastMessages, QueryBroadcastMessagesResult,
+        BroadcastMessageQuery, BroadcastMessageQueryFlags, BroadcastMessageWithTimestamp,
+        BroadcastMessagesFilter, BroadcastMessagesFilterResult, ChannelOnchainInfo,
+        GetBroadcastMessages, GetBroadcastMessagesResult, GossipMessage, QueryBroadcastMessages,
+        QueryBroadcastMessagesResult,
     },
     FiberConfig,
+};
+use fiber_types::{
+    BroadcastMessage, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, Hash256,
+    NodeAnnouncement, Pubkey,
 };
 
 // The maximum duration drift between the broadcast message timestamp and latest cursor in store.

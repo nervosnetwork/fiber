@@ -1,5 +1,3 @@
-use crate::fiber::channel::ChannelFlags;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::types::OpenChannel;
 use crate::{
     ckb::{
@@ -9,18 +7,17 @@ use crate::{
         CkbChainMessage, CkbTxTracingResult,
     },
     fiber::{
-        channel::ShutdownInfo,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand},
-        payment::{SendPaymentCommand, SendPaymentData},
+        payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
             broadcast_message_to_gossip, new_channel_announcement_unsigned, new_node_announcement,
-            BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
-            ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
-            NodeAnnouncement, Privkey, Pubkey,
+            BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult, GossipMessage,
         },
-        NetworkActorCommand, NetworkActorMessage,
+        BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
+        NetworkActorCommand, NetworkActorMessage, NodeAnnouncement, Privkey, Pubkey,
+        SendPaymentData,
     },
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash,
     invoice::InvoiceBuilder,
@@ -34,6 +31,7 @@ use ckb_types::{
     packed::{CellOutput, OutPoint, ScriptBuilder},
     prelude::{Builder, Entity, Pack},
 };
+use fiber_types::{ChannelFlags, ShutdownInfo};
 use musig2::{PartialSignature, SecNonce};
 use ractor::{call, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};

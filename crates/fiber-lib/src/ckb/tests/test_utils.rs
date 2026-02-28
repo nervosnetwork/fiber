@@ -19,13 +19,13 @@ use tokio::sync::RwLock as TokioRwLock;
 
 use crate::{
     ckb::{
-        config::{UdtArgInfo, UdtCfgInfos, UdtScript},
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
         CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError, GetTxResponse,
     },
-    fiber::types::Hash256,
     now_timestamp_as_millis_u64,
 };
+use fiber_types::{Hash256, UdtCfgInfos};
+use fiber_types::{UdtArgInfo, UdtScript};
 
 use crate::ckb::CkbChainMessage;
 

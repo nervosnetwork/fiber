@@ -6,18 +6,14 @@ use ckb_types::{packed::OutPoint, prelude::Pack};
 use secp256k1::{Keypair, PublicKey, SecretKey, XOnlyPublicKey, SECP256K1};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
-use crate::fiber::features::FeatureVector;
 use crate::fiber::types::{
-    new_channel_update_unsigned, ChannelUpdate, ChannelUpdateChannelFlags,
-    ChannelUpdateMessageFlags, EcdsaSignature,
+    new_channel_announcement_unsigned, new_channel_update_unsigned, new_node_announcement,
 };
-use crate::{
-    fiber::types::{
-        new_channel_announcement_unsigned, new_node_announcement, ChannelAnnouncement,
-        NodeAnnouncement, Privkey, Pubkey,
-    },
-    now_timestamp_as_millis_u64,
+use crate::fiber::{
+    ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
+    EcdsaSignature, FeatureVector, NodeAnnouncement, Privkey, Pubkey,
 };
+use crate::now_timestamp_as_millis_u64;
 use fiber_types::protocol::AnnouncedNodeName;
 
 pub fn gen_rand_fiber_public_key() -> Pubkey {

@@ -6,7 +6,7 @@ pub use config::Config;
 #[cfg(any(test, feature = "bench"))]
 pub mod tests;
 
-use fiber::types::Hash256;
+use fiber_types::Hash256;
 use rand::Rng;
 #[cfg(any(test, feature = "bench"))]
 pub use tests::*;

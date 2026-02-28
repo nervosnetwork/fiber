@@ -1,11 +1,6 @@
-use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
-use fiber_types::protocol::AnnouncedNodeName;
-use super::features::FeatureVector;
-use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
+use super::channel::ProcessingChannelError;
 use super::network::get_chain_hash;
-use super::serde_utils::{PartialSignatureAsBytes, PubNonceAsBytes};
 use crate::ckb::contracts::get_udt_whitelist;
-use crate::fiber::payment::PaymentCustomRecords;
 use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::{
@@ -15,26 +10,19 @@ use ckb_types::{
 };
 use core::fmt::{self, Formatter};
 use fiber_sphinx::SphinxError;
-use fiber_types::gen::fiber::PubNonceOpt;
-use fiber_types::gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt};
-use fiber_types::gen::gossip::{self as molecule_gossip};
 use fiber_types::molecule_table_data_len;
-pub use fiber_types::PaymentHopData;
-pub use fiber_types::RevokeAndAck;
+use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::{
-    BroadcastMessage, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor,
-    NodeAnnouncement, CURSOR_SIZE,
+    gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt, PubNonceOpt},
+    gen::gossip::{self as molecule_gossip},
+    BasicMppPaymentData, BroadcastMessage, BroadcastMessageID, ChannelAnnouncement, ChannelFlags,
+    ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Cursor,
+    EcdsaSignature, FeatureVector, Hash256, HashAlgorithm, NodeAnnouncement, OnionPacketError,
+    PartialSignatureAsBytes, PaymentCustomRecords, PaymentOnionPacket, PeeledPaymentOnionPacket,
+    Privkey, PubNonceAsBytes, Pubkey, RemoveTlcReason, RevokeAndAck, TlcErr,
+    UnknownHashAlgorithmError, CURSOR_SIZE, ONION_PACKET_VERSION_V1,
 };
-pub use fiber_types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags};
-pub use fiber_types::{
-    CurrentPaymentHopData, OnionPacketError, PaymentOnionPacket, PaymentSphinxCodec,
-    PeeledPaymentOnionPacket, ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
-};
-pub use fiber_types::{EcdsaSignature, Hash256, NodeId, Privkey, Pubkey, SchnorrSignature};
-pub use fiber_types::{
-    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
-    NO_SHARED_SECRET,
-};
+
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::{PartialSignature, PubNonce};
 use secp256k1::{PublicKey, Secp256k1, Signing};
@@ -1856,8 +1844,6 @@ macro_rules! impl_traits {
 }
 
 impl_traits!(FiberMessage);
-
-pub use fiber_types::BasicMppPaymentData;
 
 /// Trampoline onion hop payload.
 ///

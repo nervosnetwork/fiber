@@ -8,7 +8,8 @@ use std::{
     str::FromStr,
 };
 
-use crate::{fiber::types::NodeId, now_timestamp_as_millis_u64};
+use crate::now_timestamp_as_millis_u64;
+use fiber_types::NodeId;
 
 pub struct AuthRule {
     pub(crate) code: &'static str,

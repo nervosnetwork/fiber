@@ -14,7 +14,7 @@ use tentacle::secio::SecioKeyPair;
 use rand::{thread_rng, Rng};
 use std::io::{Error, ErrorKind, Read, Write};
 
-use super::types::Privkey;
+use fiber_types::Privkey;
 
 impl KeyPair {
     pub fn generate_random_key() -> Self {

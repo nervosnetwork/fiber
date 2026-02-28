@@ -1,9 +1,7 @@
 /// StoreSample implementation for `BroadcastMessage`.
-use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::features::FeatureVector;
-use crate::fiber::types::{
+use crate::fiber::{
     BroadcastMessage, ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags,
-    ChannelUpdateMessageFlags, NodeAnnouncement, SchnorrSignature,
+    ChannelUpdateMessageFlags, FeatureVector, NodeAnnouncement, SchnorrSignature, UdtCfgInfos,
 };
 use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::BROADCAST_MESSAGE_PREFIX;

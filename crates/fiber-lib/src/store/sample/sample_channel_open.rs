@@ -1,5 +1,5 @@
 /// StoreSample implementation for `ChannelOpenRecord` (prefix 201).
-use crate::fiber::channel::{ChannelOpenRecord, ChannelOpeningStatus};
+use crate::fiber::{ChannelOpenRecord, ChannelOpeningStatus};
 use fiber_types::schema::CHANNEL_OPEN_RECORD_PREFIX;
 use tentacle::secio::PeerId;
 

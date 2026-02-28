@@ -38,11 +38,9 @@ use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, OutputPort};
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::{
-    cch::trackers::CchTrackingEvent,
-    fiber::{payment::PaymentStatus as FiberPaymentStatus, types::Hash256},
-    invoice::CkbInvoiceStatus,
-};
+use crate::{cch::trackers::CchTrackingEvent, invoice::CkbInvoiceStatus};
+use fiber_types::payment::PaymentStatus as FiberPaymentStatus;
+use fiber_types::Hash256;
 
 const MAX_CONCURRENT_INVOICE_TRACKERS: usize = 5;
 const INVOICE_TRACKING_TIMEOUT: Duration = Duration::from_secs(5 * 60); // 5 minutes

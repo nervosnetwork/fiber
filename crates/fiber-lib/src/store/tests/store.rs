@@ -1,8 +1,6 @@
 use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::types::*;
 #[allow(unused)]
 use crate::fiber::{
@@ -10,8 +8,11 @@ use crate::fiber::{
     graph::*,
     history::Direction,
     history::TimedResult,
-    payment::{PaymentSession, PaymentStatus, SendPaymentData, SendPaymentDataBuilder},
-    types::{Privkey, Pubkey},
+    payment::{PaymentSessionExt, SendPaymentDataBuilder},
+    AwaitingChannelReadyFlags, ChannelActorData, ChannelBasePublicKeys, ChannelConstraints,
+    ChannelState, FeatureVector, InMemorySigner, NegotiatingFundingFlags, NodeId,
+    PaymentCustomRecords, PaymentSession, PaymentStatus, Privkey, Pubkey, PublicChannelInfo,
+    RevocationData, SendPaymentData, SettlementData, SigningCommitmentFlags,
 };
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
@@ -708,7 +709,7 @@ fn test_store_payment_session() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
     assert_eq!(res.payment_hash(), payment_hash);
@@ -728,7 +729,7 @@ fn test_store_payment_sessions_with_status() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
 
     let payment_hash1 = gen_rand_sha256_hash();
@@ -739,7 +740,7 @@ fn test_store_payment_sessions_with_status() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let mut payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     payment_session.set_success_status();
     store.insert_payment_session(payment_session.clone());
 
@@ -1048,8 +1049,9 @@ fn test_store_sample_channel_actor_state() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_channel_open_record() {
-    use crate::fiber::channel::{ChannelOpenRecord, ChannelOpenRecordStore, ChannelOpeningStatus};
-    use crate::store::sample::StoreSample;
+    use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus};
+
+    use crate::fiber::channel::ChannelOpenRecordStore;
 
     let samples = ChannelOpenRecord::samples(42);
     assert!(!samples.is_empty());
@@ -1110,7 +1112,7 @@ fn sample_peer_id() -> tentacle::secio::PeerId {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn deterministic_hash256(seed: u64, index: u32) -> crate::fiber::types::Hash256 {
+fn deterministic_hash256(seed: u64, index: u32) -> fiber_types::Hash256 {
     use crate::store::sample::deterministic_hash;
     deterministic_hash(seed, index).into()
 }

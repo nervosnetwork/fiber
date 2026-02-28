@@ -2,15 +2,8 @@ use ckb_sdk::util::blake160;
 use ckb_types::packed::Script;
 use musig2::{secp::Point, KeyAggContext};
 
-use crate::{
-    ckb::contracts::{get_script_by_contract, Contract},
-    fiber::{
-        channel::{RevocationData, SettlementData},
-        types::{Hash256, NodeId, Privkey, Pubkey},
-    },
-};
-
-pub use fiber_types::ChannelData;
+use crate::ckb::contracts::{get_script_by_contract, Contract};
+use fiber_types::{ChannelData, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
 
 pub trait WatchtowerStore {
     /// Get the channels that are currently being watched by the watchtower

@@ -1,4 +1,5 @@
-use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtCfgInfosExt, UdtDep, UdtScript};
+use crate::ckb::config::UdtCfgInfosExt;
+use crate::fiber::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use ckb_jsonrpc_types::OutPoint;
 use ckb_types::core::{DepType, ScriptHashType};
 use ckb_types::packed::Script;

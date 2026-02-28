@@ -1,7 +1,7 @@
 #![allow(clippy::needless_range_loop)]
-use crate::fiber::channel::CloseFlags;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::network::PeerDisconnectReason;
+use crate::fiber::CloseFlags;
+use crate::fiber::FeatureVector;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
@@ -11,7 +11,7 @@ use crate::rpc::info::NodeInfoResult;
 use crate::rpc::invoice::Attribute;
 use crate::tests::*;
 use crate::{
-    fiber::types::Hash256,
+    fiber::Hash256,
     invoice::Currency,
     rpc::{
         channel::{ListChannelsParams, ListChannelsResult},
@@ -100,7 +100,7 @@ async fn test_rpc_basic() {
         udt_type_script: Some(Script::default().into()),
         payment_preimage: Some(Hash256::default()),
         payment_hash: None,
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        hash_algorithm: Some(fiber_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
         allow_trampoline_routing: Some(true),
     };
@@ -160,7 +160,7 @@ async fn test_rpc_basic() {
         udt_type_script: Some(Script::default().into()),
         payment_preimage: Some(gen_rand_sha256_hash()),
         payment_hash: None,
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        hash_algorithm: Some(fiber_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
         allow_trampoline_routing: Some(false),
     };
@@ -642,7 +642,7 @@ async fn test_rpc_basic_with_auth() {
                 udt_type_script: Some(Script::default().into()),
                 payment_preimage: Some(Hash256::default()),
                 payment_hash: None,
-                hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+                hash_algorithm: Some(fiber_types::HashAlgorithm::CkbHash),
                 allow_mpp: None,
                 allow_trampoline_routing: None,
             },
@@ -905,7 +905,7 @@ async fn test_rpc_feature_check() {
         udt_type_script: Some(Script::default().into()),
         payment_preimage: Some(Hash256::default()),
         payment_hash: None,
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        hash_algorithm: Some(fiber_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
         allow_trampoline_routing: Some(true),
     };

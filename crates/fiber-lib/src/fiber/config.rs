@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
-use super::features::FeatureVector;
+use fiber_types::FeatureVector;
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
@@ -102,8 +102,6 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
-/// The maximum number of parts for a multi-part payment.
-pub const DEFAULT_MAX_PARTS: u64 = 12;
 pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 24;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,

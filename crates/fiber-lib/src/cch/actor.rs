@@ -18,16 +18,14 @@ use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMess
 use crate::cch::trackers::{
     CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
 };
-use crate::cch::{
-    CchConfig, CchError, CchInvoice, CchOrder, CchOrderStatus, CchOrderStore, CchStoreError,
-};
+use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{Hash256, Privkey};
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
+use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
+use fiber_types::{Hash256, Privkey};
 
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
 pub const ACTION_RETRY_MAX_MILLIS: u64 = 600_000; // 10 minute max delay

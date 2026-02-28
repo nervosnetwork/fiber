@@ -17,7 +17,6 @@ use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::str::FromStr;
@@ -51,29 +50,25 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    get_funding_and_reserved_amount, AcceptChannelParameter, AddTlcCommand,
-    AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
-    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelOpenRecord, ChannelOpenRecordStore, ChannelOpeningStatus, ChannelState, ChannelTlcInfo,
-    CloseFlags, OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
-    PublicChannelInfo, RemoveTlcCommand, RetryableTlcOperation, RevocationData, SettlementData,
-    ShuttingDownFlags, StopReason, TLCId, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
+    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
+    ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
+    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
-use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
-use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
+use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    new_node_announcement, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
-    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
-    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrorCode,
+    new_node_announcement, BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult,
+    GossipMessage, Init, OpenChannel,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::client::CkbChainClient;
-use crate::ckb::config::{UdtCfgInfos, UdtCfgInfosExt};
+use crate::ckb::config::UdtCfgInfosExt;
 use crate::ckb::contracts::{
     check_udt_script, get_udt_info, get_udt_whitelist, is_udt_type_auto_accept,
 };
@@ -86,16 +81,12 @@ use crate::fiber::channel::{
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-#[cfg(any(debug_assertions, test, feature = "bench"))]
-use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
-    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords, PaymentStatus,
-    SendPaymentCommand, SendPaymentDataBuilder, SendPaymentWithRouterCommand, TrampolineContext,
+    PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
+    SendPaymentDataBuilder, SendPaymentWithRouterCommand,
 };
-use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineHopPayload,
-    TrampolineOnionPacket, TxAbort, TxSignatures,
+    FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort, TxSignatures,
 };
 use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
@@ -104,6 +95,15 @@ use crate::invoice::{
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::{
+    AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord, ChannelOpeningStatus,
+    ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256,
+    NodeAnnouncement, PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket,
+    PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SessionRoute,
+    SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
+    TrampolineContext, UdtCfgInfos,
+};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -115,7 +115,6 @@ pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 
 pub const DEFAULT_PAYMENT_TRY_LIMIT: u32 = 5;
-pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
@@ -2937,77 +2936,6 @@ pub struct ConnectedPeer {
     pub address: Multiaddr,
     pub pubkey: Pubkey,
     pub features: Option<FeatureVector>,
-}
-
-#[serde_as]
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct PersistentNetworkActorState {
-    // This map is used to store the public key of the peer.
-    #[serde_as(as = "Vec<(DisplayFromStr, _)>")]
-    peer_pubkey_map: HashMap<PeerId, Pubkey>,
-    // These addresses are saved by the user (e.g. the user sends a ConnectPeer rpc to the node),
-    // we will then save these addresses to the peer store.
-    #[serde_as(as = "Vec<(DisplayFromStr, _)>")]
-    saved_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
-}
-
-impl PersistentNetworkActorState {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    fn get_peer_addresses(&self, peer_id: &PeerId) -> Vec<Multiaddr> {
-        self.saved_peer_addresses
-            .get(peer_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Save a single peer address to the peer store. If this address for the peer does not exist,
-    /// then return false, otherwise return true.
-    fn save_peer_address(&mut self, peer_id: PeerId, addr: Multiaddr) -> bool {
-        match self.saved_peer_addresses.entry(peer_id) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().contains(&addr) {
-                    false
-                } else {
-                    entry.get_mut().push(addr);
-                    true
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(vec![addr]);
-                true
-            }
-        }
-    }
-
-    fn get_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
-        self.peer_pubkey_map.get(peer_id).copied()
-    }
-
-    // Save a single peer pubkey to the peer store. Returns true if the new pubkey is different from the old one,
-    // or there does not exist a old pubkey.
-    fn save_peer_pubkey(&mut self, peer_id: PeerId, pubkey: Pubkey) -> bool {
-        match self.peer_pubkey_map.insert(peer_id, pubkey) {
-            Some(old_pubkey) => old_pubkey != pubkey,
-            None => true,
-        }
-    }
-
-    fn num_of_saved_nodes(&self) -> usize {
-        self.saved_peer_addresses.len()
-    }
-
-    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<Multiaddr>> {
-        // TODO: we may need to shuffle the nodes before selecting the first n nodes,
-        // to avoid some malicious nodes from being always selected.
-        self.saved_peer_addresses
-            .iter()
-            .take(n)
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
-    }
 }
 
 pub trait NetworkActorStateStore {

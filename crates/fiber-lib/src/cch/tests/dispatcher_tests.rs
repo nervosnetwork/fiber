@@ -9,8 +9,7 @@ use crate::cch::actions::{
     track_incoming_invoice::TrackIncomingInvoiceDispatcher,
     ActionDispatcher, CchOrderAction,
 };
-use crate::cch::order::{CchInvoice, CchOrder, CchOrderStatus};
-use crate::fiber::types::Hash256;
+use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, Hash256};
 
 /// Helper to create a test payment hash
 fn test_payment_hash(value: u8) -> Hash256 {

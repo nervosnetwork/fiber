@@ -1620,6 +1620,253 @@ pub struct PaymentSession {
     pub status: PaymentStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
+    /// Runtime cache for attempts; not persisted.
+    #[serde(skip)]
+    pub cached_attempts: Vec<Attempt>,
+}
+
+// ============================================================
+// Payment constants
+// ============================================================
+
+/// Default maximum number of parts for a multi-part payment.
+pub const DEFAULT_MAX_PARTS: u64 = 12;
+
+/// Default retry limit per attempt in MPP mode.
+pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
+
+// ============================================================
+// SendPaymentData methods
+// ============================================================
+
+impl SendPaymentData {
+    /// Maximum number of parallel parts for this payment.
+    pub fn max_parts(&self) -> usize {
+        self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) as usize
+    }
+
+    /// Whether this payment allows multi-path payment (MPP).
+    pub fn allow_mpp(&self) -> bool {
+        // only allow mpp if max_parts is greater than 1 and not keysend
+        self.allow_mpp && self.max_parts() > 1 && !self.keysend
+    }
+
+    /// Whether this payment uses trampoline routing.
+    pub fn use_trampoline_routing(&self) -> bool {
+        self.trampoline_hops
+            .as_ref()
+            .is_some_and(|hops| !hops.is_empty())
+    }
+}
+
+// ============================================================
+// PaymentSession methods
+// ============================================================
+
+impl PaymentSession {
+    pub fn update_with_attempt(&mut self, attempt: Attempt) {
+        if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
+            *a = attempt;
+        }
+        self.status = self.calc_payment_status();
+    }
+
+    pub fn retry_times(&self) -> u32 {
+        self.attempts().map(|a| a.tried_times).sum()
+    }
+
+    pub fn allow_mpp(&self) -> bool {
+        self.request.allow_mpp()
+    }
+
+    pub fn payment_hash(&self) -> crate::Hash256 {
+        self.request.payment_hash
+    }
+
+    pub fn is_payment_with_router(&self) -> bool {
+        !self.request.router.is_empty()
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.request.dry_run
+    }
+
+    pub fn attempts(&self) -> std::slice::Iter<'_, Attempt> {
+        self.cached_attempts.iter()
+    }
+
+    #[cfg(test)]
+    pub fn all_attempts_with_status(&self) -> Vec<(u64, AttemptStatus, Option<String>, u32, u128)> {
+        self.cached_attempts
+            .iter()
+            .map(|a| {
+                (
+                    a.id,
+                    a.status,
+                    a.last_error.clone(),
+                    a.tried_times,
+                    a.route.receiver_amount(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn attempts_count(&self) -> usize {
+        self.cached_attempts.len()
+    }
+
+    pub fn max_parts(&self) -> usize {
+        if self.allow_mpp() && !self.request.use_trampoline_routing() {
+            self.request.max_parts()
+        } else {
+            1
+        }
+    }
+
+    pub fn active_attempts(&self) -> Vec<&Attempt> {
+        self.attempts().filter(|a| a.is_active()).collect()
+    }
+
+    pub fn fee_paid(&self) -> u128 {
+        if self.request.use_trampoline_routing() {
+            let total_sent: u128 = self
+                .active_attempts()
+                .iter()
+                .map(|a| a.route.nodes.first().map_or(0, |n| n.amount))
+                .sum();
+            let total_received = self.request.amount;
+            total_sent.saturating_sub(total_received)
+        } else {
+            self.active_attempts().iter().map(|a| a.route.fee()).sum()
+        }
+    }
+
+    pub fn remain_fee_amount(&self) -> Option<u128> {
+        let max_fee_amount = self.request.max_fee_amount?;
+        let remain_fee = max_fee_amount.saturating_sub(self.fee_paid());
+        Some(remain_fee)
+    }
+
+    pub fn remain_amount(&self) -> u128 {
+        let sent_amount = self
+            .active_attempts()
+            .iter()
+            .map(|a| a.route.receiver_amount())
+            .sum::<u128>();
+        self.request.amount.saturating_sub(sent_amount)
+    }
+
+    pub fn new_attempt(
+        &self,
+        attempt_id: u64,
+        source: Pubkey,
+        target: Pubkey,
+        route_hops: Vec<PaymentHopData>,
+    ) -> Attempt {
+        let now = crate::now_timestamp_as_millis_u64();
+        let payment_hash = self.payment_hash();
+        let hash = payment_hash;
+        let try_limit = if self.allow_mpp() {
+            DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT
+        } else {
+            self.try_limit
+        };
+
+        let route = SessionRoute::new(source, target, &route_hops);
+
+        Attempt {
+            id: attempt_id,
+            hash,
+            try_limit,
+            tried_times: 1,
+            payment_hash,
+            route,
+            route_hops,
+            session_key: [0; 32],
+            preimage: None,
+            created_at: now,
+            last_updated_at: now,
+            last_error: None,
+            status: AttemptStatus::Created,
+        }
+    }
+
+    pub fn append_attempt(&mut self, attempt: Attempt) {
+        self.cached_attempts.push(attempt);
+    }
+
+    pub fn allow_more_attempts(&self) -> bool {
+        if self.status.is_final() {
+            return false;
+        }
+
+        if self.remain_amount() == 0 {
+            return false;
+        }
+
+        if self.retry_times() >= self.try_limit {
+            return false;
+        }
+
+        if self.active_attempts().len() >= self.max_parts() {
+            return false;
+        }
+
+        true
+    }
+
+    pub fn calc_payment_status(&self) -> PaymentStatus {
+        if self.cached_attempts.is_empty() || self.status.is_final() {
+            return self.status;
+        }
+
+        if self.attempts().any(|a| a.is_inflight()) {
+            return PaymentStatus::Inflight;
+        }
+
+        if self.attempts().all(|a| a.is_failed()) && !self.allow_more_attempts() {
+            return PaymentStatus::Failed;
+        }
+
+        if self.success_attempts_amount_is_enough() {
+            return PaymentStatus::Success;
+        }
+
+        PaymentStatus::Created
+    }
+
+    pub fn set_inflight_status(&mut self) {
+        self.status = PaymentStatus::Inflight;
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+    }
+
+    pub fn set_success_status(&mut self) {
+        self.status = PaymentStatus::Success;
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+        self.last_error = None;
+        self.last_error_code = None;
+    }
+
+    pub fn set_failed_status(&mut self, error: &str) {
+        self.status = PaymentStatus::Failed;
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+        self.last_error = Some(error.to_string());
+    }
+
+    fn success_attempts_amount_is_enough(&self) -> bool {
+        let success_amount: u128 = self
+            .cached_attempts
+            .iter()
+            .filter_map(|a| {
+                if a.is_success() {
+                    Some(a.route.receiver_amount())
+                } else {
+                    None
+                }
+            })
+            .sum();
+        success_amount >= self.request.amount
+    }
 }
 
 // ============================================================

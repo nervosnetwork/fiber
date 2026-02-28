@@ -3,7 +3,6 @@ use crate::{
     fiber::types::Hash256,
     gen_deterministic_secp256k1_keypair_tuple,
     invoice::{
-        invoice_impl::{CkbScript, InvoiceData, SIGNATURE_U5_SIZE},
         utils::{ar_decompress, ar_encompress},
         Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceError, InvoiceSignature,
     },
@@ -16,6 +15,8 @@ use bech32::{FromBase32, ToBase32};
 use ckb_hash::blake2b_256;
 use ckb_types::packed::Script;
 use fiber_types::gen::invoice::RawCkbInvoice;
+use fiber_types::CkbScript;
+use fiber_types::InvoiceData;
 use secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
     Message, Secp256k1,
@@ -85,7 +86,7 @@ fn test_signature() {
     );
     let signature = InvoiceSignature(signature);
     let base32 = signature.to_base32();
-    assert_eq!(base32.len(), SIGNATURE_U5_SIZE);
+    assert_eq!(base32.len(), fiber_types::SIGNATURE_U5_SIZE);
 
     let decoded_signature = InvoiceSignature::from_base32(&base32).unwrap();
     assert_eq!(decoded_signature, signature);

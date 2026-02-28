@@ -9,7 +9,8 @@ use ckb_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{ckb::jsonrpc_types_convert::*, fiber::types::Hash256};
+use crate::ckb::jsonrpc_types_convert::*;
+use fiber_types::Hash256;
 
 #[derive(Debug, Clone)]
 pub struct GetTxResponse {

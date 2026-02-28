@@ -19,38 +19,33 @@ use std::path::Path;
 
 use super::db_migrate::DbMigrate;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::cch::{CchOrder, CchOrderStore, CchStoreError};
+use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::payment::{
-    Attempt, AttemptStatus, PaymentCustomRecords, PaymentSession, PaymentStatus,
-};
-use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
+use crate::fiber::types::HoldTlc;
 #[cfg(feature = "watchtower")]
-use crate::fiber::types::{Privkey, Pubkey};
+use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{
-            ChannelActorState, ChannelActorStateStore, ChannelOpenRecord, ChannelOpenRecordStore,
-            ChannelState,
-        },
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore},
         graph::NetworkGraphStateStore,
         history::{Direction, TimedResult},
-        network::{NetworkActorStateStore, PersistentNetworkActorState},
-        types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
+        network::NetworkActorStateStore,
+        payment::PaymentSessionExt,
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
-};
-#[cfg(feature = "watchtower")]
-use crate::{
-    fiber::{
-        channel::{RevocationData, SettlementData},
-        types::NodeId,
-    },
-    watchtower::{ChannelData, WatchtowerStore},
 };
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
 use fiber_types::schema::*;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::CchOrder;
+use fiber_types::{
+    Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
+    Cursor, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    PersistentNetworkActorState, CURSOR_SIZE,
+};
+#[cfg(feature = "watchtower")]
+use fiber_types::{ChannelData, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

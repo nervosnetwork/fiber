@@ -1,24 +1,19 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
-use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::graph::NetworkGraph;
 use crate::fiber::graph::PathFindError;
 use crate::fiber::graph::SendPaymentState;
-use crate::fiber::payment::SessionRoute;
-use crate::fiber::payment::{SendPaymentData, SendPaymentDataBuilder};
+use crate::fiber::network::get_chain_hash;
+use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataBuilder, SendPaymentDataExt};
 use crate::fiber::types::{
-    new_channel_update_unsigned, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey,
-    TrampolineOnionPacket,
+    new_channel_update_unsigned, new_node_announcement, TrampolineOnionPacket,
 };
-use crate::{
-    fiber::{
-        graph::{NetworkGraph, RouterHop},
-        network::get_chain_hash,
-        payment::SendPaymentCommand,
-        types::{new_node_announcement, ChannelAnnouncement, Hash256},
-    },
-    store::Store,
+use crate::fiber::{
+    ChannelAnnouncement, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, FeatureVector,
+    Hash256, Privkey, Pubkey, RouterHop, SendPaymentData, SessionRoute,
 };
+use crate::store::Store;
 use ckb_types::{
     packed::{OutPoint, Script},
     prelude::Entity,
@@ -922,11 +917,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
 
     // Peel inner trampoline onion hop-by-hop and validate the chain.
     let peeled1 = TrampolineOnionPacket::new(trampoline_bytes)
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[2]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[2]), assoc, SECP256K1)
         .expect("peel t1");
     assert!(matches!(
         peeled1.current,
@@ -937,11 +928,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
     let peeled2 = peeled1
         .next
         .expect("next packet to t2")
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[3]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[3]), assoc, SECP256K1)
         .expect("peel t2");
     assert!(matches!(
         peeled2.current,
@@ -952,11 +939,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
     let peeled3 = peeled2
         .next
         .expect("next packet to t3")
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[4]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[4]), assoc, SECP256K1)
         .expect("peel t3");
     assert!(matches!(
         peeled3.current,
@@ -967,11 +950,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
     let peeled_final = peeled3
         .next
         .expect("next packet to final")
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[5]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[5]), assoc, SECP256K1)
         .expect("peel final");
     assert!(matches!(
         peeled_final.current,
@@ -988,11 +967,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("trampoline route should be built");
     let trampoline_short = route_short.last().unwrap().trampoline_onion().unwrap();
     let peeled_short_1 = TrampolineOnionPacket::new(trampoline_short)
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[2]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[2]), assoc, SECP256K1)
         .expect("peel short t1");
     assert!(matches!(
         peeled_short_1.current,
@@ -1199,11 +1174,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let trampoline_bytes = route.last().unwrap().trampoline_onion().unwrap();
 
     let peeled1 = TrampolineOnionPacket::new(trampoline_bytes)
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[2]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[2]), assoc, SECP256K1)
         .expect("peel t1");
     match peeled1.current {
         crate::fiber::types::TrampolineHopPayload::Forward {
@@ -1222,11 +1193,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let peeled2 = peeled1
         .next
         .unwrap()
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[3]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[3]), assoc, SECP256K1)
         .expect("peel t2");
     match peeled2.current {
         crate::fiber::types::TrampolineHopPayload::Forward {
@@ -1245,11 +1212,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let peeled3 = peeled2
         .next
         .unwrap()
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[4]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[4]), assoc, SECP256K1)
         .expect("peel t3");
     match peeled3.current {
         crate::fiber::types::TrampolineHopPayload::Forward {

@@ -150,6 +150,7 @@ mutable-key-type = "allow"
 needless-return = "allow"
 upper-case-acronyms = "allow"
 result_large_err = "allow"
+new_ret_no_self = "allow"
 
 [package.metadata.cargo-shear]
 ignored = ["getrandom"]

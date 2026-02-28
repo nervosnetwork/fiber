@@ -14,45 +14,36 @@
 //! - Serde utilities for hex and base58 serialization
 //! - Molecule generated types for protocol messages
 
-pub mod serde_utils;
-
-pub mod primitives;
-pub mod protocol;
-
 pub mod cch;
 pub mod channel;
 pub mod gen;
 pub mod invoice;
 pub mod network;
 pub mod payment;
+pub mod primitives;
+pub mod protocol;
 pub mod schema;
-
-#[cfg(feature = "watchtower")]
-pub mod watchtower;
-
-pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
-
-pub use channel::*;
-
-pub use payment::*;
-
-pub use protocol::*;
-
-pub use network::PersistentNetworkActorState;
+pub mod serde_utils;
 
 pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
-
+pub use channel::*;
 pub use invoice::*;
+pub use network::PersistentNetworkActorState;
+pub use payment::*;
+pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
+pub use protocol::*;
 
 #[cfg(feature = "watchtower")]
 pub use watchtower::{ChannelData, RevocationData, SettlementData, SettlementTlc};
+
+#[cfg(feature = "watchtower")]
+pub mod watchtower;
 
 pub use serde_utils::{
     duration_hex, from_hex, to_hex, CompactSignatureAsBytes, EntityHex, PartialSignatureAsBytes,
     PubNonceAsBytes, SliceBase58, SliceHex, SliceHexNoPrefix, U128Hex, U16Hex, U32Hex, U64Hex,
 };
 
-// Re-export tentacle types for external use
 pub use tentacle_multiaddr::Multiaddr;
 pub use tentacle_secio::PeerId;
 

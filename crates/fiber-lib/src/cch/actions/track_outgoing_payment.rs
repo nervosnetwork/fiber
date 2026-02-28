@@ -1,6 +1,7 @@
+use fiber_types::CchOrder;
 use ractor::ActorRef;
 
-use crate::cch::{actions::ActionExecutor, actor::CchState, CchMessage, CchOrder, CchOrderStore};
+use crate::cch::{actions::ActionExecutor, actor::CchState, CchMessage, CchOrderStore};
 
 pub struct TrackOutgoingPaymentDispatcher;
 

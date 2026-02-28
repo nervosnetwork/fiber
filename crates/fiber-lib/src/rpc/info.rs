@@ -1,13 +1,9 @@
 use super::graph::UdtCfgInfos;
 use crate::ckb::CkbConfig;
-use crate::fiber::serde_utils::U32Hex;
-use crate::fiber::{
-    serde_utils::{U128Hex, U64Hex},
-    types::{Hash256, Pubkey},
-    NetworkActorCommand, NetworkActorMessage,
-};
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
+use fiber_types::{Hash256, Pubkey, U128Hex, U32Hex, U64Hex};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;

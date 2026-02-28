@@ -2,10 +2,10 @@
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use fiber_types::{FeatureVector, HopHint};
 use fnn::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
 };
-use fnn::fiber::features::FeatureVector;
 use fnn::fiber::gossip::GossipMessageStore;
 use fnn::fiber::graph::{GraphChannelStat, NetworkGraph};
 use fnn::fiber::network::get_chain_hash;
@@ -320,7 +320,7 @@ fn bench_find_path_single_call_large_graph(c: &mut Criterion) {
     let target: Pubkey = keys[199].into();
 
     let channel_stats = GraphChannelStat::default();
-    let hop_hints: Vec<fnn::fiber::payment::HopHint> = Vec::new();
+    let hop_hints: Vec<HopHint> = Vec::new();
     let amount = 500;
 
     let mut group = c.benchmark_group("find_path_single_call_large_graph");

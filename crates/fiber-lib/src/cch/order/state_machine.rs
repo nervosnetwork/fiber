@@ -1,9 +1,10 @@
-use super::{CchOrder, CchOrderStatus};
 use crate::{
     cch::{trackers::CchTrackingEvent, CchError},
-    fiber::{payment::PaymentStatus, types::Hash256},
     invoice::CkbInvoiceStatus,
 };
+use fiber_types::HashAlgorithm;
+use fiber_types::{payment::PaymentStatus, Hash256};
+use fiber_types::{CchOrder, CchOrderStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CchOrderEvent {
@@ -46,7 +47,6 @@ impl CchOrderStateMachine {
                 }
                 // Verify preimage hashes to payment_hash if provided
                 if let Some(ref preimage) = payment_preimage {
-                    use crate::fiber::hash_algorithm::HashAlgorithm;
                     let hash_algorithm = HashAlgorithm::Sha256;
                     let computed_hash = hash_algorithm.hash(*preimage);
                     if computed_hash.as_slice() != order.payment_hash.as_ref() {

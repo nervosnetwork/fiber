@@ -6,23 +6,23 @@ use std::collections::{HashMap, VecDeque};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ckb_types::packed::{Script, Transaction};
+use fiber_types::PendingTlcs;
+use fiber_types::TlcState;
 use musig2::secp::MaybeScalar;
 use musig2::SecNonceBuilder;
 
+use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::InMemorySignerExt;
-use crate::fiber::channel::{
-    AddTlcCommand, AppliedFlags, ChannelActorData, ChannelActorState, ChannelBasePublicKeys,
-    ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentNumbers, InMemorySigner,
-    PendingTlcs, PrevTlcInfo, PublicChannelInfo, RetryableTlcOperation, ShutdownInfo, TLCId,
-    TlcInfo, TlcState, TlcStatus,
-};
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{
-    ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
-    PaymentOnionPacket, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, SchnorrSignature,
-    TlcErrPacket,
+use crate::fiber::{
+    AddTlcCommand, AppliedFlags, ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys,
+    ChannelConstraints, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
+    ChannelUpdateMessageFlags, CommitmentNumbers, InMemorySigner, InboundTlcStatus,
+    OutboundTlcStatus, PaymentOnionPacket, PrevTlcInfo, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevokeAndAck, SchnorrSignature, ShutdownInfo, TLCId,
+    TlcErrPacket, TlcInfo, TlcStatus,
 };
 use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+use fiber_types::HashAlgorithm;
 
 use super::{
     deterministic_ecdsa_signature, deterministic_hash, deterministic_hash256,
@@ -187,7 +187,7 @@ impl ChannelActorState {
 
         // --- TlcState: with offered and received TLCs, all nested Options populated ---
         let offered_tlc = TlcInfo {
-            status: TlcStatus::Outbound(crate::fiber::channel::OutboundTlcStatus::LocalAnnounced),
+            status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
             tlc_id: TLCId::Offered(0),
             amount: 50_000_000,
             payment_hash: deterministic_hash256(seed, 300),
@@ -211,7 +211,7 @@ impl ChannelActorState {
         };
 
         let received_tlc = TlcInfo {
-            status: TlcStatus::Inbound(crate::fiber::channel::InboundTlcStatus::Committed),
+            status: TlcStatus::Inbound(InboundTlcStatus::Committed),
             tlc_id: TLCId::Received(0),
             amount: 30_000_000,
             payment_hash: deterministic_hash256(seed, 310),

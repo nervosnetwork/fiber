@@ -1,18 +1,12 @@
 use crate::{
-    ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
-        features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
-        hash_algorithm::HashAlgorithm,
-        types::{
-            new_node_announcement, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor,
-            Hash256, NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData,
-            PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey,
-            TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
-            TrampolineOnionPacket, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
-            ONION_PACKET_VERSION_V1,
-        },
-        PaymentCustomRecords,
+        types::{new_node_announcement, AddTlc, TrampolineHopPayload, TrampolineOnionPacket},
+        BasicMppPaymentData, BroadcastMessageID, Cursor, FeatureVector, Hash256, HashAlgorithm,
+        NodeAnnouncement, NodeId, OnionPacketError, PaymentCustomRecords, PaymentHopData,
+        PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr,
+        TlcErrData, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
+        ONION_PACKET_VERSION_V1,
     },
     gen_deterministic_fiber_private_key, gen_rand_channel_outpoint, gen_rand_fiber_private_key,
     gen_rand_fiber_public_key, gen_rand_sha256_hash, now_timestamp_as_millis_u64,
@@ -26,6 +20,8 @@ use ckb_types::{
 };
 use fiber_sphinx::OnionSharedSecretIter;
 use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::UdtArgInfo;
+use fiber_types::{UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use molecule::prelude::{Builder, Byte, Entity};
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use serde::Deserialize;

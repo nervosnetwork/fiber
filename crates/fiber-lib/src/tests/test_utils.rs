@@ -4,25 +4,21 @@ use crate::ckb::CkbConfig;
 use crate::ckb::GetTxResponse;
 use crate::fiber::channel::*;
 use crate::fiber::config::CKB_SHANNONS;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
-use crate::fiber::payment::Attempt;
-use crate::fiber::payment::PaymentSession;
-use crate::fiber::payment::PaymentStatus;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
-use crate::fiber::payment::SessionRoute;
-use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Init;
-use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
-use crate::fiber::PaymentCustomRecords;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
+use crate::fiber::{
+    Attempt, EcdsaSignature, FeatureVector, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    Pubkey, SessionRoute,
+};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
@@ -36,6 +32,8 @@ use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
 };
+use fiber_types::TLCId;
+use fiber_types::TlcInfo;
 #[cfg(not(target_arch = "wasm32"))]
 use hyper::{header::HeaderValue, HeaderMap};
 #[cfg(not(target_arch = "wasm32"))]
@@ -82,7 +80,7 @@ use tracing::warn;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NodeInfo;
 use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
-use crate::fiber::types::Privkey;
+use crate::fiber::Privkey;
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
@@ -94,7 +92,7 @@ use crate::{
     fiber::network::{
         NetworkActor, NetworkActorCommand, NetworkActorMessage, NetworkActorStartArguments,
     },
-    fiber::types::Hash256,
+    fiber::Hash256,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
 };
@@ -2166,10 +2164,7 @@ pub async fn wait_until_node_has_public_channels_at_least(node: &NetworkNode, ch
 
 /// Helper function to capture all nodes' balances across all channels
 /// Returns 0 for channels that don't exist on a particular node
-pub fn capture_balances(
-    nodes: &[&NetworkNode],
-    channels: &[crate::fiber::types::Hash256],
-) -> Vec<Vec<u128>> {
+pub fn capture_balances(nodes: &[&NetworkNode], channels: &[Hash256]) -> Vec<Vec<u128>> {
     nodes
         .iter()
         .map(|node| {

@@ -32,20 +32,18 @@ use crate::{
         signer::LocalSigner,
         CkbConfig,
     },
-    fiber::{
-        channel::{
-            settlement_data_to_witness, settlement_tlc_local_pubkey_hash, RevocationData,
-            SettlementData, XUDT_COMPATIBLE_WITNESS,
-        },
-        hash_algorithm::HashAlgorithm,
-        types::{Hash256, NodeId, Privkey, Pubkey},
+    fiber::channel::{
+        settlement_data_to_witness, settlement_tlc_local_pubkey_hash, XUDT_COMPATIBLE_WITNESS,
     },
     now_timestamp_as_millis_u64,
     utils::{actor::ActorHandleLogGuard, tx::compute_tx_message},
     watchtower::{
         channel_data_funding_tx_lock, channel_data_local_settlement_pubkey_hash,
-        channel_data_x_only_aggregated_pubkey, ChannelData,
+        channel_data_x_only_aggregated_pubkey,
     },
+};
+use fiber_types::{
+    ChannelData, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey, RevocationData, SettlementData,
 };
 
 use super::WatchtowerStore;

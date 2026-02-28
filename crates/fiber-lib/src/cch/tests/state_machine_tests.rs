@@ -6,13 +6,11 @@
 //! - on_entering actions for each status
 //! - Failure transitions from any state
 
-use crate::cch::order::{
-    state_machine::CchOrderEvent, CchInvoice, CchOrder, CchOrderStateMachine, CchOrderStatus,
-};
+use crate::cch::order::{state_machine::CchOrderEvent, CchOrderStateMachine};
 use crate::cch::CchError;
-use crate::fiber::payment::PaymentStatus;
-use crate::fiber::types::Hash256;
 use crate::invoice::CkbInvoiceStatus;
+use fiber_types::{CchInvoice, CchOrder, CchOrderStatus};
+use fiber_types::{Hash256, PaymentStatus};
 
 /// Helper function to create a test payment hash
 fn test_payment_hash(value: u8) -> Hash256 {
@@ -24,7 +22,7 @@ fn test_payment_hash(value: u8) -> Hash256 {
 /// Helper function to create a valid preimage/payment hash pair.
 /// The preimage will hash to the payment hash using SHA256.
 fn create_valid_preimage_pair(seed: u8) -> (Hash256, Hash256) {
-    use crate::fiber::hash_algorithm::HashAlgorithm;
+    use fiber_types::HashAlgorithm;
     // Generate a preimage from the seed
     let mut preimage_bytes = [0u8; 32];
     preimage_bytes[0] = seed;

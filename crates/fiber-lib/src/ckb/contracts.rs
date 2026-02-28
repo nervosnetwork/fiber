@@ -13,7 +13,8 @@ use tracing::info;
 use crate::{ckb::config::new_ckb_rpc_async_client, fiber::config::FiberScript};
 use fiber_types::gen::fiber::{UdtDep, UdtDepUnion};
 
-use super::config::{UdtArgInfo, UdtCfgInfos, UdtCfgInfosExt};
+use super::config::UdtCfgInfosExt;
+use fiber_types::{UdtArgInfo, UdtCfgInfos};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Contract {

@@ -1,4 +1,4 @@
-use crate::cch::{CchInvoice, CchOrder};
+use fiber_types::{CchInvoice, CchOrder};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentHandlerType {

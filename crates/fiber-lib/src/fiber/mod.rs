@@ -28,7 +28,6 @@ pub use network::{
     start_network, NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     NetworkServiceEvent,
 };
-pub use payment::{HopHint, PaymentCustomRecords};
 pub use settle_tlc_set_command::SettleTlcSetCommand;
 
 pub(crate) const ASSUME_NETWORK_ACTOR_ALIVE: &str = "network actor must be alive";

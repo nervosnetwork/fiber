@@ -1,10 +1,7 @@
 use super::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
 };
-use super::types::{
-    new_channel_announcement_unsigned, new_channel_update_unsigned, ChannelUpdateChannelFlags,
-    ChannelUpdateMessageFlags, UpdateTlcInfo,
-};
+use super::types::{new_channel_announcement_unsigned, new_channel_update_unsigned, UpdateTlcInfo};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -13,8 +10,7 @@ use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
-use crate::fiber::payment::PaymentCustomRecords;
-use crate::fiber::types::TxSignatures;
+use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::utils::payment::is_invoice_fulfilled;
@@ -34,12 +30,9 @@ use crate::{
         network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
         types::{
             peeled_packet_mpp_custom_records, AcceptChannel, AddTlc, AnnouncementSignatures,
-            BasicMppPaymentData, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelReady,
-            ChannelUpdate, ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage,
-            FiberMessage, Hash256, HoldTlc, OpenChannel, PeeledPaymentOnionPacket, Privkey, Pubkey,
-            ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, Shutdown, TlcErr,
-            TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket,
-            TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
+            ChannelReady, ClosingSigned, CommitmentSigned, FiberChannelMessage, FiberMessage,
+            HoldTlc, OpenChannel, ReestablishChannel, RemoveTlc, Shutdown, TrampolineHopPayload,
+            TrampolineOnionPacket, TxCollaborationMsg, TxComplete, TxUpdate,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -58,14 +51,18 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
     H256,
 };
-pub use fiber_types::{
+use fiber_types::{
     AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
-    ChannelActorData, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags, ChannelOpenRecord,
-    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, CollaboratingFundingTxFlags,
-    CommitmentNumbers, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PendingTlcs,
-    PublicChannelInfo, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
-    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcInfo,
-    TlcState, TlcStatus, INITIAL_COMMITMENT_NUMBER,
+    BasicMppPaymentData, ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys,
+    ChannelConstraints, ChannelFlags, ChannelOpenRecord, ChannelState, ChannelTlcInfo,
+    ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, CloseFlags,
+    CollaboratingFundingTxFlags, CommitmentNumbers, EcdsaSignature, Hash256, InMemorySigner,
+    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords,
+    PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey,
+    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
+    RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
+    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus, NO_SHARED_SECRET,
 };
 use molecule::prelude::{Builder, Entity};
 #[cfg(test)]
@@ -2952,7 +2949,6 @@ where
 }
 
 // When we are forwarding a TLC, we need to know the previous TLC information.
-pub use fiber_types::PrevTlcInfo;
 
 impl From<TlcInfo> for TlcNotifyInfo {
     fn from(tlc: TlcInfo) -> Self {
@@ -3025,8 +3021,6 @@ pub fn settlement_tlc_local_pubkey_hash(tlc: &SettlementTlc) -> [u8; 20] {
 
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
-
-pub use fiber_types::PendingNotifySettleTlc;
 
 /// Check if a PendingNotifySettleTlc should be held.
 fn pending_notify_should_hold(tlc: &PendingNotifySettleTlc) -> bool {
@@ -7179,8 +7173,6 @@ impl std::fmt::Display for Musig2Context {
         write!(f, "{}", context_str)
     }
 }
-
-pub use fiber_types::InMemorySigner;
 
 /// Extension trait providing methods for `InMemorySigner` that depend on
 /// fiber-lib-only functions (key derivation, ckb_hash, Musig2Context).

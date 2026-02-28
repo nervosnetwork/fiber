@@ -2,15 +2,12 @@
 // https://github.com/lightningnetwork/lnd/blob/b7c59b36a74975c4e710a02ea42959053735402e/routing/probability_bimodal.go
 // we only use direct channel probability now.
 
-use super::payment::SessionRouteNode;
-use super::{
-    graph::NetworkGraphStateStore,
-    types::{ChannelUpdate, Pubkey, TlcErr},
-};
+use super::graph::NetworkGraphStateStore;
 #[cfg(test)]
 use crate::mock_timestamp_as_millis_u64;
-use crate::{fiber::types::TlcErrorCode, now_timestamp_as_millis_u64};
+use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::OutPoint;
+use fiber_types::{ChannelUpdate, Pubkey, SessionRouteNode, TlcErr, TlcErrorCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};

@@ -6,12 +6,12 @@ use tracing::debug;
 
 use crate::{
     ckb::contracts::{get_script_by_contract, Contract},
-    fiber::types::Hash256,
     utils::actor::ActorHandleLogGuard,
 };
+use fiber_types::Hash256;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::fiber::serde_utils::EntityHex;
+use fiber_types::serde_utils::EntityHex;
 #[cfg(not(target_arch = "wasm32"))]
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]

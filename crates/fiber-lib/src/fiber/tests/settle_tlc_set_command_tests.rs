@@ -4,19 +4,19 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ckb_types::packed::{OutPoint, Script};
+use fiber_types::TlcState;
 use tentacle::secio::PeerId;
 
 use crate::fiber::channel::InMemorySignerExt;
-use crate::fiber::channel::InboundTlcStatus;
-use crate::fiber::channel::{
-    AppliedFlags, ChannelActorData, ChannelActorState, ChannelActorStateStore,
-    ChannelBasePublicKeys, ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentNumbers,
-    InMemorySigner, TLCId, TlcInfo, TlcState, TlcStatus,
-};
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::payment::PaymentCustomRecords;
+use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
-use crate::fiber::types::{Hash256, HoldTlc, RemoveTlcReason, TlcErrorCode, NO_SHARED_SECRET};
+use crate::fiber::types::HoldTlc;
+use crate::fiber::{
+    AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelConstraints, ChannelState,
+    ChannelTlcInfo, CommitmentNumbers, Hash256, HashAlgorithm, InMemorySigner, InboundTlcStatus,
+    PaymentCustomRecords, RemoveTlcReason, TLCId, TlcErrorCode, TlcInfo, TlcStatus,
+    NO_SHARED_SECRET,
+};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
 use crate::invoice::{InvoiceStore, PreimageStore};
