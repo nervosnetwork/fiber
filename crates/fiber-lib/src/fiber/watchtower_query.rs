@@ -1,6 +1,7 @@
 use crate::fiber::types::Hash256;
 
 /// Status of a TLC as reported by the watchtower
+#[derive(Clone)]
 pub struct TlcWatchtowerStatus {
     /// The preimage for the payment hash, if known by the watchtower
     pub preimage: Option<Hash256>,

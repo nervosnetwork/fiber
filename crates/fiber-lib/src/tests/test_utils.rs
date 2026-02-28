@@ -273,6 +273,7 @@ pub struct NetworkNodeConfig {
     rpc_config: Option<RpcConfig>,
     ckb_config: Option<CkbConfig>,
     mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
+    watchtower_querier: Option<std::sync::Arc<dyn crate::fiber::WatchtowerQuerier>>,
 }
 
 impl NetworkNodeConfig {
@@ -290,6 +291,7 @@ pub struct NetworkNodeConfigBuilder {
     #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
     mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
+    watchtower_querier: Option<std::sync::Arc<dyn crate::fiber::WatchtowerQuerier>>,
 }
 
 impl Default for NetworkNodeConfigBuilder {
@@ -306,6 +308,7 @@ impl NetworkNodeConfigBuilder {
             rpc_config: None,
             fiber_config_updater: None,
             mock_chain_actor_middleware: None,
+            watchtower_querier: None,
         }
     }
 
@@ -341,6 +344,14 @@ impl NetworkNodeConfigBuilder {
         middleware: Box<dyn MockChainActorMiddleware>,
     ) -> Self {
         self.mock_chain_actor_middleware = Some(middleware);
+        self
+    }
+
+    pub fn watchtower_querier(
+        mut self,
+        querier: Option<std::sync::Arc<dyn crate::fiber::WatchtowerQuerier>>,
+    ) -> Self {
+        self.watchtower_querier = querier;
         self
     }
 
@@ -385,6 +396,7 @@ impl NetworkNodeConfigBuilder {
             fiber_config,
             rpc_config,
             mock_chain_actor_middleware: self.mock_chain_actor_middleware,
+            watchtower_querier: self.watchtower_querier,
         };
 
         if let Some(updater) = self.fiber_config_updater {
@@ -1471,6 +1483,7 @@ impl NetworkNode {
             rpc_config,
             ckb_config,
             mock_chain_actor_middleware,
+            watchtower_querier,
         } = config;
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
@@ -1511,7 +1524,7 @@ impl NetworkNode {
                 store.clone(),
                 network_graph.clone(),
                 chain_client.clone(),
-                None,
+                watchtower_querier,
             ),
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
@@ -1640,6 +1653,7 @@ impl NetworkNode {
             fiber_config: self.fiber_config.clone(),
             rpc_config: self.rpc_config.clone(),
             mock_chain_actor_middleware: self.mock_chain_actor_middleware.clone(),
+            watchtower_querier: None,
         }
     }
 
