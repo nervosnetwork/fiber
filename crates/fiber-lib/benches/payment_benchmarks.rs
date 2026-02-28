@@ -9,8 +9,8 @@ use fnn::fiber::config::{
 use fnn::fiber::gossip::GossipMessageStore;
 use fnn::fiber::graph::{GraphChannelStat, NetworkGraph};
 use fnn::fiber::types::{
-    new_node_announcement, ChannelAnnouncement, ChannelUpdateChannelFlags,
-    ChannelUpdateMessageFlags, Pubkey,
+    ChannelAnnouncement, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, NodeAnnouncement,
+    Pubkey,
 };
 use fnn::fiber_types::get_chain_hash;
 use fnn::store::Store;
@@ -104,13 +104,15 @@ fn build_graph_for_find_path_bench(
     }
 
     for (i, (sk, _pk)) in keypairs.iter().enumerate() {
-        store.save_node_announcement(new_node_announcement(
+        store.save_node_announcement(NodeAnnouncement::new_signed(
             format!("node{i}").as_str().into(),
             FeatureVector::default(),
             vec![],
             &(*sk).into(),
             now_timestamp_as_millis_u64(),
             0,
+            Default::default(),
+            env!("CARGO_PKG_VERSION").to_string(),
         ));
     }
 

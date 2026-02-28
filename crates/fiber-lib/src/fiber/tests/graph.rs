@@ -5,10 +5,11 @@ use crate::fiber::graph::NetworkGraph;
 use crate::fiber::graph::PathFindError;
 use crate::fiber::graph::SendPaymentState;
 use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataBuilder, SendPaymentDataExt};
-use crate::fiber::types::{new_node_announcement, TrampolineOnionPacket};
+use crate::fiber::types::TrampolineOnionPacket;
 use crate::fiber::{
     ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
-    FeatureVector, Hash256, Privkey, Pubkey, RouterHop, SendPaymentData, SessionRoute,
+    FeatureVector, Hash256, NodeAnnouncement, Privkey, Pubkey, RouterHop, SendPaymentData,
+    SessionRoute,
 };
 use crate::store::Store;
 use ckb_types::{
@@ -51,23 +52,27 @@ impl MockNetworkGraph {
         let (store, _dir) = generate_store();
         let keypairs = generate_key_pairs(node_num + 1);
         let (secret_key1, public_key1) = keypairs[0];
-        store.save_node_announcement(new_node_announcement(
+        store.save_node_announcement(NodeAnnouncement::new_signed(
             "node0".into(),
             FeatureVector::default(),
             vec![],
             &secret_key1.into(),
             now_timestamp_as_millis_u64(),
             0,
+            Default::default(),
+            env!("CARGO_PKG_VERSION").to_string(),
         ));
         for (i, keypair) in keypairs.iter().enumerate().skip(1) {
             let (sk, _pk) = keypair;
-            store.save_node_announcement(new_node_announcement(
+            store.save_node_announcement(NodeAnnouncement::new_signed(
                 format!("node{i}").as_str().into(),
                 FeatureVector::default(),
                 vec![],
                 &(*sk).into(),
                 now_timestamp_as_millis_u64(),
                 0,
+                Default::default(),
+                env!("CARGO_PKG_VERSION").to_string(),
             ));
         }
         let mut graph = NetworkGraph::new(store.clone(), public_key1.into(), true);

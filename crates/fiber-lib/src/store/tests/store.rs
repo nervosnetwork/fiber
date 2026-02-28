@@ -55,13 +55,15 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
     let sk: Privkey = (*signer.secret_key()).into();
     (
         sk.clone(),
-        new_node_announcement(
+        NodeAnnouncement::new_signed(
             AnnouncedNodeName::from_string("node1").expect("invalid name"),
             FeatureVector::default(),
             vec![],
             &sk,
             now_timestamp_as_millis_u64(),
             0,
+            Default::default(),
+            env!("CARGO_PKG_VERSION").to_string(),
         ),
     )
 }
@@ -74,7 +76,7 @@ fn mock_channel() -> ChannelAnnouncement {
     let rand_hash256 = gen_rand_sha256_hash();
     let pubkey1: Pubkey = (*signer1.pubkey()).into();
     let pubkey2: Pubkey = (*signer2.pubkey()).into();
-    new_channel_announcement_unsigned(
+    ChannelAnnouncement::new_unsigned(
         &pubkey1,
         &pubkey2,
         OutPoint::new_builder()
@@ -841,13 +843,15 @@ fn test_store_payment_custom_record() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = new_node_announcement(
+    let node_announcement = NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     assert!(
         node_announcement.verify(),

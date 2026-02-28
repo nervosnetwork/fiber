@@ -6,7 +6,6 @@ use ckb_types::{packed::OutPoint, prelude::Pack};
 use secp256k1::{Keypair, PublicKey, SecretKey, XOnlyPublicKey, SECP256K1};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
-use crate::fiber::types::{new_channel_announcement_unsigned, new_node_announcement};
 use crate::fiber::{
     ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
     EcdsaSignature, FeatureVector, NodeAnnouncement, Privkey, Pubkey,
@@ -74,13 +73,15 @@ pub fn gen_rand_node_announcement() -> (Privkey, NodeAnnouncement) {
 }
 
 pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
-    new_node_announcement(
+    NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         sk,
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     )
 }
 
@@ -124,7 +125,7 @@ impl ChannelTestContext {
         let funding_tx = create_funding_tx(&xonly).await;
         let outpoint = funding_tx.output_pts_iter().next().unwrap();
         let capacity: u64 = funding_tx.output(0).unwrap().capacity().unpack();
-        let mut channel_announcement = new_channel_announcement_unsigned(
+        let mut channel_announcement = ChannelAnnouncement::new_unsigned(
             &node1_sk.pubkey(),
             &node2_sk.pubkey(),
             outpoint.clone(),

@@ -1,7 +1,7 @@
 use crate::{
     fiber::{
         gen::{fiber as molecule_fiber, gossip},
-        types::{new_node_announcement, AddTlc, TrampolineHopPayload, TrampolineOnionPacket},
+        types::{AddTlc, TrampolineHopPayload, TrampolineOnionPacket},
         BasicMppPaymentData, BroadcastMessageID, Cursor, FeatureVector, Hash256, HashAlgorithm,
         NodeAnnouncement, NodeId, OnionPacketError, PaymentCustomRecords, PaymentHopData,
         PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr,
@@ -749,13 +749,15 @@ fn test_tlc_error_code() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = new_node_announcement(
+    let node_announcement = NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     assert!(
         node_announcement.verify(),
@@ -768,13 +770,15 @@ fn test_create_and_verify_node_announcement() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = new_node_announcement(
+    let node_announcement = NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         &privkey,
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     assert!(
         node_announcement.verify(),

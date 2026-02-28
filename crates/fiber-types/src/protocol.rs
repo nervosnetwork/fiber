@@ -10,7 +10,7 @@ use crate::gen::gossip as molecule_gossip;
 use crate::primitives::u8_32_as_byte_32;
 use crate::serde_utils::EntityHex;
 use crate::UdtCfgInfos;
-use crate::{Hash256, Pubkey};
+use crate::{Hash256, Privkey, Pubkey};
 use ckb_types::packed::{BytesVec, OutPoint, Script};
 use ckb_types::prelude::Pack;
 use molecule::prelude::{Builder, Byte, Entity};
@@ -512,6 +512,30 @@ impl ChannelAnnouncement {
     pub fn out_point(&self) -> &OutPoint {
         &self.channel_outpoint
     }
+
+    /// Create an unsigned channel announcement with the given parameters.
+    pub fn new_unsigned(
+        node1_pubkey: &Pubkey,
+        node2_pubkey: &Pubkey,
+        channel_outpoint: OutPoint,
+        ckb_pubkey: &secp256k1::XOnlyPublicKey,
+        capacity: u128,
+        udt_type_script: Option<Script>,
+    ) -> Self {
+        Self {
+            node1_signature: None,
+            node2_signature: None,
+            ckb_signature: None,
+            features: Default::default(),
+            chain_hash: get_chain_hash(),
+            channel_outpoint,
+            node1_id: *node1_pubkey,
+            node2_id: *node2_pubkey,
+            ckb_key: *ckb_pubkey,
+            capacity,
+            udt_type_script,
+        }
+    }
 }
 
 // ============================================================
@@ -643,6 +667,64 @@ impl ChannelAnnouncement {
 }
 
 impl NodeAnnouncement {
+    /// Create an unsigned node announcement with the given parameters.
+    ///
+    /// The `udt_cfg_infos` and `version` are passed as parameters to avoid
+    /// depending on runtime/global state from the caller's crate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_unsigned(
+        node_name: AnnouncedNodeName,
+        features: FeatureVector,
+        addresses: Vec<tentacle_multiaddr::Multiaddr>,
+        node_id: Pubkey,
+        timestamp: u64,
+        auto_accept_min_ckb_funding_amount: u64,
+        udt_cfg_infos: UdtCfgInfos,
+        version: String,
+    ) -> Self {
+        Self {
+            signature: None,
+            features,
+            timestamp,
+            node_id,
+            version,
+            node_name,
+            chain_hash: get_chain_hash(),
+            addresses,
+            auto_accept_min_ckb_funding_amount,
+            udt_cfg_infos,
+        }
+    }
+
+    /// Create a signed node announcement.
+    ///
+    /// Builds an unsigned announcement, signs it with the given private key,
+    /// and returns the signed announcement.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_signed(
+        node_name: AnnouncedNodeName,
+        features: FeatureVector,
+        addresses: Vec<tentacle_multiaddr::Multiaddr>,
+        private_key: &Privkey,
+        timestamp: u64,
+        auto_accept_min_ckb_funding_amount: u64,
+        udt_cfg_infos: UdtCfgInfos,
+        version: String,
+    ) -> Self {
+        let mut unsigned = Self::new_unsigned(
+            node_name,
+            features,
+            addresses,
+            private_key.pubkey(),
+            timestamp,
+            auto_accept_min_ckb_funding_amount,
+            udt_cfg_infos,
+            version,
+        );
+        unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
+        unsigned
+    }
+
     /// Get the message bytes to sign (hash of unsigned molecule serialization).
     pub fn message_to_sign(&self) -> [u8; 32] {
         let unsigned_announcement = NodeAnnouncement {

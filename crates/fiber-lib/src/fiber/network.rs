@@ -61,8 +61,7 @@ use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    new_node_announcement, BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult,
-    GossipMessage, Init, OpenChannel,
+    BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
@@ -2965,13 +2964,15 @@ where
             _ => {
                 let node_name = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
-                let announcement = new_node_announcement(
+                let announcement = NodeAnnouncement::new_signed(
                     node_name,
                     self.features.clone(),
                     addresses,
                     &self.private_key,
                     now,
                     self.open_channel_auto_accept_min_ckb_funding_amount,
+                    get_udt_whitelist(),
+                    env!("CARGO_PKG_VERSION").to_string(),
                 );
                 debug!(
                     "Created new node announcement message: {:?}, previous {:?}",

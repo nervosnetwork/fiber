@@ -1,7 +1,7 @@
 use super::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
 };
-use super::types::{new_channel_announcement_unsigned, UpdateTlcInfo};
+use super::types::UpdateTlcInfo;
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -3453,7 +3453,7 @@ impl ChannelActorState {
                     (self.remote_pubkey, self.local_pubkey)
                 };
 
-                new_channel_announcement_unsigned(
+                ChannelAnnouncement::new_unsigned(
                     &node1_id,
                     &node2_id,
                     channel_outpoint,

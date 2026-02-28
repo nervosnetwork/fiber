@@ -12,8 +12,8 @@ use crate::{
         network::{AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand},
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
-            broadcast_message_to_gossip, new_channel_announcement_unsigned, new_node_announcement,
-            BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult, GossipMessage,
+            broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
+            BroadcastMessagesFilterResult, GossipMessage,
         },
         BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
         NetworkActorCommand, NetworkActorMessage, NodeAnnouncement, Privkey, Pubkey,
@@ -79,7 +79,7 @@ fn create_fake_channel_announcement_message(
     let sk2 = Privkey::from([2u8; 32]);
     let node_announcement2 = create_node_announcement_message_with_priv_key(&sk2);
 
-    let mut channel_announcement = new_channel_announcement_unsigned(
+    let mut channel_announcement = ChannelAnnouncement::new_unsigned(
         &sk1.pubkey(),
         &sk2.pubkey(),
         outpoint,
@@ -101,13 +101,15 @@ fn create_node_announcement_message_with_priv_key(priv_key: &Privkey) -> NodeAnn
         .iter()
         .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
         .collect();
-    new_node_announcement(
+    NodeAnnouncement::new_signed(
         node_name.into(),
         FeatureVector::default(),
         addresses,
         priv_key,
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     )
 }
 

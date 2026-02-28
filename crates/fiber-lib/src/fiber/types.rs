@@ -1,5 +1,4 @@
 use super::channel::ProcessingChannelError;
-use crate::ckb::contracts::get_udt_whitelist;
 use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::{
@@ -9,9 +8,7 @@ use ckb_types::{
 };
 use core::fmt::{self, Formatter};
 use fiber_sphinx::SphinxError;
-use fiber_types::get_chain_hash;
 use fiber_types::molecule_table_data_len;
-use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::{
     gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt, PubNonceOpt},
     gen::gossip::{self as molecule_gossip},
@@ -25,14 +22,13 @@ pub use fiber_types::{
 
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::{PartialSignature, PubNonce};
+use secp256k1::Verification;
 use secp256k1::{PublicKey, Secp256k1, Signing};
-use secp256k1::{Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::fmt::Display;
-use tentacle::multiaddr::MultiAddr;
 use thiserror::Error;
 
 /// The error type wrap various ser/de errors.
@@ -801,71 +797,6 @@ pub struct ForwardTlcResult {
     pub payment_hash: Hash256,
     pub tlc_id: u64,
     pub add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
-}
-
-pub fn new_node_announcement_unsigned(
-    node_name: AnnouncedNodeName,
-    features: FeatureVector,
-    addresses: Vec<MultiAddr>,
-    node_id: Pubkey,
-    timestamp: u64,
-    auto_accept_min_ckb_funding_amount: u64,
-) -> NodeAnnouncement {
-    NodeAnnouncement {
-        signature: None,
-        features,
-        timestamp,
-        node_id,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        node_name,
-        chain_hash: get_chain_hash(),
-        addresses,
-        auto_accept_min_ckb_funding_amount,
-        udt_cfg_infos: get_udt_whitelist(),
-    }
-}
-
-pub fn new_node_announcement(
-    node_name: AnnouncedNodeName,
-    features: FeatureVector,
-    addresses: Vec<MultiAddr>,
-    private_key: &Privkey,
-    timestamp: u64,
-    auto_accept_min_ckb_funding_amount: u64,
-) -> NodeAnnouncement {
-    let mut unsigned = new_node_announcement_unsigned(
-        node_name,
-        features,
-        addresses,
-        private_key.pubkey(),
-        timestamp,
-        auto_accept_min_ckb_funding_amount,
-    );
-    unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
-    unsigned
-}
-
-pub fn new_channel_announcement_unsigned(
-    node1_pubkey: &Pubkey,
-    node2_pubkey: &Pubkey,
-    channel_outpoint: OutPoint,
-    ckb_pubkey: &XOnlyPublicKey,
-    capacity: u128,
-    udt_type_script: Option<Script>,
-) -> ChannelAnnouncement {
-    ChannelAnnouncement {
-        node1_signature: None,
-        node2_signature: None,
-        ckb_signature: None,
-        features: Default::default(),
-        chain_hash: get_chain_hash(),
-        channel_outpoint,
-        node1_id: *node1_pubkey,
-        node2_id: *node2_pubkey,
-        ckb_key: *ckb_pubkey,
-        capacity,
-        udt_type_script,
-    }
 }
 
 #[derive(Debug, Clone)]
