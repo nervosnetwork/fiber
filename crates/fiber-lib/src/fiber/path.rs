@@ -1,5 +1,4 @@
-use super::graph::RouterHop;
-use super::types::Pubkey;
+use fiber_types::{Pubkey, RouterHop};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 

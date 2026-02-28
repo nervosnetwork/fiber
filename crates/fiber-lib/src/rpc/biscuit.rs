@@ -8,7 +8,8 @@ use std::{
     str::FromStr,
 };
 
-use crate::{fiber::types::NodeId, now_timestamp_as_millis_u64};
+use crate::now_timestamp_as_millis_u64;
+use fiber_types::NodeId;
 
 pub struct AuthRule {
     pub(crate) code: &'static str,
@@ -111,6 +112,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);
     b.rule("get_payment", r#"allow if read("payments");"#);
+    b.rule("list_payments", r#"allow if read("payments");"#);
     b.rule("build_router", r#"allow if read("payments");"#);
     b.rule("send_payment_with_router", r#"allow if write("payments");"#);
 

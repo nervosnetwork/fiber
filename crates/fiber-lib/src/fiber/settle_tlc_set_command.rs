@@ -1,9 +1,9 @@
 use crate::{
-    fiber::{
-        channel::{ChannelActorStateStore, RemoveTlcCommand, TLCId, TlcInfo},
-        types::{Hash256, RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrPacket, TlcErrorCode},
-    },
+    fiber::channel::{ChannelActorStateStore, RemoveTlcCommand},
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
+};
+use fiber_types::{
+    Hash256, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
 };
 
 pub struct SettleTlcSetCommand<'s, S> {

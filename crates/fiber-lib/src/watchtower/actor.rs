@@ -32,14 +32,18 @@ use crate::{
         signer::LocalSigner,
         CkbConfig,
     },
-    fiber::{
-        channel::{RevocationData, SettlementData, XUDT_COMPATIBLE_WITNESS},
-        hash_algorithm::HashAlgorithm,
-        types::{Hash256, NodeId, Privkey, Pubkey},
+    fiber::channel::{
+        settlement_data_to_witness, settlement_tlc_local_pubkey_hash, XUDT_COMPATIBLE_WITNESS,
     },
     now_timestamp_as_millis_u64,
     utils::{actor::ActorHandleLogGuard, tx::compute_tx_message},
-    watchtower::ChannelData,
+    watchtower::{
+        channel_data_funding_tx_lock, channel_data_local_settlement_pubkey_hash,
+        channel_data_x_only_aggregated_pubkey,
+    },
+};
+use fiber_types::{
+    ChannelData, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey, RevocationData, SettlementData,
 };
 
 use super::WatchtowerStore;
@@ -231,7 +235,7 @@ where
             CkbRpcClient::with_builder(&rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
                 .expect("create ckb rpc client should not fail");
         let search_key = SearchKey {
-            script: channel_data.funding_tx_lock().into(),
+            script: channel_data_funding_tx_lock(&channel_data).into(),
             script_type: ScriptType::Lock,
             script_search_mode: Some(SearchMode::Exact),
             with_data: None,
@@ -271,7 +275,10 @@ where
                                                 );
 
                                                 let x_only_aggregated_pubkey =
-                                                    channel_data.x_only_aggregated_pubkey(false);
+                                                    channel_data_x_only_aggregated_pubkey(
+                                                        &channel_data,
+                                                        false,
+                                                    );
                                                 if blake160(&x_only_aggregated_pubkey).0
                                                     == pub_key_hash
                                                 {
@@ -461,7 +468,7 @@ fn build_revocation_tx(
         if inputs_capacity >= change_output_occupied_capacity + fee {
             let new_change_output = change_output
                 .as_builder()
-                .capacity((inputs_capacity - fee).pack())
+                .capacity(inputs_capacity - fee)
                 .build();
             let tx = tx_builder
                 .set_outputs(vec![revocation_data.output, new_change_output])
@@ -854,10 +861,10 @@ fn build_settlement_tx<S: WatchtowerStore>(
         Some(mut sw) => {
             if sw.update() {
                 debug!("channel_data local_settlement_key pubkey hash: {:?}，sw settlement_remote_pubkey_hash: {:?}, sw settlement_local_pubkey_hash: {:?}, for_remote: {}",
-                    channel_data.local_settlement_pubkey_hash(), sw.settlement_remote_pubkey_hash, sw.settlement_local_pubkey_hash, for_remote);
+                    channel_data_local_settlement_pubkey_hash(&channel_data), sw.settlement_remote_pubkey_hash, sw.settlement_local_pubkey_hash, for_remote);
                 if for_remote {
                     if sw.settlement_local_pubkey_hash
-                        == channel_data.local_settlement_pubkey_hash()
+                        == channel_data_local_settlement_pubkey_hash(&channel_data)
                     {
                         two_parties_all_settled = sw.settlement_remote_pubkey_hash == [0u8; 20];
                         if two_parties_all_settled {
@@ -949,7 +956,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         return Ok(None);
                     }
                 } else if sw.settlement_remote_pubkey_hash
-                    == channel_data.local_settlement_pubkey_hash()
+                    == channel_data_local_settlement_pubkey_hash(&channel_data)
                 {
                     two_parties_all_settled = sw.settlement_local_pubkey_hash == [0u8; 20];
                     if two_parties_all_settled {
@@ -1132,7 +1139,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock,
                     unlock_amount,
                     private_key,
-                    settlement_data.to_witness(
+                    settlement_data_to_witness(
+                        &settlement_data,
                         for_remote,
                         channel_data.local_settlement_key.clone(),
                         channel_data.remote_settlement_key,
@@ -1177,11 +1185,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .args(new_commitment_lock_script_args.pack())
                     .build(),
             )
-            .capacity(new_capacity.pack())
+            .capacity(new_capacity)
             .build();
         let settlement_output = CellOutput::new_builder()
             .lock(fee_provider_lock_script.clone())
-            .capacity((unlock_amount as u64).pack())
+            .capacity(unlock_amount as u64)
             .build();
 
         let witness_for_commitment_cell: Vec<u8> = [
@@ -1200,12 +1208,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
             )
             .value();
             CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
-                .since(since.pack())
+                .previous_output(commitment_cell.out_point.clone())
+                .since(since)
                 .build()
         } else {
             CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
+                .previous_output(commitment_cell.out_point.clone())
                 .build()
         };
 
@@ -1260,7 +1268,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
-                    .since(since.pack())
+                    .since(since)
                     .build(),
             );
             let fee = fee_calculator
@@ -1268,7 +1276,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
                 let adjusted_settlement_output = change_output
                     .as_builder()
-                    .capacity((inputs_capacity - new_capacity - fee).pack())
+                    .capacity(inputs_capacity - new_capacity - fee)
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![adjusted_settlement_output]
@@ -1320,7 +1328,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             .as_u64();
         let mut settlement_output = settlement_output
             .as_builder()
-            .capacity(settlement_output_occupied_capacity.pack())
+            .capacity(settlement_output_occupied_capacity)
             .build();
 
         let witness_for_commitment_cell: Vec<u8> = [
@@ -1339,12 +1347,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
             )
             .value();
             CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
-                .since(since.pack())
+                .previous_output(commitment_cell.out_point.clone())
+                .since(since)
                 .build()
         } else {
             CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
+                .previous_output(commitment_cell.out_point.clone())
                 .build()
         };
 
@@ -1370,7 +1378,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .as_u64();
                 new_commitment_output = new_commitment_output
                     .as_builder()
-                    .capacity(new_commitment_output_capacity.pack())
+                    .capacity(new_commitment_output_capacity)
                     .build();
 
                 let settlement_output_capacity: u64 = settlement_output.capacity().unpack();
@@ -1379,7 +1387,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     - new_commitment_output_capacity;
                 settlement_output = settlement_output
                     .as_builder()
-                    .capacity(new_settlement_output_capacity.pack())
+                    .capacity(new_settlement_output_capacity)
                     .build();
 
                 new_settlement_output_capacity + new_commitment_output_capacity
@@ -1433,7 +1441,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
-                    .since(since.pack())
+                    .since(since)
                     .build(),
             );
             let fee = fee_calculator
@@ -1441,7 +1449,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             if inputs_capacity >= change_output_occupied_capacity + outputs_capacity + fee {
                 let new_change_output = change_output
                     .as_builder()
-                    .capacity((inputs_capacity - outputs_capacity - fee).pack())
+                    .capacity(inputs_capacity - outputs_capacity - fee)
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![settlement_output, new_change_output]
@@ -1630,9 +1638,11 @@ impl Htlc {
                 .starts_with(&self.payment_hash);
             let pubkey_hash_matches = match (self.is_offered(), with_preimage) {
                 (true, true) | (false, false) => {
-                    self.remote_htlc_pubkey_hash == settlement_tlc.local_pubkey_hash()
+                    self.remote_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
                 }
-                _ => self.local_htlc_pubkey_hash == settlement_tlc.local_pubkey_hash(),
+                _ => {
+                    self.local_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
+                }
             };
             (payment_hash_matches && pubkey_hash_matches).then_some(&settlement_tlc.local_key)
         })

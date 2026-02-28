@@ -1,12 +1,10 @@
 /// StoreSample implementation for `BroadcastMessage`.
-use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::config::AnnouncedNodeName;
-use crate::fiber::features::FeatureVector;
-use crate::fiber::types::{
+use crate::fiber::{
     BroadcastMessage, ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags,
-    ChannelUpdateMessageFlags, NodeAnnouncement,
+    ChannelUpdateMessageFlags, FeatureVector, NodeAnnouncement, SchnorrSignature, UdtCfgInfos,
 };
-use crate::store::schema::BROADCAST_MESSAGE_PREFIX;
+use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::schema::BROADCAST_MESSAGE_PREFIX;
 
 use super::{
     deterministic_ecdsa_signature, deterministic_hash256, deterministic_outpoint,
@@ -47,7 +45,7 @@ fn sample_channel_announcement(seed: u64) -> BroadcastMessage {
     BroadcastMessage::ChannelAnnouncement(ChannelAnnouncement {
         node1_signature: Some(deterministic_ecdsa_signature(seed, 10)),
         node2_signature: Some(deterministic_ecdsa_signature(seed, 11)),
-        ckb_signature: Some(deterministic_schnorr_signature(seed, 12)),
+        ckb_signature: Some(SchnorrSignature(deterministic_schnorr_signature(seed, 12))),
         features: 0,
         chain_hash: deterministic_hash256(seed, 13),
         channel_outpoint: deterministic_outpoint(seed, 14),

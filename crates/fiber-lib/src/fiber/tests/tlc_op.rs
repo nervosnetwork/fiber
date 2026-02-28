@@ -1,15 +1,14 @@
-use crate::fiber::channel::{AppliedFlags, TlcInfo};
-use crate::fiber::channel::{
-    CommitmentNumbers, InboundTlcStatus, OutboundTlcStatus, TLCId, TlcState, TlcStatus,
+use crate::fiber::{
+    AppliedFlags, CommitmentNumbers, Hash256, InboundTlcStatus, OutboundTlcStatus,
+    PaymentOnionPacket, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcInfo, TlcStatus,
+    NO_SHARED_SECRET,
 };
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::RemoveTlcFulfill;
-use crate::fiber::types::{Hash256, NO_SHARED_SECRET};
-use crate::fiber::types::{PaymentOnionPacket, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use ckb_hash::new_blake2b;
 use ckb_types::packed::Byte32;
+use fiber_types::HashAlgorithm;
+use fiber_types::TlcState;
 
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
@@ -472,6 +471,7 @@ async fn test_tlc_actor() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_tlc_state_v2() {
+    use fiber_types::TlcState;
     let mut tlc_state = TlcState::default();
     let mut add_tlc1 = TlcInfo {
         amount: 10000,

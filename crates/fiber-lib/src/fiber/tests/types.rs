@@ -1,18 +1,13 @@
+use crate::fiber::network::get_chain_hash;
 use crate::{
-    ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
-        config::AnnouncedNodeName,
-        features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
-        hash_algorithm::HashAlgorithm,
-        types::{
-            AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error, Hash256,
-            NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData, PaymentOnionPacket,
-            PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrData,
-            TlcErrPacket, TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket,
-            NO_SHARED_SECRET, ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
-        },
-        PaymentCustomRecords,
+        types::{AddTlc, TrampolineHopPayload, TrampolineOnionPacket},
+        BasicMppPaymentData, BroadcastMessageID, Cursor, FeatureVector, Hash256, HashAlgorithm,
+        NodeAnnouncement, NodeId, OnionPacketError, PaymentCustomRecords, PaymentHopData,
+        PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr,
+        TlcErrData, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
+        ONION_PACKET_VERSION_V1,
     },
     gen_deterministic_fiber_private_key, gen_rand_channel_outpoint, gen_rand_fiber_private_key,
     gen_rand_fiber_public_key, gen_rand_sha256_hash, now_timestamp_as_millis_u64,
@@ -25,6 +20,9 @@ use ckb_types::{
     H256,
 };
 use fiber_sphinx::OnionSharedSecretIter;
+use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::UdtArgInfo;
+use fiber_types::{UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use molecule::prelude::{Builder, Byte, Entity};
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use serde::Deserialize;
@@ -554,10 +552,7 @@ fn test_payment_onion_packet_peel_unknown_version() {
     // Verify it's specifically an UnknownVersion error
     let err = result.unwrap_err();
     assert!(
-        matches!(
-            err,
-            Error::OnionPacket(OnionPacketError::UnknownVersion(99))
-        ),
+        matches!(err, OnionPacketError::UnknownVersion(99)),
         "Expected UnknownVersion(99) error, got: {:?}",
         err
     );
@@ -755,13 +750,16 @@ fn test_tlc_error_code() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = NodeAnnouncement::new(
+    let node_announcement = NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         &privkey,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     assert!(
         node_announcement.verify(),
@@ -774,13 +772,16 @@ fn test_create_and_verify_node_announcement() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = NodeAnnouncement::new(
+    let node_announcement = NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         &privkey,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     assert!(
         node_announcement.verify(),

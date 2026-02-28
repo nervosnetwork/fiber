@@ -1,18 +1,18 @@
 use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
-use crate::fiber::config::AnnouncedNodeName;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::payment::PaymentCustomRecords;
+use crate::fiber::network::get_chain_hash;
+use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
 use crate::fiber::{
     config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT},
     graph::*,
-    history::Direction,
-    history::TimedResult,
-    payment::{PaymentSession, PaymentStatus, SendPaymentData, SendPaymentDataBuilder},
-    types::{Privkey, Pubkey},
+    payment::{PaymentSessionExt, SendPaymentDataBuilder},
+    AwaitingChannelReadyFlags, ChannelActorData, ChannelBasePublicKeys, ChannelConstraints,
+    ChannelState, Direction, FeatureVector, InMemorySigner, NegotiatingFundingFlags, NodeId,
+    PaymentCustomRecords, PaymentSession, PaymentStatus, Privkey, Pubkey, PublicChannelInfo,
+    RevocationData, SendPaymentData, SettlementData, SigningCommitmentFlags, TimedResult,
 };
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
@@ -37,6 +37,7 @@ use ckb_types::prelude::*;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
+use fiber_types::protocol::AnnouncedNodeName;
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
@@ -56,13 +57,16 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
     let sk: Privkey = (*signer.secret_key()).into();
     (
         sk.clone(),
-        NodeAnnouncement::new(
+        NodeAnnouncement::new_signed(
             AnnouncedNodeName::from_string("node1").expect("invalid name"),
             FeatureVector::default(),
             vec![],
             &sk,
+            get_chain_hash(),
             now_timestamp_as_millis_u64(),
             0,
+            Default::default(),
+            env!("CARGO_PKG_VERSION").to_string(),
         ),
     )
 }
@@ -79,9 +83,10 @@ fn mock_channel() -> ChannelAnnouncement {
         &pubkey1,
         &pubkey2,
         OutPoint::new_builder()
-            .tx_hash(rand_hash256.into())
-            .index(0u32.pack())
+            .tx_hash(rand_hash256)
+            .index(0u32)
             .build(),
+        get_chain_hash(),
         &xonly,
         0,
         None,
@@ -187,10 +192,10 @@ fn test_store_save_channel_announcement() {
 fn test_store_save_channel_update() {
     let (store, _dir) = generate_store();
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
-    let channel_update_of_node1 = ChannelUpdate::new_unsigned(
+    let channel_update_of_node1 = new_channel_update_unsigned(
         OutPoint::new_builder()
-            .tx_hash(gen_rand_sha256_hash().into())
-            .index(0u32.pack())
+            .tx_hash(gen_rand_sha256_hash())
+            .index(0u32)
             .build(),
         now_timestamp_as_millis_u64(),
         flags_for_update_of_node1,
@@ -486,75 +491,77 @@ fn test_channel_actor_state_store() {
     let pub_nonce = sec_nonce.public_nonce();
 
     let state = ChannelActorState {
-        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
-        public_channel_info: Some(PublicChannelInfo {
-            local_channel_announcement_signature: Some((
-                mock_ecdsa_signature(),
-                MaybeScalar::two(),
-            )),
-            remote_channel_announcement_signature: Some((
-                mock_ecdsa_signature(),
-                MaybeScalar::two(),
-            )),
-            remote_channel_announcement_nonce: Some(pub_nonce.clone()),
-            channel_announcement: None,
-            channel_update: None,
-        }),
-        local_tlc_info: ChannelTlcInfo {
-            enabled: false,
-            timestamp: 0,
-            tlc_fee_proportional_millionths: 123,
-            tlc_expiry_delta: 3,
-            tlc_minimum_value: 10,
+        core: ChannelActorData {
+            state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+            public_channel_info: Some(PublicChannelInfo {
+                local_channel_announcement_signature: Some((
+                    mock_ecdsa_signature(),
+                    MaybeScalar::two(),
+                )),
+                remote_channel_announcement_signature: Some((
+                    mock_ecdsa_signature(),
+                    MaybeScalar::two(),
+                )),
+                remote_channel_announcement_nonce: Some(pub_nonce.clone()),
+                channel_announcement: None,
+                channel_update: None,
+            }),
+            local_tlc_info: ChannelTlcInfo {
+                enabled: false,
+                timestamp: 0,
+                tlc_fee_proportional_millionths: 123,
+                tlc_expiry_delta: 3,
+                tlc_minimum_value: 10,
+            },
+            remote_tlc_info: None,
+            local_pubkey: gen_rand_fiber_public_key(),
+            remote_pubkey: gen_rand_fiber_public_key(),
+            funding_tx: Some(Transaction::default()),
+            funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
+            is_acceptor: true,
+            is_one_way: false,
+            funding_udt_type_script: Some(Script::default()),
+            to_local_amount: 100,
+            to_remote_amount: 100,
+            commitment_fee_rate: 100,
+            commitment_delay_epoch: 100,
+            funding_fee_rate: 100,
+            id: gen_rand_sha256_hash(),
+            tlc_state: Default::default(),
+            retryable_tlc_operations: Default::default(),
+            waiting_forward_tlc_tasks: Default::default(),
+            local_shutdown_script: Script::default(),
+            local_channel_public_keys: ChannelBasePublicKeys {
+                funding_pubkey: gen_rand_fiber_public_key(),
+                tlc_base_key: gen_rand_fiber_public_key(),
+            },
+            signer,
+            remote_channel_public_keys: Some(ChannelBasePublicKeys {
+                funding_pubkey: gen_rand_fiber_public_key(),
+                tlc_base_key: gen_rand_fiber_public_key(),
+            }),
+            commitment_numbers: Default::default(),
+            remote_shutdown_script: Some(Script::default()),
+            last_committed_remote_nonce: None,
+            remote_revocation_nonce_for_verify: None,
+            remote_revocation_nonce_for_send: None,
+            remote_revocation_nonce_for_next: None,
+            remote_commitment_points: vec![
+                (0, gen_rand_fiber_public_key()),
+                (1, gen_rand_fiber_public_key()),
+            ],
+            local_shutdown_info: None,
+            remote_shutdown_info: None,
+            shutdown_transaction_hash: None,
+            local_reserved_ckb_amount: 100,
+            remote_reserved_ckb_amount: 100,
+            latest_commitment_transaction: None,
+            local_constraints: ChannelConstraints::default(),
+            remote_constraints: ChannelConstraints::default(),
+            reestablishing: false,
+            last_revoke_ack_msg: None,
+            created_at: SystemTime::now(),
         },
-        remote_tlc_info: None,
-        local_pubkey: gen_rand_fiber_public_key(),
-        remote_pubkey: gen_rand_fiber_public_key(),
-        funding_tx: Some(Transaction::default()),
-        funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
-        is_acceptor: true,
-        is_one_way: false,
-        funding_udt_type_script: Some(Script::default()),
-        to_local_amount: 100,
-        to_remote_amount: 100,
-        commitment_fee_rate: 100,
-        commitment_delay_epoch: 100,
-        funding_fee_rate: 100,
-        id: gen_rand_sha256_hash(),
-        tlc_state: Default::default(),
-        retryable_tlc_operations: Default::default(),
-        waiting_forward_tlc_tasks: Default::default(),
-        local_shutdown_script: Script::default(),
-        local_channel_public_keys: ChannelBasePublicKeys {
-            funding_pubkey: gen_rand_fiber_public_key(),
-            tlc_base_key: gen_rand_fiber_public_key(),
-        },
-        signer,
-        remote_channel_public_keys: Some(ChannelBasePublicKeys {
-            funding_pubkey: gen_rand_fiber_public_key(),
-            tlc_base_key: gen_rand_fiber_public_key(),
-        }),
-        commitment_numbers: Default::default(),
-        remote_shutdown_script: Some(Script::default()),
-        last_committed_remote_nonce: None,
-        remote_revocation_nonce_for_verify: None,
-        remote_revocation_nonce_for_send: None,
-        remote_revocation_nonce_for_next: None,
-        remote_commitment_points: vec![
-            (0, gen_rand_fiber_public_key()),
-            (1, gen_rand_fiber_public_key()),
-        ],
-        local_shutdown_info: None,
-        remote_shutdown_info: None,
-        shutdown_transaction_hash: None,
-        local_reserved_ckb_amount: 100,
-        remote_reserved_ckb_amount: 100,
-        latest_commitment_transaction: None,
-        local_constraints: ChannelConstraints::default(),
-        remote_constraints: ChannelConstraints::default(),
-        reestablishing: false,
-        last_revoke_ack_msg: None,
-        created_at: SystemTime::now(),
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
@@ -609,75 +616,77 @@ fn test_serde_channel_actor_state_ciborium() {
     let pub_nonce = sec_nonce.public_nonce();
 
     let state = ChannelActorState {
-        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
-        public_channel_info: Some(PublicChannelInfo {
-            local_channel_announcement_signature: Some((
-                mock_ecdsa_signature(),
-                MaybeScalar::two(),
-            )),
-            remote_channel_announcement_signature: Some((
-                mock_ecdsa_signature(),
-                MaybeScalar::two(),
-            )),
-            remote_channel_announcement_nonce: Some(pub_nonce.clone()),
-            channel_announcement: None,
-            channel_update: None,
-        }),
-        local_tlc_info: ChannelTlcInfo {
-            enabled: false,
-            timestamp: 0,
-            tlc_fee_proportional_millionths: 123,
-            tlc_expiry_delta: 3,
-            tlc_minimum_value: 10,
+        core: ChannelActorData {
+            state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+            public_channel_info: Some(PublicChannelInfo {
+                local_channel_announcement_signature: Some((
+                    mock_ecdsa_signature(),
+                    MaybeScalar::two(),
+                )),
+                remote_channel_announcement_signature: Some((
+                    mock_ecdsa_signature(),
+                    MaybeScalar::two(),
+                )),
+                remote_channel_announcement_nonce: Some(pub_nonce.clone()),
+                channel_announcement: None,
+                channel_update: None,
+            }),
+            local_tlc_info: ChannelTlcInfo {
+                enabled: false,
+                timestamp: 0,
+                tlc_fee_proportional_millionths: 123,
+                tlc_expiry_delta: 3,
+                tlc_minimum_value: 10,
+            },
+            remote_tlc_info: None,
+            local_pubkey: gen_rand_fiber_public_key(),
+            remote_pubkey: gen_rand_fiber_public_key(),
+            funding_tx: Some(Transaction::default()),
+            funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
+            is_acceptor: true,
+            is_one_way: false,
+            funding_udt_type_script: Some(Script::default()),
+            to_local_amount: 100,
+            to_remote_amount: 100,
+            commitment_fee_rate: 100,
+            commitment_delay_epoch: 100,
+            funding_fee_rate: 100,
+            id: gen_rand_sha256_hash(),
+            tlc_state: Default::default(),
+            retryable_tlc_operations: Default::default(),
+            waiting_forward_tlc_tasks: Default::default(),
+            local_shutdown_script: Script::default(),
+            local_channel_public_keys: ChannelBasePublicKeys {
+                funding_pubkey: gen_rand_fiber_public_key(),
+                tlc_base_key: gen_rand_fiber_public_key(),
+            },
+            signer,
+            remote_channel_public_keys: Some(ChannelBasePublicKeys {
+                funding_pubkey: gen_rand_fiber_public_key(),
+                tlc_base_key: gen_rand_fiber_public_key(),
+            }),
+            commitment_numbers: Default::default(),
+            remote_shutdown_script: Some(Script::default()),
+            last_committed_remote_nonce: None,
+            remote_revocation_nonce_for_verify: None,
+            remote_revocation_nonce_for_send: None,
+            remote_revocation_nonce_for_next: None,
+            remote_commitment_points: vec![
+                (0, gen_rand_fiber_public_key()),
+                (1, gen_rand_fiber_public_key()),
+            ],
+            local_shutdown_info: None,
+            remote_shutdown_info: None,
+            shutdown_transaction_hash: None,
+            local_reserved_ckb_amount: 100,
+            remote_reserved_ckb_amount: 100,
+            latest_commitment_transaction: None,
+            local_constraints: ChannelConstraints::default(),
+            remote_constraints: ChannelConstraints::default(),
+            reestablishing: false,
+            last_revoke_ack_msg: None,
+            created_at: SystemTime::now(),
         },
-        remote_tlc_info: None,
-        local_pubkey: gen_rand_fiber_public_key(),
-        remote_pubkey: gen_rand_fiber_public_key(),
-        funding_tx: Some(Transaction::default()),
-        funding_tx_confirmed_at: Some((H256::default(), 1, 1)),
-        is_acceptor: true,
-        is_one_way: false,
-        funding_udt_type_script: Some(Script::default()),
-        to_local_amount: 100,
-        to_remote_amount: 100,
-        commitment_fee_rate: 100,
-        commitment_delay_epoch: 100,
-        funding_fee_rate: 100,
-        id: gen_rand_sha256_hash(),
-        tlc_state: Default::default(),
-        retryable_tlc_operations: Default::default(),
-        waiting_forward_tlc_tasks: Default::default(),
-        local_shutdown_script: Script::default(),
-        local_channel_public_keys: ChannelBasePublicKeys {
-            funding_pubkey: gen_rand_fiber_public_key(),
-            tlc_base_key: gen_rand_fiber_public_key(),
-        },
-        signer,
-        remote_channel_public_keys: Some(ChannelBasePublicKeys {
-            funding_pubkey: gen_rand_fiber_public_key(),
-            tlc_base_key: gen_rand_fiber_public_key(),
-        }),
-        commitment_numbers: Default::default(),
-        remote_shutdown_script: Some(Script::default()),
-        last_committed_remote_nonce: None,
-        remote_revocation_nonce_for_verify: None,
-        remote_revocation_nonce_for_send: None,
-        remote_revocation_nonce_for_next: None,
-        remote_commitment_points: vec![
-            (0, gen_rand_fiber_public_key()),
-            (1, gen_rand_fiber_public_key()),
-        ],
-        local_shutdown_info: None,
-        remote_shutdown_info: None,
-        shutdown_transaction_hash: None,
-        local_reserved_ckb_amount: 100,
-        remote_reserved_ckb_amount: 100,
-        latest_commitment_transaction: None,
-        local_constraints: ChannelConstraints::default(),
-        remote_constraints: ChannelConstraints::default(),
-        reestablishing: false,
-        last_revoke_ack_msg: None,
-        created_at: SystemTime::now(),
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
@@ -704,7 +713,7 @@ fn test_store_payment_session() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
     assert_eq!(res.payment_hash(), payment_hash);
@@ -724,7 +733,7 @@ fn test_store_payment_sessions_with_status() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
 
     let payment_hash1 = gen_rand_sha256_hash();
@@ -735,7 +744,7 @@ fn test_store_payment_sessions_with_status() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let mut payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     payment_session.set_success_status();
     store.insert_payment_session(payment_session.clone());
 
@@ -795,8 +804,8 @@ fn test_store_payment_history() {
     assert_eq!(r1, r2);
 
     let outpoint_3 = OutPoint::new_builder()
-        .tx_hash(gen_rand_sha256_hash().into())
-        .index(1u32.pack())
+        .tx_hash(gen_rand_sha256_hash())
+        .index(1u32)
         .build();
     let direction_3 = Direction::Forward;
     let result_3 = TimedResult {
@@ -838,13 +847,16 @@ fn test_store_payment_custom_record() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = NodeAnnouncement::new(
+    let node_announcement = NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         &privkey,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     assert!(
         node_announcement.verify(),
@@ -883,10 +895,10 @@ fn test_store_save_channel_update_and_get_timestamp() {
     let (store, _dir) = generate_store();
 
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
-    let channel_update_of_node1 = ChannelUpdate::new_unsigned(
+    let channel_update_of_node1 = new_channel_update_unsigned(
         OutPoint::new_builder()
-            .tx_hash(gen_rand_sha256_hash().into())
-            .index(0u32.pack())
+            .tx_hash(gen_rand_sha256_hash())
+            .index(0u32)
             .build(),
         now_timestamp_as_millis_u64(),
         flags_for_update_of_node1,
@@ -1044,8 +1056,9 @@ fn test_store_sample_channel_actor_state() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_channel_open_record() {
-    use crate::fiber::channel::{ChannelOpenRecord, ChannelOpenRecordStore, ChannelOpeningStatus};
-    use crate::store::sample::StoreSample;
+    use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus};
+
+    use crate::fiber::channel::ChannelOpenRecordStore;
 
     let samples = ChannelOpenRecord::samples(42);
     assert!(!samples.is_empty());
@@ -1083,7 +1096,7 @@ fn test_store_channel_open_record() {
     assert!(store.get_channel_open_records().is_empty());
 
     // Test update_status helper
-    let mut record = ChannelOpenRecord::new(
+    let mut record = ChannelOpenRecord::new_outbound(
         deterministic_hash256(42, 99),
         sample_peer_id(),
         100_0000_0000,
@@ -1106,7 +1119,7 @@ fn sample_peer_id() -> tentacle::secio::PeerId {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn deterministic_hash256(seed: u64, index: u32) -> crate::fiber::types::Hash256 {
+fn deterministic_hash256(seed: u64, index: u32) -> fiber_types::Hash256 {
     use crate::store::sample::deterministic_hash;
     deterministic_hash(seed, index).into()
 }

@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
-use crate::{
-    cch::trackers::{LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage},
-    fiber::types::Hash256,
-};
-
+use crate::cch::trackers::{LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage};
+use fiber_types::Hash256;
 use ractor::{concurrency::Duration as RactorDuration, Actor, ActorRef, OutputPort};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 

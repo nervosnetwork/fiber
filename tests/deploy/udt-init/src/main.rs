@@ -54,10 +54,10 @@ fn gen_dev_udt_handler(udt_kind: &str) -> SudtHandler {
         .out_point(
             OutPoint::new_builder()
                 .tx_hash(genesis_tx.pack())
-                .index(index.pack())
+                .index(index)
                 .build(),
         )
-        .dep_type(DepType::Code.into())
+        .dep_type(DepType::Code)
         .build();
 
     ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(
@@ -74,11 +74,11 @@ fn gen_dev_sighash_handler() -> Secp256k1Blake160SighashAllScriptHandler {
         .hash();
     let secp256k1_dep_group_out_point = OutPoint::new_builder()
         .tx_hash(secp256k1_dep_group_tx_hash)
-        .index(0u32.pack())
+        .index(0u32)
         .build();
     let cell_dep = CellDep::new_builder()
         .out_point(secp256k1_dep_group_out_point)
-        .dep_type(DepType::DepGroup.into())
+        .dep_type(DepType::DepGroup)
         .build();
 
     Secp256k1Blake160SighashAllScriptHandler::new_with_customize(vec![cell_dep])
@@ -162,7 +162,7 @@ fn generate_udt_type_script(udt_kind: &str, address: &str) -> ckb_types::packed:
     let (code_hash, _, _) = get_udt_info(udt_kind);
     Script::new_builder()
         .code_hash(code_hash.pack())
-        .hash_type(ScriptHashType::Data2.into())
+        .hash_type(ScriptHashType::Data2)
         .args(sudt_owner_lock_script.calc_script_hash().as_bytes().pack())
         .build()
 }
@@ -201,11 +201,6 @@ struct UdtInfo {
     script: UdtScript,
     auto_accept_amount: Option<u128>,
     cell_deps: Vec<UdtDep>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct UdtInfos {
-    infos: Vec<UdtInfo>,
 }
 
 fn is_port_available(port: u16) -> bool {

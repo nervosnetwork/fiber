@@ -1,21 +1,21 @@
 #![cfg(not(target_arch = "wasm32"))]
-use crate::fiber::channel::{ChannelActorStateStore, PrevTlcInfo};
+use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::config::{DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA};
-use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::*;
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand};
-use crate::fiber::payment::{PaymentStatus, SendPaymentCommand};
-use crate::fiber::types::{
-    CurrentPaymentHopData, Hash256, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErrorCode,
-    TrampolineHopPayload, TrampolineOnionPacket,
-};
+use crate::fiber::payment::SendPaymentCommand;
+use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
+use crate::fiber::{FeatureVector, PaymentStatus, Privkey, Pubkey};
 use crate::gen_rand_fiber_public_key;
 use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
 use crate::tests::test_utils::*;
 use crate::{
     create_channel_with_nodes, gen_rand_sha256_hash, ChannelParameters, HUGE_CKB_AMOUNT,
     MIN_RESERVED_CKB,
+};
+use fiber_types::Hash256;
+use fiber_types::{
+    CurrentPaymentHopData, HashAlgorithm, PeeledPaymentOnionPacket, PrevTlcInfo, TlcErrorCode,
 };
 use ractor::RpcReplyPort;
 use rand::Rng;
@@ -2990,9 +2990,7 @@ async fn test_trampoline_node_restart() {
         let channels = node_b.store.get_channel_states(None);
         let ready_count = channels
             .iter()
-            .filter(|(_, _, state)| {
-                matches!(*state, crate::fiber::channel::ChannelState::ChannelReady)
-            })
+            .filter(|(_, _, state)| matches!(*state, crate::fiber::ChannelState::ChannelReady))
             .count();
         if ready_count == 2 {
             break;
@@ -3037,7 +3035,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     let next_node_pubkey = gen_rand_fiber_public_key();
     let payment_hash = gen_rand_sha256_hash();
 
-    fn gen_rand_session_key() -> crate::fiber::types::Privkey {
+    fn gen_rand_session_key() -> crate::fiber::Privkey {
         let mut rng = rand::thread_rng();
         let mut key = [0u8; 32];
         rng.fill(&mut key);
@@ -3127,7 +3125,7 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     let next_node_pubkey = gen_rand_fiber_public_key();
     let payment_hash = gen_rand_sha256_hash();
 
-    fn gen_rand_session_key() -> crate::fiber::types::Privkey {
+    fn gen_rand_session_key() -> crate::fiber::Privkey {
         let mut rng = rand::thread_rng();
         let mut key = [0u8; 32];
         rng.fill(&mut key);

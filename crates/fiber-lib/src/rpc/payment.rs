@@ -1,22 +1,20 @@
-use crate::fiber::graph::RouterHop;
+use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
-#[cfg(debug_assertions)]
-use crate::fiber::payment::SessionRoute;
-use crate::fiber::serde_utils::SliceHex;
-use crate::fiber::serde_utils::U32Hex;
 use crate::fiber::{
-    channel::ChannelActorStateStore,
-    payment::PaymentStatus,
-    payment::{HopHint as NetworkHopHint, SendPaymentCommand},
-    serde_utils::{EntityHex, U128Hex, U64Hex},
-    types::{Hash256, Pubkey},
-    NetworkActorCommand, NetworkActorMessage,
+    channel::ChannelActorStateStore, payment::SendPaymentCommand, NetworkActorCommand,
+    NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::OutPoint;
+#[cfg(debug_assertions)]
+use fiber_types::SessionRoute;
+use fiber_types::{
+    EntityHex, Hash256, HopHint as NetworkHopHint, PaymentStatus, Pubkey, RouterHop, SliceHex,
+    U128Hex, U32Hex, U64Hex,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
@@ -35,8 +33,10 @@ pub struct GetPaymentCommandParams {
     pub payment_hash: Hash256,
 }
 
+/// The result of a get_payment command, which includes the payment hash, status, timestamps,
+/// error message if failed, fee paid, and custom records.
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
@@ -66,6 +66,26 @@ pub struct GetPaymentCommandResult {
     ///    `A(amount, channel) -> B -> C -> D`
     /// means A will send `amount` with `channel` to B.
     routers: Vec<SessionRoute>,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ListPaymentsParams {
+    /// Filter payments by status. If not set, all payments are returned.
+    pub status: Option<PaymentStatus>,
+    /// The maximum number of payments to return. Default is 15.
+    #[serde_as(as = "Option<U64Hex>")]
+    pub limit: Option<u64>,
+    /// The payment hash to start returning payments after (exclusive cursor for pagination).
+    pub after: Option<Hash256>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ListPaymentsResult {
+    /// The list of payments.
+    pub payments: Vec<GetPaymentCommandResult>,
+    /// The last cursor for pagination. Use this as `after` in the next request to get more results.
+    pub last_cursor: Option<Hash256>,
 }
 
 /// The custom records to be included in the payment.
@@ -341,23 +361,30 @@ trait PaymentRpc {
         &self,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
+
+    /// Lists all payments, optionally filtered by status.
+    #[method(name = "list_payments")]
+    async fn list_payments(
+        &self,
+        params: ListPaymentsParams,
+    ) -> Result<ListPaymentsResult, ErrorObjectOwned>;
 }
 
 pub struct PaymentRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
-    _store: S,
+    store: S,
 }
 
 impl<S> PaymentRpcServerImpl<S> {
-    pub fn new(actor: ActorRef<NetworkActorMessage>, _store: S) -> Self {
-        PaymentRpcServerImpl { actor, _store }
+    pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
+        PaymentRpcServerImpl { actor, store }
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<S> PaymentRpcServer for PaymentRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
 {
     /// Sends a payment to a peer.
     async fn send_payment(
@@ -392,11 +419,19 @@ where
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         self.send_payment_with_router(params).await
     }
+
+    /// Lists all payments, optionally filtered by status.
+    async fn list_payments(
+        &self,
+        params: ListPaymentsParams,
+    ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
+        self.list_payments(params).await
+    }
 }
 
 impl<S> PaymentRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
 {
     pub async fn send_payment(
         &self,
@@ -520,6 +555,45 @@ where
                 .map(|records| PaymentCustomRecords { data: records.data }),
             #[cfg(debug_assertions)]
             routers: response.routers.clone(),
+        })
+    }
+
+    pub async fn list_payments(
+        &self,
+        params: ListPaymentsParams,
+    ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
+        let default_limit: u64 = 15;
+        let limit = params.limit.unwrap_or(default_limit) as usize;
+
+        let sessions =
+            self.store
+                .get_payment_sessions_with_limit(limit, params.after, params.status);
+
+        let payments: Vec<GetPaymentCommandResult> = sessions
+            .into_iter()
+            .map(|session| {
+                let response: crate::fiber::network::SendPaymentResponse = session.into();
+                GetPaymentCommandResult {
+                    payment_hash: response.payment_hash,
+                    status: response.status,
+                    created_at: response.created_at,
+                    last_updated_at: response.last_updated_at,
+                    failed_error: response.failed_error,
+                    fee: response.fee,
+                    custom_records: response
+                        .custom_records
+                        .map(|records| PaymentCustomRecords { data: records.data }),
+                    #[cfg(debug_assertions)]
+                    routers: response.routers.clone(),
+                }
+            })
+            .collect();
+
+        let last_cursor = payments.last().map(|p| p.payment_hash);
+
+        Ok(ListPaymentsResult {
+            payments,
+            last_cursor,
         })
     }
 }

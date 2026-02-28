@@ -4,7 +4,7 @@ use crate::create_mock_chain_actor;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{CellInput, CellOutput};
-use ckb_types::prelude::{Builder, Pack};
+use ckb_types::prelude::Builder;
 use molecule::prelude::Entity;
 
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
@@ -26,7 +26,7 @@ async fn test_submit_one_output_tx() {
             actor,
             TransactionView::new_advanced_builder()
                 .output(CellOutput::default())
-                .output_data(Default::default())
+                .output_data(ckb_types::packed::Bytes::default())
                 .build()
         )
         .await,
@@ -40,7 +40,7 @@ async fn test_submit_mocked_secp256k1_tx() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
     let output = CellOutput::new_builder()
-        .capacity(capacity.pack())
+        .capacity(capacity)
         .lock(get_script_by_contract(
             Contract::Secp256k1Lock,
             &b"whatever1"[..],
@@ -48,7 +48,7 @@ async fn test_submit_mocked_secp256k1_tx() {
         .build();
     let tx = TransactionView::new_advanced_builder()
         .output(output)
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build();
     assert!(matches!(
         submit_tx(actor.clone(), tx.clone()).await,
@@ -68,14 +68,14 @@ async fn test_submit_mocked_secp256k1_tx() {
         )
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(get_script_by_contract(
                     Contract::FundingLock,
                     &b"whatever2"[..],
                 ))
                 .build(),
         )
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build();
     assert!(matches!(
         submit_tx(actor, tx).await,
@@ -88,7 +88,7 @@ async fn test_repeatedly_consume_the_same_cell() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
     let output = CellOutput::new_builder()
-        .capacity(capacity.pack())
+        .capacity(capacity)
         .lock(get_script_by_contract(
             Contract::Secp256k1Lock,
             &b"whatever1"[..],
@@ -96,7 +96,7 @@ async fn test_repeatedly_consume_the_same_cell() {
         .build();
     let tx = TransactionView::new_advanced_builder()
         .output(output)
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build();
     assert!(matches!(
         submit_tx(actor.clone(), tx.clone()).await,
@@ -116,14 +116,14 @@ async fn test_repeatedly_consume_the_same_cell() {
         )
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(get_script_by_contract(
                     Contract::FundingLock,
                     &b"whatever2"[..],
                 ))
                 .build(),
         )
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build();
     assert!(matches!(
         submit_tx(actor.clone(), tx).await,
@@ -142,14 +142,14 @@ async fn test_repeatedly_consume_the_same_cell() {
         )
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(get_script_by_contract(
                     Contract::FundingLock,
                     &b"whatever3"[..],
                 ))
                 .build(),
         )
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build();
     assert!(matches!(submit_tx(actor, tx).await, TxStatus::Rejected(_)));
 }
@@ -159,7 +159,7 @@ async fn test_submit_malformed_commitment_tx() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
     let output = CellOutput::new_builder()
-        .capacity(capacity.pack())
+        .capacity(capacity)
         .lock(get_script_by_contract(
             Contract::FundingLock,
             &b"whatever1"[..],
@@ -167,7 +167,7 @@ async fn test_submit_malformed_commitment_tx() {
         .build();
     let tx = TransactionView::new_advanced_builder()
         .output(output)
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build();
     assert!(matches!(
         submit_tx(actor.clone(), tx.clone()).await,
@@ -187,14 +187,14 @@ async fn test_submit_malformed_commitment_tx() {
         )
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(get_script_by_contract(
                     Contract::CommitmentLock,
                     &b"whatever2"[..],
                 ))
                 .build(),
         )
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build();
     assert!(matches!(submit_tx(actor, tx).await, TxStatus::Rejected(_)));
 }

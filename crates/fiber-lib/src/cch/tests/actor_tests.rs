@@ -12,18 +12,17 @@
 
 use crate::cch::{
     actor::{CchActor, CchArgs, CchMessage},
-    order::{CchInvoice, CchOrder, CchOrderStatus, CchOrderStore},
+    order::CchOrderStore,
     trackers::CchTrackingEvent,
     CchConfig, CchError, CchStoreError,
 };
 use crate::fiber::{
-    network::SendPaymentResponse,
-    payment::{PaymentStatus, SendPaymentCommand},
-    types::Hash256,
-    NetworkActorCommand, NetworkActorMessage,
+    network::SendPaymentResponse, payment::SendPaymentCommand, NetworkActorCommand,
+    NetworkActorMessage,
 };
 use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
+use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, Hash256, PaymentStatus};
 use ractor::{call, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort};
 use secp256k1::{Secp256k1, SecretKey};
 use std::collections::HashMap;
@@ -92,7 +91,7 @@ fn test_payment_hash(value: u8) -> Hash256 {
 /// Helper function to create a valid preimage/payment hash pair.
 /// The preimage will hash to the payment hash using SHA256.
 fn create_valid_preimage_pair(seed: u8) -> (Hash256, Hash256) {
-    use crate::fiber::hash_algorithm::HashAlgorithm;
+    use fiber_types::HashAlgorithm;
     // Generate a preimage from the seed
     let mut preimage_bytes = [0u8; 32];
     preimage_bytes[0] = seed;

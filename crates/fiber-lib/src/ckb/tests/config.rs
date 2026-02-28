@@ -1,10 +1,11 @@
-use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
-use crate::fiber::gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
+use crate::ckb::config::UdtCfgInfosExt;
+use crate::fiber::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use ckb_jsonrpc_types::OutPoint;
 use ckb_types::core::{DepType, ScriptHashType};
 use ckb_types::packed::Script;
 use ckb_types::prelude::{Builder, Pack};
 use ckb_types::H256;
+use fiber_types::gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
 use hex;
 use molecule::prelude::Entity;
 
@@ -54,7 +55,7 @@ fn test_find_matching_udt_exact_match() {
     let args_bytes = hex::decode(&args[2..]).unwrap();
     let script = Script::new_builder()
         .code_hash(code_hash.pack())
-        .hash_type(ScriptHashType::Data.into())
+        .hash_type(ScriptHashType::Data)
         .args(args_bytes.pack())
         .build();
 
@@ -82,7 +83,7 @@ fn test_find_matching_udt_regex_pattern() {
     let args_bytes = hex::decode("abcd").unwrap();
     let script = Script::new_builder()
         .code_hash(code_hash.pack())
-        .hash_type(ScriptHashType::Data.into())
+        .hash_type(ScriptHashType::Data)
         .args(args_bytes.pack())
         .build();
 
@@ -94,7 +95,7 @@ fn test_find_matching_udt_regex_pattern() {
     let args_bytes_no_match = hex::decode("ab").unwrap(); // Only 2 hex digits (1 byte), doesn't match pattern
     let script_no_match = Script::new_builder()
         .code_hash(code_hash.pack())
-        .hash_type(ScriptHashType::Data.into())
+        .hash_type(ScriptHashType::Data)
         .args(args_bytes_no_match.pack())
         .build();
 
@@ -121,7 +122,7 @@ fn test_find_matching_udt_wrong_code_hash() {
     let args_bytes = hex::decode("00").unwrap();
     let script = Script::new_builder()
         .code_hash(code_hash2.pack()) // Different code_hash
-        .hash_type(ScriptHashType::Data.into())
+        .hash_type(ScriptHashType::Data)
         .args(args_bytes.pack())
         .build();
 
@@ -147,7 +148,7 @@ fn test_find_matching_udt_wrong_hash_type() {
     let args_bytes = hex::decode("00").unwrap();
     let script = Script::new_builder()
         .code_hash(code_hash.pack())
-        .hash_type(ScriptHashType::Type.into()) // Different hash_type
+        .hash_type(ScriptHashType::Type) // Different hash_type
         .args(args_bytes.pack())
         .build();
 
@@ -187,7 +188,7 @@ fn test_find_matching_udt_multiple_udts() {
     let args_bytes1 = hex::decode("00").unwrap();
     let script1 = Script::new_builder()
         .code_hash(code_hash1.pack())
-        .hash_type(ScriptHashType::Data.into())
+        .hash_type(ScriptHashType::Data)
         .args(args_bytes1.pack())
         .build();
 
@@ -199,7 +200,7 @@ fn test_find_matching_udt_multiple_udts() {
     let args_bytes2 = hex::decode("01").unwrap();
     let script2 = Script::new_builder()
         .code_hash(code_hash2.pack())
-        .hash_type(ScriptHashType::Data.into())
+        .hash_type(ScriptHashType::Data)
         .args(args_bytes2.pack())
         .build();
 
@@ -217,7 +218,7 @@ fn test_find_matching_udt_empty_whitelist() {
     let args_bytes = hex::decode("00").unwrap();
     let script = Script::new_builder()
         .code_hash(code_hash.pack())
-        .hash_type(ScriptHashType::Data.into())
+        .hash_type(ScriptHashType::Data)
         .args(args_bytes.pack())
         .build();
 

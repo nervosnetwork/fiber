@@ -5,13 +5,9 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
 
-use crate::cch::{
-    order::{CchOrderStatus, CchOrderStore},
-    trackers::LndTrackerMessage,
-    CchError,
-};
-use crate::fiber::types::Hash256;
+use crate::cch::{order::CchOrderStore, trackers::LndTrackerMessage, CchError};
 use crate::time::{SystemTime, UNIX_EPOCH};
+use fiber_types::{CchOrderStatus, Hash256};
 
 const PRUNE_DELAY_DAYS: u64 = 21;
 pub const PRUNE_DELAY_SECONDS: u64 = PRUNE_DELAY_DAYS * 24 * 60 * 60;

@@ -3,10 +3,10 @@ use std::sync::Arc;
 use ractor::OutputPort;
 
 use crate::cch::trackers::CchTrackingEvent;
-use crate::fiber::payment::PaymentStatus;
 use crate::invoice::PreimageStore as _;
 use crate::store::store_impl::{StoreChange, StoreChangeWatcher};
 use crate::store::Store;
+use fiber_types::payment::PaymentStatus;
 
 /// Maps StoreChange events into CchTrackingEvent and emits them via an OutputPort.
 #[derive(Debug)]

@@ -15,7 +15,8 @@ use crate::{
     utils::actor::ActorHandleLogGuard,
 };
 
-use super::{types::Hash256, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE};
+use super::{NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE};
+use fiber_types::Hash256;
 
 /// Check if an RPC error is a permanent error that should not be retried.
 /// Currently checks for TransactionFailedToResolve errors.

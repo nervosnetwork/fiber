@@ -2,28 +2,20 @@ use super::contracts::{get_script_by_contract, Contract};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
 use crate::Result;
-use ckb_jsonrpc_types::{OutPoint as OutPointWrapper, Script as ScriptWrapper};
 use ckb_sdk::{traits::DefaultCellCollector, CkbRpcAsyncClient};
-use ckb_types::core::ScriptHashType;
-use ckb_types::prelude::{Builder, Pack};
-use ckb_types::H256;
-use ckb_types::{
-    core::DepType,
-    packed::{CellDep, Script},
-};
+use ckb_types::packed::Script;
+use ckb_types::prelude::Pack;
 use clap_serde_derive::clap::{self};
 use clap_serde_derive::ClapSerde;
-use molecule::prelude::Entity;
+use fiber_types::{UdtArgInfo, UdtCfgInfos};
 use secp256k1::SecretKey;
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::info;
 use {ckb_hash::blake2b_256, secp256k1::SECP256K1};
 
-use std::{path::PathBuf, str::FromStr};
+use std::path::PathBuf;
 
 pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
 const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
@@ -168,110 +160,13 @@ impl CkbConfig {
     }
 }
 
-serde_with::serde_conv!(
-    ScriptHashTypeWrapper,
-    ScriptHashType,
-    |s: &ScriptHashType| -> String {
-        let v = match s {
-            ScriptHashType::Type => "type",
-            ScriptHashType::Data => "data",
-            ScriptHashType::Data1 => "data1",
-            ScriptHashType::Data2 => "data2",
-        };
-        v.to_string()
-    },
-    |s: String| {
-        let v = match s.to_lowercase().as_str() {
-            "type" => ScriptHashType::Type,
-            "data" => ScriptHashType::Data,
-            "data1" => ScriptHashType::Data1,
-            "data2" => ScriptHashType::Data2,
-            _ => return Err("invalid hash type"),
-        };
-        Ok(v)
-    }
-);
-
-serde_with::serde_conv!(
-    DepTypeWrapper,
-    DepType,
-    |s: &DepType| -> String {
-        let v = match s {
-            DepType::Code => "code",
-            DepType::DepGroup => "dep_group",
-        };
-        v.to_string()
-    },
-    |s: String| {
-        let v = match s.to_lowercase().as_str() {
-            "code" => DepType::Code,
-            "dep_group" => DepType::DepGroup,
-            _ => return Err("invalid hash type"),
-        };
-        Ok(v)
-    }
-);
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, Default, Eq, PartialEq, Hash)]
-pub struct UdtScript {
-    pub code_hash: H256,
-    #[serde_as(as = "ScriptHashTypeWrapper")]
-    pub hash_type: ScriptHashType,
-    /// args may be used in pattern matching
-    pub args: String,
+pub trait UdtCfgInfosExt {
+    fn find_matching_udt(&self, udt_script: &Script) -> Option<&UdtArgInfo>;
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-/// Udt script on-chain dependencies.
-pub struct UdtDep {
-    /// cell dep described by out_point.
-    #[serde(default)]
-    pub cell_dep: Option<UdtCellDep>,
-    /// cell dep described by type ID.
-    #[serde(default)]
-    pub type_id: Option<ScriptWrapper>,
-}
-
-impl UdtDep {
-    pub fn with_cell_dep(cell_dep: UdtCellDep) -> Self {
-        Self {
-            cell_dep: Some(cell_dep),
-            type_id: None,
-        }
-    }
-
-    pub fn with_type_id(type_id: ScriptWrapper) -> Self {
-        Self {
-            cell_dep: None,
-            type_id: Some(type_id),
-        }
-    }
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct UdtCellDep {
-    pub out_point: OutPointWrapper,
-    #[serde_as(as = "DepTypeWrapper")]
-    pub dep_type: DepType,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
-pub struct UdtArgInfo {
-    pub name: String,
-    pub script: UdtScript,
-    pub auto_accept_amount: Option<u128>,
-    pub cell_deps: Vec<UdtDep>,
-}
-
-/// The UDT configurations
-#[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
-pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
-
-impl UdtCfgInfos {
+impl UdtCfgInfosExt for UdtCfgInfos {
     /// Find a matching UDT info by script (code_hash, hash_type, and args pattern)
-    pub fn find_matching_udt(&self, udt_script: &Script) -> Option<&UdtArgInfo> {
+    fn find_matching_udt(&self, udt_script: &Script) -> Option<&UdtArgInfo> {
         use regex::Regex;
         for udt in &self.0 {
             if let Ok(hash_type) = udt_script.hash_type().try_into() {
@@ -287,23 +182,6 @@ impl UdtCfgInfos {
             }
         }
         None
-    }
-}
-
-impl FromStr for UdtCfgInfos {
-    type Err = serde_json::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        serde_json::from_str(s)
-    }
-}
-
-impl From<&UdtCellDep> for CellDep {
-    fn from(cell_dep: &UdtCellDep) -> Self {
-        CellDep::new_builder()
-            .dep_type(cell_dep.dep_type.into())
-            .out_point(cell_dep.out_point.clone().into())
-            .build()
     }
 }
 

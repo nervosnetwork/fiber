@@ -1,6 +1,5 @@
-use crate::{cch::error::CchStoreError, fiber::types::Hash256};
-
-use super::CchOrder;
+use crate::cch::error::CchStoreError;
+use fiber_types::{CchOrder, Hash256};
 
 pub trait CchOrderStore {
     /// Gets an order from the store.

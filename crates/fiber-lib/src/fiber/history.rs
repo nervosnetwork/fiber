@@ -2,26 +2,16 @@
 // https://github.com/lightningnetwork/lnd/blob/b7c59b36a74975c4e710a02ea42959053735402e/routing/probability_bimodal.go
 // we only use direct channel probability now.
 
-use super::payment::SessionRouteNode;
-use super::{
-    graph::NetworkGraphStateStore,
-    types::{ChannelUpdate, Pubkey, TlcErr},
-};
+use super::graph::NetworkGraphStateStore;
 #[cfg(test)]
 use crate::mock_timestamp_as_millis_u64;
-use crate::{fiber::types::TlcErrorCode, now_timestamp_as_millis_u64};
+use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::OutPoint;
+use fiber_types::{ChannelUpdate, Pubkey, SessionRouteNode, TlcErr, TlcErrorCode};
+pub use fiber_types::{Direction, TimedResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimedResult {
-    pub fail_time: u64,
-    pub fail_amount: u128,
-    pub success_time: u64,
-    pub success_amount: u128,
-}
 
 const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u64 = 60 * 1000;
 
@@ -30,15 +20,6 @@ const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u64 = 60 * 1000;
 // we need to find a better way to set this value for UDT
 const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
 pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u64 = 30 * 60 * 1000; // 30 minutes
-
-// The direction of the channel,
-// Forward means from node_a to node_b
-// Backward means from node_b to node_a
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum Direction {
-    Forward,
-    Backward,
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SentNode {

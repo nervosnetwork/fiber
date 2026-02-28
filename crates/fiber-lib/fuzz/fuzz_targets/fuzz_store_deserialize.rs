@@ -4,10 +4,10 @@ use libfuzzer_sys::fuzz_target;
 
 use fnn::fiber::channel::ChannelActorState;
 use fnn::fiber::history::TimedResult;
-use fnn::fiber::network::PersistentNetworkActorState;
 use fnn::fiber::payment::PaymentSession;
 use fnn::fiber::types::BroadcastMessage;
 use fnn::fiber::PaymentCustomRecords;
+use fnn::fiber::PersistentNetworkActorState;
 use fnn::invoice::{CkbInvoice, CkbInvoiceStatus};
 
 fuzz_target!(|data: &[u8]| {

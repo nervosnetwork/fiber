@@ -2,16 +2,17 @@
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use fiber_types::{FeatureVector, HopHint};
 use fnn::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
 };
-use fnn::fiber::features::FeatureVector;
 use fnn::fiber::gossip::GossipMessageStore;
 use fnn::fiber::graph::{GraphChannelStat, NetworkGraph};
 use fnn::fiber::network::get_chain_hash;
+use fnn::fiber::types::new_channel_update_unsigned;
 use fnn::fiber::types::{
-    ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
-    NodeAnnouncement, Pubkey,
+    ChannelAnnouncement, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, NodeAnnouncement,
+    Pubkey,
 };
 use fnn::store::Store;
 use fnn::tests::create_n_nodes_network;
@@ -104,13 +105,16 @@ fn build_graph_for_find_path_bench(
     }
 
     for (i, (sk, _pk)) in keypairs.iter().enumerate() {
-        store.save_node_announcement(NodeAnnouncement::new(
+        store.save_node_announcement(NodeAnnouncement::new_signed(
             format!("node{i}").as_str().into(),
             FeatureVector::default(),
             vec![],
             &(*sk).into(),
+            get_chain_hash(),
             now_timestamp_as_millis_u64(),
             0,
+            Default::default(),
+            env!("CARGO_PKG_VERSION").to_string(),
         ));
     }
 
@@ -277,7 +281,7 @@ fn build_graph_for_find_path_bench(
             },
         );
 
-        store.save_channel_update(ChannelUpdate::new_unsigned(
+        store.save_channel_update(new_channel_update_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
@@ -290,7 +294,7 @@ fn build_graph_for_find_path_bench(
             0,                        // tlc_minimum_value
             0, // tlc_fee_proportional_millionths (fee rate, should be small, not capacity!)
         ));
-        store.save_channel_update(ChannelUpdate::new_unsigned(
+        store.save_channel_update(new_channel_update_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
@@ -320,7 +324,7 @@ fn bench_find_path_single_call_large_graph(c: &mut Criterion) {
     let target: Pubkey = keys[199].into();
 
     let channel_stats = GraphChannelStat::default();
-    let hop_hints: Vec<fnn::fiber::payment::HopHint> = Vec::new();
+    let hop_hints: Vec<HopHint> = Vec::new();
     let amount = 500;
 
     let mut group = c.benchmark_group("find_path_single_call_large_graph");

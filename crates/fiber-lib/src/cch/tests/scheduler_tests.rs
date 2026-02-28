@@ -4,15 +4,16 @@
 
 use crate::cch::trackers::LndTrackerMessage;
 use crate::cch::{
-    order::{CchInvoice, CchOrder, CchOrderStatus, CchOrderStore},
+    order::CchOrderStore,
     scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage, PRUNE_DELAY_SECONDS},
     tests::actor_tests::MockCchOrderStore,
     CchStoreError,
 };
-use crate::fiber::types::Hash256;
 use crate::invoice::{Attribute, CkbInvoice, Currency, InvoiceData};
 use crate::tests::test_utils::get_test_root_actor;
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
+use fiber_types::{CchInvoice, Hash256};
+use fiber_types::{CchOrder, CchOrderStatus};
 use ractor::{Actor, ActorRef};
 use secp256k1::{Secp256k1, SecretKey};
 

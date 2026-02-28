@@ -1,16 +1,9 @@
-use crate::fiber::channel::{TLCId, TlcStatus};
-use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
     channel::{
-        AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelActorStateStore,
-        ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore, ChannelOpeningStatus,
-        ChannelState as RawChannelState, CloseFlags, CollaboratingFundingTxFlags,
-        NegotiatingFundingFlags, ShutdownCommand, ShuttingDownFlags, SigningCommitmentFlags,
-        UpdateCommand,
+        ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore,
+        ShutdownCommand, UpdateCommand,
     },
     network::{AcceptChannelCommand, OpenChannelCommand, PendingAcceptChannel},
-    serde_utils::{U128Hex, U64Hex},
-    types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
@@ -20,6 +13,12 @@ use ckb_types::{
     packed::OutPoint,
     prelude::{IntoTransactionView, Unpack},
     H256,
+};
+use fiber_types::{
+    AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelOpeningStatus,
+    ChannelState as RawChannelState, CloseFlags, CollaboratingFundingTxFlags, EntityHex, Hash256,
+    NegotiatingFundingFlags, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcStatus, U128Hex,
+    U64Hex,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
@@ -679,7 +678,7 @@ where
                             tlc_fee_proportional_millionths: state
                                 .local_tlc_info
                                 .tlc_fee_proportional_millionths,
-                            shutdown_transaction_hash: state.shutdown_transaction_hash,
+                            shutdown_transaction_hash: state.shutdown_transaction_hash.clone(),
                             failure_detail,
                         })
                     })

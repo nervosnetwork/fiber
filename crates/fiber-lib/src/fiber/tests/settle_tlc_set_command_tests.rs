@@ -4,18 +4,19 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ckb_types::packed::{OutPoint, Script};
+use fiber_types::TlcState;
 use tentacle::secio::PeerId;
 
-use crate::fiber::channel::InboundTlcStatus;
-use crate::fiber::channel::{
-    AppliedFlags, ChannelActorState, ChannelActorStateStore, ChannelBasePublicKeys,
-    ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentNumbers, InMemorySigner, TLCId,
-    TlcInfo, TlcState, TlcStatus,
-};
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::payment::PaymentCustomRecords;
+use crate::fiber::channel::InMemorySignerExt;
+use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
-use crate::fiber::types::{Hash256, HoldTlc, RemoveTlcReason, TlcErrorCode, NO_SHARED_SECRET};
+use crate::fiber::types::HoldTlc;
+use crate::fiber::{
+    AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelConstraints, ChannelState,
+    ChannelTlcInfo, CommitmentNumbers, Hash256, HashAlgorithm, InMemorySigner, InboundTlcStatus,
+    PaymentCustomRecords, RemoveTlcReason, TLCId, TlcErrorCode, TlcInfo, TlcStatus,
+    NO_SHARED_SECRET,
+};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
 use crate::invoice::{InvoiceStore, PreimageStore};
@@ -244,51 +245,53 @@ fn create_test_channel_state_with_tlc(
     let signer = InMemorySigner::generate_from_seed(&seed);
 
     ChannelActorState {
-        state: ChannelState::ChannelReady,
-        public_channel_info: None,
-        local_tlc_info: ChannelTlcInfo::default(),
-        remote_tlc_info: None,
-        local_pubkey: gen_rand_fiber_public_key(),
-        remote_pubkey: gen_rand_fiber_public_key(),
-        id: channel_id,
-        funding_tx: None,
-        funding_tx_confirmed_at: None,
-        funding_udt_type_script: None,
-        is_acceptor: false,
-        is_one_way: false,
-        to_local_amount: 0,
-        to_remote_amount: 0,
-        local_reserved_ckb_amount: 0,
-        remote_reserved_ckb_amount: 0,
-        commitment_fee_rate: 0,
-        commitment_delay_epoch: 0,
-        funding_fee_rate: 0,
-        signer,
-        local_channel_public_keys: ChannelBasePublicKeys {
-            funding_pubkey: gen_rand_fiber_public_key(),
-            tlc_base_key: gen_rand_fiber_public_key(),
+        core: ChannelActorData {
+            state: ChannelState::ChannelReady,
+            public_channel_info: None,
+            local_tlc_info: ChannelTlcInfo::default(),
+            remote_tlc_info: None,
+            local_pubkey: gen_rand_fiber_public_key(),
+            remote_pubkey: gen_rand_fiber_public_key(),
+            id: channel_id,
+            funding_tx: None,
+            funding_tx_confirmed_at: None,
+            funding_udt_type_script: None,
+            is_acceptor: false,
+            is_one_way: false,
+            to_local_amount: 0,
+            to_remote_amount: 0,
+            local_reserved_ckb_amount: 0,
+            remote_reserved_ckb_amount: 0,
+            commitment_fee_rate: 0,
+            commitment_delay_epoch: 0,
+            funding_fee_rate: 0,
+            signer,
+            local_channel_public_keys: ChannelBasePublicKeys {
+                funding_pubkey: gen_rand_fiber_public_key(),
+                tlc_base_key: gen_rand_fiber_public_key(),
+            },
+            commitment_numbers: CommitmentNumbers::default(),
+            local_constraints: ChannelConstraints::default(),
+            remote_constraints: ChannelConstraints::default(),
+            tlc_state,
+            retryable_tlc_operations: std::collections::VecDeque::new(),
+            waiting_forward_tlc_tasks: HashMap::new(),
+            remote_shutdown_script: None,
+            local_shutdown_script: Script::default(),
+            last_committed_remote_nonce: None,
+            remote_revocation_nonce_for_verify: None,
+            remote_revocation_nonce_for_send: None,
+            remote_revocation_nonce_for_next: None,
+            remote_commitment_points: vec![],
+            remote_channel_public_keys: None,
+            local_shutdown_info: None,
+            remote_shutdown_info: None,
+            shutdown_transaction_hash: None,
+            latest_commitment_transaction: None,
+            reestablishing: false,
+            last_revoke_ack_msg: None,
+            created_at: SystemTime::now(),
         },
-        commitment_numbers: CommitmentNumbers::default(),
-        local_constraints: ChannelConstraints::default(),
-        remote_constraints: ChannelConstraints::default(),
-        tlc_state,
-        retryable_tlc_operations: std::collections::VecDeque::new(),
-        waiting_forward_tlc_tasks: HashMap::new(),
-        remote_shutdown_script: None,
-        local_shutdown_script: Script::default(),
-        last_committed_remote_nonce: None,
-        remote_revocation_nonce_for_verify: None,
-        remote_revocation_nonce_for_send: None,
-        remote_revocation_nonce_for_next: None,
-        remote_commitment_points: vec![],
-        remote_channel_public_keys: None,
-        local_shutdown_info: None,
-        remote_shutdown_info: None,
-        shutdown_transaction_hash: None,
-        latest_commitment_transaction: None,
-        reestablishing: false,
-        last_revoke_ack_msg: None,
-        created_at: SystemTime::now(),
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,

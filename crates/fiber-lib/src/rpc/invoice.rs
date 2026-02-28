@@ -4,16 +4,13 @@
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
-use crate::fiber::features::FeatureVector;
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::serde_utils::{duration_hex, U128Hex, U64Hex};
-use crate::fiber::types::{Hash256, Privkey};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
     Attribute as InternalAttribute, CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, CkbScript,
     Currency, InvoiceBuilder, InvoiceData as InternalInvoiceData, InvoiceSignature, InvoiceStore,
 };
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
+use fiber_types::{duration_hex, FeatureVector, Hash256, HashAlgorithm, Privkey, U128Hex, U64Hex};
 
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
