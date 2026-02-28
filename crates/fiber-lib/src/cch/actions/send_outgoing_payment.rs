@@ -12,16 +12,17 @@ use crate::{
             ActionExecutor, CchOrderAction,
         },
         actor::CchState,
-        order::CchInvoice,
         trackers::{map_lnd_payment_changed_event, CchTrackingEvent, LndConnectionInfo},
         CchMessage, CchOrderStore,
     },
-    fiber::{payment::SendPaymentCommand, NetworkActorCommand, NetworkActorMessage},
+    fiber::{
+        config::MAX_PAYMENT_TLC_EXPIRY_LIMIT, payment::SendPaymentCommand, NetworkActorCommand,
+        NetworkActorMessage,
+    },
     invoice::CkbInvoice,
     time::{SystemTime, UNIX_EPOCH},
 };
-use fiber_types::{payment::PaymentStatus, CchOrder};
-use fiber_types::{CchOrderStatus, Hash256};
+use fiber_types::{payment::PaymentStatus, CchInvoice, CchOrder, CchOrderStatus, Hash256};
 
 const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 
@@ -343,7 +344,9 @@ impl SendOutgoingPaymentDispatcher {
 
         match dispatch_payment_handler(order) {
             PaymentHandlerType::Fiber => {
-                let tlc_expiry_limit = max_outgoing_seconds * 1000; // convert to milliseconds
+                let tlc_expiry_limit = max_outgoing_seconds
+                    .saturating_mul(1000)
+                    .min(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
                 Some(Box::new(SendFiberOutgoingPaymentExecutor {
                     payment_hash: order.payment_hash,
                     cch_actor_ref: cch_actor_ref.clone(),
