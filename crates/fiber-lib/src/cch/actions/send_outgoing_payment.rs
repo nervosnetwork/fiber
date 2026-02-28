@@ -17,6 +17,7 @@ use crate::{
         CchMessage, CchOrder, CchOrderStatus, CchOrderStore,
     },
     fiber::{
+        config::MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         payment::{PaymentStatus, SendPaymentCommand},
         types::Hash256,
         NetworkActorCommand, NetworkActorMessage,
@@ -313,7 +314,9 @@ impl SendOutgoingPaymentDispatcher {
 
         match dispatch_payment_handler(order) {
             PaymentHandlerType::Fiber => {
-                let tlc_expiry_limit = max_outgoing_seconds * 1000; // convert to milliseconds
+                let tlc_expiry_limit = max_outgoing_seconds
+                    .saturating_mul(1000)
+                    .min(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
                 Some(Box::new(SendFiberOutgoingPaymentExecutor {
                     payment_hash: order.payment_hash,
                     cch_actor_ref: cch_actor_ref.clone(),

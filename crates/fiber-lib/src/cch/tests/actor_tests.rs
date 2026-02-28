@@ -448,6 +448,9 @@ fn create_test_fiber_invoice(payment_hash: Hash256) -> CkbInvoice {
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
 
+    // Use DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS (108,000 s) converted to
+    // milliseconds, matching production invoice construction in actor.rs.
+    let default_expiry_delta_ms = 108_000 * 1000;
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
         amount: Some(100000),
@@ -459,7 +462,7 @@ fn create_test_fiber_invoice(payment_hash: Hash256) -> CkbInvoice {
                 .unwrap()
                 .as_millis(),
             attrs: vec![
-                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::FinalHtlcMinimumExpiryDelta(default_expiry_delta_ms),
                 Attribute::Description("test".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(3600)),
                 Attribute::PayeePublicKey(public_key),
@@ -547,8 +550,10 @@ async fn test_receive_btc_happy_path() {
     let harness = setup_test_harness().await;
 
     // Step 1: Create order directly in the database (bypassing LND hold invoice creation)
-    // In production, ReceiveBTC creates a hold invoice via LND, but we skip that for testing
-    let fiber_invoice = create_test_fiber_invoice(payment_hash);
+    // In production, ReceiveBTC creates a hold invoice via LND, but we skip that for testing.
+    // Use a small final TLC expiry delta (10,000 ms = 10 seconds) so it fits
+    // within the default incoming budget (180 blocks * 600 / 2 = 54,000 seconds).
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
     let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
     let order = CchOrder {
         created_at: SystemTime::now()
@@ -824,22 +829,25 @@ async fn test_send_btc_fails_insufficient_expiry_delta() {
     // Create a BTC invoice with min_final_cltv_expiry_delta = 36 blocks (= 21,600 seconds)
     let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 36);
 
-    // Use a config with ckb_final_tlc_expiry_delta_seconds = 50,000 seconds (~14 hours).
+    // The incoming Fiber invoice has ckb_final_tlc_expiry_delta = 50,000 seconds.
     // Initial static check: 36 * 600 = 21,600 < 50,000 / 2 = 25,000 → passes.
     // But if the order was created 20,000 seconds ago:
     //   remaining = 50,000 - 20,000 = 30,000 seconds
     //   max_outgoing = 30,000 / 2 = 15,000 seconds
     //   needed = 21,600 seconds
     //   15,000 < 21,600 → fails!
+    let ckb_final_tlc_seconds: u64 = 50_000;
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
         wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
-        ckb_final_tlc_expiry_delta_seconds: 50_000,
+        ckb_final_tlc_expiry_delta_seconds: ckb_final_tlc_seconds,
         ..Default::default()
     };
 
-    // Create an order with created_at 20,000 seconds in the past
+    // Create an order with created_at 20,000 seconds in the past.
+    // The incoming invoice's final expiry delta must match the config value
+    // because compute_max_outgoing_expiry_seconds reads from the stored invoice.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -849,7 +857,10 @@ async fn test_send_btc_fails_insufficient_expiry_delta() {
         expiry_delta_seconds: 100_000, // large enough not to expire
         wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
         outgoing_pay_req: lightning_invoice.to_string(),
-        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice_with_expiry(
+            payment_hash,
+            ckb_final_tlc_seconds * 1000,
+        )),
         payment_hash,
         payment_preimage: None,
         amount_sats: 100_000,
@@ -890,6 +901,8 @@ async fn test_receive_btc_fails_insufficient_expiry_delta() {
     let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 100_000_000);
 
     // Use a config with btc_final_tlc_expiry_delta_blocks = 180 blocks (= 108,000 seconds).
+    // The incoming Lightning invoice must carry the same CLTV value because
+    // compute_max_outgoing_expiry_seconds now reads from the stored invoice.
     // If order was just created:
     //   remaining = 108,000 seconds
     //   max_outgoing = 54,000 seconds
@@ -902,7 +915,9 @@ async fn test_receive_btc_fails_insufficient_expiry_delta() {
         ..Default::default()
     };
 
-    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+    // Create a Lightning invoice whose min_final_cltv_expiry_delta matches the
+    // default btc_final_tlc_expiry_delta_blocks (180 blocks).
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 180);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -950,17 +965,18 @@ async fn test_send_btc_passes_sufficient_expiry_delta() {
     // Create a BTC invoice with small min_final_cltv_expiry_delta = 3 blocks (= 1,800 seconds)
     let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 3);
 
-    // Use a config with ckb_final_tlc_expiry_delta_seconds = 100,000 seconds.
+    // The incoming Fiber invoice has ckb_final_tlc_expiry_delta = 100,000 seconds.
     // Even with 10,000 seconds elapsed:
     //   remaining = 100,000 - 10,000 = 90,000 seconds
     //   max_outgoing = 45,000 seconds
     //   needed = 3 * 600 = 1,800 seconds
     //   45,000 > 1,800 → passes ✓
+    let ckb_final_tlc_seconds: u64 = 100_000;
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
         wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
-        ckb_final_tlc_expiry_delta_seconds: 100_000,
+        ckb_final_tlc_expiry_delta_seconds: ckb_final_tlc_seconds,
         ..Default::default()
     };
 
@@ -973,7 +989,10 @@ async fn test_send_btc_passes_sufficient_expiry_delta() {
         expiry_delta_seconds: 200_000,
         wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
         outgoing_pay_req: lightning_invoice.to_string(),
-        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice_with_expiry(
+            payment_hash,
+            ckb_final_tlc_seconds * 1000,
+        )),
         payment_hash,
         payment_preimage: None,
         amount_sats: 100_000,
