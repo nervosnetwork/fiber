@@ -203,6 +203,11 @@ impl SendOutgoingPaymentDispatcher {
     /// The other half is reserved for the CCH to settle the incoming payment
     /// after receiving the preimage.
     ///
+    /// The final expiry delta is extracted from the stored incoming invoice when
+    /// available, so that persisted orders use the actual inbound HTLC/TLC terms
+    /// even if the config has changed since order creation. Falls back to the
+    /// current config values when the invoice does not carry the setting.
+    ///
     /// Returns `None` if there is insufficient time remaining.
     fn compute_max_outgoing_expiry_seconds<S: CchOrderStore>(
         state: &CchState<S>,
@@ -216,9 +221,21 @@ impl SendOutgoingPaymentDispatcher {
 
         // The incoming TLC/HTLC was accepted with at least this many seconds of expiry.
         // Using `created_at` is conservative (the TLC was accepted after order creation).
+        //
+        // Prefer the final expiry delta encoded in the stored incoming invoice so
+        // that persisted orders are checked against their actual terms, not values
+        // that may have drifted if the config was updated between restart.
         let incoming_expiry_seconds = match &order.incoming_invoice {
-            CchInvoice::Fiber(_) => state.config.ckb_final_tlc_expiry_delta_seconds,
-            CchInvoice::Lightning(_) => state.config.btc_final_tlc_expiry_delta_blocks * 600,
+            CchInvoice::Fiber(inv) => {
+                // CkbInvoice stores the delta in milliseconds; convert to seconds.
+                inv.final_tlc_minimum_expiry_delta()
+                    .map(|ms| ms / 1000)
+                    .unwrap_or(state.config.ckb_final_tlc_expiry_delta_seconds)
+            }
+            CchInvoice::Lightning(inv) => {
+                // Bolt11Invoice stores the delta in blocks; convert to seconds.
+                inv.min_final_cltv_expiry_delta().saturating_mul(600)
+            }
         };
         let remaining = incoming_expiry_seconds.checked_sub(elapsed)?;
 
