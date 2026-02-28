@@ -542,9 +542,11 @@ impl<S: CchOrderStore> CchState<S> {
             return Err(CchError::OutgoingInvoiceExpiryTooShort);
         }
 
-        let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
-            / 1_000_000u128
-            + (self.config.base_fee_sats as u128);
+        let fee_sats = amount_sats
+            .checked_mul(self.config.fee_rate_per_million_sats as u128)
+            .and_then(|v| v.checked_div(1_000_000u128))
+            .and_then(|v| v.checked_add(self.config.base_fee_sats as u128))
+            .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
         let total_msat = i64::try_from(
             amount_sats
                 .checked_add(fee_sats)
