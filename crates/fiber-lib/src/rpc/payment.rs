@@ -97,7 +97,9 @@ impl From<PaymentCustomRecords> for crate::fiber::PaymentCustomRecords {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendPaymentCommandParams {
-    /// the identifier of the payment target
+    /// The public key (`Pubkey`) of the payment target node, serialized as a hex string.
+    /// You can obtain a node's pubkey via the `node_info` or `graph_nodes` RPC.
+    /// Note: this is the `Pubkey` (secp256k1 public key), not the `PeerId`.
     pub target_pubkey: Option<Pubkey>,
 
     /// the amount of the payment, the unit is Shannons for non UDT payment
@@ -153,7 +155,12 @@ pub struct SendPaymentCommandParams {
     /// udt type script for the payment
     pub udt_type_script: Option<Script>,
 
-    /// allow self payment, default is false
+    /// Allow paying yourself through a circular route, default is false.
+    /// This is useful for **channel rebalancing**: the payment flows out of one channel and
+    /// back through another, shifting liquidity between your channels without changing your
+    /// total balance (only routing fees are deducted).
+    /// Set `target_pubkey` to your own node pubkey and `keysend` to `true` to perform a rebalance.
+    /// Note: `allow_self_payment` is not compatible with trampoline routing.
     pub allow_self_payment: Option<bool>,
 
     /// Some custom records for the payment which contains a map of u32 to Vec<u8>
@@ -316,9 +323,19 @@ trait PaymentRpc {
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned>;
 
-    /// Sends a payment to a peer with specified router
+    /// Sends a payment to a peer with specified router.
     /// This method differs from SendPayment in that it allows users to specify a full route manually.
-    /// This can be used for things like rebalancing.
+    ///
+    /// A typical use case is **channel rebalancing**: you can construct a circular route
+    /// (your node -> intermediate nodes -> your node) to shift liquidity between your channels.
+    ///
+    /// To rebalance, follow these steps:
+    ///
+    /// 1. Call `build_router` with `hops_info` defining the circular route you want,
+    ///    e.g. your_node -> peer_A -> peer_B -> your_node.
+    /// 2. Call `send_payment_with_router` with the returned `router_hops` and `keysend: true`.
+    ///
+    /// Only routing fees are deducted; your total balance across channels remains the same.
     #[method(name = "send_payment_with_router")]
     async fn send_payment_with_router(
         &self,
@@ -366,9 +383,9 @@ where
         self.build_router(params).await
     }
 
-    /// Sends a payment to a peer with specified router
+    /// Sends a payment to a peer with specified router.
     /// This method differs from SendPayment in that it allows users to specify a full route manually.
-    /// This can be used for things like rebalancing.
+    /// This can be used for things like channel rebalancing.
     async fn send_payment_with_router(
         &self,
         params: SendPaymentWithRouterParams,

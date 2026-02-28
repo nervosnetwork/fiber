@@ -23,7 +23,7 @@ pub struct ConnectPeerParams {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DisconnectPeerParams {
-    /// The peer ID of the peer to disconnect.
+    /// The peer ID of the peer to disconnect (base58 string, derived from the peer's `Pubkey`).
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
 }
