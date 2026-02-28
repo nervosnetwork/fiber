@@ -175,19 +175,6 @@ impl AttemptStatus {
 }
 
 // ============================================================
-// TimedResult
-// ============================================================
-
-/// A result that tracks timing information for success and failure.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimedResult {
-    pub fail_time: u64,
-    pub fail_amount: u128,
-    pub success_time: u64,
-    pub success_amount: u128,
-}
-
-// ============================================================
 // TlcErr / TlcErrData
 // ============================================================
 
@@ -1225,4 +1212,27 @@ impl PaymentSession {
             .sum();
         success_amount >= self.request.amount
     }
+}
+
+// ============================================================
+// Payment history types
+// ============================================================
+
+/// A timed payment result for a channel direction, used to track success/failure
+/// history for probability-based routing.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedResult {
+    pub fail_time: u64,
+    pub fail_amount: u128,
+    pub success_time: u64,
+    pub success_amount: u128,
+}
+
+/// The direction of a channel payment.
+/// Forward means from node_a to node_b;
+/// Backward means from node_b to node_a.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Direction {
+    Forward,
+    Backward,
 }

@@ -28,7 +28,6 @@ use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore},
         graph::NetworkGraphStateStore,
-        history::{Direction, TimedResult},
         network::NetworkActorStateStore,
         payment::PaymentSessionExt,
     },
@@ -41,8 +40,8 @@ use fiber_types::schema::*;
 use fiber_types::CchOrder;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, CURSOR_SIZE,
+    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    PersistentNetworkActorState, TimedResult, CURSOR_SIZE,
 };
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, Pubkey, RevocationData, SettlementData};

@@ -6,13 +6,11 @@ use crate::fiber::types::*;
 use crate::fiber::{
     config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT},
     graph::*,
-    history::Direction,
-    history::TimedResult,
     payment::{PaymentSessionExt, SendPaymentDataBuilder},
     AwaitingChannelReadyFlags, ChannelActorData, ChannelBasePublicKeys, ChannelConstraints,
-    ChannelState, FeatureVector, InMemorySigner, NegotiatingFundingFlags, NodeId,
+    ChannelState, Direction, FeatureVector, InMemorySigner, NegotiatingFundingFlags, NodeId,
     PaymentCustomRecords, PaymentSession, PaymentStatus, Privkey, Pubkey, PublicChannelInfo,
-    RevocationData, SendPaymentData, SettlementData, SigningCommitmentFlags,
+    RevocationData, SendPaymentData, SettlementData, SigningCommitmentFlags, TimedResult,
 };
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
