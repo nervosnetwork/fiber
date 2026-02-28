@@ -33,6 +33,7 @@ pub mod actors;
 pub mod tasks;
 
 pub mod utils;
+pub use fiber_types;
 
 use git_version::git_version;
 

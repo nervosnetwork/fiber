@@ -33,13 +33,19 @@ use crate::{
         CkbConfig,
     },
     fiber::{
-        channel::{RevocationData, SettlementData, XUDT_COMPATIBLE_WITNESS},
+        channel::{
+            settlement_data_to_witness, settlement_tlc_local_pubkey_hash, RevocationData,
+            SettlementData, XUDT_COMPATIBLE_WITNESS,
+        },
         hash_algorithm::HashAlgorithm,
         types::{Hash256, NodeId, Privkey, Pubkey},
     },
     now_timestamp_as_millis_u64,
     utils::{actor::ActorHandleLogGuard, tx::compute_tx_message},
-    watchtower::ChannelData,
+    watchtower::{
+        channel_data_funding_tx_lock, channel_data_local_settlement_pubkey_hash,
+        channel_data_x_only_aggregated_pubkey, ChannelData,
+    },
 };
 
 use super::WatchtowerStore;
@@ -231,7 +237,7 @@ where
             CkbRpcClient::with_builder(&rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
                 .expect("create ckb rpc client should not fail");
         let search_key = SearchKey {
-            script: channel_data.funding_tx_lock().into(),
+            script: channel_data_funding_tx_lock(&channel_data).into(),
             script_type: ScriptType::Lock,
             script_search_mode: Some(SearchMode::Exact),
             with_data: None,
@@ -271,7 +277,10 @@ where
                                                 );
 
                                                 let x_only_aggregated_pubkey =
-                                                    channel_data.x_only_aggregated_pubkey(false);
+                                                    channel_data_x_only_aggregated_pubkey(
+                                                        &channel_data,
+                                                        false,
+                                                    );
                                                 if blake160(&x_only_aggregated_pubkey).0
                                                     == pub_key_hash
                                                 {
@@ -854,10 +863,10 @@ fn build_settlement_tx<S: WatchtowerStore>(
         Some(mut sw) => {
             if sw.update() {
                 debug!("channel_data local_settlement_key pubkey hash: {:?}，sw settlement_remote_pubkey_hash: {:?}, sw settlement_local_pubkey_hash: {:?}, for_remote: {}",
-                    channel_data.local_settlement_pubkey_hash(), sw.settlement_remote_pubkey_hash, sw.settlement_local_pubkey_hash, for_remote);
+                    channel_data_local_settlement_pubkey_hash(&channel_data), sw.settlement_remote_pubkey_hash, sw.settlement_local_pubkey_hash, for_remote);
                 if for_remote {
                     if sw.settlement_local_pubkey_hash
-                        == channel_data.local_settlement_pubkey_hash()
+                        == channel_data_local_settlement_pubkey_hash(&channel_data)
                     {
                         two_parties_all_settled = sw.settlement_remote_pubkey_hash == [0u8; 20];
                         if two_parties_all_settled {
@@ -949,7 +958,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         return Ok(None);
                     }
                 } else if sw.settlement_remote_pubkey_hash
-                    == channel_data.local_settlement_pubkey_hash()
+                    == channel_data_local_settlement_pubkey_hash(&channel_data)
                 {
                     two_parties_all_settled = sw.settlement_local_pubkey_hash == [0u8; 20];
                     if two_parties_all_settled {
@@ -1132,7 +1141,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock,
                     unlock_amount,
                     private_key,
-                    settlement_data.to_witness(
+                    settlement_data_to_witness(
+                        &settlement_data,
                         for_remote,
                         channel_data.local_settlement_key.clone(),
                         channel_data.remote_settlement_key,
@@ -1630,9 +1640,11 @@ impl Htlc {
                 .starts_with(&self.payment_hash);
             let pubkey_hash_matches = match (self.is_offered(), with_preimage) {
                 (true, true) | (false, false) => {
-                    self.remote_htlc_pubkey_hash == settlement_tlc.local_pubkey_hash()
+                    self.remote_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
                 }
-                _ => self.local_htlc_pubkey_hash == settlement_tlc.local_pubkey_hash(),
+                _ => {
+                    self.local_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
+                }
             };
             (payment_hash_matches && pubkey_hash_matches).then_some(&settlement_tlc.local_key)
         })

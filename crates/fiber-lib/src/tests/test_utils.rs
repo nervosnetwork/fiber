@@ -1352,7 +1352,7 @@ impl NetworkNode {
                         close_script: command
                             .close_script
                             .clone()
-                            .unwrap_or(state.local_shutdown_script),
+                            .unwrap_or_else(|| state.local_shutdown_script.clone()),
                         fee_rate: command
                             .fee_rate
                             .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate)),

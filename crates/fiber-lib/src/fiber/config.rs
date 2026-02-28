@@ -6,9 +6,10 @@ use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
+use fiber_types::protocol::AnnouncedNodeName;
 #[cfg(not(any(test, feature = "bench")))]
 use once_cell::sync::OnceCell;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
@@ -389,77 +390,6 @@ pub struct FiberConfig {
         help = "Address for metrics endpoint (e.g., 127.0.0.1:9090). Requires binary to be compiled with RUSTFLAGS=\"--cfg tokio_unstable\" and metrics feature enabled"
     )]
     pub metrics_addr: Option<String>,
-}
-
-/// Must be a valid utf-8 string of length maximal length 32 bytes.
-/// If the length is less than 32 bytes, it will be padded with 0.
-/// If the length is more than 32 bytes, it should be truncated.
-#[derive(Eq, PartialEq, Copy, Clone, Default, Hash)]
-pub struct AnnouncedNodeName(pub [u8; 32]);
-
-impl AnnouncedNodeName {
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    pub fn from_slice(slice: &[u8]) -> std::result::Result<Self, String> {
-        if slice.len() > 32 {
-            return Err("Node Alias can not be longer than 32 bytes".to_string());
-        }
-        let mut bytes = [0; 32];
-        bytes[..slice.len()].copy_from_slice(slice);
-        Ok(Self(bytes))
-    }
-
-    pub fn from_string(value: &str) -> std::result::Result<Self, String> {
-        let str_bytes = value.as_bytes();
-        Self::from_slice(str_bytes)
-    }
-
-    pub fn as_str(&self) -> &str {
-        let end = self.0.iter().position(|&b| b == 0).unwrap_or(self.0.len());
-        if end == 0 {
-            return "";
-        }
-        std::str::from_utf8(&self.0[..end]).expect("valid utf8 string")
-    }
-}
-
-impl std::fmt::Display for AnnouncedNodeName {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl std::fmt::Debug for AnnouncedNodeName {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "AnnouncedNodeName({})", self)
-    }
-}
-
-impl<'s> From<&'s str> for AnnouncedNodeName {
-    fn from(value: &'s str) -> Self {
-        Self::from_string(value).expect("Valid announced node name")
-    }
-}
-
-impl serde::Serialize for AnnouncedNodeName {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(std::str::from_utf8(&self.0).expect("valid utf8 string"))
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::from_string(&s).map_err(serde::de::Error::custom)
-    }
 }
 
 #[cfg(not(any(test, feature = "bench")))]

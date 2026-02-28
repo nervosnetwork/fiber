@@ -51,41 +51,37 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
-    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelOpenRecord, ChannelOpenRecordStore,
-    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
-    PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
-    RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    get_funding_and_reserved_amount, AcceptChannelParameter, AddTlcCommand,
+    AwaitingTxSignaturesFlags, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
+    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
+    ChannelOpenRecord, ChannelOpenRecordStore, ChannelOpeningStatus, ChannelState, ChannelTlcInfo,
+    CloseFlags, OpenChannelParameter, PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult,
+    PublicChannelInfo, RemoveTlcCommand, RetryableTlcOperation, RevocationData, SettlementData,
+    ShuttingDownFlags, StopReason, TLCId, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
-use super::config::AnnouncedNodeName;
 use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, TlcErr, TlcErrorCode,
+    new_node_announcement, BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage,
+    ForwardTlcResult, GossipMessage, Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
+    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrorCode,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::client::CkbChainClient;
-use crate::ckb::config::UdtCfgInfos;
+use crate::ckb::config::{UdtCfgInfos, UdtCfgInfosExt};
 use crate::ckb::contracts::{
     check_udt_script, get_udt_info, get_udt_whitelist, is_udt_type_auto_accept,
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
-    TxUpdateCommand,
-};
-use crate::fiber::channel::{
-    AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
+    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
@@ -107,6 +103,7 @@ use crate::invoice::{
 };
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
+use fiber_types::protocol::AnnouncedNodeName;
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -1338,28 +1335,38 @@ where
                                 with_channel_down_peers.insert(peer_id);
                             }
 
-                            for tlc in actor_state.tlc_state.get_committed_received_tlcs() {
+                            // Collect TLC data before async operations to avoid holding iterator across await
+                            let committed_tlcs: Vec<_> = actor_state
+                                .tlc_state
+                                .get_committed_received_tlcs()
+                                .map(|tlc| (tlc.tlc_id, tlc.id(), tlc.payment_hash))
+                                .collect();
+
+                            for (tlc_id, id, payment_hash) in committed_tlcs {
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
-                                if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-                                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                                if let Some(invoice) = self.store.get_invoice(&payment_hash) {
+                                    // Re-fetch tlc for is_invoice_fulfilled check
+                                    if let Some(tlc) = actor_state.tlc_state.get(&tlc_id) {
+                                        if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                                            continue;
+                                        }
+                                    } else {
                                         continue;
                                     }
                                 }
 
-                                let Some(payment_preimage) =
-                                    self.store.get_preimage(&tlc.payment_hash)
+                                let Some(payment_preimage) = self.store.get_preimage(&payment_hash)
                                 else {
                                     continue;
                                 };
                                 debug!(
                                     "Found payment preimage for channel {:?} tlc {:?}",
-                                    channel_id,
-                                    tlc.id()
+                                    channel_id, id
                                 );
                                 if self
                                     .store
-                                    .get_invoice_status(&tlc.payment_hash)
+                                    .get_invoice_status(&payment_hash)
                                     .is_some_and(|s| {
                                         !matches!(
                                             s,
@@ -1378,7 +1385,7 @@ where
                                         channel_id,
                                         ChannelCommand::RemoveTlc(
                                             RemoveTlcCommand {
-                                                id: tlc.id(),
+                                                id,
                                                 reason: RemoveTlcReason::RemoveTlcFulfill(
                                                     RemoveTlcFulfill { payment_preimage },
                                                 ),
@@ -1390,7 +1397,7 @@ where
                                 {
                                     error!(
                                         "Failed to remove tlc {:?} with preimage for channel {:?}: {}",
-                                        tlc.id(),
+                                        id,
                                         channel_id,
                                         err
                                     );
@@ -1500,41 +1507,57 @@ where
                             );
                             let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
                             let expect_expiry = now + epoch_delay_milliseconds;
-                            for tlc in actor_state
+                            // Collect TLC data before async operations to avoid holding iterator across await
+                            let expired_tlcs: Vec<_> = actor_state
                                 .tlc_state
                                 .get_expired_offered_tlcs(expect_expiry)
-                            {
-                                if let Some((forwarding_channel_id, forwarding_tlc_id)) =
-                                    tlc.forwarding_tlc
-                                {
-                                    if self.store.is_tlc_settled(&channel_id, &tlc.payment_hash) {
-                                        let (send, _recv) = oneshot::channel();
-                                        let rpc_reply = RpcReplyPort::from(send);
-                                        if let Err(err) = state
-                                            .send_command_to_channel(
+                                .filter_map(|tlc| {
+                                    tlc.forwarding_tlc.map(
+                                        |(forwarding_channel_id, forwarding_tlc_id)| {
+                                            (
                                                 forwarding_channel_id,
-                                                ChannelCommand::RemoveTlc(
-                                                    RemoveTlcCommand {
-                                                        id: forwarding_tlc_id,
-                                                        reason: RemoveTlcReason::RemoveTlcFail(
-                                                            TlcErrPacket::new(
-                                                                TlcErr::new(
-                                                                    TlcErrorCode::ExpiryTooSoon,
-                                                                ),
-                                                                &tlc.shared_secret,
-                                                            ),
-                                                        ),
-                                                    },
-                                                    rpc_reply,
-                                                ),
+                                                forwarding_tlc_id,
+                                                tlc.payment_hash,
+                                                tlc.shared_secret,
                                             )
-                                            .await
-                                        {
-                                            error!(
-                                                "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                                                forwarding_tlc_id, forwarding_channel_id, err
-                                            );
-                                        }
+                                        },
+                                    )
+                                })
+                                .collect();
+                            for (
+                                forwarding_channel_id,
+                                forwarding_tlc_id,
+                                payment_hash,
+                                shared_secret,
+                            ) in expired_tlcs
+                            {
+                                if self.store.is_tlc_settled(&channel_id, &payment_hash) {
+                                    let (send, _recv) = oneshot::channel();
+                                    let rpc_reply = RpcReplyPort::from(send);
+                                    if let Err(err) = state
+                                        .send_command_to_channel(
+                                            forwarding_channel_id,
+                                            ChannelCommand::RemoveTlc(
+                                                RemoveTlcCommand {
+                                                    id: forwarding_tlc_id,
+                                                    reason: RemoveTlcReason::RemoveTlcFail(
+                                                        TlcErrPacket::new(
+                                                            TlcErr::new(
+                                                                TlcErrorCode::ExpiryTooSoon,
+                                                            ),
+                                                            &shared_secret,
+                                                        ),
+                                                    ),
+                                                },
+                                                rpc_reply,
+                                            ),
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            "Failed to remove settled tlc {:?} for channel {:?}: {}",
+                                            forwarding_tlc_id, forwarding_channel_id, err
+                                        );
                                     }
                                 }
                             }
@@ -3033,7 +3056,7 @@ where
             _ => {
                 let node_name = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
-                let announcement = NodeAnnouncement::new(
+                let announcement = new_node_announcement(
                     node_name,
                     self.features.clone(),
                     addresses,
@@ -3349,6 +3372,7 @@ where
                         tlc_expiry_delta,
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
+                        now_timestamp_as_millis_u64(),
                     ),
                     public_channel_info: public.then_some(PublicChannelInfo::new()),
                     is_one_way: one_way,
@@ -3375,7 +3399,7 @@ where
         self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
 
         // Record the channel opening attempt so it can be queried via RPC.
-        let record = ChannelOpenRecord::new(temp_channel_id, peer_id, funding_amount);
+        let record = ChannelOpenRecord::new_outbound(temp_channel_id, peer_id, funding_amount);
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -3441,6 +3465,7 @@ where
                         tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
+                        now_timestamp_as_millis_u64(),
                     ),
                     public_channel_info: open_channel
                         .is_public()

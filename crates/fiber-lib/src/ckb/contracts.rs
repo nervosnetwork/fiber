@@ -10,15 +10,10 @@ use std::{collections::HashMap, vec};
 use thiserror::Error;
 use tracing::info;
 
-use crate::{
-    ckb::config::new_ckb_rpc_async_client,
-    fiber::{
-        config::FiberScript,
-        gen::fiber::{UdtDep, UdtDepUnion},
-    },
-};
+use crate::{ckb::config::new_ckb_rpc_async_client, fiber::config::FiberScript};
+use fiber_types::gen::fiber::{UdtDep, UdtDepUnion};
 
-use super::config::{UdtArgInfo, UdtCfgInfos};
+use super::config::{UdtArgInfo, UdtCfgInfos, UdtCfgInfosExt};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Contract {

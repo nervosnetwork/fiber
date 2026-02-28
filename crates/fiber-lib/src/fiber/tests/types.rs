@@ -1,16 +1,16 @@
 use crate::{
     ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript},
     fiber::{
-        config::AnnouncedNodeName,
         features::FeatureVector,
         gen::{fiber as molecule_fiber, gossip},
         hash_algorithm::HashAlgorithm,
         types::{
-            AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor, Error, Hash256,
-            NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData, PaymentOnionPacket,
-            PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr, TlcErrData,
-            TlcErrPacket, TlcErrorCode, TrampolineHopPayload, TrampolineOnionPacket,
-            NO_SHARED_SECRET, ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
+            new_node_announcement, AddTlc, BasicMppPaymentData, BroadcastMessageID, Cursor,
+            Hash256, NodeAnnouncement, NodeId, OnionPacketError, PaymentHopData,
+            PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey,
+            TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineHopPayload,
+            TrampolineOnionPacket, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
+            ONION_PACKET_VERSION_V1,
         },
         PaymentCustomRecords,
     },
@@ -25,6 +25,7 @@ use ckb_types::{
     H256,
 };
 use fiber_sphinx::OnionSharedSecretIter;
+use fiber_types::protocol::AnnouncedNodeName;
 use molecule::prelude::{Builder, Byte, Entity};
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use serde::Deserialize;
@@ -554,10 +555,7 @@ fn test_payment_onion_packet_peel_unknown_version() {
     // Verify it's specifically an UnknownVersion error
     let err = result.unwrap_err();
     assert!(
-        matches!(
-            err,
-            Error::OnionPacket(OnionPacketError::UnknownVersion(99))
-        ),
+        matches!(err, OnionPacketError::UnknownVersion(99)),
         "Expected UnknownVersion(99) error, got: {:?}",
         err
     );
@@ -755,7 +753,7 @@ fn test_tlc_error_code() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_create_and_verify_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = NodeAnnouncement::new(
+    let node_announcement = new_node_announcement(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
@@ -774,7 +772,7 @@ fn test_create_and_verify_node_announcement() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_serde_node_announcement() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = NodeAnnouncement::new(
+    let node_announcement = new_node_announcement(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],

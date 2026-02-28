@@ -111,6 +111,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);
     b.rule("get_payment", r#"allow if read("payments");"#);
+    b.rule("list_payments", r#"allow if read("payments");"#);
     b.rule("build_router", r#"allow if read("payments");"#);
     b.rule("send_payment_with_router", r#"allow if write("payments");"#);
 
