@@ -36,7 +36,7 @@ pub(crate) const ATTEMPT_PREFIX: u8 = 195;
 // Key: [PREFIX, channel_outpoint, payment_hash, attempt_id], Value: ()
 pub(crate) const ATTEMPT_CHANNEL_INDEX_PREFIX: u8 = 196;
 pub(crate) const HOLD_TLC_PREFIX: u8 = 197;
-// A shared prefix for watchtower and channel store
+#[cfg(feature = "watchtower")]
 pub(crate) const WATCHTOWER_TLC_SETTLED_PREFIX: u8 = 200;
 pub(crate) const CHANNEL_OPEN_RECORD_PREFIX: u8 = 201;
 #[cfg(feature = "watchtower")]

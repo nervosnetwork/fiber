@@ -111,6 +111,13 @@ rule(
 ); 
 rule("create_preimage", r#"allow if write("watchtower");"#); 
 rule("remove_preimage", r#"allow if write("watchtower");"#); 
+rule(
+    "query_tlc_status",
+    r#"
+    allow if read("watchtower");
+    allow if right({channel_id}, "watchtower");
+    "#,
+);
 ```
 
 ## 3. How to Configure Biscuit Auth in Fiber

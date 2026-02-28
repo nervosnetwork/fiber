@@ -148,6 +148,10 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "remove_preimage",
         AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
+    b.with_rule(
+        "query_tlc_status",
+        AuthRule::new(r#"allow if read("watchtower");"#).with_require_rpc_context(true),
+    );
 
     b.0
 }

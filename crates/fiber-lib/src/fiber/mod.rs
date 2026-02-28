@@ -12,6 +12,7 @@ pub mod payment;
 pub mod profiling;
 pub mod serde_utils;
 pub mod types;
+pub mod watchtower_query;
 
 mod fee;
 mod in_flight_ckb_tx_actor;
@@ -30,6 +31,7 @@ pub use network::{
 };
 pub use payment::PaymentCustomRecords;
 pub use settle_tlc_set_command::SettleTlcSetCommand;
+pub use watchtower_query::{TlcWatchtowerStatus, WatchtowerQuerier};
 
 pub(crate) const ASSUME_NETWORK_ACTOR_ALIVE: &str = "network actor must be alive";
 
