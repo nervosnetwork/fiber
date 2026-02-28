@@ -32,6 +32,9 @@ use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
 pub const ACTION_RETRY_MAX_MILLIS: u64 = 600_000; // 10 minute max delay
 
+/// Average time per Bitcoin block in milliseconds (10 minutes = 600 seconds = 600,000 ms).
+pub const BTC_BLOCK_TIME_MILLIS: u64 = 600_000;
+
 fn calculate_retry_delay(retry_count: u32) -> Duration {
     // Exponential backoff starting from ACTION_RETRY_BASE_MILLIS, capped at ACTION_RETRY_MAX_MILLIS
     let max_shift = (ACTION_RETRY_MAX_MILLIS / ACTION_RETRY_BASE_MILLIS).ilog2();
@@ -512,7 +515,16 @@ impl<S: CchOrderStore> CchState<S> {
             .final_tlc_minimum_expiry_delta()
             .copied()
             .unwrap_or(0);
-        let btc_final_cltv_millis = self.config.btc_final_tlc_expiry_delta_blocks * 600 * 1000;
+        let btc_final_cltv_millis = self
+            .config
+            .btc_final_tlc_expiry_delta_blocks
+            .checked_mul(BTC_BLOCK_TIME_MILLIS)
+            .ok_or_else(|| {
+                CchError::ConfigError(format!(
+                    "btc_final_tlc_expiry_delta_blocks ({}) is too large and causes overflow when converting to milliseconds",
+                    self.config.btc_final_tlc_expiry_delta_blocks
+                ))
+            })?;
         if ckb_final_tlc_millis >= btc_final_cltv_millis / 2 {
             return Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge);
         }
