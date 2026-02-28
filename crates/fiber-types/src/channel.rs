@@ -1,5 +1,10 @@
 //! Channel-related types: state flags, TLC status, channel state enum.
 
+use crate::invoice::HashAlgorithm;
+use crate::onion::PaymentOnionPacket;
+use crate::onion::TlcErrPacket;
+use crate::Hash256;
+use crate::Pubkey;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
@@ -408,8 +413,6 @@ pub enum ChannelOpeningStatus {
 // ChannelBasePublicKeys
 // ============================================================
 
-use crate::Pubkey;
-
 /// One counterparty's public keys which do not change over the life of a channel.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelBasePublicKeys {
@@ -424,9 +427,6 @@ pub struct ChannelBasePublicKeys {
 // ============================================================
 // PrevTlcInfo
 // ============================================================
-
-use crate::Hash256;
-
 /// When we are forwarding a TLC, we need to know the previous TLC information.
 /// This struct keeps the information of the previous TLC.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -466,10 +466,6 @@ impl PrevTlcInfo {
 // ============================================================
 // TlcInfo
 // ============================================================
-
-use crate::invoice::HashAlgorithm;
-use crate::payment::{PaymentOnionPacket, RemoveTlcReason};
-
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TlcInfo {
     pub status: TlcStatus,
@@ -580,7 +576,6 @@ impl TlcInfo {
     }
 
     pub fn is_fail_remove_confirmed(&self) -> bool {
-        use crate::payment::RemoveTlcReason;
         matches!(self.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
             && matches!(
                 self.status,
@@ -1339,5 +1334,109 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
             )
             .map_err(|e| anyhow::anyhow!("{}", e))?,
         })
+    }
+}
+
+// ============================================================
+// RemoveTlcFulfill
+// ============================================================
+/// The fulfillment of a TLC removal.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct RemoveTlcFulfill {
+    pub payment_preimage: Hash256,
+}
+
+// ============================================================
+// RemoveTlcReason
+// ============================================================
+
+use std::fmt::{Debug, Formatter};
+
+/// The reason for removing a TLC.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum RemoveTlcReason {
+    RemoveTlcFulfill(RemoveTlcFulfill),
+    RemoveTlcFail(TlcErrPacket),
+}
+
+impl Debug for RemoveTlcReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
+                write!(f, "RemoveTlcFulfill")
+            }
+            RemoveTlcReason::RemoveTlcFail(_fail) => {
+                write!(f, "RemoveTlcFail")
+            }
+        }
+    }
+}
+
+impl RemoveTlcReason {
+    /// Intermediate node backwards the error to the previous hop using the shared secret
+    /// used in forwarding the onion packet.
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
+        match self {
+            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
+                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill)
+            }
+            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
+                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.backward(shared_secret))
+            }
+        }
+    }
+}
+
+impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
+    fn from(remove_tlc_reason: RemoveTlcReason) -> Self {
+        match remove_tlc_reason {
+            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
+                molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill.into())
+            }
+            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
+                molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail.into())
+            }
+        }
+    }
+}
+
+impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReason {
+    fn from(remove_tlc_reason: RemoveTlcReason) -> Self {
+        molecule_fiber::RemoveTlcReason::new_builder()
+            .set(remove_tlc_reason)
+            .build()
+    }
+}
+
+impl From<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
+    fn from(remove_tlc_reason: molecule_fiber::RemoveTlcReason) -> Self {
+        match remove_tlc_reason.to_enum() {
+            molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill) => {
+                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill.into())
+            }
+            molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail) => {
+                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.into())
+            }
+        }
+    }
+}
+
+// ============================================================
+// Molecule conversions
+// ============================================================
+
+impl From<RemoveTlcFulfill> for molecule_fiber::RemoveTlcFulfill {
+    fn from(remove_tlc_fulfill: RemoveTlcFulfill) -> Self {
+        molecule_fiber::RemoveTlcFulfill::new_builder()
+            .payment_preimage(remove_tlc_fulfill.payment_preimage.into())
+            .build()
+    }
+}
+
+impl From<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
+    fn from(remove_tlc_fulfill: molecule_fiber::RemoveTlcFulfill) -> Self {
+        RemoveTlcFulfill {
+            payment_preimage: remove_tlc_fulfill.payment_preimage().into(),
+        }
     }
 }

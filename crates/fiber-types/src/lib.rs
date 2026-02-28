@@ -16,9 +16,11 @@
 
 pub mod cch;
 pub mod channel;
+pub mod config;
 pub mod gen;
 pub mod invoice;
 pub mod network;
+pub mod onion;
 pub mod payment;
 pub mod primitives;
 pub mod protocol;
@@ -27,8 +29,10 @@ pub mod serde_utils;
 
 pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
 pub use channel::*;
+pub use config::*;
 pub use invoice::*;
 pub use network::PersistentNetworkActorState;
+pub use onion::*;
 pub use payment::*;
 pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
 pub use protocol::*;

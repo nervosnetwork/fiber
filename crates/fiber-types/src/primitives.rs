@@ -548,3 +548,7 @@ impl TryFrom<molecule_gossip::SchnorrSignature> for secp256k1::schnorr::Signatur
         secp256k1::schnorr::Signature::from_slice(signature.as_slice())
     }
 }
+
+pub(crate) fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
+    MByte32::from_slice(value.as_slice()).expect("[u8; 32] to Byte32")
+}
