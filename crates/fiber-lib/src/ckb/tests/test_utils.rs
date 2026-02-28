@@ -659,6 +659,7 @@ impl Actor for MockChainActor {
                 funding_tx,
                 request,
                 funding_source_lock_script: _,
+                funding_source_extra_cell_deps,
                 funding_cell_lock_script,
                 reply,
             } => {
@@ -732,6 +733,7 @@ impl Actor for MockChainActor {
 
                 fulfilled_tx.update_for_self(
                     tx_builder
+                        .set_cell_deps(funding_source_extra_cell_deps)
                         .set_outputs(outputs)
                         .set_outputs_data(outputs_data)
                         .build(),

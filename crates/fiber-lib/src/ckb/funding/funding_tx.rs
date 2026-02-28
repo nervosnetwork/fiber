@@ -164,6 +164,8 @@ pub struct ExternalFundingContext {
     pub rpc_url: String,
     /// The lock script of the cells to use for funding (user's wallet lock script)
     pub funding_source_lock_script: packed::Script,
+    /// Additional deps required by the funding source lock script.
+    pub funding_source_extra_cell_deps: Vec<packed::CellDep>,
     /// The lock script of the funding cell (channel multisig lock)
     pub funding_cell_lock_script: packed::Script,
 }
@@ -270,6 +272,7 @@ async fn build_base_from_funding_cell(
     funding_tx: &FundingTx,
     request: &FundingRequest,
     funding_source_lock_script: &packed::Script,
+    funding_source_extra_cell_deps: &[packed::CellDep],
     cell_collector: &mut dyn CellCollector,
 ) -> Result<TransactionView, TxBuilderError> {
     let mut inputs = vec![];
@@ -293,6 +296,9 @@ async fn build_base_from_funding_cell(
         &mut cell_deps,
     )
     .await?;
+    for cell_dep in funding_source_extra_cell_deps {
+        cell_deps.insert(cell_dep.clone());
+    }
     if let Some(ref tx) = funding_tx.tx {
         for (i, output) in tx.outputs().into_iter().enumerate().skip(1) {
             outputs.push(output.clone());
@@ -450,6 +456,7 @@ impl TxBuilder for FundingTxBuilder {
             &self.funding_tx,
             &self.request,
             &self.context.funding_source_lock_script,
+            &[],
             cell_collector,
         )
         .await
@@ -564,6 +571,7 @@ impl TxBuilder for ExternalFundingTxBuilder {
             &self.funding_tx,
             &self.request,
             &self.context.funding_source_lock_script,
+            &self.context.funding_source_extra_cell_deps,
             cell_collector,
         )
         .await
@@ -621,7 +629,7 @@ impl ExternalFundingTxBuilder {
         self,
         live_cells_exclusion_map: &mut LiveCellsExclusionMap,
     ) -> Result<FundingTx, FundingError> {
-        let tx = build_and_balance_tx(
+        let mut tx = build_and_balance_tx(
             &self,
             &self.context.rpc_url,
             &self.context.funding_source_lock_script,
@@ -629,6 +637,15 @@ impl ExternalFundingTxBuilder {
             live_cells_exclusion_map,
         )
         .await?;
+        if !self.context.funding_source_extra_cell_deps.is_empty() {
+            let mut cell_deps: Vec<packed::CellDep> = tx.cell_deps().into_iter().collect();
+            for extra_cell_dep in &self.context.funding_source_extra_cell_deps {
+                if !cell_deps.iter().any(|cell_dep| cell_dep == extra_cell_dep) {
+                    cell_deps.push(extra_cell_dep.clone());
+                }
+            }
+            tx = tx.as_advanced_builder().set_cell_deps(cell_deps).build();
+        }
         debug!("built unsigned funding tx: {:?}", tx);
         Ok(finalize_funding_tx_update(
             self.funding_tx,
@@ -916,6 +933,7 @@ mod tests {
         ExternalFundingContext {
             rpc_url: String::new(),
             funding_source_lock_script: script.clone(),
+            funding_source_extra_cell_deps: vec![],
             funding_cell_lock_script: script,
         }
     }

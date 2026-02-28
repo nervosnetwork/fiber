@@ -52,6 +52,7 @@ pub enum CkbChainMessage {
         funding_tx: FundingTx,
         request: FundingRequest,
         funding_source_lock_script: packed::Script,
+        funding_source_extra_cell_deps: Vec<packed::CellDep>,
         funding_cell_lock_script: packed::Script,
         reply: RpcReplyPort<Result<FundingTx, FundingError>>,
     },
@@ -145,12 +146,14 @@ impl Actor for CkbChainActor {
                 funding_tx,
                 request,
                 funding_source_lock_script,
+                funding_source_extra_cell_deps,
                 funding_cell_lock_script,
                 reply,
             } => {
                 let context = ExternalFundingContext {
                     rpc_url: state.config.rpc_url.clone(),
                     funding_source_lock_script,
+                    funding_source_extra_cell_deps,
                     funding_cell_lock_script,
                 };
                 let result = funding_tx

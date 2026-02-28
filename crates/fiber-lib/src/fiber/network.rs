@@ -1,7 +1,7 @@
 use ckb_hash::blake2b_256;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
-use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
+use ckb_types::packed::{self, Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
@@ -421,6 +421,8 @@ pub struct OpenChannelWithExternalFundingCommand {
     pub shutdown_script: Script,
     /// The lock script that controls the funding cells (user's wallet lock script).
     pub funding_lock_script: Script,
+    /// Additional deps required by the funding source lock script.
+    pub funding_source_extra_cell_deps: Vec<packed::CellDep>,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -611,6 +613,8 @@ pub enum NetworkActorEvent {
         remote_funding_amount: u128,
         /// The lock script of the user's wallet, used to collect input cells.
         funding_source_lock_script: Script,
+        /// Additional deps required by the funding source lock script.
+        funding_source_extra_cell_deps: Vec<packed::CellDep>,
         /// The 2-of-2 multisig lock script for the funding cell output.
         funding_cell_lock_script: Script,
         funding_udt_type_script: Option<Script>,
@@ -1126,6 +1130,7 @@ where
                 funding_amount,
                 remote_funding_amount,
                 funding_source_lock_script,
+                funding_source_extra_cell_deps,
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 local_reserved_ckb_amount,
@@ -1188,6 +1193,7 @@ where
                                 funding_tx,
                                 request,
                                 funding_source_lock_script,
+                                funding_source_extra_cell_deps,
                                 funding_cell_lock_script,
                                 reply: rpc_reply,
                             });
@@ -3630,6 +3636,7 @@ where
             public,
             shutdown_script,
             funding_lock_script,
+            funding_source_extra_cell_deps,
             funding_udt_type_script,
             commitment_fee_rate,
             commitment_delay_epoch,
@@ -3693,6 +3700,7 @@ where
                         funding_udt_type_script,
                         shutdown_script,
                         funding_lock_script,
+                        funding_source_extra_cell_deps,
                         channel_id_sender: tx,
                         commitment_fee_rate,
                         commitment_delay_epoch,

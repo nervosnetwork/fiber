@@ -374,6 +374,8 @@ Opens a channel with external funding. The node will negotiate the channel with 
 * `shutdown_script` - <em>`Script`</em>, The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
 * `funding_lock_script` - <em>`Script`</em>, The lock script that controls the funding cells. The node will collect cells with this lock script
  to build the funding transaction. The user must be able to sign for this lock script.
+* `funding_source_extra_cell_deps` - <em>`Option<Vec<JsonCellDep>>`</em>, Additional cell deps required by the funding source lock script.
+ These deps are appended to the unsigned funding transaction before it is returned for signing.
 * `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
 * `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
 * `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.

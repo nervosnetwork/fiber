@@ -363,6 +363,8 @@ pub struct OpenChannelWithExternalFundingParameter {
     pub shutdown_script: Script,
     /// The lock script that controls the funding cells (user's wallet lock script).
     pub funding_lock_script: Script,
+    /// Additional deps required by the funding source lock script.
+    pub funding_source_extra_cell_deps: Vec<packed::CellDep>,
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -376,6 +378,7 @@ pub struct OpenChannelWithExternalFundingParameter {
 pub struct ExternalFundingRuntime {
     pub enabled: bool,
     pub funding_lock_script: Option<Script>,
+    pub funding_source_extra_cell_deps: Vec<packed::CellDep>,
     pub unsigned_funding_tx: Option<Transaction>,
     pub started_at: Option<SystemTime>,
     pub signed_submitted: bool,
@@ -542,6 +545,11 @@ where
                                     .funding_lock_script
                                     .clone()
                                     .expect("external_funding_lock_script should be set"),
+                                funding_source_extra_cell_deps: state
+                                    .ephemeral_config
+                                    .external_funding
+                                    .funding_source_extra_cell_deps
+                                    .clone(),
                                 funding_cell_lock_script: state.get_funding_lock_script(),
                                 funding_udt_type_script: state.funding_udt_type_script.clone(),
                                 local_reserved_ckb_amount: state.local_reserved_ckb_amount,
@@ -2508,6 +2516,50 @@ where
             }
         }
 
+        if unsigned_view.cell_deps().len() != signed_view.cell_deps().len() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Cell deps count mismatch: unsigned has {}, signed has {}",
+                unsigned_view.cell_deps().len(),
+                signed_view.cell_deps().len()
+            )));
+        }
+
+        for (i, (unsigned_cell_dep, signed_cell_dep)) in unsigned_view
+            .cell_deps()
+            .into_iter()
+            .zip(signed_view.cell_deps().into_iter())
+            .enumerate()
+        {
+            if unsigned_cell_dep != signed_cell_dep {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Cell dep {} mismatch",
+                    i
+                )));
+            }
+        }
+
+        if unsigned_view.header_deps().len() != signed_view.header_deps().len() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Header deps count mismatch: unsigned has {}, signed has {}",
+                unsigned_view.header_deps().len(),
+                signed_view.header_deps().len()
+            )));
+        }
+
+        for (i, (unsigned_header_dep, signed_header_dep)) in unsigned_view
+            .header_deps()
+            .into_iter()
+            .zip(signed_view.header_deps().into_iter())
+            .enumerate()
+        {
+            if unsigned_header_dep != signed_header_dep {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Header dep {} mismatch",
+                    i
+                )));
+            }
+        }
+
         // External funding v1 requires the submitted tx to already be final.
         if !state.is_tx_final(&signed_tx)? {
             return Err(ProcessingChannelError::InvalidParameter(
@@ -3110,6 +3162,7 @@ where
                     funding_udt_type_script,
                     shutdown_script,
                     funding_lock_script,
+                    funding_source_extra_cell_deps,
                     channel_id_sender,
                     commitment_fee_rate,
                     commitment_delay_epoch,
@@ -3167,6 +3220,10 @@ where
                     .ephemeral_config
                     .external_funding
                     .funding_lock_script = Some(funding_lock_script);
+                channel
+                    .ephemeral_config
+                    .external_funding
+                    .funding_source_extra_cell_deps = funding_source_extra_cell_deps;
 
                 check_open_channel_parameters(
                     &channel.funding_udt_type_script,

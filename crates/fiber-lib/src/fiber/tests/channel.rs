@@ -41,7 +41,7 @@ use crate::{
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
-    packed::{CellInput, Script, Transaction},
+    packed::{CellDep, CellInput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use musig2::secp::Point;
@@ -6480,6 +6480,7 @@ async fn open_external_funding_channel(
                 public: false,
                 shutdown_script: Script::default(),
                 funding_lock_script: Script::default(),
+                funding_source_extra_cell_deps: vec![],
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
@@ -6530,6 +6531,58 @@ async fn test_open_channel_with_external_funding() {
             .get_channel_actor_state_unchecked(channel_id)
             .is_none(),
         "channel state should not be persisted before signed external funding tx submission"
+    );
+}
+
+#[tokio::test]
+async fn test_open_channel_with_external_funding_extra_cell_deps() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let peer_id = node_b.peer_id.clone();
+    let extra_cell_dep = CellDep::new_builder()
+        .out_point(
+            OutPoint::new_builder()
+                .tx_hash([1u8; 32].pack())
+                .index(1u32.pack())
+                .build(),
+        )
+        .build();
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            OpenChannelWithExternalFundingCommand {
+                peer_id: peer_id.clone(),
+                funding_amount: 100_000_000_000,
+                public: false,
+                shutdown_script: Script::default(),
+                funding_lock_script: Script::default(),
+                funding_source_extra_cell_deps: vec![extra_cell_dep.clone()],
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel with external funding success");
+
+    let unsigned_tx = result.unsigned_funding_tx.into_view();
+    assert!(
+        unsigned_tx
+            .cell_deps()
+            .into_iter()
+            .any(|cell_dep| cell_dep == extra_cell_dep),
+        "unsigned funding tx should include the extra funding source cell dep"
     );
 }
 
@@ -6814,6 +6867,42 @@ async fn test_submit_signed_funding_tx_input_count_mismatch() {
 }
 
 #[tokio::test]
+async fn test_submit_signed_funding_tx_cell_dep_mismatch() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let funding_amount: u128 = 100_000_000_000;
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, funding_amount).await;
+
+    let tampered_tx: Transaction = unsigned_tx
+        .as_advanced_builder()
+        .set_cell_deps(vec![CellDep::new_builder().build()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: tampered_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message).expect("node_a alive");
+    assert!(
+        submit_result.is_err(),
+        "submitting tx with different cell deps should fail"
+    );
+    let err_msg = submit_result.unwrap_err();
+    assert!(
+        err_msg.contains("Cell dep") || err_msg.contains("cell dep"),
+        "error should mention cell dep mismatch, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
 async fn test_external_funding_invalid_tlc_expiry_delta() {
     init_tracing();
 
@@ -6829,6 +6918,7 @@ async fn test_external_funding_invalid_tlc_expiry_delta() {
                 public: false,
                 shutdown_script: Script::default(),
                 funding_lock_script: Script::default(),
+                funding_source_extra_cell_deps: vec![],
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
@@ -6874,6 +6964,7 @@ async fn test_external_funding_invalid_commitment_delay() {
                 public: false,
                 shutdown_script: Script::default(),
                 funding_lock_script: Script::default(),
+                funding_source_extra_cell_deps: vec![],
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: Some(too_small_epoch),
@@ -6918,6 +7009,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
                     public: false,
                     shutdown_script: Script::default(),
                     funding_lock_script: Script::default(),
+                    funding_source_extra_cell_deps: vec![],
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     commitment_delay_epoch: None,

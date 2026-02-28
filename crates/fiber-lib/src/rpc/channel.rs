@@ -13,7 +13,7 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
-use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
+use ckb_jsonrpc_types::{CellDep as JsonCellDep, EpochNumberWithFraction, Script};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
     packed::{self, OutPoint},
@@ -376,6 +376,10 @@ pub struct OpenChannelWithExternalFundingParams {
     /// The lock script that controls the funding cells. The node will collect cells with this lock script
     /// to build the funding transaction. The user must be able to sign for this lock script.
     pub funding_lock_script: Script,
+
+    /// Additional cell deps required by the funding source lock script.
+    /// These deps are appended to the unsigned funding transaction before it is returned for signing.
+    pub funding_source_extra_cell_deps: Option<Vec<JsonCellDep>>,
 
     /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -810,6 +814,13 @@ where
                     public: params.public.unwrap_or(true),
                     shutdown_script: params.shutdown_script.clone().into(),
                     funding_lock_script: params.funding_lock_script.clone().into(),
+                    funding_source_extra_cell_deps: params
+                        .funding_source_extra_cell_deps
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch
                         .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
