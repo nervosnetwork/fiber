@@ -119,6 +119,11 @@ class Fiber {
     async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
         return await this.invokeCommand("open_channel", [params]);
     }
+
+    /**
+     * Matches Fiber RPC `open_channel_with_external_funding`.
+     * Supports optional `funding_source_extra_cell_deps` for custom funding-source locks.
+     */
     async openChannelWithExternalFunding(params: OpenChannelWithExternalFundingParams): Promise<OpenChannelWithExternalFundingResult> {
         return await this.invokeCommand("open_channel_with_external_funding", [params]);
     }

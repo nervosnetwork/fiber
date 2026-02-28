@@ -15,6 +15,10 @@ After that, `fiber-js` will be ready to use in npm.
 
 `fiber-js` provide the same API ad Fiber RPC, see `fiber-js/src/index.ts` for details. For documentation, please refer to the docs of Fiber RPC.
 
+For `open_channel_with_external_funding`, the JS wrapper also accepts the optional
+`funding_source_extra_cell_deps` field so callers can provide extra lock deps for
+custom funding-source scripts.
+
 ## Example
 
 ```js

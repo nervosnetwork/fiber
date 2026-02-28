@@ -47,6 +47,8 @@ use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 pub mod api;
 
 /// Re-export at crate root so fiber-js worker finds them by simple name.
+/// Accepts the same params as the native RPC, including optional
+/// `funding_source_extra_cell_deps`.
 #[wasm_bindgen]
 pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
     api::open_channel_with_external_funding(params).await

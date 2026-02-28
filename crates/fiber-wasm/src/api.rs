@@ -171,6 +171,8 @@ pub mod channel {
 }
 
 /// LocalSign: open channel with external funding (user signs tx locally).
+/// Accepts the same params as the native RPC, including optional
+/// `funding_source_extra_cell_deps`.
 /// Exported at crate root in lib.rs for fiber-js worker lookup.
 pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
     fiber_wasm()?

@@ -6,6 +6,14 @@ interface Script {
     args: string;
 }
 
+interface CellDep {
+    dep_type: "code" | "dep_group";
+    out_point: {
+        tx_hash: HexString;
+        index: HexString;
+    };
+}
+
 interface OpenChannelParams {
     peer_id: string;
     funding_amount: HexString;
@@ -86,7 +94,7 @@ interface UpdateChannelParams {
 /** CKB JSON-RPC Transaction format (from fiber open_channel_with_external_funding) */
 interface CkbJsonRpcTransaction {
     version: HexString;
-    cell_deps: Array<{ dep_type: string; out_point: { tx_hash: HexString; index: HexString } }>;
+    cell_deps: CellDep[];
     header_deps: HexString[];
     inputs: Array<{ previous_output: { tx_hash: HexString; index: HexString }; since: HexString }>;
     outputs: Array<{
@@ -105,6 +113,7 @@ interface OpenChannelWithExternalFundingParams {
     funding_udt_type_script?: Script;
     shutdown_script: Script;
     funding_lock_script: Script;
+    funding_source_extra_cell_deps?: CellDep[];
     commitment_delay_epoch?: HexString;
     commitment_fee_rate?: HexString;
     funding_fee_rate?: HexString;
@@ -146,6 +155,7 @@ export type {
     ShutdownChannelParams,
     UpdateChannelParams,
     ListChannelsResult,
+    CellDep,
     CkbJsonRpcTransaction,
     OpenChannelWithExternalFundingParams,
     OpenChannelWithExternalFundingResult,
