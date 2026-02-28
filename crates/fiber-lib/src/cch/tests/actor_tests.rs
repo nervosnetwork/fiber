@@ -554,7 +554,10 @@ async fn test_receive_btc_happy_path() {
     // Use a small final TLC expiry delta (10,000 ms = 10 seconds) so it fits
     // within the default incoming budget (180 blocks * 600 / 2 = 54,000 seconds).
     let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
-    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+    // The incoming Lightning invoice must carry min_final_cltv_expiry_delta matching
+    // the default btc_final_tlc_expiry_delta_blocks (180) so the stored invoice
+    // reflects a realistic inbound HTLC budget.
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 180);
     let order = CchOrder {
         created_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
