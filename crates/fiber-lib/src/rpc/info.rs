@@ -23,7 +23,9 @@ pub struct NodeInfoResult {
     /// The commit hash of the node software.
     pub commit_hash: String,
 
-    /// The identity public key of the node.
+    /// The identity public key of this node (secp256k1 compressed, hex string).
+    /// This is the same value referred to as `pubkey` in `list_peers` responses.
+    /// Note: this is different from `peer_id`, which is a base58 hash derived from this key.
     pub node_id: Pubkey,
 
     /// The features supported by the node.

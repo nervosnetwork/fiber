@@ -255,10 +255,11 @@ pub struct NodeInfoResponse {
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PeerInfo {
-    /// The identity public key of the peer.
+    /// The identity public key of the peer (also known as `node_id`).
     pub pubkey: Pubkey,
 
-    /// The peer ID of the peer
+    /// The peer ID of the peer (base58 string, derived by hashing the `pubkey` above).
+    /// This is used for P2P transport connections, e.g. when calling `open_channel` or `disconnect_peer`.
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
 
