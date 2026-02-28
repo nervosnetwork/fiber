@@ -1511,6 +1511,7 @@ impl NetworkNode {
                 store.clone(),
                 network_graph.clone(),
                 chain_client.clone(),
+                None,
             ),
             NetworkActorStartArguments {
                 config: fiber_config.clone(),

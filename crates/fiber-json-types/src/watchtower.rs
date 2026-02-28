@@ -166,3 +166,18 @@ pub struct RemovePreimageParams {
     /// Payment hash
     pub payment_hash: Hash256,
 }
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct QueryTlcStatusParams {
+    pub channel_id: Hash256,
+    pub payment_hash: Hash256,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct QueryTlcStatusResult {
+    pub preimage: Option<Hash256>,
+    /// Whether the TLC has been settled on chain
+    pub is_settled: bool,
+}

@@ -13,8 +13,9 @@ pub use fiber_json_types::RpcContext;
 use fiber_types::{NodeId, Pubkey};
 
 pub use fiber_json_types::{
-    CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
-    UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
+    CreatePreimageParams, CreateWatchChannelParams, QueryTlcStatusParams, QueryTlcStatusResult,
+    RemovePreimageParams, RemoveWatchChannelParams, UpdateLocalSettlementParams,
+    UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
 };
 
 /// RPC module for watchtower related operations
@@ -76,6 +77,14 @@ trait WatchtowerRpc {
         ctx: RpcContext,
         params: RemovePreimageParams,
     ) -> Result<(), ErrorObjectOwned>;
+
+    /// Query the status of a TLC
+    #[method(name = "query_tlc_status")]
+    async fn query_tlc_status(
+        &self,
+        ctx: RpcContext,
+        params: QueryTlcStatusParams,
+    ) -> Result<QueryTlcStatusResult, ErrorObjectOwned>;
 }
 
 /// ignore rpc-doc-gen
@@ -124,6 +133,13 @@ trait WatchtowerRpc {
     /// Remove preimage
     #[method(name = "remove_preimage")]
     async fn remove_preimage(&self, params: RemovePreimageParams) -> Result<(), ErrorObjectOwned>;
+
+    /// Query the status of a TLC
+    #[method(name = "query_tlc_status")]
+    async fn query_tlc_status(
+        &self,
+        params: QueryTlcStatusParams,
+    ) -> Result<QueryTlcStatusResult, ErrorObjectOwned>;
 }
 
 #[cfg(feature = "watchtower")]
@@ -273,5 +289,59 @@ where
         let payment_hash = params.payment_hash.into();
         self.store.remove_watch_preimage(node_id, payment_hash);
         Ok(())
+    }
+    async fn query_tlc_status(
+        &self,
+        _ctx: RpcContext,
+        params: QueryTlcStatusParams,
+    ) -> Result<QueryTlcStatusResult, ErrorObjectOwned> {
+        let status = self
+            .store
+            .query_tlc_status(&params.channel_id, &params.payment_hash);
+        Ok(QueryTlcStatusResult {
+            preimage: status.preimage,
+            is_settled: status.is_settled,
+        })
+    }
+}
+
+/// A wrapper around a watchtower RPC client that implements `WatchtowerQuerier`.
+pub struct WatchtowerRpcQuerier<C> {
+    client: C,
+}
+
+impl<C> WatchtowerRpcQuerier<C> {
+    pub fn new(client: C) -> Self {
+        Self { client }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl<C: WatchtowerRpcClient + Send + Sync> crate::fiber::WatchtowerQuerier
+    for WatchtowerRpcQuerier<C>
+{
+    async fn query_tlc_status(
+        &self,
+        channel_id: &crate::fiber::types::Hash256,
+        payment_hash: &crate::fiber::types::Hash256,
+    ) -> Option<crate::fiber::TlcWatchtowerStatus> {
+        match self
+            .client
+            .query_tlc_status(QueryTlcStatusParams {
+                channel_id: *channel_id,
+                payment_hash: *payment_hash,
+            })
+            .await
+        {
+            Ok(result) => Some(crate::fiber::TlcWatchtowerStatus {
+                preimage: result.preimage,
+                is_settled: result.is_settled,
+            }),
+            Err(e) => {
+                tracing::warn!("Watchtower query failed: {}", e);
+                None
+            }
+        }
     }
 }

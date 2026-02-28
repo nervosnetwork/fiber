@@ -8,6 +8,7 @@ pub mod payment;
 #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
 pub mod profiling;
 pub mod types;
+pub mod watchtower_query;
 
 mod fee;
 mod in_flight_ckb_tx_actor;
@@ -26,6 +27,7 @@ pub use network::{
     NetworkServiceEvent,
 };
 pub use settle_tlc_set_command::SettleTlcSetCommand;
+pub use watchtower_query::{TlcWatchtowerStatus, WatchtowerQuerier};
 
 pub(crate) const ASSUME_NETWORK_ACTOR_ALIVE: &str = "network actor must be alive";
 

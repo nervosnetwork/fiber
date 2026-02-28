@@ -187,10 +187,6 @@ impl ChannelActorStateStore for MockStore {
         HashMap::new()
     }
 
-    fn is_tlc_settled(&self, _channel_id: &Hash256, _payment_hash: &Hash256) -> bool {
-        false
-    }
-
     fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {
         // No-op for tests
     }

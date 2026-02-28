@@ -20,7 +20,7 @@ use fnn::watchtower::{
 };
 use fnn::ExitMessage;
 use fnn::{start_network, CchActor, Config, NetworkServiceEvent};
-use jsonrpsee::http_client::HttpClientBuilder;
+use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
 #[cfg(debug_assertions)]
@@ -36,6 +36,27 @@ use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
+
+/// Build an HTTP client for the standalone watchtower RPC, optionally with a Bearer token.
+fn build_watchtower_rpc_client(
+    url: impl AsRef<str>,
+    token: Option<&str>,
+) -> Result<HttpClient, ExitMessage> {
+    let mut client_builder = HttpClientBuilder::default();
+    if let Some(token) = token {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|err| {
+                ExitMessage(format!("failed to create watchtower rpc client: {err:?}"))
+            })?,
+        );
+        client_builder = client_builder.set_headers(headers);
+    }
+    client_builder
+        .build(url)
+        .map_err(|err| ExitMessage(format!("failed to create watchtower rpc client: {}", err)))
+}
 
 #[tokio::main]
 pub async fn main() -> Result<(), ExitMessage> {
@@ -170,6 +191,36 @@ async fn run_node(
 
             info!("Starting fiber");
 
+            // Build the standalone watchtower RPC client once if configured.
+            let standalone_watchtower_client = fiber_config
+                .standalone_watchtower_rpc_url
+                .as_ref()
+                .map(|url| {
+                    if fiber_config.standalone_watchtower_token.is_none() {
+                        tracing::debug!(
+                            "create watchtower rpc client without standalone_watchtower_token"
+                        );
+                    }
+                    build_watchtower_rpc_client(
+                        url,
+                        fiber_config.standalone_watchtower_token.as_deref(),
+                    )
+                })
+                .transpose()?;
+
+            // Construct watchtower querier before starting network.
+            // Prefer local store (built-in watchtower) over standalone RPC for efficiency.
+            let watchtower_querier: Option<Arc<dyn fnn::fiber::WatchtowerQuerier>> =
+                if !fiber_config.disable_built_in_watchtower.unwrap_or_default() {
+                    Some(Arc::new(store.clone()))
+                } else if let Some(client) = standalone_watchtower_client.clone() {
+                    Some(Arc::new(fnn::rpc::watchtower::WatchtowerRpcQuerier::new(
+                        client,
+                    )))
+                } else {
+                    None
+                };
+
             let chain_client = CkbRpcClient::new(&ckb_config);
             let network_actor: ActorRef<NetworkActorMessage> = start_network(
                 fiber_config.clone(),
@@ -181,6 +232,7 @@ async fn run_node(
                 store.clone(),
                 network_graph.clone(),
                 default_shutdown_script,
+                watchtower_querier,
             )
             .await;
 
@@ -193,33 +245,7 @@ async fn run_node(
                 );
             }
 
-            let watchtower_client = if let Some(url) =
-                fiber_config.standalone_watchtower_rpc_url.clone()
-            {
-                let mut client_builder = HttpClientBuilder::default();
-
-                if let Some(token) = fiber_config.standalone_watchtower_token.as_ref() {
-                    let mut headers = HeaderMap::new();
-                    headers.insert(
-                        "Authorization",
-                        HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|err| {
-                            ExitMessage(format!("failed to create watchtower rpc client: {err:?}"))
-                        })?,
-                    );
-                    client_builder = client_builder.set_headers(headers);
-                } else {
-                    tracing::debug!(
-                        "create watchtower rpc client without standalone_watchtower_token"
-                    );
-                }
-
-                let watchtower_client = client_builder.build(url).map_err(|err| {
-                    ExitMessage(format!("failed to create watchtower rpc client: {}", err))
-                })?;
-                Some(watchtower_client)
-            } else {
-                None
-            };
+            let watchtower_client = standalone_watchtower_client;
 
             let watchtower_actor = if fiber_config.disable_built_in_watchtower.unwrap_or_default() {
                 None
