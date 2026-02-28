@@ -83,8 +83,8 @@ fn mock_channel() -> ChannelAnnouncement {
         &pubkey1,
         &pubkey2,
         OutPoint::new_builder()
-            .tx_hash(rand_hash256.into())
-            .index(0u32.pack())
+            .tx_hash(rand_hash256)
+            .index(0u32)
             .build(),
         get_chain_hash(),
         &xonly,
@@ -194,8 +194,8 @@ fn test_store_save_channel_update() {
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
     let channel_update_of_node1 = new_channel_update_unsigned(
         OutPoint::new_builder()
-            .tx_hash(gen_rand_sha256_hash().into())
-            .index(0u32.pack())
+            .tx_hash(gen_rand_sha256_hash())
+            .index(0u32)
             .build(),
         now_timestamp_as_millis_u64(),
         flags_for_update_of_node1,
@@ -804,8 +804,8 @@ fn test_store_payment_history() {
     assert_eq!(r1, r2);
 
     let outpoint_3 = OutPoint::new_builder()
-        .tx_hash(gen_rand_sha256_hash().into())
-        .index(1u32.pack())
+        .tx_hash(gen_rand_sha256_hash())
+        .index(1u32)
         .build();
     let direction_3 = Direction::Forward;
     let result_3 = TimedResult {
@@ -897,8 +897,8 @@ fn test_store_save_channel_update_and_get_timestamp() {
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
     let channel_update_of_node1 = new_channel_update_unsigned(
         OutPoint::new_builder()
-            .tx_hash(gen_rand_sha256_hash().into())
-            .index(0u32.pack())
+            .tx_hash(gen_rand_sha256_hash())
+            .index(0u32)
             .build(),
         now_timestamp_as_millis_u64(),
         flags_for_update_of_node1,

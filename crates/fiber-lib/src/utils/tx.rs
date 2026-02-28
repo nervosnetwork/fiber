@@ -9,7 +9,7 @@ pub fn compute_tx_message(tx: &TransactionView) -> [u8; 32] {
         .data()
         .raw()
         .as_builder()
-        .cell_deps(Default::default())
+        .cell_deps(ckb_types::packed::CellDepVec::default())
         .build();
     blake2b_256(tx.as_slice())
 }

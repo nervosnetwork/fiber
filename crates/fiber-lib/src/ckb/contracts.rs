@@ -92,8 +92,8 @@ impl TypeIDResolver {
             .ok()?;
         let cell = cells.objects.first()?;
         let cell_dep = CellDep::new_builder()
-            .out_point(cell.out_point.clone().into())
-            .dep_type(DepType::Code.into())
+            .out_point(cell.out_point.clone())
+            .dep_type(DepType::Code)
             .build();
         Some(cell_dep)
     }
@@ -152,7 +152,7 @@ impl ContractsContext {
             Contract::Secp256k1Lock,
             Script::new_builder()
                 .code_hash(secp256k1_binary_cell_type_script.calc_script_hash())
-                .hash_type(ScriptHashType::Type.into())
+                .hash_type(ScriptHashType::Type)
                 .build(),
         );
 
@@ -162,13 +162,13 @@ impl ContractsContext {
             .hash();
         let secp256k1_dep_group_out_point = OutPoint::new_builder()
             .tx_hash(secp256k1_dep_group_tx_hash)
-            .index(0u32.pack())
+            .index(0u32)
             .build();
         script_cell_deps.insert(
             Contract::Secp256k1Lock,
             vec![CellDep::new_builder()
                 .out_point(secp256k1_dep_group_out_point)
-                .dep_type(DepType::DepGroup.into())
+                .dep_type(DepType::DepGroup)
                 .build()
                 .into()],
         );
@@ -188,10 +188,10 @@ impl ContractsContext {
                     .out_point(
                         OutPoint::new_builder()
                             .tx_hash(genesis_tx.hash())
-                            .index(5u32.pack())
+                            .index(5u32)
                             .build(),
                     )
-                    .dep_type(DepType::Code.into())
+                    .dep_type(DepType::Code)
                     .build();
                 script_cell_deps.insert(Contract::CkbAuth, vec![ckb_auth_cell_dep.clone().into()]);
 
@@ -205,10 +205,10 @@ impl ContractsContext {
                         .out_point(
                             OutPoint::new_builder()
                                 .tx_hash(genesis_tx.hash())
-                                .index(index.pack())
+                                .index(index)
                                 .build(),
                         )
-                        .dep_type(DepType::Code.into())
+                        .dep_type(DepType::Code)
                         .build();
                     let output_data = genesis_tx
                         .outputs_data()
@@ -230,7 +230,7 @@ impl ContractsContext {
                         contract,
                         Script::new_builder()
                             .code_hash(CellOutput::calc_data_hash(&output_data))
-                            .hash_type(ScriptHashType::Data2.into())
+                            .hash_type(ScriptHashType::Data2)
                             .build(),
                     );
                 }

@@ -15,12 +15,12 @@ bs58 = "0.5.1"
 bech32 = "0.9"
 
 # CKB types
-ckb-types = "0.202.0"
-ckb-gen-types = "0.202.0"
+ckb-types = "1"
+ckb-gen-types = "1"
 molecule = { version = "0.8.0", default-features = false }
 
 # Hashing (for HashAlgorithm::hash())
-ckb-hash = "0.202.0"
+ckb-hash = "1"
 bitcoin = { version = "0.32", features = ["serde"] }
 
 # Cryptography
@@ -39,7 +39,7 @@ tentacle-secio = { version = "0.6", default-features = false }
 tentacle-multiaddr = "0.3"
 
 # CKB JSON-RPC types (for serializable wrappers)
-ckb-jsonrpc-types = "0.202.0"
+ckb-jsonrpc-types = "1"
 
 # Logging
 tracing = "0.1"

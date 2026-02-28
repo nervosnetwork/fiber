@@ -4246,7 +4246,7 @@ impl ChannelActorState {
                 let output = CellOutput::new_builder()
                     .lock(lock_script)
                     .type_(Some(udt_type_script.clone()).pack())
-                    .capacity(capacity.pack())
+                    .capacity(capacity)
                     .build();
 
                 let output_data = self.get_liquid_capacity().to_le_bytes().pack();
@@ -4255,7 +4255,7 @@ impl ChannelActorState {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
-                    .capacity(capacity.pack())
+                    .capacity(capacity)
                     .build();
                 let output_data = Bytes::default();
                 (output, output_data)
@@ -5909,7 +5909,7 @@ impl ChannelActorState {
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .type_(Some(udt_type_script.clone()).pack())
-                    .capacity(capacity.pack())
+                    .capacity(capacity)
                     .build();
 
                 let output_data = self.get_liquid_capacity().to_le_bytes().pack();
@@ -5918,7 +5918,7 @@ impl ChannelActorState {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
-                    .capacity(capacity.pack())
+                    .capacity(capacity)
                     .build();
                 let output_data = Bytes::default();
                 (output, output_data)
@@ -6470,7 +6470,7 @@ impl ChannelActorState {
             let to_local_output = CellOutput::new_builder()
                 .lock(local_shutdown_script)
                 .type_(Some(type_script.clone()).pack())
-                .capacity(local_capacity.pack())
+                .capacity(local_capacity)
                 .build();
             let to_local_output_data = self.to_local_amount.to_le_bytes().pack();
 
@@ -6482,7 +6482,7 @@ impl ChannelActorState {
             let to_remote_output = CellOutput::new_builder()
                 .lock(remote_shutdown_script)
                 .type_(Some(type_script.clone()).pack())
-                .capacity(remote_capacity.pack())
+                .capacity(remote_capacity)
                 .build();
             let to_remote_output_data = self.to_remote_amount.to_le_bytes().pack();
 
@@ -6509,11 +6509,11 @@ impl ChannelActorState {
                 local_value, remote_value
             );
             let to_local_output = CellOutput::new_builder()
-                .capacity(local_value.pack())
+                .capacity(local_value)
                 .lock(local_shutdown_script)
                 .build();
             let to_remote_output = CellOutput::new_builder()
-                .capacity(remote_value.pack())
+                .capacity(remote_value)
                 .lock(remote_shutdown_script)
                 .build();
             let outputs = self.order_things_for_musig2(to_local_output, to_remote_output);
@@ -6594,7 +6594,7 @@ impl ChannelActorState {
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .build();
 
             let output_data = self.get_liquid_capacity().to_le_bytes().pack();
@@ -6603,7 +6603,7 @@ impl ChannelActorState {
             let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .build();
             let output_data = Bytes::default();
             (output, output_data, settlement_data)

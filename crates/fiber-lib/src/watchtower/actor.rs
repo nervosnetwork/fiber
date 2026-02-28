@@ -468,7 +468,7 @@ fn build_revocation_tx(
         if inputs_capacity >= change_output_occupied_capacity + fee {
             let new_change_output = change_output
                 .as_builder()
-                .capacity((inputs_capacity - fee).pack())
+                .capacity(inputs_capacity - fee)
                 .build();
             let tx = tx_builder
                 .set_outputs(vec![revocation_data.output, new_change_output])
@@ -1185,11 +1185,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .args(new_commitment_lock_script_args.pack())
                     .build(),
             )
-            .capacity(new_capacity.pack())
+            .capacity(new_capacity)
             .build();
         let settlement_output = CellOutput::new_builder()
             .lock(fee_provider_lock_script.clone())
-            .capacity((unlock_amount as u64).pack())
+            .capacity(unlock_amount as u64)
             .build();
 
         let witness_for_commitment_cell: Vec<u8> = [
@@ -1208,12 +1208,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
             )
             .value();
             CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
-                .since(since.pack())
+                .previous_output(commitment_cell.out_point.clone())
+                .since(since)
                 .build()
         } else {
             CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
+                .previous_output(commitment_cell.out_point.clone())
                 .build()
         };
 
@@ -1268,7 +1268,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
-                    .since(since.pack())
+                    .since(since)
                     .build(),
             );
             let fee = fee_calculator
@@ -1276,7 +1276,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
                 let adjusted_settlement_output = change_output
                     .as_builder()
-                    .capacity((inputs_capacity - new_capacity - fee).pack())
+                    .capacity(inputs_capacity - new_capacity - fee)
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![adjusted_settlement_output]
@@ -1328,7 +1328,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             .as_u64();
         let mut settlement_output = settlement_output
             .as_builder()
-            .capacity(settlement_output_occupied_capacity.pack())
+            .capacity(settlement_output_occupied_capacity)
             .build();
 
         let witness_for_commitment_cell: Vec<u8> = [
@@ -1347,12 +1347,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
             )
             .value();
             CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
-                .since(since.pack())
+                .previous_output(commitment_cell.out_point.clone())
+                .since(since)
                 .build()
         } else {
             CellInput::new_builder()
-                .previous_output(commitment_cell.out_point.clone().into())
+                .previous_output(commitment_cell.out_point.clone())
                 .build()
         };
 
@@ -1378,7 +1378,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .as_u64();
                 new_commitment_output = new_commitment_output
                     .as_builder()
-                    .capacity(new_commitment_output_capacity.pack())
+                    .capacity(new_commitment_output_capacity)
                     .build();
 
                 let settlement_output_capacity: u64 = settlement_output.capacity().unpack();
@@ -1387,7 +1387,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     - new_commitment_output_capacity;
                 settlement_output = settlement_output
                     .as_builder()
-                    .capacity(new_settlement_output_capacity.pack())
+                    .capacity(new_settlement_output_capacity)
                     .build();
 
                 new_settlement_output_capacity + new_commitment_output_capacity
@@ -1441,7 +1441,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
-                    .since(since.pack())
+                    .since(since)
                     .build(),
             );
             let fee = fee_calculator
@@ -1449,7 +1449,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             if inputs_capacity >= change_output_occupied_capacity + outputs_capacity + fee {
                 let new_change_output = change_output
                     .as_builder()
-                    .capacity((inputs_capacity - outputs_capacity - fee).pack())
+                    .capacity(inputs_capacity - outputs_capacity - fee)
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![settlement_output, new_change_output]

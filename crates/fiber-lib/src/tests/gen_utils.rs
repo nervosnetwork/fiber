@@ -1,8 +1,8 @@
 use ckb_hash::blake2b_256;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::CellOutput;
+use ckb_types::packed::OutPoint;
 use ckb_types::prelude::{Builder, Entity, Unpack};
-use ckb_types::{packed::OutPoint, prelude::Pack};
 use secp256k1::{Keypair, PublicKey, SecretKey, XOnlyPublicKey, SECP256K1};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
@@ -100,14 +100,14 @@ pub async fn create_funding_tx(x_only: &XOnlyPublicKey) -> TransactionView {
         )
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(get_script_by_contract(
                     Contract::CommitmentLock,
                     commitment_lock_script_args.as_slice(),
                 ))
                 .build(),
         )
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build()
 }
 

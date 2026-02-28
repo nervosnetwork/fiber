@@ -291,7 +291,7 @@ async fn test_sync_channel_announcement_on_startup() {
     let tx = TransactionView::new_advanced_builder()
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
@@ -861,7 +861,7 @@ fn test_announcement_message_serialize() {
     let tx = TransactionView::new_advanced_builder()
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )

@@ -21,6 +21,7 @@ serde_with::serde_conv!(
             ScriptHashType::Data => "data",
             ScriptHashType::Data1 => "data1",
             ScriptHashType::Data2 => "data2",
+            _ => "unknown",
         };
         v.to_string()
     },
@@ -221,10 +222,11 @@ impl From<UdtScript> for molecule_fiber::UdtScript {
             .code_hash(u8_32_as_byte_32(&code_hash_bytes))
             .hash_type(
                 match udt_script.hash_type {
-                    ScriptHashType::Type => 1,
-                    ScriptHashType::Data => 0,
-                    ScriptHashType::Data1 => 2,
-                    ScriptHashType::Data2 => 4,
+                    ScriptHashType::Type => 1u8,
+                    ScriptHashType::Data => 0u8,
+                    ScriptHashType::Data1 => 2u8,
+                    ScriptHashType::Data2 => 4u8,
+                    _ => panic!("unsupported hash type: {:?}", udt_script.hash_type),
                 }
                 .into(),
             )
@@ -332,13 +334,7 @@ impl From<UdtCellDep> for ckb_types::packed::CellDep {
         let out_point: ckb_types::packed::OutPoint = udt_cell_dep.out_point.into();
         ckb_types::packed::CellDep::new_builder()
             .out_point(out_point)
-            .dep_type(
-                match udt_cell_dep.dep_type {
-                    ckb_types::core::DepType::Code => 0u8,
-                    ckb_types::core::DepType::DepGroup => 1u8,
-                }
-                .into(),
-            )
+            .dep_type(udt_cell_dep.dep_type)
             .build()
     }
 }
@@ -348,13 +344,7 @@ impl From<&UdtCellDep> for ckb_types::packed::CellDep {
         let out_point: ckb_types::packed::OutPoint = udt_cell_dep.out_point.clone().into();
         ckb_types::packed::CellDep::new_builder()
             .out_point(out_point)
-            .dep_type(
-                match udt_cell_dep.dep_type {
-                    ckb_types::core::DepType::Code => 0u8,
-                    ckb_types::core::DepType::DepGroup => 1u8,
-                }
-                .into(),
-            )
+            .dep_type(udt_cell_dep.dep_type)
             .build()
     }
 }
