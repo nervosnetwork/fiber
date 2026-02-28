@@ -1,3 +1,4 @@
+use crate::ckb::contracts::get_cell_deps_by_script;
 use crate::fiber::channel::{TLCId, TlcStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
@@ -806,6 +807,31 @@ where
         &self,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
+        let funding_lock_script: packed::Script = params.funding_lock_script.clone().into();
+        let mut funding_source_extra_cell_deps: Vec<packed::CellDep> = params
+            .funding_source_extra_cell_deps
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect();
+
+        let auto_cell_deps = get_cell_deps_by_script(&funding_lock_script)
+            .await
+            .map_err(|err| {
+                ErrorObjectOwned::owned(CALL_EXECUTION_FAILED_CODE, err.to_string(), Some(&params))
+            })?;
+        if let Some(auto_cell_deps) = auto_cell_deps {
+            for cell_dep in auto_cell_deps {
+                if !funding_source_extra_cell_deps
+                    .iter()
+                    .any(|existing| existing == &cell_dep)
+                {
+                    funding_source_extra_cell_deps.push(cell_dep);
+                }
+            }
+        }
+
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
                 OpenChannelWithExternalFundingCommand {
@@ -813,14 +839,8 @@ where
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(true),
                     shutdown_script: params.shutdown_script.clone().into(),
-                    funding_lock_script: params.funding_lock_script.clone().into(),
-                    funding_source_extra_cell_deps: params
-                        .funding_source_extra_cell_deps
-                        .clone()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
+                    funding_lock_script: funding_lock_script.clone(),
+                    funding_source_extra_cell_deps: funding_source_extra_cell_deps.clone(),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch
                         .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),

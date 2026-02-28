@@ -113,6 +113,21 @@ impl LiveCellsExclusionMap {
     }
 }
 
+struct ExtraCellDepResolver<'a> {
+    default: &'a dyn CellDepResolver,
+    funding_source_lock_script: &'a packed::Script,
+    funding_source_extra_cell_deps: &'a [packed::CellDep],
+}
+
+impl CellDepResolver for ExtraCellDepResolver<'_> {
+    fn resolve(&self, script: &Script) -> Option<packed::CellDep> {
+        if script == self.funding_source_lock_script {
+            return self.funding_source_extra_cell_deps.first().cloned();
+        }
+        self.default.resolve(script)
+    }
+}
+
 impl From<TransactionView> for FundingTx {
     fn from(tx: TransactionView) -> Self {
         Self { tx: Some(tx) }
@@ -332,6 +347,7 @@ async fn build_and_balance_tx<T: TxBuilder>(
     builder: &T,
     rpc_url: &str,
     funding_source_lock_script: &packed::Script,
+    funding_source_extra_cell_deps: &[packed::CellDep],
     funding_fee_rate: u64,
     live_cells_exclusion_map: &mut LiveCellsExclusionMap,
 ) -> Result<TransactionView, FundingError> {
@@ -387,11 +403,16 @@ async fn build_and_balance_tx<T: TxBuilder>(
     live_cells_exclusion_map
         .apply(&mut cell_collector)
         .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
+    let extra_cell_dep_resolver = ExtraCellDepResolver {
+        default: &cell_dep_resolver,
+        funding_source_lock_script,
+        funding_source_extra_cell_deps,
+    };
 
     #[cfg(not(target_arch = "wasm32"))]
     let (tx, _) = builder.build_unlocked(
         &mut cell_collector,
-        &cell_dep_resolver,
+        &extra_cell_dep_resolver,
         &header_dep_resolver,
         &tx_dep_provider,
         &balancer,
@@ -401,7 +422,7 @@ async fn build_and_balance_tx<T: TxBuilder>(
     let (tx, _) = builder
         .build_unlocked_async(
             &mut cell_collector,
-            &cell_dep_resolver,
+            &extra_cell_dep_resolver,
             &header_dep_resolver,
             &tx_dep_provider,
             &balancer,
@@ -529,6 +550,7 @@ impl FundingTxBuilder {
             &self,
             &self.context.rpc_url,
             &self.context.funding_source_lock_script,
+            &[],
             self.request.funding_fee_rate,
             live_cells_exclusion_map,
         )
@@ -633,6 +655,7 @@ impl ExternalFundingTxBuilder {
             &self,
             &self.context.rpc_url,
             &self.context.funding_source_lock_script,
+            &self.context.funding_source_extra_cell_deps,
             self.request.funding_fee_rate,
             live_cells_exclusion_map,
         )

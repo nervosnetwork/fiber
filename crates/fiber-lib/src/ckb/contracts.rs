@@ -293,6 +293,26 @@ impl ContractsContext {
         &self.contracts.contract_default_scripts
     }
 
+    fn get_contract_by_script(&self, script: &Script) -> Option<Contract> {
+        const MATCH_ORDER: [Contract; 4] = [
+            Contract::Secp256k1Lock,
+            Contract::CkbAuth,
+            Contract::FundingLock,
+            Contract::CommitmentLock,
+        ];
+
+        MATCH_ORDER.into_iter().find(|contract| {
+            self.contracts
+                .contract_default_scripts
+                .get(contract)
+                .map(|known_script| {
+                    known_script.code_hash() == script.code_hash()
+                        && known_script.hash_type() == script.hash_type()
+                })
+                .unwrap_or(false)
+        })
+    }
+
     pub(crate) async fn get_cell_deps(
         &self,
         contracts: Vec<Contract>,
@@ -427,6 +447,16 @@ pub async fn get_cell_deps_by_contracts(
     get_contracts_context().get_cell_deps(contracts).await
 }
 
+pub async fn get_cell_deps_by_script(
+    script: &Script,
+) -> Result<Option<CellDepVec>, ContractsContextError> {
+    let context = get_contracts_context();
+    if let Some(contract) = context.get_contract_by_script(script) {
+        return context.get_cell_deps(vec![contract]).await.map(Some);
+    }
+    Ok(None)
+}
+
 pub fn get_cell_deps_count_by_contracts(contracts: Vec<Contract>) -> usize {
     get_contracts_context().get_cell_deps_count(contracts)
 }
@@ -499,4 +529,29 @@ pub fn get_cell_deps_count(contracts: Vec<Contract>, udt_script: &Option<Script>
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        get_cell_deps_by_contracts, get_cell_deps_by_script, get_script_by_contract, Contract,
+    };
+
+    #[tokio::test]
+    async fn test_get_cell_deps_by_script_matches_known_lock() {
+        let lock_script = get_script_by_contract(Contract::Secp256k1Lock, &[]);
+        let expected: Vec<_> = get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock])
+            .await
+            .expect("resolve cell deps")
+            .into_iter()
+            .collect();
+        let actual: Vec<_> = get_cell_deps_by_script(&lock_script)
+            .await
+            .expect("resolve matched cell deps")
+            .expect("known lock should match")
+            .into_iter()
+            .collect();
+
+        assert_eq!(actual, expected);
+    }
 }
