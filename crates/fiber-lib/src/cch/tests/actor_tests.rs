@@ -837,7 +837,7 @@ async fn test_send_btc_rejects_currency_mismatch() {
 }
 
 /// Tests that send_btc rejects when the BTC invoice network doesn't match the expected network.
-/// Issue #978: send_btc should fail when BTC invoice is for mainnet but node expects regtest
+/// Issue #978: send_btc should fail when BTC invoice is for regtest but node expects mainnet
 #[tokio::test]
 async fn test_send_btc_rejects_btc_invoice_network_mismatch() {
     let harness = setup_test_harness().await;
