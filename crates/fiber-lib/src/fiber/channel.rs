@@ -78,7 +78,7 @@ use ractor::{
 };
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 #[cfg(test)]
@@ -7980,9 +7980,8 @@ pub struct ChannelOpenRecord {
     /// channels, the temp ID is replaced by the computed new ID when `accept_channel` is
     /// called.
     pub channel_id: Hash256,
-    /// The remote peer involved in this channel-opening attempt.
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
+    /// The remote peer public key.
+    pub pubkey: Pubkey,
     /// Whether the local node is the accepting side (received the `OpenChannel` request).
     pub is_acceptor: bool,
     /// Current status of the opening process.
@@ -8001,11 +8000,11 @@ pub struct ChannelOpenRecord {
 
 impl ChannelOpenRecord {
     /// Create a new outbound record in the `WaitingForPeer` state.
-    pub fn new(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
+    pub fn new(channel_id: Hash256, pubkey: Pubkey, funding_amount: u128) -> Self {
         let now = now_timestamp_as_millis_u64();
         Self {
             channel_id,
-            peer_id,
+            pubkey,
             is_acceptor: false,
             status: ChannelOpeningStatus::WaitingForPeer,
             funding_amount,
@@ -8017,8 +8016,8 @@ impl ChannelOpenRecord {
 
     /// Create a new inbound record in the `WaitingForPeer` state.
     /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
-    pub fn new_inbound(channel_id: Hash256, peer_id: PeerId, remote_funding_amount: u128) -> Self {
-        let mut record = Self::new(channel_id, peer_id, remote_funding_amount);
+    pub fn new_inbound(channel_id: Hash256, pubkey: Pubkey, remote_funding_amount: u128) -> Self {
+        let mut record = Self::new(channel_id, pubkey, remote_funding_amount);
         record.is_acceptor = true;
         record
     }

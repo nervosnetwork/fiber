@@ -66,7 +66,7 @@ async fn test_rpc_basic() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
                 only_pending: None,
             },
@@ -214,13 +214,13 @@ async fn test_rpc_list_peers() {
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
     assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey);
-    let node_1_peer_id = list_peers.peers[0].peer_id.clone();
+    let node_1_pubkey = list_peers.peers[0].pubkey;
 
     let _res: () = node_0
         .send_rpc_request(
             "disconnect_peer",
             crate::rpc::peer::DisconnectPeerParams {
-                peer_id: node_1_peer_id,
+                pubkey: node_1_pubkey,
             },
         )
         .await
@@ -254,8 +254,6 @@ async fn test_rpc_list_peers() {
     dbg!("list_peers: {:?}", &list_peers);
     assert!(list_peers.peers.iter().any(|p| p.pubkey == node_1.pubkey));
     assert!(list_peers.peers.iter().any(|p| p.pubkey == node_3.pubkey));
-    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_1.peer_id));
-    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_3.peer_id));
 }
 
 #[tokio::test]
@@ -342,7 +340,7 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
                 only_pending: None,
             },
@@ -371,7 +369,7 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: Some(true),
                 only_pending: None,
             },
@@ -413,7 +411,7 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: Some(true),
                 only_pending: None,
             },
@@ -604,7 +602,7 @@ async fn test_rpc_basic_with_auth() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
                 only_pending: None,
             },

@@ -209,8 +209,8 @@ pub struct AcceptChannelResponse {
 pub struct PendingAcceptChannel {
     /// The temporary channel ID assigned by the initiator.
     pub channel_id: Hash256,
-    /// The peer ID of the channel initiator.
-    pub peer_id: PeerId,
+    /// The public key of the channel initiator.
+    pub pubkey: Pubkey,
     /// The amount of CKB or UDT the initiator is contributing to the channel.
     pub funding_amount: u128,
     /// UDT type script, if this is a UDT channel.
@@ -2020,16 +2020,15 @@ where
                     .collect::<Vec<_>>();
                 let _ = rpc.send(Ok(peers));
             }
-
             NetworkActorCommand::GetPendingAcceptChannels(rpc) => {
                 let pending = state
                     .to_be_accepted_channels
                     .map
                     .iter()
                     .map(
-                        |(channel_id, (peer_id, open_channel))| PendingAcceptChannel {
+                        |(channel_id, (pubkey, open_channel))| PendingAcceptChannel {
                             channel_id: *channel_id,
-                            peer_id: peer_id.clone(),
+                            pubkey: *pubkey,
                             funding_amount: open_channel.funding_amount,
                             udt_type_script: open_channel.funding_udt_type_script.clone(),
                             created_at: state
@@ -3376,7 +3375,7 @@ where
         self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
 
         // Record the channel opening attempt so it can be queried via RPC.
-        let record = ChannelOpenRecord::new(temp_channel_id, peer_id, funding_amount);
+        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -3398,20 +3397,13 @@ where
             tlc_expiry_delta,
         } = accept_channel;
 
-        let (peer_id, open_channel) = self
+        let (remote_pubkey, open_channel) = self
             .to_be_accepted_channels
             .remove(&temp_channel_id)
-            .ok_or(ProcessingChannelError::InvalidParameter(format!(
-                "No channel with temp id {:?} found",
-                &temp_channel_id
-            )))?;
-
-        let remote_pubkey =
-            self.get_peer_pubkey(&peer_id)
-                .ok_or(ProcessingChannelError::InvalidParameter(format!(
-                    "Peer {:?} pubkey not found",
-                    &peer_id
-                )))?;
+            .ok_or(ProcessingChannelError::InvalidParameter(
+            format!("No channel with temp id {:?} found", &temp_channel_id),
+        ))?;
+        let peer_id = remote_pubkey.tentacle_peer_id();
 
         let shutdown_script =
             shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
@@ -3955,7 +3947,7 @@ where
             .to_be_accepted_channels
             .map
             .iter()
-            .filter(|(_, (peer_id, _))| peer_id == id)
+            .filter(|(_, (pubkey, _))| pubkey.tentacle_peer_id() == *id)
             .map(|(channel_id, _)| *channel_id)
             .collect();
         for channel_id in failed_channels {
@@ -4200,6 +4192,15 @@ where
     ) -> ProcessingChannelResult {
         let id = open_channel.channel_id;
         let remote_funding_amount = open_channel.funding_amount;
+        let remote_pubkey = self
+            .peer_session_map
+            .get(&peer_id)
+            .map(|peer| peer.pubkey)
+            .or_else(|| self.get_peer_pubkey(&peer_id))
+            .ok_or(ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?} pubkey not found",
+                &peer_id
+            )))?;
         let result = check_open_channel_parameters(
             &open_channel.funding_udt_type_script,
             &open_channel.shutdown_script,
@@ -4211,7 +4212,7 @@ where
         )
         .and_then(|_| {
             self.to_be_accepted_channels
-                .try_insert(id, peer_id.clone(), open_channel)
+                .try_insert(id, remote_pubkey, open_channel)
         });
 
         match result {
@@ -4219,7 +4220,7 @@ where
                 // Create a persistent record so the accepting side can see this pending channel
                 // via list_channels(only_pending=true) and across node restarts.
                 let record =
-                    ChannelOpenRecord::new_inbound(id, peer_id.clone(), remote_funding_amount);
+                    ChannelOpenRecord::new_inbound(id, remote_pubkey, remote_funding_amount);
                 self.store.insert_channel_open_record(record);
 
                 // Notify outside observers.
@@ -5036,7 +5037,7 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
 struct ToBeAcceptedChannels {
     total_number_limit: usize,
     total_bytes_limit: usize,
-    map: HashMap<Hash256, (PeerId, OpenChannel)>,
+    map: HashMap<Hash256, (Pubkey, OpenChannel)>,
 }
 
 impl Default for ToBeAcceptedChannels {
@@ -5067,7 +5068,7 @@ impl ToBeAcceptedChannels {
         }
     }
 
-    fn remove(&mut self, id: &Hash256) -> Option<(PeerId, OpenChannel)> {
+    fn remove(&mut self, id: &Hash256) -> Option<(Pubkey, OpenChannel)> {
         self.map.remove(id)
     }
 
@@ -5075,13 +5076,13 @@ impl ToBeAcceptedChannels {
     fn try_insert(
         &mut self,
         id: Hash256,
-        peer_id: PeerId,
+        pubkey: Pubkey,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
         if let Some(existing_value) = self.map.get(&id) {
             let err_message = format!(
                 "A channel from {:?} of id {:?} is already awaiting to be accepted",
-                &peer_id, &id,
+                &pubkey, &id,
             );
             warn!("{}: {:?}", err_message, existing_value);
             return Err(ProcessingChannelError::RepeatedProcessing(err_message));
@@ -5092,7 +5093,7 @@ impl ToBeAcceptedChannels {
         let (total_number, total_bytes) = self
             .map
             .values()
-            .filter(|(saved_peer_id, _)| *saved_peer_id == peer_id)
+            .filter(|(saved_pubkey, _)| *saved_pubkey == pubkey)
             .fold(
                 (1, open_channel.mem_size()),
                 |(count, size), (_, saved_open_channel)| {
@@ -5113,9 +5114,9 @@ impl ToBeAcceptedChannels {
 
         debug!(
             "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
-            &peer_id, &id, &open_channel
+            &pubkey, &id, &open_channel
         );
-        self.map.insert(id, (peer_id, open_channel));
+        self.map.insert(id, (pubkey, open_channel));
         Ok(())
     }
 }

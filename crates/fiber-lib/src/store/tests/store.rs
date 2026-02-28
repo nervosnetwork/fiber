@@ -1045,7 +1045,7 @@ fn test_store_sample_channel_actor_state() {
 #[test]
 fn test_store_channel_open_record() {
     use crate::fiber::channel::{ChannelOpenRecord, ChannelOpenRecordStore, ChannelOpeningStatus};
-    use crate::store::sample::StoreSample;
+    use crate::store::sample::{deterministic_pubkey, StoreSample};
 
     let samples = ChannelOpenRecord::samples(42);
     assert!(!samples.is_empty());
@@ -1085,7 +1085,7 @@ fn test_store_channel_open_record() {
     // Test update_status helper
     let mut record = ChannelOpenRecord::new(
         deterministic_hash256(42, 99),
-        sample_peer_id(),
+        deterministic_pubkey(999, 0),
         100_0000_0000,
     );
     assert_eq!(record.status, ChannelOpeningStatus::WaitingForPeer);
@@ -1094,15 +1094,6 @@ fn test_store_channel_open_record() {
     record.fail("test failure".to_string());
     assert_eq!(record.status, ChannelOpeningStatus::Failed);
     assert_eq!(record.failure_detail.as_deref(), Some("test failure"));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn sample_peer_id() -> tentacle::secio::PeerId {
-    use crate::store::sample::deterministic_pubkey;
-    let pubkey = deterministic_pubkey(999, 0);
-    let pk_bytes = pubkey.serialize();
-    let tentacle_pk = tentacle::secio::PublicKey::from_raw_key(pk_bytes.to_vec());
-    tentacle::secio::PeerId::from_public_key(&tentacle_pk)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

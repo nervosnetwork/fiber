@@ -202,9 +202,8 @@ Attempts to open a channel with a peer.
 
 ##### Params
 
-* `peer_id` - <em>`PeerId`</em>, The peer ID to open a channel with (base58 string, derived from the peer's `Pubkey`).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the peer to open a channel with.
  The peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
- You can obtain a peer's `peer_id` from the `list_peers` RPC.
 * `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
 * `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
 * `one_way` - <em>`Option<bool>`</em>, Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
@@ -298,7 +297,7 @@ Lists all channels.
 
 ##### Params
 
-* `peer_id` - <em>`Option<PeerId>`</em>, The peer ID to list channels for (base58 string, derived from the peer's `Pubkey`).
+* `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key to list channels for.
  An optional parameter, if not provided, all channels will be listed.
 * `include_closed` - <em>`Option<bool>`</em>, Whether to include closed channels in the list, an optional parameter, default value is false
 * `only_pending` - <em>`Option<bool>`</em>, When set to true, only return channels that are still being opened (non-final states:
@@ -887,7 +886,7 @@ Disconnect from a peer.
 
 ##### Params
 
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the peer to disconnect (base58 string, derived from the peer's `Pubkey`).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the peer to disconnect.
 
 ##### Returns
 
@@ -1144,7 +1143,7 @@ The channel data structure
 * `is_one_way` - <em>`bool`</em>, Is this channel one-way?
  Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
 * `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint of the channel
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the channel counterparty (base58 string, derived from the peer's `Pubkey`).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the channel counterparty.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel
 * `state` - <em>[ChannelState](#type-channelstate)</em>, The state of the channel
 * `local_balance` - <em>`u128`</em>, The local balance of the channel
@@ -1430,8 +1429,6 @@ The information about a peer connected to the node.
 #### Fields
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer (also known as `node_id`).
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the peer (base58 string, derived by hashing the `pubkey` above).
- This is used for P2P transport connections, e.g. when calling `open_channel` or `disconnect_peer`.
 * `address` - <em>`MultiAddr`</em>, The multi-address associated with the connecting peer.
  Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
  The `graph_nodes` in Graph rpc module will return all addresses of the peer.
