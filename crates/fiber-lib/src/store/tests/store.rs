@@ -1,6 +1,8 @@
 use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::network::get_chain_hash;
+use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
 use crate::fiber::{
@@ -60,6 +62,7 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
             FeatureVector::default(),
             vec![],
             &sk,
+            get_chain_hash(),
             now_timestamp_as_millis_u64(),
             0,
             Default::default(),
@@ -83,6 +86,7 @@ fn mock_channel() -> ChannelAnnouncement {
             .tx_hash(rand_hash256.into())
             .index(0u32.pack())
             .build(),
+        get_chain_hash(),
         &xonly,
         0,
         None,
@@ -188,7 +192,7 @@ fn test_store_save_channel_announcement() {
 fn test_store_save_channel_update() {
     let (store, _dir) = generate_store();
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
-    let channel_update_of_node1 = ChannelUpdate::new_unsigned(
+    let channel_update_of_node1 = new_channel_update_unsigned(
         OutPoint::new_builder()
             .tx_hash(gen_rand_sha256_hash().into())
             .index(0u32.pack())
@@ -848,6 +852,7 @@ fn test_serde_node_announcement_as_broadcast_message() {
         FeatureVector::default(),
         vec![],
         &privkey,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
         Default::default(),
@@ -890,7 +895,7 @@ fn test_store_save_channel_update_and_get_timestamp() {
     let (store, _dir) = generate_store();
 
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
-    let channel_update_of_node1 = ChannelUpdate::new_unsigned(
+    let channel_update_of_node1 = new_channel_update_unsigned(
         OutPoint::new_builder()
             .tx_hash(gen_rand_sha256_hash().into())
             .index(0u32.pack())

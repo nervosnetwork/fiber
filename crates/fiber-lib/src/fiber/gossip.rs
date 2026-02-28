@@ -14,7 +14,6 @@ use ckb_types::{
     packed::OutPoint,
     prelude::Unpack,
 };
-use fiber_types::{check_chain_hash, get_chain_hash};
 use ractor::{
     call, call_t, concurrency::JoinHandle, Actor, ActorCell, ActorProcessingErr, ActorRef,
     ActorRuntime, MessagingErr, OutputPort, RpcReplyPort, SupervisionEvent,
@@ -47,7 +46,7 @@ use crate::{
 
 use super::{
     config::DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
-    network::{GossipMessageWithPeerId, GOSSIP_PROTOCOL_ID},
+    network::{check_chain_hash, get_chain_hash, GossipMessageWithPeerId, GOSSIP_PROTOCOL_ID},
     types::{
         BroadcastMessageQuery, BroadcastMessageQueryFlags, BroadcastMessageWithTimestamp,
         BroadcastMessagesFilter, BroadcastMessagesFilterResult, ChannelOnchainInfo,
@@ -2817,7 +2816,7 @@ where
                     chain_hash,
                     queries,
                 }) => {
-                    if let Err(e) = fiber_types::check_chain_hash(&chain_hash) {
+                    if let Err(e) = check_chain_hash(&chain_hash) {
                         error!("Failed to check chain hash: {:?}", e);
                         return Ok(());
                     }

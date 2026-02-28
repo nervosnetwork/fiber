@@ -7,7 +7,7 @@ use std::{
 use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
-use fnn::fiber_types::init_chain_hash;
+use fnn::fiber::network::init_chain_hash;
 use fnn::{
     Config, NetworkServiceEvent,
     actors::RootActor,

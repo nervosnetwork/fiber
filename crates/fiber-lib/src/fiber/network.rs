@@ -6,9 +6,8 @@ use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
-use fiber_types::check_chain_hash;
-use fiber_types::get_chain_hash;
 use getrandom::getrandom;
+use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
@@ -157,6 +156,26 @@ const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 // and the latest cursor.
 const MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
+
+static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
+
+pub fn init_chain_hash(chain_hash: Hash256) {
+    CHAIN_HASH_INSTANCE
+        .set(chain_hash)
+        .expect("init_chain_hash should only be called once");
+}
+
+pub fn get_chain_hash() -> Hash256 {
+    CHAIN_HASH_INSTANCE.get().cloned().unwrap_or_default()
+}
+
+pub(crate) fn check_chain_hash(chain_hash: &Hash256) -> Result<(), Error> {
+    if chain_hash == &get_chain_hash() {
+        Ok(())
+    } else {
+        Err(Error::InvalidChainHash(*chain_hash, get_chain_hash()))
+    }
+}
 
 #[derive(Debug)]
 pub enum PeerDisconnectReason {
@@ -2969,6 +2988,7 @@ where
                     self.features.clone(),
                     addresses,
                     &self.private_key,
+                    get_chain_hash(),
                     now,
                     self.open_channel_auto_accept_min_ckb_funding_amount,
                     get_udt_whitelist(),

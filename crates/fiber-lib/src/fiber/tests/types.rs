@@ -1,3 +1,4 @@
+use crate::fiber::network::get_chain_hash;
 use crate::{
     fiber::{
         gen::{fiber as molecule_fiber, gossip},
@@ -754,6 +755,7 @@ fn test_create_and_verify_node_announcement() {
         FeatureVector::default(),
         vec![],
         &privkey,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
         Default::default(),
@@ -775,6 +777,7 @@ fn test_serde_node_announcement() {
         FeatureVector::default(),
         vec![],
         &privkey,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
         Default::default(),

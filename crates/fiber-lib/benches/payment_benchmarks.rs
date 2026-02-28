@@ -2,17 +2,18 @@
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use fiber_types::{ChannelUpdate, FeatureVector, HopHint};
+use fiber_types::{FeatureVector, HopHint};
 use fnn::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
 };
 use fnn::fiber::gossip::GossipMessageStore;
 use fnn::fiber::graph::{GraphChannelStat, NetworkGraph};
+use fnn::fiber::network::get_chain_hash;
+use fnn::fiber::types::new_channel_update_unsigned;
 use fnn::fiber::types::{
     ChannelAnnouncement, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, NodeAnnouncement,
     Pubkey,
 };
-use fnn::fiber_types::get_chain_hash;
 use fnn::store::Store;
 use fnn::tests::create_n_nodes_network;
 use fnn::MIN_RESERVED_CKB;
@@ -109,6 +110,7 @@ fn build_graph_for_find_path_bench(
             FeatureVector::default(),
             vec![],
             &(*sk).into(),
+            get_chain_hash(),
             now_timestamp_as_millis_u64(),
             0,
             Default::default(),
@@ -279,7 +281,7 @@ fn build_graph_for_find_path_bench(
             },
         );
 
-        store.save_channel_update(ChannelUpdate::new_unsigned(
+        store.save_channel_update(new_channel_update_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
@@ -292,7 +294,7 @@ fn build_graph_for_find_path_bench(
             0,                        // tlc_minimum_value
             0, // tlc_fee_proportional_millionths (fee rate, should be small, not capacity!)
         ));
-        store.save_channel_update(ChannelUpdate::new_unsigned(
+        store.save_channel_update(new_channel_update_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {

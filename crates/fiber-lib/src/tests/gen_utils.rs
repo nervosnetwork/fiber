@@ -6,6 +6,8 @@ use ckb_types::{packed::OutPoint, prelude::Pack};
 use secp256k1::{Keypair, PublicKey, SecretKey, XOnlyPublicKey, SECP256K1};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
+use crate::fiber::network::get_chain_hash;
+use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::{
     ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
     EcdsaSignature, FeatureVector, NodeAnnouncement, Privkey, Pubkey,
@@ -78,6 +80,7 @@ pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
         FeatureVector::default(),
         vec![],
         sk,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
         Default::default(),
@@ -129,6 +132,7 @@ impl ChannelTestContext {
             &node1_sk.pubkey(),
             &node2_sk.pubkey(),
             outpoint.clone(),
+            get_chain_hash(),
             &xonly,
             capacity as u128,
             None,
@@ -161,7 +165,7 @@ impl ChannelTestContext {
         timestamp: Option<u64>,
     ) -> ChannelUpdate {
         let timestamp = timestamp.unwrap_or(now_timestamp_as_millis_u64());
-        let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
+        let mut unsigned_channel_update = new_channel_update_unsigned(
             self.channel_announcement.channel_outpoint.clone(),
             timestamp,
             ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
@@ -185,7 +189,7 @@ impl ChannelTestContext {
         timestamp: Option<u64>,
     ) -> ChannelUpdate {
         let timestamp = timestamp.unwrap_or(now_timestamp_as_millis_u64());
-        let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
+        let mut unsigned_channel_update = new_channel_update_unsigned(
             self.channel_announcement.channel_outpoint.clone(),
             timestamp,
             ChannelUpdateMessageFlags::UPDATE_OF_NODE2,

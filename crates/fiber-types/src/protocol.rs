@@ -15,36 +15,11 @@ use ckb_types::packed::{BytesVec, OutPoint, Script};
 use ckb_types::prelude::Pack;
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::LiftedSignature;
-use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
 use std::cmp::Ordering;
 
 pub use feature_bits::*;
-
-static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
-
-pub fn init_chain_hash(chain_hash: Hash256) {
-    CHAIN_HASH_INSTANCE
-        .set(chain_hash)
-        .expect("init_chain_hash should only be called once");
-}
-
-pub fn get_chain_hash() -> Hash256 {
-    CHAIN_HASH_INSTANCE.get().cloned().unwrap_or_default()
-}
-
-pub fn check_chain_hash(chain_hash: &Hash256) -> Result<(), String> {
-    let expected = get_chain_hash();
-    if chain_hash == &expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "chain hash mismatch: expected {:?}, got {:?}",
-            expected, chain_hash
-        ))
-    }
-}
 
 // ============================================================
 // EcdsaSignature
@@ -518,6 +493,7 @@ impl ChannelAnnouncement {
         node1_pubkey: &Pubkey,
         node2_pubkey: &Pubkey,
         channel_outpoint: OutPoint,
+        chain_hash: Hash256,
         ckb_pubkey: &secp256k1::XOnlyPublicKey,
         capacity: u128,
         udt_type_script: Option<Script>,
@@ -527,7 +503,7 @@ impl ChannelAnnouncement {
             node2_signature: None,
             ckb_signature: None,
             features: Default::default(),
-            chain_hash: get_chain_hash(),
+            chain_hash,
             channel_outpoint,
             node1_id: *node1_pubkey,
             node2_id: *node2_pubkey,
@@ -571,37 +547,6 @@ pub struct ChannelUpdate {
 }
 
 impl ChannelUpdate {
-    /// Create an unsigned channel update with the given parameters.
-    ///
-    /// To avoid having the same timestamp for both channel updates, an even
-    /// timestamp is used for node1 and an odd timestamp for node2.
-    pub fn new_unsigned(
-        channel_outpoint: OutPoint,
-        timestamp: u64,
-        message_flags: ChannelUpdateMessageFlags,
-        channel_flags: ChannelUpdateChannelFlags,
-        tlc_expiry_delta: u64,
-        tlc_minimum_value: u128,
-        tlc_fee_proportional_millionths: u128,
-    ) -> Self {
-        let timestamp = if message_flags.contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2) {
-            timestamp | 1u64
-        } else {
-            timestamp & !1u64
-        };
-        Self {
-            signature: None,
-            chain_hash: get_chain_hash(),
-            channel_outpoint,
-            timestamp,
-            message_flags,
-            channel_flags,
-            tlc_expiry_delta,
-            tlc_minimum_value,
-            tlc_fee_proportional_millionths,
-        }
-    }
-
     /// Check if this update is from node 1.
     pub fn is_update_of_node_1(&self) -> bool {
         !self.is_update_of_node_2()
@@ -677,6 +622,7 @@ impl NodeAnnouncement {
         features: FeatureVector,
         addresses: Vec<tentacle_multiaddr::Multiaddr>,
         node_id: Pubkey,
+        chain_hash: Hash256,
         timestamp: u64,
         auto_accept_min_ckb_funding_amount: u64,
         udt_cfg_infos: UdtCfgInfos,
@@ -689,7 +635,7 @@ impl NodeAnnouncement {
             node_id,
             version,
             node_name,
-            chain_hash: get_chain_hash(),
+            chain_hash,
             addresses,
             auto_accept_min_ckb_funding_amount,
             udt_cfg_infos,
@@ -706,6 +652,7 @@ impl NodeAnnouncement {
         features: FeatureVector,
         addresses: Vec<tentacle_multiaddr::Multiaddr>,
         private_key: &Privkey,
+        chain_hash: Hash256,
         timestamp: u64,
         auto_accept_min_ckb_funding_amount: u64,
         udt_cfg_infos: UdtCfgInfos,
@@ -716,6 +663,7 @@ impl NodeAnnouncement {
             features,
             addresses,
             private_key.pubkey(),
+            chain_hash,
             timestamp,
             auto_accept_min_ckb_funding_amount,
             udt_cfg_infos,

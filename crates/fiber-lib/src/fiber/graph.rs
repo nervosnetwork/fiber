@@ -1,7 +1,7 @@
 use super::channel::{ChannelActorState, ChannelActorStateStore};
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
-use super::network::BuildRouterCommand;
+use super::network::{get_chain_hash, BuildRouterCommand};
 use super::path::NodeHeap;
 use super::payment::SendPaymentDataExt;
 use super::types::BroadcastMessageWithTimestamp;
@@ -16,7 +16,6 @@ use crate::fiber::path::NodeHeapElement;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
-use fiber_types::get_chain_hash;
 use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::{
     Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelTlcInfo, ChannelUpdate, Cursor,

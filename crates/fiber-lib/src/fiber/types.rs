@@ -1,4 +1,5 @@
 use super::channel::ProcessingChannelError;
+use super::network::get_chain_hash;
 use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::{
@@ -797,6 +798,35 @@ pub struct ForwardTlcResult {
     pub payment_hash: Hash256,
     pub tlc_id: u64,
     pub add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
+}
+
+pub fn new_channel_update_unsigned(
+    channel_outpoint: OutPoint,
+    timestamp: u64,
+    message_flags: ChannelUpdateMessageFlags,
+    channel_flags: ChannelUpdateChannelFlags,
+    tlc_expiry_delta: u64,
+    tlc_minimum_value: u128,
+    tlc_fee_proportional_millionths: u128,
+) -> ChannelUpdate {
+    // To avoid having the same timestamp for both channel updates, we will use an even
+    // timestamp number for node1 and an odd timestamp number for node2.
+    let timestamp = if message_flags.contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2) {
+        timestamp | 1u64
+    } else {
+        timestamp & !1u64
+    };
+    ChannelUpdate {
+        signature: None,
+        chain_hash: get_chain_hash(),
+        channel_outpoint,
+        timestamp,
+        message_flags,
+        channel_flags,
+        tlc_expiry_delta,
+        tlc_minimum_value,
+        tlc_fee_proportional_millionths,
+    }
 }
 
 #[derive(Debug, Clone)]

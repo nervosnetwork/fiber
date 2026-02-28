@@ -1,4 +1,4 @@
-use crate::fiber::types::OpenChannel;
+use crate::fiber::network::get_chain_hash;
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -13,7 +13,7 @@ use crate::{
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
             broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
-            BroadcastMessagesFilterResult, GossipMessage,
+            BroadcastMessagesFilterResult, GossipMessage, OpenChannel,
         },
         BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
         NetworkActorCommand, NetworkActorMessage, NodeAnnouncement, Privkey, Pubkey,
@@ -83,6 +83,7 @@ fn create_fake_channel_announcement_message(
         &sk1.pubkey(),
         &sk2.pubkey(),
         outpoint,
+        get_chain_hash(),
         &x_only_pub_key,
         capacity as u128,
         None,
@@ -106,6 +107,7 @@ fn create_node_announcement_message_with_priv_key(priv_key: &Privkey) -> NodeAnn
         FeatureVector::default(),
         addresses,
         priv_key,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
         Default::default(),
