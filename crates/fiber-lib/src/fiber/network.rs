@@ -670,6 +670,7 @@ pub struct NetworkActor<S, C> {
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
+    watchtower_querier: Option<Arc<dyn super::WatchtowerQuerier>>,
 }
 
 impl<S, C> NetworkActor<S, C>
@@ -693,6 +694,7 @@ where
         store: S,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
         chain_client: C,
+        watchtower_querier: Option<Arc<dyn super::WatchtowerQuerier>>,
     ) -> Self {
         Self {
             event_sender,
@@ -700,6 +702,7 @@ where
             store: store.clone(),
             network_graph,
             chain_client,
+            watchtower_querier,
         }
     }
 
@@ -1347,9 +1350,20 @@ where
                                     }
                                 }
 
-                                let Some(payment_preimage) =
-                                    self.store.get_preimage(&tlc.payment_hash)
-                                else {
+                                let mut payment_preimage =
+                                    self.store.get_preimage(&tlc.payment_hash);
+                                if payment_preimage.is_none() {
+                                    if let Some(querier) = self.watchtower_querier.as_ref() {
+                                        payment_preimage = querier
+                                            .query_tlc_status(&channel_id, &tlc.payment_hash)
+                                            .await
+                                            .and_then(|s| s.preimage);
+                                        if let Some(preimage) = payment_preimage {
+                                            self.store.insert_preimage(tlc.payment_hash, preimage);
+                                        }
+                                    }
+                                }
+                                let Some(payment_preimage) = payment_preimage else {
                                     continue;
                                 };
                                 debug!(
@@ -1507,7 +1521,16 @@ where
                                 if let Some((forwarding_channel_id, forwarding_tlc_id)) =
                                     tlc.forwarding_tlc
                                 {
-                                    if self.store.is_tlc_settled(&channel_id, &tlc.payment_hash) {
+                                    let is_settled =
+                                        if let Some(querier) = self.watchtower_querier.as_ref() {
+                                            querier
+                                                .query_tlc_status(&channel_id, &tlc.payment_hash)
+                                                .await
+                                                .is_some_and(|s| s.is_settled)
+                                        } else {
+                                            false
+                                        };
+                                    if is_settled {
                                         let (send, _recv) = oneshot::channel();
                                         let rpc_reply = RpcReplyPort::from(send);
                                         if let Err(err) = state
@@ -4994,6 +5017,7 @@ pub async fn start_network<
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
+    watchtower_querier: Option<Arc<dyn super::WatchtowerQuerier>>,
 ) -> ActorRef<NetworkActorMessage> {
     let my_pubkey = config.public_key();
     let my_peer_id = PeerId::from_public_key(&my_pubkey);
@@ -5006,6 +5030,7 @@ pub async fn start_network<
             store,
             network_graph,
             chain_client,
+            watchtower_querier,
         ),
         NetworkActorStartArguments {
             config,

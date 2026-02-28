@@ -189,10 +189,6 @@ impl ChannelActorStateStore for MockStore {
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
         HashMap::new()
     }
-
-    fn is_tlc_settled(&self, _channel_id: &Hash256, _payment_hash: &Hash256) -> bool {
-        false
-    }
 }
 
 fn create_test_invoice(payment_hash: Hash256, amount: Option<u128>, allow_mpp: bool) -> CkbInvoice {

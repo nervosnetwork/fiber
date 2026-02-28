@@ -206,6 +206,27 @@ pub async fn fiber(
                 .expect("get default funding lock script should be ok");
 
             info!("Starting fiber");
+
+            // Construct watchtower querier for WASM (standalone watchtower only)
+            let watchtower_querier: Option<std::sync::Arc<dyn fnn::fiber::WatchtowerQuerier>> =
+                if let Some(url) = fiber_config.standalone_watchtower_rpc_url.clone() {
+                    let querier_client =
+                        WasmClientBuilder::default()
+                            .build(url)
+                            .await
+                            .map_err(|err| {
+                                ExitMessage(format!(
+                                    "failed to create watchtower rpc client: {}",
+                                    err
+                                ))
+                            })?;
+                    Some(std::sync::Arc::new(
+                        fnn::rpc::watchtower::WatchtowerRpcQuerier::new(querier_client),
+                    ))
+                } else {
+                    None
+                };
+
             let network_actor = start_network(
                 fiber_config.clone(),
                 chain_client,
@@ -216,6 +237,7 @@ pub async fn fiber(
                 store.clone(),
                 network_graph.clone(),
                 default_shutdown_script,
+                watchtower_querier,
             )
             .await;
 

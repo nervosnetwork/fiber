@@ -10,6 +10,7 @@ use crate::{
         channel::{RevocationData, SettlementData},
         serde_utils::EntityHex,
         types::{Hash256, NodeId, Privkey, Pubkey},
+        watchtower_query::TlcWatchtowerStatus,
     },
 };
 
@@ -71,6 +72,21 @@ pub trait WatchtowerStore {
 
     /// Mark a tlc as settled on chain
     fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]);
+
+    /// Check if a tlc is settled on chain
+    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool;
+
+    /// Query the status of a TLC, returning both preimage and settlement status
+    fn query_tlc_status(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> TlcWatchtowerStatus {
+        TlcWatchtowerStatus {
+            preimage: self.get_watch_preimage(payment_hash),
+            is_settled: self.is_tlc_settled(channel_id, payment_hash),
+        }
+    }
 }
 
 /// The data of a channel that the watchtower is monitoring
