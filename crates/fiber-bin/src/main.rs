@@ -12,7 +12,8 @@ use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::Network
 use fnn::rpc::server::start_rpc;
 use fnn::rpc::watchtower::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
-    UpdateLocalSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
+    UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
+    WatchtowerRpcClient,
 };
 use fnn::store::Store;
 use fnn::tasks::{
@@ -553,6 +554,15 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         ) => {
             watchtower_client
                 .update_local_settlement(UpdateLocalSettlementParams {
+                    channel_id,
+                    settlement_data,
+                })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
+            watchtower_client
+                .update_pending_remote_settlement(UpdatePendingRemoteSettlementParams {
                     channel_id,
                     settlement_data,
                 })
