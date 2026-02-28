@@ -11,7 +11,6 @@ mod config;
 pub use config::CchConfig;
 
 mod order;
-//pub use fiber_types::{CchInvoice, CchOrder, CchOrderStatus};
 pub use order::state_machine::CchOrderStateMachine;
 pub use order::CchOrderStore;
 

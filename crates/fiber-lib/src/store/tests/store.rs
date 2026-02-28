@@ -188,7 +188,7 @@ fn test_store_save_channel_announcement() {
 fn test_store_save_channel_update() {
     let (store, _dir) = generate_store();
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
-    let channel_update_of_node1 = new_channel_update_unsigned(
+    let channel_update_of_node1 = ChannelUpdate::new_unsigned(
         OutPoint::new_builder()
             .tx_hash(gen_rand_sha256_hash().into())
             .index(0u32.pack())
@@ -888,7 +888,7 @@ fn test_store_save_channel_update_and_get_timestamp() {
     let (store, _dir) = generate_store();
 
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
-    let channel_update_of_node1 = new_channel_update_unsigned(
+    let channel_update_of_node1 = ChannelUpdate::new_unsigned(
         OutPoint::new_builder()
             .tx_hash(gen_rand_sha256_hash().into())
             .index(0u32.pack())

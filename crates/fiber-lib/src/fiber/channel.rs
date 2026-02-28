@@ -1,7 +1,7 @@
 use super::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
 };
-use super::types::{new_channel_announcement_unsigned, new_channel_update_unsigned, UpdateTlcInfo};
+use super::types::{new_channel_announcement_unsigned, UpdateTlcInfo};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
     types::ForwardTlcResult,
@@ -27,7 +27,7 @@ use crate::{
         },
         key::blake2b_hash_with_salt,
         network::SendOnionPacketCommand,
-        network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
+        network::{sign_network_message, FiberMessageWithPeerId},
         types::{
             peeled_packet_mpp_custom_records, AcceptChannel, AddTlc, AnnouncementSignatures,
             ChannelReady, ClosingSigned, CommitmentSigned, FiberChannelMessage, FiberMessage,
@@ -2483,7 +2483,7 @@ where
                     ..
                 } = &open_channel;
 
-                if *chain_hash != get_chain_hash() {
+                if *chain_hash != fiber_types::get_chain_hash() {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
                         "Invalid chain hash {:?}",
                         chain_hash
@@ -2670,7 +2670,7 @@ where
                 };
                 let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
                 let message = FiberMessage::ChannelInitialization(OpenChannel {
-                    chain_hash: get_chain_hash(),
+                    chain_hash: fiber_types::get_chain_hash(),
                     channel_id: channel.get_id(),
                     funding_udt_type_script,
                     funding_amount: channel.to_local_amount,
@@ -3716,7 +3716,7 @@ impl ChannelActorState {
             ChannelUpdateMessageFlags::UPDATE_OF_NODE2
         };
 
-        self.is_public().then_some(new_channel_update_unsigned(
+        self.is_public().then_some(ChannelUpdate::new_unsigned(
             self.must_get_funding_transaction_outpoint(),
             now_timestamp_as_millis_u64(),
             message_flags,

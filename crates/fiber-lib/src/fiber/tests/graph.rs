@@ -4,20 +4,18 @@ use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::NetworkGraph;
 use crate::fiber::graph::PathFindError;
 use crate::fiber::graph::SendPaymentState;
-use crate::fiber::network::get_chain_hash;
 use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataBuilder, SendPaymentDataExt};
-use crate::fiber::types::{
-    new_channel_update_unsigned, new_node_announcement, TrampolineOnionPacket,
-};
+use crate::fiber::types::{new_node_announcement, TrampolineOnionPacket};
 use crate::fiber::{
-    ChannelAnnouncement, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, FeatureVector,
-    Hash256, Privkey, Pubkey, RouterHop, SendPaymentData, SessionRoute,
+    ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
+    FeatureVector, Hash256, Privkey, Pubkey, RouterHop, SendPaymentData, SessionRoute,
 };
 use crate::store::Store;
 use ckb_types::{
     packed::{OutPoint, Script},
     prelude::Entity,
 };
+use fiber_types::get_chain_hash;
 use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey, SECP256K1};
 use tracing::debug;
 
@@ -147,7 +145,7 @@ impl MockNetworkGraph {
                 features: 0,
             },
         );
-        self.store.save_channel_update(new_channel_update_unsigned(
+        self.store.save_channel_update(ChannelUpdate::new_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
@@ -161,7 +159,7 @@ impl MockNetworkGraph {
             fee_rate.unwrap_or(0),
         ));
         if let Some(fee_rate) = other_fee_rate {
-            self.store.save_channel_update(new_channel_update_unsigned(
+            self.store.save_channel_update(ChannelUpdate::new_unsigned(
                 channel_outpoint.clone(),
                 now_timestamp_as_millis_u64(),
                 if node_a_is_node1 {
