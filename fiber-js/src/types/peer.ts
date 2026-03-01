@@ -7,12 +7,11 @@ interface ConnectPeerParams {
 }
 
 interface DisconnectPeerParams {
-    peer_id: string;
+    pubkey: HexString;
 }
 
 interface PeerInfo {
-    pubkey: string;
-    peer_id: string;
+    pubkey: HexString;
     address: string;
 }
 

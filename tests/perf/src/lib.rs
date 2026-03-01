@@ -47,7 +47,7 @@ pub type TestResult<T> = Result<T, TestError>;
 #[derive(Clone)]
 pub struct NodeConfig {
     pub rpc_url: String,
-    pub peer_id: String,
+    pub pubkey: String,
     pub addr: String,
 }
 
@@ -137,17 +137,17 @@ impl TestContext {
             client,
             node1: NodeConfig {
                 rpc_url: Self::get_config_value(&vars, "NODE1_RPC_URL"),
-                peer_id: Self::get_config_value(&vars, "NODE1_PEERID"),
+                pubkey: Self::get_config_value(&vars, "NODE1_PUBKEY"),
                 addr: Self::get_config_value(&vars, "NODE1_ADDR"),
             },
             node2: NodeConfig {
                 rpc_url: Self::get_config_value(&vars, "NODE2_RPC_URL"),
-                peer_id: Self::get_config_value(&vars, "NODE2_PEERID"),
+                pubkey: Self::get_config_value(&vars, "NODE2_PUBKEY"),
                 addr: Self::get_config_value(&vars, "NODE2_ADDR"),
             },
             node3: NodeConfig {
                 rpc_url: Self::get_config_value(&vars, "NODE3_RPC_URL"),
-                peer_id: Self::get_config_value(&vars, "NODE3_PEERID"),
+                pubkey: Self::get_config_value(&vars, "NODE3_PUBKEY"),
                 addr: Self::get_config_value(&vars, "NODE3_ADDR"),
             },
             ckb_rpc_url: Self::get_config_value(&vars, "CKB_RPC_URL"),
@@ -224,11 +224,11 @@ impl TestContext {
     pub async fn open_channel(
         &self,
         from_url: &str,
-        peer_id: &str,
+        pubkey: &str,
         funding_amount: &str,
     ) -> TestResult<String> {
         let params = json!([{
-            "peer_id": peer_id,
+            "pubkey": pubkey,
             "funding_amount": funding_amount
         }]);
 
@@ -253,9 +253,9 @@ impl TestContext {
     }
 
     /// List channels for a specific peer
-    pub async fn list_channels(&self, node_url: &str, peer_id: Option<&str>) -> TestResult<Value> {
-        let params = if let Some(peer_id) = peer_id {
-            json!([{"peer_id": peer_id}])
+    pub async fn list_channels(&self, node_url: &str, pubkey: Option<&str>) -> TestResult<Value> {
+        let params = if let Some(pubkey) = pubkey {
+            json!([{"pubkey": pubkey}])
         } else {
             json!([{}])
         };
@@ -283,9 +283,9 @@ impl TestContext {
     pub async fn get_auto_accepted_channel(
         &self,
         node_url: &str,
-        peer_id: &str,
+        pubkey: &str,
     ) -> TestResult<String> {
-        let result = self.list_channels(node_url, Some(peer_id)).await?;
+        let result = self.list_channels(node_url, Some(pubkey)).await?;
 
         let channels = result["result"]["channels"]
             .as_array()
@@ -347,11 +347,11 @@ impl TestContext {
     pub async fn validate_channel_balance(
         &self,
         node_url: &str,
-        peer_id: &str,
+        pubkey: &str,
         expected_remote: &str,
         expected_local: &str,
     ) -> TestResult<()> {
-        let result = self.list_channels(node_url, Some(peer_id)).await?;
+        let result = self.list_channels(node_url, Some(pubkey)).await?;
 
         let channels = result["result"]["channels"]
             .as_array()
@@ -487,10 +487,10 @@ pub async fn run_integration_test() -> TestResult<()> {
 
     println!("📡 Step 2: Opening channels...");
     let _temp_channel_1 = ctx
-        .open_channel(&ctx.node1.rpc_url, &ctx.node2.peer_id, "0x377aab54d000")
+        .open_channel(&ctx.node1.rpc_url, &ctx.node2.pubkey, "0x377aab54d000")
         .await?;
     ctx.n1n2_channel_id = Some(
-        ctx.get_auto_accepted_channel(&ctx.node2.rpc_url, &ctx.node1.peer_id)
+        ctx.get_auto_accepted_channel(&ctx.node2.rpc_url, &ctx.node1.pubkey)
             .await?,
     );
 
@@ -498,10 +498,10 @@ pub async fn run_integration_test() -> TestResult<()> {
     ctx.generate_ckb_epochs("0x2").await?;
 
     let _temp_channel_2 = ctx
-        .open_channel(&ctx.node2.rpc_url, &ctx.node3.peer_id, "0x377aab54d000")
+        .open_channel(&ctx.node2.rpc_url, &ctx.node3.pubkey, "0x377aab54d000")
         .await?;
     ctx.n2n3_channel_id = Some(
-        ctx.get_auto_accepted_channel(&ctx.node3.rpc_url, &ctx.node2.peer_id)
+        ctx.get_auto_accepted_channel(&ctx.node3.rpc_url, &ctx.node2.pubkey)
             .await?,
     );
 
@@ -511,7 +511,7 @@ pub async fn run_integration_test() -> TestResult<()> {
     println!("✅ Step 5: Validating channel balances...");
     ctx.validate_channel_balance(
         &ctx.node2.rpc_url,
-        &ctx.node3.peer_id,
+        &ctx.node3.pubkey,
         "0x0",
         "0x37785d3ecd00",
     )
@@ -820,7 +820,7 @@ mod tests {
             .await?;
         // Then open channel
         let _temp_id = ctx
-            .open_channel(&ctx.node1.rpc_url, &ctx.node2.peer_id, "0x377aab54d000")
+            .open_channel(&ctx.node1.rpc_url, &ctx.node2.pubkey, "0x377aab54d000")
             .await?;
         Ok(())
     }
@@ -829,7 +829,7 @@ mod tests {
     async fn test_list_channels() -> TestResult<()> {
         let ctx = TestContext::new();
         let _result = ctx
-            .list_channels(&ctx.node1.rpc_url, Some(&ctx.node2.peer_id))
+            .list_channels(&ctx.node1.rpc_url, Some(&ctx.node2.pubkey))
             .await?;
         Ok(())
     }

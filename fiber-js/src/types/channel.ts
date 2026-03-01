@@ -7,7 +7,7 @@ interface Script {
 }
 
 interface OpenChannelParams {
-    peer_id: string;
+    pubkey: HexString;
     funding_amount: HexString;
     public?: boolean;
     funding_udt_type_script?: Script;
@@ -41,7 +41,7 @@ interface AcceptChannelResult {
     channel_id: HexString;
 }
 interface ListChannelsParams {
-    peer_id?: string;
+    pubkey?: HexString;
     include_closed?: boolean;
 }
 
@@ -53,7 +53,7 @@ interface Channel {
     channel_id: HexString;
     is_public: boolean;
     channel_outpoint: HexString;
-    peer_id: HexString;
+    pubkey: HexString;
     funding_udt_type_script?: Script;
     state: ChannelState;
     local_balance: HexString;

@@ -10,7 +10,7 @@ use crate::fiber::config::{
 };
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::ChannelInfo;
-use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason};
+use crate::fiber::network::{DebugEvent, FiberMessageWithTarget, PeerDisconnectReason};
 use crate::fiber::payment::{PaymentStatus, SendPaymentCommand};
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
@@ -93,7 +93,7 @@ async fn test_open_channel_to_peer() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -117,9 +117,9 @@ async fn test_open_channel_to_peer() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -134,7 +134,7 @@ async fn test_open_and_accept_channel() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -158,9 +158,9 @@ async fn test_open_and_accept_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -211,7 +211,7 @@ async fn test_send_init_msg_with_different_chain_hash() {
 
     let dummy_err_chain_hash = Hash256::from([1; 32]);
     node_a.send_init_peer_message(
-        node_b.peer_id.clone(),
+        node_b.pubkey,
         Init {
             features: FeatureVector::default(),
             chain_hash: dummy_err_chain_hash,
@@ -222,8 +222,8 @@ async fn test_send_init_msg_with_different_chain_hash() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
-                assert_eq!(peer_id, &node_b.peer_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _reason) => {
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -232,8 +232,8 @@ async fn test_send_init_msg_with_different_chain_hash() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _reason) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -298,17 +298,17 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
         )
         .await;
 
-    let node1_id = node1.peer_id.clone();
+    let node1_pubkey = node1.pubkey;
     node1.stop().await;
-    let node2_id = node2.peer_id.clone();
+    let node2_pubkey = node2.pubkey;
     node2.stop().await;
 
     let node1_channels = node1.get_network_graph_channels().await;
     assert_eq!(node1_channels.len(), 1);
     let node1_channel = &node1_channels[0];
     assert_eq!(
-        HashSet::from([node1_channel.node1_peerid(), node1_channel.node2_peerid()]),
-        HashSet::from([node1_id.clone(), node2_id.clone()])
+        HashSet::from([node1_channel.node1(), node1_channel.node2()]),
+        HashSet::from([node1_pubkey, node2_pubkey])
     );
     assert_ne!(node1_channel.update_of_node1, None);
     assert_ne!(node1_channel.update_of_node2, None);
@@ -324,8 +324,8 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
     assert_ne!(node2_channel.update_of_node1, None);
     assert_ne!(node2_channel.update_of_node2, None);
     assert_eq!(
-        HashSet::from([node2_channel.node1_peerid(), node2_channel.node2_peerid()]),
-        HashSet::from([node1_id, node2_id])
+        HashSet::from([node2_channel.node1(), node2_channel.node2()]),
+        HashSet::from([node1_pubkey, node2_pubkey])
     );
     let node2_nodes = node2.get_network_graph_nodes().await;
     assert_eq!(node2_nodes.len(), 2);
@@ -396,9 +396,6 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
         )
         .await;
 
-    let node1_id = node1.peer_id.clone();
-    let node2_id = node2.peer_id.clone();
-
     let node1_channels = node1.get_network_graph_channels().await;
     assert_ne!(node1_channels, vec![]);
     let node2_channels = node2.get_network_graph_channels().await;
@@ -407,14 +404,14 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node2.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node2_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node2.pubkey);
                 true
             }
             _ => false,
@@ -423,8 +420,8 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
 
     node2
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node1_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node1.pubkey);
                 true
             }
             _ => false,
@@ -460,9 +457,6 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
         )
         .await;
 
-    let node1_id = node1.peer_id.clone();
-    let node2_id = node2.peer_id.clone();
-
     let node1_channels = node1.get_network_graph_channels().await;
     assert_ne!(node1_channels, vec![]);
     let node2_channels = node2.get_network_graph_channels().await;
@@ -471,14 +465,14 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node2.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node2_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node2.pubkey);
                 true
             }
             _ => false,
@@ -487,8 +481,8 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
 
     node2
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node1_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node1.pubkey);
                 true
             }
             _ => false,
@@ -508,9 +502,9 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
 
     node1
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node2_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node2.pubkey);
                 true
             }
             _ => false,
@@ -519,9 +513,9 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
 
     node2
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node1_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node1.pubkey);
                 true
             }
             _ => false,
@@ -706,8 +700,8 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     assert_eq!(channels.len(), 1);
     let channel = &channels[0];
     assert_eq!(
-        HashSet::from([channel.node1_peerid(), channel.node2_peerid()]),
-        HashSet::from([node1.peer_id.clone(), node2.peer_id.clone()])
+        HashSet::from([channel.node1(), channel.node2()]),
+        HashSet::from([node1.pubkey, node2.pubkey])
     );
 
     let nodes = node3.get_network_graph_nodes().await;
@@ -1013,15 +1007,15 @@ async fn test_network_send_previous_tlc_error() {
 
     let res = call!(node_a.network_actor, message).expect("node_a alive");
     assert!(res.is_ok());
-    let node_b_peer_id = node_b.peer_id.clone();
+    let node_b_pubkey = node_b.pubkey;
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
-                peer_id,
+                pubkey,
                 payment_hash,
                 err,
             )) => {
-                assert_eq!(peer_id, &node_b_peer_id);
+                assert_eq!(pubkey, &node_b_pubkey);
                 assert_eq!(payment_hash, &generated_payment_hash);
                 assert_eq!(err.error_code, TlcErrorCode::InvalidOnionPayload);
                 true
@@ -1108,15 +1102,15 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
 
     let res = call!(node_a.network_actor, message).expect("node_a alive");
     assert!(res.is_ok());
-    let node_b_peer_id = node_b.peer_id.clone();
+    let node_b_pubkey = node_b.pubkey;
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
-                peer_id,
+                pubkey,
                 payment_hash,
                 err,
             )) => {
-                assert_eq!(peer_id, &node_b_peer_id);
+                assert_eq!(pubkey, &node_b_pubkey);
                 assert_eq!(payment_hash, &generated_payment_hash);
                 assert_eq!(err.error_code, TlcErrorCode::InvalidOnionPayload);
                 true
@@ -1754,7 +1748,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -1778,9 +1772,9 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -1808,12 +1802,12 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -1823,12 +1817,12 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -1871,12 +1865,12 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     // to be received by node b.
     let node_b_commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -1910,12 +1904,12 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     // to be received by node a.
     let node_a_commitment_tx = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -3660,12 +3654,12 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 
     let node_a_shutdown_tx_hash = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+            NetworkServiceEvent::ChannelClosed(pubkey, channel_id, tx_hash) => {
                 println!(
                     "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                    &tx_hash, &peer_id, channel_id
+                    &tx_hash, &pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(tx_hash.clone())
             }
@@ -3677,12 +3671,12 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 
     let node_b_shutdown_tx_hash = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+            NetworkServiceEvent::ChannelClosed(pubkey, channel_id, tx_hash) => {
                 println!(
                     "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                    &tx_hash, &peer_id, channel_id
+                    &tx_hash, &pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(tx_hash.clone())
             }
@@ -3718,7 +3712,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -3752,7 +3746,7 @@ async fn test_revoke_old_commitment_transaction() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -3776,9 +3770,9 @@ async fn test_revoke_old_commitment_transaction() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -3827,12 +3821,12 @@ async fn test_revoke_old_commitment_transaction() {
 
     let commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -3842,12 +3836,12 @@ async fn test_revoke_old_commitment_transaction() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -3857,12 +3851,12 @@ async fn test_revoke_old_commitment_transaction() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -3883,12 +3877,12 @@ async fn test_revoke_old_commitment_transaction() {
     let revocation_data = node_a
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::RevokeAndAckReceived(
-                peer_id,
+                pubkey,
                 channel_id,
                 revocation_data,
                 _settlement_data,
             ) => {
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 assert_eq!(revocation_data.commitment_number, 1u64);
                 Some(revocation_data.clone())
@@ -3954,7 +3948,7 @@ async fn test_create_channel() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -3978,9 +3972,9 @@ async fn test_create_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4008,12 +4002,12 @@ async fn test_create_channel() {
 
     let node_a_commitment_tx = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -4023,12 +4017,12 @@ async fn test_create_channel() {
 
     let node_b_commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -4038,12 +4032,12 @@ async fn test_create_channel() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -4053,12 +4047,12 @@ async fn test_create_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -4084,7 +4078,7 @@ async fn test_reestablish_channel() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -4108,9 +4102,9 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4138,9 +4132,9 @@ async fn test_reestablish_channel() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_b.peer_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -4149,9 +4143,9 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4161,17 +4155,14 @@ async fn test_reestablish_channel() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
-                node_b.peer_id.clone(),
-                PeerDisconnectReason::Requested,
-            ),
+            NetworkActorCommand::DisconnectPeer(node_b.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node_b.peer_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -4180,8 +4171,8 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4195,9 +4186,9 @@ async fn test_reestablish_channel() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_b.peer_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -4206,9 +4197,9 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4385,7 +4376,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     node_a.restart().await;
 
     node_a.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
     ).await;
 
     node_a
@@ -4419,7 +4410,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
     debug!("debug tentacle after stop node_a");
 
     node_b.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _addr) if id == &node_a.peer_id),
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _addr) if id == &node_a.pubkey),
     )
     .await;
 
@@ -4430,7 +4421,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
     debug!("debug tentacle after restart node_a");
 
     node_a.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
     )
     .await;
 }
@@ -4465,7 +4456,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     node_b.start().await;
 
     node_a.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
     )
     .await;
 
@@ -4589,7 +4580,7 @@ async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
 
@@ -4639,7 +4630,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: Some(Script::new_builder().args([0u8; 40].pack()).build()),
@@ -4664,10 +4655,10 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
                 assert_eq!(channel_id, &open_channel_result.channel_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4677,12 +4668,12 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
     // should fail
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -4805,12 +4796,12 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
 
     let node_a_shutdown_tx_hash = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+            NetworkServiceEvent::ChannelClosed(pubkey, channel_id, tx_hash) => {
                 println!(
                     "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                    &tx_hash, &peer_id, channel_id
+                    &tx_hash, &pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(tx_hash.clone())
             }
@@ -4820,12 +4811,12 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
 
     let node_b_shutdown_tx_hash = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+            NetworkServiceEvent::ChannelClosed(pubkey, channel_id, tx_hash) => {
                 println!(
                     "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                    &tx_hash, &peer_id, channel_id
+                    &tx_hash, &pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(tx_hash.clone())
             }
@@ -5786,7 +5777,7 @@ async fn test_abandon_failed_channel_without_accept() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
 
@@ -5834,7 +5825,7 @@ async fn test_open_channel_with_invalid_commitment_delay() {
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
-                    peer_id: node_b.peer_id.clone(),
+                    pubkey: node_b.pubkey,
                     public: false,
                     one_way: false,
                     shutdown_script: None,
@@ -5886,7 +5877,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -5916,7 +5907,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -5946,7 +5937,7 @@ async fn test_abandon_channel_with_peer_accept() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -6065,8 +6056,8 @@ async fn test_channel_with_malicious_peer_send_channel_msg() {
         node_2
             .network_actor
             .send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                    peer_id: target_node.peer_id.clone(),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                    target: target_node.pubkey,
                     message: FiberMessage::add_tlc(AddTlc {
                         channel_id: wrong_channel_id,
                         amount: 1000,
@@ -6110,7 +6101,7 @@ async fn test_funding_timeout() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: nodes[1].peer_id.clone(),
+                pubkey: nodes[1].pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -6158,7 +6149,7 @@ async fn test_auto_accept_fails_debug_event() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: nodes[1].peer_id.clone(),
+                pubkey: nodes[1].pubkey,
                 public: false,
                 shutdown_script: None,
                 funding_amount,
@@ -6249,7 +6240,7 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -6277,8 +6268,8 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
     // Wait for node_b to receive the channel pending event
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(*channel_id, temp_channel_id);
                 true
             }
