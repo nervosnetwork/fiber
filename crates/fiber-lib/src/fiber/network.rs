@@ -1144,7 +1144,8 @@ where
             NetworkActorCommand::MaintainConnections => {
                 debug!("Trying to connect to peers with mutual channels");
 
-                for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    let peer_id = pubkey.tentacle_peer_id();
                     if state.is_connected(&peer_id) {
                         continue;
                     }
@@ -1278,7 +1279,7 @@ where
                 }
             }
             NetworkActorCommand::CheckChannelsShutdown => {
-                for (_peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(
                         channel_state,
                         ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
@@ -1327,7 +1328,8 @@ where
                 let mut with_channel_down_peers = HashSet::new();
                 let mut ready_channels_count = 0;
                 let mut shuttingdown_channels_count = 0;
-                for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+                for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    let peer_id = pubkey.tentacle_peer_id();
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             ready_channels_count += 1;
@@ -4168,9 +4170,10 @@ where
 
         if let Some(info) = self.peer_session_map.get_mut(&peer_id) {
             info.features = Some(init_msg.features);
+            let peer_pubkey = info.pubkey;
             debug_event!(_myself, "PeerInit");
 
-            for channel_id in self.store.get_active_channel_ids_by_peer(&peer_id) {
+            for channel_id in self.store.get_active_channel_ids_by_pubkey(&peer_pubkey) {
                 if let Err(e) = self.reestablish_channel(&peer_id, channel_id).await {
                     error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
                 }

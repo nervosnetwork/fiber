@@ -4614,13 +4614,13 @@ impl ChannelActorState {
     fn update_graph_for_remote_channel_change(&mut self) {
         if let Some(channel_update_info) = self.get_remote_channel_update_info() {
             if let Some(channel_outpoint) = self.get_funding_transaction_outpoint() {
-                let peer_id = self.get_remote_pubkey();
+                let pubkey = self.get_remote_pubkey();
                 self.network()
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::OwnedChannelUpdateEvent(
                             super::graph::OwnedChannelUpdateEvent::Updated(
                                 channel_outpoint,
-                                peer_id,
+                                pubkey,
                                 channel_update_info,
                             ),
                         ),
@@ -4646,14 +4646,14 @@ impl ChannelActorState {
         let Some(channel_outpoint) = self.get_funding_transaction_outpoint() else {
             return;
         };
-        let peer_id = self.get_local_pubkey();
+        let pubkey = self.get_local_pubkey();
         let channel_update_info = self.get_local_channel_update_info();
         self.network()
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::OwnedChannelUpdateEvent(
                     super::graph::OwnedChannelUpdateEvent::Updated(
                         channel_outpoint,
-                        peer_id,
+                        pubkey,
                         channel_update_info,
                     ),
                 ),
@@ -7917,21 +7917,21 @@ pub trait ChannelActorStateStore {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
-    fn get_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256>;
-    fn get_active_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
-        self.get_channel_ids_by_peer(peer_id)
+    fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256>;
+    fn get_active_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
+        self.get_channel_ids_by_pubkey(pubkey)
             .into_iter()
             .filter(
                 |id| matches!(self.get_channel_actor_state(id), Some(state) if !state.is_closed()),
             )
             .collect()
     }
-    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)>;
+    fn get_channel_states(&self, pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)>;
     fn get_active_channel_states(
         &self,
-        peer_id: Option<PeerId>,
-    ) -> Vec<(PeerId, Hash256, ChannelState)> {
-        self.get_channel_states(peer_id)
+        pubkey: Option<Pubkey>,
+    ) -> Vec<(Pubkey, Hash256, ChannelState)> {
+        self.get_channel_states(pubkey)
             .into_iter()
             .filter(|(_, _, state)| !state.is_closed())
             .collect()

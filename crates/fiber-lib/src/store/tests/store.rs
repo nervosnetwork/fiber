@@ -576,9 +576,9 @@ fn test_channel_actor_state_store() {
     assert!(get_state.is_some());
     assert!(!get_state.unwrap().is_tlc_forwarding_enabled());
 
-    let remote_peer_id = state.get_remote_peer_id();
+    let remote_pubkey = state.get_remote_pubkey();
     assert_eq!(
-        store.get_channel_ids_by_peer(&remote_peer_id),
+        store.get_channel_ids_by_pubkey(&remote_pubkey),
         vec![state.id]
     );
     let channel_point = state.must_get_funding_transaction_outpoint();
@@ -588,7 +588,7 @@ fn test_channel_actor_state_store() {
 
     store.delete_channel_actor_state(&state.id);
     assert!(store.get_channel_actor_state(&state.id).is_none());
-    assert_eq!(store.get_channel_ids_by_peer(&remote_peer_id), vec![]);
+    assert_eq!(store.get_channel_ids_by_pubkey(&remote_pubkey), vec![]);
     let channel_point = state.must_get_funding_transaction_outpoint();
     assert!(store
         .get_channel_state_by_outpoint(&channel_point)
@@ -1022,12 +1022,12 @@ fn test_store_sample_channel_actor_state() {
             sample.shutdown_transaction_hash
         );
 
-        // Verify peer-id index
-        let remote_peer_id = sample.get_remote_peer_id();
-        let channel_ids = store.get_channel_ids_by_peer(&remote_peer_id);
+        // Verify pubkey index
+        let remote_pubkey = sample.get_remote_pubkey();
+        let channel_ids = store.get_channel_ids_by_pubkey(&remote_pubkey);
         assert!(
             channel_ids.contains(&sample.id),
-            "peer-id index should contain the channel id"
+            "pubkey index should contain the channel id"
         );
     }
 

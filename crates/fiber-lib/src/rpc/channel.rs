@@ -589,10 +589,7 @@ where
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
         let only_pending = params.only_pending.unwrap_or_default();
         let include_closed = params.include_closed.unwrap_or_default();
-        let filter_peer_id = params
-            .pubkey
-            .as_ref()
-            .map(|pubkey| pubkey.tentacle_peer_id());
+        let filter_pubkey = params.pubkey;
 
         // The two filter options are mutually exclusive: `only_pending` narrows to channels
         // that are still opening (or failed to open), while `include_closed` broadens to
@@ -609,15 +606,15 @@ where
         let channel_states = if only_pending {
             // For pending mode, fetch all channel states (including non-active ones
             // like ABANDONED / FUNDING_ABORTED which are "closed" but represent failed openings)
-            self.store.get_channel_states(filter_peer_id.clone())
+            self.store.get_channel_states(filter_pubkey)
         } else if include_closed {
-            self.store.get_channel_states(filter_peer_id.clone())
+            self.store.get_channel_states(filter_pubkey)
         } else {
-            self.store.get_active_channel_states(filter_peer_id.clone())
+            self.store.get_active_channel_states(filter_pubkey)
         };
         let mut channels: Vec<_> = channel_states
             .into_iter()
-            .filter_map(|(_peer_id, channel_id, _state)| {
+            .filter_map(|(_pubkey, channel_id, _state)| {
                 self.store
                     .get_channel_actor_state(&channel_id)
                     .and_then(|state| {
@@ -717,7 +714,7 @@ where
                     continue;
                 }
                 // Apply pubkey filter if provided
-                if let Some(ref filter_pubkey) = params.pubkey {
+                if let Some(filter_pubkey) = filter_pubkey.as_ref() {
                     if filter_pubkey != &record.pubkey {
                         continue;
                     }
@@ -775,7 +772,7 @@ where
             };
             for pending in pending_accept {
                 // Apply pubkey filter if provided
-                if let Some(ref filter_pubkey) = params.pubkey {
+                if let Some(filter_pubkey) = filter_pubkey.as_ref() {
                     if filter_pubkey != &pending.pubkey {
                         continue;
                     }
