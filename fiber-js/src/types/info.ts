@@ -1,11 +1,11 @@
 import { Script } from "./channel";
-import { HexString } from "./general";
+import { HexString, Pubkey } from "./general";
 import { UdtCfgInfos } from "./graph";
 
 interface NodeInfoResult {
     version: string;
     commit_hash: string;
-    pubkey: string;
+    pubkey: Pubkey;
     node_name?: string;
     addresses: string[];
     chain_hash: HexString;

@@ -1,4 +1,4 @@
-import { HexString } from "./general";
+import { HexString, Pubkey } from "./general";
 
 interface Script {
     code_hash: HexString;
@@ -7,7 +7,7 @@ interface Script {
 }
 
 interface OpenChannelParams {
-    pubkey: HexString;
+    pubkey: Pubkey;
     funding_amount: HexString;
     public?: boolean;
     funding_udt_type_script?: Script;
@@ -41,7 +41,7 @@ interface AcceptChannelResult {
     channel_id: HexString;
 }
 interface ListChannelsParams {
-    pubkey?: HexString;
+    pubkey?: Pubkey;
     include_closed?: boolean;
 }
 
@@ -53,7 +53,7 @@ interface Channel {
     channel_id: HexString;
     is_public: boolean;
     channel_outpoint: HexString;
-    pubkey: HexString;
+    pubkey: Pubkey;
     funding_udt_type_script?: Script;
     state: ChannelState;
     local_balance: HexString;

@@ -1,5 +1,5 @@
 import { Script } from "./channel";
-import { HexString } from "./general"
+import { HexString, Pubkey } from "./general"
 
 interface GraphNodesParams {
     limit?: HexString;
@@ -39,7 +39,7 @@ type UdtCfgInfos = UdtArgInfo[];
 interface NodeInfo {
     node_name: string;
     addresses: string[];
-    pubkey: HexString;
+    pubkey: Pubkey;
     timestamp: HexString;
     chain_hash: HexString;
     auto_accept_min_ckb_funding_amount: HexString;
@@ -66,8 +66,8 @@ interface ChannelUpdateInfo {
 
 interface ChannelInfo {
     channel_outpoint: HexString;
-    node1: HexString;
-    node2: HexString;
+    node1: Pubkey;
+    node2: Pubkey;
     created_timestamp: HexString;
     update_info_of_node1?: ChannelUpdateInfo;
     update_info_of_node2?: ChannelUpdateInfo;

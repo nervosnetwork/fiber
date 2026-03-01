@@ -1,4 +1,4 @@
-import { HexString } from "./general"
+import { Pubkey } from "./general"
 
 interface ConnectPeerParams {
     address: string;
@@ -7,11 +7,11 @@ interface ConnectPeerParams {
 }
 
 interface DisconnectPeerParams {
-    pubkey: HexString;
+    pubkey: Pubkey;
 }
 
 interface PeerInfo {
-    pubkey: HexString;
+    pubkey: Pubkey;
     address: string;
 }
 
