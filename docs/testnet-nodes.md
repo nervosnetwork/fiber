@@ -1,17 +1,13 @@
 # Testnet Public Nodes User Manual
 
-## Testnet Public Nodes’ Addresses
+## Testnet Public Nodes
 #### node1
 
-```bash
-"/ip4/18.162.235.225/tcp/8119/p2p/QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo"
-```
+- pubkey: `02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71`
 
 #### node2
 
-```bash
-"/ip4/18.163.221.211/tcp/8119/p2p/QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89"
-```
+- pubkey: `0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc`
 
 
 
@@ -75,6 +71,41 @@
 
 
 
+## Discover Public Nodes from `graph_nodes` (optional)
+
+1. Query graph nodes
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
+       "id": 1,
+       "jsonrpc": "2.0",
+       "method": "graph_nodes",
+       "params": [
+           {}
+       ]
+   }'
+   ```
+
+2. Find node1 / node2 by pubkey and read addresses
+
+   - node1 pubkey: `02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71`
+   - node1 address (current): `"/ip4/18.162.235.225/tcp/8119/p2p/QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo"`
+   - node2 pubkey: `0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc`
+   - node2 address (current): `"/ip4/18.163.221.211/tcp/8119/p2p/QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89"`
+   - use each node's `addresses` field in the `connect_peer` call below.
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
+       "id": 1,
+       "jsonrpc": "2.0",
+       "method": "graph_nodes",
+       "params": [
+           {}
+       ]
+   }' | jq '.result.nodes[] | select(.pubkey=="02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71" or .pubkey=="0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc") | {pubkey, addresses}'
+   ```
+
+
 ## Establishing a CKB Channel with Public Node 1
 
 
@@ -110,7 +141,7 @@
        "method": "open_channel",
        "params": [
            {
-               "peer_id": "QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo",
+               "pubkey": "02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71",
                "funding_amount": "0xba43b7400",
                "public": true
            }
@@ -134,7 +165,7 @@
        "method": "list_channels",
        "params": [
            {
-               "peer_id": "QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo"
+               "pubkey": "02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71"
            }
        ]
    }'
@@ -145,7 +176,7 @@
    **Note: When the channel has just changed to the CHANNEL_READY state and you attempt to use send_payment, you may still encounter an error: `Failed to build route`. It is advisable to wait for some time before trying again.**
 
    ```json
-   {"jsonrpc":"2.0","result":{"channels":[{"channel_id":"0x26ce85d57fb4a1a826cbf4862358862317a83b775090625550d8be12c6ce9569","is_public":true,"channel_outpoint":"0x9bb2a8a4bebaf793a235ba2ec87051ae0018b58736b6741df74009ca8101cb8d00000000","peer_id":"QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xa32aef600","offered_tlc_balance":"0x0","remote_balance":"0x460913c00","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x18ef541a5a195c0ea4715a7783964b3c4be8fba6bd25542e626f91ef1673e3e4","created_at":"0x195892d237f","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"}]},"id":3
+   {"jsonrpc":"2.0","result":{"channels":[{"channel_id":"0x26ce85d57fb4a1a826cbf4862358862317a83b775090625550d8be12c6ce9569","is_public":true,"channel_outpoint":"0x9bb2a8a4bebaf793a235ba2ec87051ae0018b58736b6741df74009ca8101cb8d00000000","pubkey":"02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xa32aef600","offered_tlc_balance":"0x0","remote_balance":"0x460913c00","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x18ef541a5a195c0ea4715a7783964b3c4be8fba6bd25542e626f91ef1673e3e4","created_at":"0x195892d237f","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"}]},"id":3
    ```
 
    **Why is the local_balance 0xa32aef600 (43,800,000,000) and the remote_balance 0x460913c00 (18,800,000,000)?**
@@ -218,14 +249,14 @@
        "method": "list_channels",
        "params": [
            {
-               "peer_id": "QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89"
+               "pubkey": "0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc"
            }
        ]
    }'
    ```
 
     ```json
-    {"jsonrpc":"2.0","result":{"channels":[{"channel_id":"0x29a2e93e70fcfcd8b64fd74646b3893247f2a73a9dd8706298b5defa17bfee0a","is_public":true,"channel_outpoint":"0xa065311059be4d2194d9d6dbc428fe794ed3c6d91e08fe1d960d1574c19f88d400000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x173c0e06bb","offered_tlc_balance":"0x1f5","remote_balance":"0xc68e145","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x195e1cbd1dd062752e776a44dd9c12f3b83a69dfdd1e22edff19025572bcbd25","created_at":"0x1944491c154","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x4cd5bdcac419b203fd5752c4daa00a6f24305123d65f7a7fa6b455df82e97eee","is_public":true,"channel_outpoint":"0xe7d8464be26933021810f31252a98e9b2b1ff00f70173fafb134861ce21bccbb00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x1748630df7","offered_tlc_balance":"0x0","remote_balance":"0x13da09","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6bd9890fd65297359079d87a995d794becc90bafd5eca9676ccbfd96abcb3ffd","created_at":"0x194448fc295","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x9e72e8dbf7409a5aaf456dbe25f61247450f72079249ee508bb23cb14d0408b1","is_public":true,"channel_outpoint":"0x49f5f1cf664d48df66943989ef87d1316f1dffe5aec96db9ee8f1b6879ccac1b00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xa38b9d","offered_tlc_balance":"0x0","remote_balance":"0x1747d35c63","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6ad24a7dda73ed2ff896401ba4487c207362510670295b60288040df4b78884d","created_at":"0x194448ea599","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x632548057f0f13752e6d55ea666a93aaae450f2cf6e31093142c940071648f88","is_public":true,"channel_outpoint":"0xb0fcf51f0587c3c623377d054874dbb6ff1e8a26950834ace30dc88003af05f900000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xc505f","offered_tlc_balance":"0x0","remote_balance":"0x17486a97a1","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x62892d0751149af74d6baa7d7e09215427858d8dd047ae62b9179c8779d236e5","created_at":"0x194448dbf4b","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x0d54942293e7bb2704749e85741fd65e9a3d2f4eb380eb33b0aa0d38f891638f","is_public":true,"channel_outpoint":"0xf846f128450f3319352e8b48a38060feaed09d834f8d1c4d98477069f64ef78100000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x45a9b5cf3","offered_tlc_balance":"0x0","remote_balance":"0x916e2dc010d","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x68002aad33179b3d7bd21234ecf7a296f71833ecd4a69632e294c583e73181ff","created_at":"0x1944489267e","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x4c84c39f5166eb15631fca02dbc1910fa0139ad0ec6732ab2cc51c275d8fc11b","is_public":true,"channel_outpoint":"0x5c871464dc91eaf6fb262157329dc90d00b96cafaf272bd322184cab5d2601fa00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x504f21d045c","offered_tlc_balance":"0x0","remote_balance":"0x4164b5a59a4","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x117b18ac0789b44e3a08504d503a9cbf29acd2a4050069a640f67d7ec8209a00","created_at":"0x1944487f433","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x728fce53aaedf010b8f7c09497f3ab8527382ada0b6691cc61c04badf4837296","is_public":true,"channel_outpoint":"0x713364717227e24ebcf1b1ddd469f3f278e8b4069ebd23631d2aca12fffa2e1c00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x916d6f044e9","offered_tlc_balance":"0x0","remote_balance":"0x466871917","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x83a0d88fd312bb14f3cf953888257581d859230d1230b21b487a5cda48be7c8d","created_at":"0x1944485b77f","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0xfb27dc9ebc391440afe5e25cd4dc25e302b6fbb089397eda07decdb04db14b9e","is_public":true,"channel_outpoint":"0x56b3edb1dd683f9149286069881395bb878c69fbff638b7dc6d1bca1c83acd6400000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x48ab5ace976","offered_tlc_balance":"0x0","remote_balance":"0x49087ca748a","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0xe6a25f3420db9f0a436df0214fa5622a39a8975549f861f941d33cf8fba19e2e","created_at":"0x1944483b877","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x92b04366f93500efef5f28ba79704fa3a0e3771148899aa8836f0e5d2fbc38d5","is_public":true,"channel_outpoint":"0x61368447e60f0aa15ef61e13539d19d2f32fbacb20728db4248d8c82fa56079a00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x48ab5acd200","offered_tlc_balance":"0x0","remote_balance":"0x49087ca8c00","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6048cd50eb71aa8fabda1a5d567ceb5fb84181efbb36d839245e253e382bbfaf","created_at":"0x194447dd85a","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"}]},"id":5}
+    {"jsonrpc":"2.0","result":{"channels":[{"channel_id":"0x29a2e93e70fcfcd8b64fd74646b3893247f2a73a9dd8706298b5defa17bfee0a","is_public":true,"channel_outpoint":"0xa065311059be4d2194d9d6dbc428fe794ed3c6d91e08fe1d960d1574c19f88d400000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x173c0e06bb","offered_tlc_balance":"0x1f5","remote_balance":"0xc68e145","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x195e1cbd1dd062752e776a44dd9c12f3b83a69dfdd1e22edff19025572bcbd25","created_at":"0x1944491c154","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x4cd5bdcac419b203fd5752c4daa00a6f24305123d65f7a7fa6b455df82e97eee","is_public":true,"channel_outpoint":"0xe7d8464be26933021810f31252a98e9b2b1ff00f70173fafb134861ce21bccbb00000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x1748630df7","offered_tlc_balance":"0x0","remote_balance":"0x13da09","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6bd9890fd65297359079d87a995d794becc90bafd5eca9676ccbfd96abcb3ffd","created_at":"0x194448fc295","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x9e72e8dbf7409a5aaf456dbe25f61247450f72079249ee508bb23cb14d0408b1","is_public":true,"channel_outpoint":"0x49f5f1cf664d48df66943989ef87d1316f1dffe5aec96db9ee8f1b6879ccac1b00000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xa38b9d","offered_tlc_balance":"0x0","remote_balance":"0x1747d35c63","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6ad24a7dda73ed2ff896401ba4487c207362510670295b60288040df4b78884d","created_at":"0x194448ea599","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x632548057f0f13752e6d55ea666a93aaae450f2cf6e31093142c940071648f88","is_public":true,"channel_outpoint":"0xb0fcf51f0587c3c623377d054874dbb6ff1e8a26950834ace30dc88003af05f900000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xc505f","offered_tlc_balance":"0x0","remote_balance":"0x17486a97a1","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x62892d0751149af74d6baa7d7e09215427858d8dd047ae62b9179c8779d236e5","created_at":"0x194448dbf4b","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x0d54942293e7bb2704749e85741fd65e9a3d2f4eb380eb33b0aa0d38f891638f","is_public":true,"channel_outpoint":"0xf846f128450f3319352e8b48a38060feaed09d834f8d1c4d98477069f64ef78100000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x45a9b5cf3","offered_tlc_balance":"0x0","remote_balance":"0x916e2dc010d","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x68002aad33179b3d7bd21234ecf7a296f71833ecd4a69632e294c583e73181ff","created_at":"0x1944489267e","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x4c84c39f5166eb15631fca02dbc1910fa0139ad0ec6732ab2cc51c275d8fc11b","is_public":true,"channel_outpoint":"0x5c871464dc91eaf6fb262157329dc90d00b96cafaf272bd322184cab5d2601fa00000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x504f21d045c","offered_tlc_balance":"0x0","remote_balance":"0x4164b5a59a4","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x117b18ac0789b44e3a08504d503a9cbf29acd2a4050069a640f67d7ec8209a00","created_at":"0x1944487f433","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x728fce53aaedf010b8f7c09497f3ab8527382ada0b6691cc61c04badf4837296","is_public":true,"channel_outpoint":"0x713364717227e24ebcf1b1ddd469f3f278e8b4069ebd23631d2aca12fffa2e1c00000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x916d6f044e9","offered_tlc_balance":"0x0","remote_balance":"0x466871917","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x83a0d88fd312bb14f3cf953888257581d859230d1230b21b487a5cda48be7c8d","created_at":"0x1944485b77f","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0xfb27dc9ebc391440afe5e25cd4dc25e302b6fbb089397eda07decdb04db14b9e","is_public":true,"channel_outpoint":"0x56b3edb1dd683f9149286069881395bb878c69fbff638b7dc6d1bca1c83acd6400000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x48ab5ace976","offered_tlc_balance":"0x0","remote_balance":"0x49087ca748a","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0xe6a25f3420db9f0a436df0214fa5622a39a8975549f861f941d33cf8fba19e2e","created_at":"0x1944483b877","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x92b04366f93500efef5f28ba79704fa3a0e3771148899aa8836f0e5d2fbc38d5","is_public":true,"channel_outpoint":"0x61368447e60f0aa15ef61e13539d19d2f32fbacb20728db4248d8c82fa56079a00000000","pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x48ab5acd200","offered_tlc_balance":"0x0","remote_balance":"0x49087ca8c00","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6048cd50eb71aa8fabda1a5d567ceb5fb84181efbb36d839245e253e382bbfaf","created_at":"0x194447dd85a","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"}]},"id":5}
     ```
    Find all entries in the response where `funding_udt_type_script` is null.
    ```json
@@ -356,7 +387,7 @@
        "method": "open_channel",
        "params": [
            {
-               "peer_id": "QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo",
+               "pubkey": "02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71",
                "funding_amount": "0x2540be400",
                "public": true,
                "funding_udt_type_script": {
@@ -384,14 +415,14 @@
        "method": "list_channels",
        "params": [
            {
-               "peer_id": "QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo"
+               "pubkey": "02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71"
            }
        ]
    }'
    ```
 
    ```json
-   {"jsonrpc":"2.0","result":{"channels":[{"channel_id":"0x75dce35923a79086afd0f81b0134ac87619756b6c04a15669ce232aa7db142d8","is_public":true,"channel_outpoint":"0x8e133056792766e1fd34e870fb33990b58c4ebb9615526b38dacdf3686cf6d3f00000000","peer_id":"QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x2540be400","offered_tlc_balance":"0x0","remote_balance":"0x0","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x2b0b36c5db14778484358a4641bfe00a4f351660c280255ef8e8538898e399d0","created_at":"0x1958977b7be","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"}]},"id":3}
+   {"jsonrpc":"2.0","result":{"channels":[{"channel_id":"0x75dce35923a79086afd0f81b0134ac87619756b6c04a15669ce232aa7db142d8","is_public":true,"channel_outpoint":"0x8e133056792766e1fd34e870fb33990b58c4ebb9615526b38dacdf3686cf6d3f00000000","pubkey":"02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x2540be400","offered_tlc_balance":"0x0","remote_balance":"0x0","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x2b0b36c5db14778484358a4641bfe00a4f351660c280255ef8e8538898e399d0","created_at":"0x1958977b7be","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"}]},"id":3}
    ```
 
 
@@ -448,7 +479,7 @@
        "method": "list_channels",
        "params": [
            {
-               "peer_id": "QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89"
+               "pubkey": "0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc"
            }
        ]
    }'
