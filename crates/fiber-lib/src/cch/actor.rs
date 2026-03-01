@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use lightning_invoice::Bolt11Invoice;
+use lightning_invoice::Currency as LnCurrency;
 use lnd_grpc_tonic_client::{invoicesrpc, Uri};
 use ractor::{
     call, port::OutputPortSubscriberTrait as _, Actor, ActorProcessingErr, ActorRef, OutputPort,
@@ -98,6 +99,9 @@ pub struct CchArgs<S> {
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub node_keypair: crate::fiber::KeyPair,
     pub store: S,
+    /// The CKB network currency this node is configured for.
+    /// Used to validate that incoming invoices match the expected network.
+    pub currency: Currency,
 }
 
 pub struct CchState<S> {
@@ -108,6 +112,8 @@ pub struct CchState<S> {
     pub(super) lnd_tracker: ActorRef<LndTrackerMessage>,
     pub(super) scheduler: ActorRef<SchedulerMessage>,
     pub(super) store: S,
+    /// The CKB network currency this node is configured for.
+    pub(super) currency: Currency,
 }
 
 #[async_trait::async_trait]
@@ -182,6 +188,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             lnd_connection,
             lnd_tracker,
             scheduler,
+            currency: args.currency,
         };
 
         Ok(state)
@@ -346,6 +353,19 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
     }
 }
 
+/// Maps a CKB network currency to the expected Lightning Network invoice currency.
+///
+/// - Fibb (CKB mainnet) → Bitcoin mainnet
+/// - Fibt (CKB testnet) → Bitcoin testnet
+/// - Fibd (CKB devnet) → Bitcoin regtest
+fn expected_ln_currency(currency: Currency) -> LnCurrency {
+    match currency {
+        Currency::Fibb => LnCurrency::Bitcoin,
+        Currency::Fibt => LnCurrency::BitcoinTestnet,
+        Currency::Fibd => LnCurrency::Regtest,
+    }
+}
+
 impl<S: CchOrderStore> CchState<S> {
     /// Get a CCH order by payment hash, returning None if not found.
     /// This handles the common pattern of checking for NotFound vs other errors.
@@ -413,8 +433,27 @@ impl<S: CchOrderStore> CchState<S> {
     async fn send_btc(&self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
+        // Validate that the currency matches the configured CKB network (#981)
+        if send_btc.currency != self.currency {
+            return Err(CchError::CKBInvoiceNetworkMismatch {
+                expected: self.currency,
+                actual: send_btc.currency,
+            });
+        }
+
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
         tracing::debug!("BTC invoice: {:?}", invoice);
+
+        // Validate that the BTC invoice network matches the expected BTC network (#978)
+        let expected_ln_currency = expected_ln_currency(self.currency);
+        let actual_ln_currency = invoice.currency();
+        if actual_ln_currency != expected_ln_currency {
+            return Err(CchError::BTCInvoiceNetworkMismatch {
+                expected: format!("{:?}", expected_ln_currency),
+                actual: format!("{:?}", actual_ln_currency),
+            });
+        }
+
         let payment_hash = Hash256::from(*invoice.payment_hash());
 
         // Validate that outgoing BTC invoice's final CLTV is less than half of incoming CKB invoice's final TLC expiry.
@@ -502,6 +541,15 @@ impl<S: CchOrderStore> CchState<S> {
 
     async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<CchOrder, CchError> {
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
+
+        // Validate that the CKB invoice currency matches the configured network (#982)
+        if invoice.currency != self.currency {
+            return Err(CchError::CKBInvoiceNetworkMismatch {
+                expected: self.currency,
+                actual: invoice.currency,
+            });
+        }
+
         let payment_hash = *invoice.payment_hash();
         let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
 
