@@ -31,7 +31,7 @@ pub struct DisconnectPeerParams {
 /// The information about a peer connected to the node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
-    /// The identity public key of the peer (also known as `node_id`).
+    /// The identity public key of the peer.
     pub pubkey: Pubkey,
 
     /// The multi-address associated with the connecting peer.

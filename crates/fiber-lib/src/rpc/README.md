@@ -515,7 +515,7 @@ Get the node information.
 
 * `version` - <em>`String`</em>, The version of the node software.
 * `commit_hash` - <em>`String`</em>, The commit hash of the node software.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of this node (secp256k1 compressed, hex string).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of this node (secp256k1 compressed, hex string).
  This is the same value referred to as `pubkey` in `list_peers` responses.
  Note: this is different from `peer_id`, which is a base58 hash derived from this key.
 * `features` - <em>`Vec<String>`</em>, The features supported by the node.
@@ -1370,7 +1370,7 @@ The Node information.
 * `version` - <em>`String`</em>, The version of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, The addresses of the node.
 * `features` - <em>`Vec<String>`</em>, The node features supported by the node.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
 * `timestamp` - <em>`u64`</em>, The latest timestamp set by the owner for the node announcement.
  When a Node is online this timestamp will be updated to the latest value.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the node.
@@ -1428,7 +1428,7 @@ The information about a peer connected to the node.
 
 #### Fields
 
-* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer (also known as `node_id`).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer.
 * `address` - <em>`MultiAddr`</em>, The multi-address associated with the connecting peer.
  Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
  The `graph_nodes` in Graph rpc module will return all addresses of the peer.
@@ -1447,7 +1447,7 @@ A wrapper for secp256k1 secret key
 ### Type `Pubkey`
 
 A compressed secp256k1 public key (33 bytes), used as the primary identity of a node.
- In the RPC interface this value is also referred to as `node_id`.
+ In the RPC interface this value is exposed as fields such as `pubkey`.
  It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
 
  Note: `Pubkey` is different from `PeerId`. A `PeerId` is derived by hashing the

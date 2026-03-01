@@ -324,7 +324,7 @@ impl Privkey {
 }
 
 /// A compressed secp256k1 public key (33 bytes), used as the primary identity of a node.
-/// In the RPC interface this value is also referred to as `node_id`.
+/// In the RPC interface this value is exposed as fields such as `pubkey`.
 /// It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
 ///
 /// Note: `Pubkey` is different from `PeerId`. A `PeerId` is derived by hashing the

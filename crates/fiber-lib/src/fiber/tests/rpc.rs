@@ -299,7 +299,7 @@ async fn test_rpc_graph() {
     eprintln!("Graph nodes: {:#?}", graph_nodes);
 
     assert!(!graph_nodes.nodes.is_empty());
-    assert!(graph_nodes.nodes.iter().any(|n| n.node_id == node_1.pubkey));
+    assert!(graph_nodes.nodes.iter().any(|n| n.pubkey == node_1.pubkey));
     assert!(graph_nodes
         .nodes
         .iter()
@@ -469,10 +469,10 @@ async fn test_rpc_node_info() {
     assert_eq!(node_info.default_funding_lock_script, Default::default());
 }
 
-/// Test that node_id in node_info RPC and payee_public_key in invoice RPC
+/// Test that pubkey in node_info RPC and payee_public_key in invoice RPC
 /// have the same JSON format (both without "0x" prefix).
 #[tokio::test]
-async fn test_rpc_node_id_and_payee_public_key_same_format() {
+async fn test_rpc_pubkey_and_payee_public_key_same_format() {
     let (nodes, _channels) = create_n_nodes_network_with_params(
         &[(
             (0, 1),
@@ -491,9 +491,9 @@ async fn test_rpc_node_id_and_payee_public_key_same_format() {
 
     // Get node_info raw response
     let node_info_raw = node_0.send_rpc_request_raw("node_info", ()).await.unwrap();
-    let node_id = node_info_raw["node_id"]
+    let pubkey = node_info_raw["pubkey"]
         .as_str()
-        .expect("node_id should be a string");
+        .expect("pubkey should be a string");
 
     // Create an invoice and get raw response
     let new_invoice_params = NewInvoiceParams {
@@ -527,18 +527,18 @@ async fn test_rpc_node_id_and_payee_public_key_same_format() {
 
     // Both should have the same format (without "0x" prefix)
     assert_eq!(
-        node_id, payee_public_key,
-        "node_id and payee_public_key should have the same format.\n\
-         node_id: {}\n\
+        pubkey, payee_public_key,
+        "pubkey and payee_public_key should have the same format.\n\
+         pubkey: {}\n\
          payee_public_key: {}",
-        node_id, payee_public_key
+        pubkey, payee_public_key
     );
 
     // Verify neither has "0x" prefix
     assert!(
-        !node_id.starts_with("0x"),
-        "node_id should not have 0x prefix, got: {}",
-        node_id
+        !pubkey.starts_with("0x"),
+        "pubkey should not have 0x prefix, got: {}",
+        pubkey
     );
     assert!(
         !payee_public_key.starts_with("0x"),

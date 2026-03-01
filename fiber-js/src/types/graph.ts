@@ -39,7 +39,7 @@ type UdtCfgInfos = UdtArgInfo[];
 interface NodeInfo {
     node_name: string;
     addresses: string[];
-    node_id: HexString;
+    pubkey: HexString;
     timestamp: HexString;
     chain_hash: HexString;
     auto_accept_min_ckb_funding_amount: HexString;
