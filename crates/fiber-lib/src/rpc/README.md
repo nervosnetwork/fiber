@@ -516,8 +516,6 @@ Get the node information.
 * `version` - <em>`String`</em>, The version of the node software.
 * `commit_hash` - <em>`String`</em>, The commit hash of the node software.
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of this node (secp256k1 compressed, hex string).
- This is the same value referred to as `pubkey` in `list_peers` responses.
- Note: this is different from `peer_id`, which is a base58 hash derived from this key.
 * `features` - <em>`Vec<String>`</em>, The features supported by the node.
 * `node_name` - <em>`Option<String>`</em>, The optional name of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the node.
@@ -659,7 +657,6 @@ Sends a payment to a peer.
 
 * `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key (`Pubkey`) of the payment target node, serialized as a hex string.
  You can obtain a node's pubkey via the `node_info` or `graph_nodes` RPC.
- Note: this is the `Pubkey` (secp256k1 public key), not the `PeerId`.
 * `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
  If not set and there is a invoice, the amount will be set to the invoice amount
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC.
@@ -1449,10 +1446,6 @@ A wrapper for secp256k1 secret key
 A compressed secp256k1 public key (33 bytes), used as the primary identity of a node.
  In the RPC interface this value is exposed as fields such as `pubkey`.
  It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
-
- Note: `Pubkey` is different from `PeerId`. A `PeerId` is derived by hashing the
- public key and is used only for P2P transport connections. You can obtain both
- values from the `list_peers` or `node_info` RPC.
 
 
 

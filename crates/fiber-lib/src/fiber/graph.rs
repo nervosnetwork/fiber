@@ -38,7 +38,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
-use tentacle::secio::PeerId;
 use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
@@ -144,14 +143,6 @@ impl ChannelInfo {
 
     pub fn node2(&self) -> Pubkey {
         self.node2
-    }
-
-    pub fn node1_peerid(&self) -> PeerId {
-        self.node1.tentacle_peer_id()
-    }
-
-    pub fn node2_peerid(&self) -> PeerId {
-        self.node2.tentacle_peer_id()
     }
 
     pub fn udt_type_script(&self) -> &Option<Script> {
@@ -921,14 +912,14 @@ where
         self.nodes.len()
     }
 
-    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<MultiAddr>> {
+    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<Pubkey, Vec<MultiAddr>> {
         // TODO: we may need to shuffle the nodes before selecting the first n nodes,
         // to avoid some malicious nodes from being always selected.
         self.nodes
             .iter()
             .filter(|(k, _)| **k != self.source)
             .take(n)
-            .map(|(k, v)| (k.tentacle_peer_id(), v.addresses.clone()))
+            .map(|(k, v)| (*k, v.addresses.clone()))
             .collect()
     }
 

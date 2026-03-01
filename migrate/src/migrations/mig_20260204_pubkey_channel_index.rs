@@ -9,7 +9,7 @@ use tracing::info;
 
 const MIGRATION_DB_VERSION: &str = "20260204120000";
 const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
-const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
+const PUBKEY_CHANNEL_ID_PREFIX: u8 = 64;
 
 pub struct MigrationObj {
     version: String,
@@ -39,7 +39,7 @@ impl Migration for MigrationObj {
         let mut rebuilt_index_count = 0;
         let mut skipped_state_count = 0;
 
-        let index_prefix = vec![PEER_ID_CHANNEL_ID_PREFIX];
+        let index_prefix = vec![PUBKEY_CHANNEL_ID_PREFIX];
         for (key, _) in db
             .prefix_iterator(index_prefix.as_slice())
             .take_while(|(key, _)| key.starts_with(index_prefix.as_slice()))
@@ -68,7 +68,7 @@ impl Migration for MigrationObj {
             };
 
             let pubkey_bytes = state.remote_pubkey.serialize();
-            let index_key = [&[PEER_ID_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..], channel_id].concat();
+            let index_key = [&[PUBKEY_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..], channel_id].concat();
             let index_value =
                 bincode::serialize(&state.state).expect("serialize ChannelState should be OK");
             batch.put(index_key, index_value);

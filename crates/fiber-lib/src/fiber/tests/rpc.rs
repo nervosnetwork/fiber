@@ -848,7 +848,7 @@ async fn test_rpc_shutdown_following_disconnect() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node_1.peer_id, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node_1.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 

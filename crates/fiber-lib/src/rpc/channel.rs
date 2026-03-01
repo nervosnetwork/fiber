@@ -517,7 +517,7 @@ where
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
-                    peer_id: params.pubkey.tentacle_peer_id(),
+                    pubkey: params.pubkey,
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(true),
                     one_way: params.one_way.unwrap_or(false),

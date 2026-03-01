@@ -94,17 +94,10 @@ impl PeerRpcServer for PeerRpcServerImpl {
 
 impl PeerRpcServerImpl {
     pub async fn connect_peer(&self, params: ConnectPeerParams) -> Result<(), ErrorObjectOwned> {
-        let message =
-            NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(params.address.clone()));
-        if params.save.unwrap_or(true) {
-            crate::handle_actor_cast!(
-                self.actor,
-                NetworkActorMessage::Command(NetworkActorCommand::SavePeerAddress(
-                    params.address.clone()
-                )),
-                params.clone()
-            )?;
-        }
+        let message = NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+            params.address.clone(),
+            params.save.unwrap_or(true),
+        ));
         crate::handle_actor_cast!(self.actor, message, params)
     }
 
@@ -112,9 +105,8 @@ impl PeerRpcServerImpl {
         &self,
         params: DisconnectPeerParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let peer_id = params.pubkey.tentacle_peer_id();
         let message = NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
-            peer_id,
+            params.pubkey,
             PeerDisconnectReason::Requested,
         ));
         crate::handle_actor_cast!(self.actor, message, params)

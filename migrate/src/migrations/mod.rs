@@ -5,3 +5,4 @@ pub mod mig_20251219;
 pub mod mig_20260203_trampoline;
 pub mod mig_20260203_channel_index;
 pub mod mig_20260204_pubkey_channel_index;
+pub mod mig_20260301_network_state_pubkey;

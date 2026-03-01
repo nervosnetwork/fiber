@@ -99,7 +99,6 @@ impl From<PaymentCustomRecords> for crate::fiber::PaymentCustomRecords {
 pub struct SendPaymentCommandParams {
     /// The public key (`Pubkey`) of the payment target node, serialized as a hex string.
     /// You can obtain a node's pubkey via the `node_info` or `graph_nodes` RPC.
-    /// Note: this is the `Pubkey` (secp256k1 public key), not the `PeerId`.
     pub target_pubkey: Option<Pubkey>,
 
     /// the amount of the payment, the unit is Shannons for non UDT payment

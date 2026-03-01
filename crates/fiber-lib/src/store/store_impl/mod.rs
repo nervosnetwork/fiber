@@ -54,7 +54,6 @@ use ckb_types::prelude::Entity;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use tentacle::secio::PeerId;
 use tracing::info;
 
 #[derive(Copy, Clone)]
@@ -117,10 +116,10 @@ impl Store {
                         &mut errors,
                     );
                 }
-                PEER_ID_NETWORK_ACTOR_STATE_PREFIX => {
+                PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX => {
                     check_deserialization::<PersistentNetworkActorState>(
                         &value,
-                        "PEER_ID_NETWORK_ACTOR_STATE_PREFIX",
+                        "PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX",
                         &mut errors,
                     );
                 }
@@ -137,7 +136,7 @@ impl Store {
                         &mut errors,
                     );
                 }
-                PEER_ID_CHANNEL_ID_PREFIX => {}
+                PUBKEY_CHANNEL_ID_PREFIX => {}
                 CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX => {
                     check_deserialization::<Hash256>(
                         &value,
@@ -246,7 +245,7 @@ pub enum KeyValue {
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
-    NetworkActorState(PeerId, PersistentNetworkActorState),
+    NetworkActorState(Pubkey, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
     // Index for attempts by first hop channel outpoint
     // Key: (channel_outpoint, payment_hash, attempt_id), Value: ()
@@ -296,7 +295,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::PubkeyChannelId((pubkey, channel_id), _) => {
                 let pubkey_bytes = pubkey.serialize();
                 [
-                    &[PEER_ID_CHANNEL_ID_PREFIX][..],
+                    &[PUBKEY_CHANNEL_ID_PREFIX][..],
                     &pubkey_bytes[..],
                     channel_id.as_ref(),
                 ]
@@ -343,8 +342,9 @@ impl StoreKeyValue for KeyValue {
                 payment_hash.as_ref(),
             ]
             .concat(),
-            KeyValue::NetworkActorState(peer_id, _) => {
-                [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], peer_id.as_bytes()].concat()
+            KeyValue::NetworkActorState(pubkey, _) => {
+                let pubkey_bytes = pubkey.serialize();
+                [&[PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX], &pubkey_bytes[..]].concat()
             }
             KeyValue::PaymentHistoryTimedResult((channel_outpoint, direction), _) => [
                 &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
@@ -424,15 +424,19 @@ impl StoreKeyValue for KeyValue {
 }
 
 impl NetworkActorStateStore for Store {
-    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
-        let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], id.as_bytes()].concat();
+    fn get_network_actor_state(&self, id: &Pubkey) -> Option<PersistentNetworkActorState> {
+        let key = [
+            &[PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX],
+            &id.serialize()[..],
+        ]
+        .concat();
         self.get(key)
             .map(|value| deserialize_from(value.as_ref(), "PersistentNetworkActorState"))
     }
 
-    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {
+    fn insert_network_actor_state(&self, id: &Pubkey, state: PersistentNetworkActorState) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::NetworkActorState(id.clone(), state));
+        batch.put_kv(KeyValue::NetworkActorState(*id, state));
         batch.commit();
     }
 }
@@ -465,7 +469,7 @@ impl ChannelActorStateStore for Store {
             let remote_pubkey_bytes = state.get_remote_pubkey().serialize();
             batch.delete(
                 [
-                    &[PEER_ID_CHANNEL_ID_PREFIX][..],
+                    &[PUBKEY_CHANNEL_ID_PREFIX][..],
                     &remote_pubkey_bytes[..],
                     id.as_ref(),
                 ]
@@ -480,7 +484,7 @@ impl ChannelActorStateStore for Store {
 
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
         let pubkey_bytes = pubkey.serialize();
-        let prefix = [&[PEER_ID_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..]].concat();
+        let prefix = [&[PUBKEY_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..]].concat();
         let iter = self.prefix_iterator(&prefix);
         iter.map(|(key, _)| {
             let channel_id: [u8; 32] = key[prefix.len()..]
@@ -495,9 +499,9 @@ impl ChannelActorStateStore for Store {
         let prefix = match pubkey {
             Some(pubkey) => {
                 let pubkey_bytes = pubkey.serialize();
-                [&[PEER_ID_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..]].concat()
+                [&[PUBKEY_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..]].concat()
             }
-            None => vec![PEER_ID_CHANNEL_ID_PREFIX],
+            None => vec![PUBKEY_CHANNEL_ID_PREFIX],
         };
         self.prefix_iterator(&prefix)
             .map(|(key, value)| {
