@@ -1971,6 +1971,11 @@ impl NetworkNode {
     pub fn get_store(&self) -> &Store {
         &self.store
     }
+
+    #[cfg(test)]
+    pub fn get_actor(&self) -> ActorRef<NetworkActorMessage> {
+        self.network_actor.clone()
+    }
 }
 
 pub async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {

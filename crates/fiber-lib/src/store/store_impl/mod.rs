@@ -77,6 +77,11 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub trait KVStore {
+    fn inner_db(&self) -> &std::sync::Arc<rocksdb::DB>;
+}
+
 impl Store {
     /// Open or create a rocksdb
     fn check_migrate<P: AsRef<Path>>(path: P, db: &Self) -> Result<(), String> {
