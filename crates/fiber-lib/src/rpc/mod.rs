@@ -425,12 +425,14 @@ pub(crate) fn schema_as_string_array(generator: &mut SchemaGenerator) -> Schema 
     use schemars::schema::*;
 
     let item_schema = schema_as_string(generator);
-    let mut schema = SchemaObject::default();
-    schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Array)));
-    schema.array = Some(Box::new(ArrayValidation {
-        items: Some(SingleOrVec::Single(Box::new(item_schema))),
+    let schema = SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Array))),
+        array: Some(Box::new(ArrayValidation {
+            items: Some(SingleOrVec::Single(Box::new(item_schema))),
+            ..Default::default()
+        })),
         ..Default::default()
-    }));
+    };
     schema.into()
 }
 
@@ -444,39 +446,49 @@ pub(crate) fn schema_as_string_optional(generator: &mut SchemaGenerator) -> Sche
     }
     .into();
 
-    let mut schema = SchemaObject::default();
-    schema.subschemas = Some(Box::new(SubschemaValidation {
-        any_of: Some(vec![string_schema, null_schema]),
+    let schema = SchemaObject {
+        subschemas: Some(Box::new(SubschemaValidation {
+            any_of: Some(vec![string_schema, null_schema]),
+            ..Default::default()
+        })),
         ..Default::default()
-    }));
+    };
     schema.into()
 }
 
 pub(crate) fn schema_as_integer(_generator: &mut SchemaGenerator) -> Schema {
     use schemars::schema::*;
 
-    let mut schema = SchemaObject::default();
-    schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Integer)));
+    let schema = SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Integer))),
+        ..Default::default()
+    };
+
     schema.into()
 }
 
 pub(crate) fn schema_as_byte_array(_generator: &mut SchemaGenerator) -> Schema {
     use schemars::schema::*;
 
-    let mut item_schema = SchemaObject::default();
-    item_schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Integer)));
-    item_schema.number = Some(Box::new(NumberValidation {
-        minimum: Some(0.0),
-        maximum: Some(255.0),
+    let item_schema = SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Integer))),
+        number: Some(Box::new(NumberValidation {
+            minimum: Some(0.0),
+            maximum: Some(255.0),
+            ..Default::default()
+        })),
         ..Default::default()
-    }));
+    };
 
-    let mut schema = SchemaObject::default();
-    schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Array)));
-    schema.array = Some(Box::new(ArrayValidation {
-        items: Some(SingleOrVec::Single(Box::new(item_schema.into()))),
+    let schema = SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Array))),
+        array: Some(Box::new(ArrayValidation {
+            items: Some(SingleOrVec::Single(Box::new(item_schema.into()))),
+            ..Default::default()
+        })),
         ..Default::default()
-    }));
+    };
+
     schema.into()
 }
 
@@ -499,11 +511,14 @@ pub(crate) fn schema_as_hex_bytes_optional(generator: &mut SchemaGenerator) -> S
     }
     .into();
 
-    let mut schema = SchemaObject::default();
-    schema.subschemas = Some(Box::new(SubschemaValidation {
-        any_of: Some(vec![hex_schema, null_schema]),
+    let schema = SchemaObject {
+        subschemas: Some(Box::new(SubschemaValidation {
+            any_of: Some(vec![hex_schema, null_schema]),
+            ..Default::default()
+        })),
         ..Default::default()
-    }));
+    };
+
     schema.into()
 }
 
@@ -525,10 +540,12 @@ pub(crate) fn schema_as_uint_hex_optional(generator: &mut SchemaGenerator) -> Sc
     }
     .into();
 
-    let mut schema = SchemaObject::default();
-    schema.subschemas = Some(Box::new(SubschemaValidation {
-        any_of: Some(vec![hex_schema, null_schema]),
+    let schema = SchemaObject {
+        subschemas: Some(Box::new(SubschemaValidation {
+            any_of: Some(vec![hex_schema, null_schema]),
+            ..Default::default()
+        })),
         ..Default::default()
-    }));
+    };
     schema.into()
 }

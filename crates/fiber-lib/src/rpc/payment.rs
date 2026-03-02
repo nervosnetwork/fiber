@@ -124,21 +124,23 @@ impl JsonSchema for PaymentCustomRecords {
             ..Default::default()
         });
 
-        let mut schema = SchemaObject::default();
-        schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Object)));
-        schema.object = Some(Box::new(ObjectValidation {
-            property_names: Some(Box::new(key_schema.into())),
-            additional_properties: Some(Box::new(value_schema)),
-            ..Default::default()
-        }));
-        schema.metadata = Some(Box::new(Metadata {
-            description: Some(
-                "Custom records map. Keys are hex-encoded u32 (0~65535), \
+        let schema = SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Object))),
+            object: Some(Box::new(ObjectValidation {
+                property_names: Some(Box::new(key_schema.into())),
+                additional_properties: Some(Box::new(value_schema)),
+                ..Default::default()
+            })),
+            metadata: Some(Box::new(Metadata {
+                description: Some(
+                    "Custom records map. Keys are hex-encoded u32 (0~65535), \
                  values are hex-encoded bytes. Both prefixed with 0x."
-                    .to_string(),
-            ),
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
             ..Default::default()
-        }));
+        };
 
         schema.into()
     }
