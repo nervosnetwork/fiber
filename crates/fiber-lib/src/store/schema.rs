@@ -7,6 +7,7 @@
 //! | 32           | Hash256              | CkbInvoice                  |
 //! | 33           | Payment_hash         | CkbInvoice Preimage         |
 //! | 34           | Payment_hash         | CkbInvoice Status           |
+//! | 48           | Hash256              | PendingCommitDiff           |
 //! | 64           | PeerId | Hash256     | ChannelState                |
 //! | 65           | OutPoint             | ChannelId                   |
 //! | 96           | Cursor               | BroadcastMessage            |
