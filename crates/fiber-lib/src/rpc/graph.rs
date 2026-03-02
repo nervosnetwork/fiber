@@ -16,6 +16,7 @@ use ckb_types::H256;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::{types::error::INVALID_PARAMS_CODE, types::ErrorObjectOwned};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::sync::Arc;
@@ -23,9 +24,10 @@ use tentacle::multiaddr::MultiAddr;
 use tokio::sync::RwLock;
 
 #[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct GraphNodesParams {
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     /// The maximum number of nodes to return.
     pub limit: Option<u64>,
     /// The cursor to start returning nodes from.
@@ -33,7 +35,7 @@ pub struct GraphNodesParams {
 }
 
 /// The UDT script which is used to identify the UDT configuration for a Fiber Node
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct UdtScript {
     /// The code hash of the script.
     pub code_hash: H256,
@@ -54,7 +56,7 @@ impl From<ConfigUdtScript> for UdtScript {
 }
 
 /// Udt script on-chain dependencies.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct UdtDep {
     /// cell dep described by out_point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,7 +75,7 @@ impl From<ConfigUdtDep> for UdtDep {
     }
 }
 /// The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct UdtCellDep {
     /// The out point of the cell dep.
     pub out_point: OutPointWrapper,
@@ -92,13 +94,14 @@ impl From<ConfigUdtCellDep> for UdtCellDep {
 
 /// The UDT argument info which is used to identify the UDT configuration
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct UdtArgInfo {
     /// The name of the UDT.
     pub name: String,
     /// The script of the UDT.
     pub script: UdtScript,
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     /// The minimum amount of the UDT that can be automatically accepted.
     pub auto_accept_amount: Option<u128>,
     /// The cell deps of the UDT.
@@ -121,7 +124,7 @@ impl From<ConfigUdtArgInfo> for UdtArgInfo {
 }
 
 /// A list of UDT configuration infos.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct UdtCfgInfos(
     /// The list of UDT configuration infos.
     pub Vec<UdtArgInfo>,
@@ -135,13 +138,14 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
 
 /// The Node information.
 #[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct NodeInfo {
     /// The name of the node.
     pub node_name: String,
     /// The version of the node.
     pub version: String,
     /// The addresses of the node.
+    #[schemars(schema_with = "crate::rpc::schema_as_string_array")]
     pub addresses: Vec<MultiAddr>,
     /// The node features supported by the node.
     pub features: Vec<String>,
@@ -150,11 +154,13 @@ pub struct NodeInfo {
     #[serde_as(as = "U64Hex")]
     /// The latest timestamp set by the owner for the node announcement.
     /// When a Node is online this timestamp will be updated to the latest value.
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub timestamp: u64,
     /// The chain hash of the node.
     pub chain_hash: Hash256,
     #[serde_as(as = "U64Hex")]
     /// The minimum CKB funding amount for automatically accepting open channel requests.
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub auto_accept_min_ckb_funding_amount: u64,
     /// The UDT configuration infos of the node.
     pub udt_cfg_infos: UdtCfgInfos,
@@ -176,7 +182,7 @@ impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct GraphNodesResult {
     /// The list of nodes.
     pub nodes: Vec<NodeInfo>,
@@ -185,10 +191,11 @@ pub struct GraphNodesResult {
 }
 
 #[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct GraphChannelsParams {
     /// The maximum number of channels to return.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub limit: Option<u64>,
     /// The cursor to start returning channels from.
     pub after: Option<JsonBytes>,
@@ -196,10 +203,11 @@ pub struct GraphChannelsParams {
 
 /// The Channel information.
 #[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct ChannelInfo {
     /// The outpoint of the channel.
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
     /// The identity public key of the first node (secp256k1 compressed, hex string).
     pub node1: Pubkey,
@@ -208,6 +216,7 @@ pub struct ChannelInfo {
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub created_timestamp: u64,
 
     /// The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
@@ -218,6 +227,7 @@ pub struct ChannelInfo {
 
     /// The capacity of the channel.
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub capacity: u128,
     /// The chain hash of the channel.
     pub chain_hash: Hash256,
@@ -241,7 +251,7 @@ impl From<super::super::fiber::graph::ChannelInfo> for ChannelInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 pub struct GraphChannelsResult {
     /// A list of channels.
     pub channels: Vec<ChannelInfo>,

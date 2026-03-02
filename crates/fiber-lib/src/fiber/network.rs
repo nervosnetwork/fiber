@@ -13,6 +13,7 @@ use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
 use rand::seq::{IteratorRandom, SliceRandom};
+use schemars::JsonSchema;
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -257,7 +258,7 @@ pub struct NodeInfoResponse {
 }
 
 /// The information about a peer connected to the node.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
 pub struct PeerInfo {
     /// The identity public key of the peer (also known as `node_id`).
     pub pubkey: Pubkey,
@@ -265,6 +266,7 @@ pub struct PeerInfo {
     /// The multi-address associated with the connecting peer.
     /// Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
     /// The `graph_nodes` in Graph rpc module will return all addresses of the peer.
+    #[schemars(schema_with = "crate::rpc::schema_as_string")]
     pub address: MultiAddr,
 }
 
@@ -416,28 +418,30 @@ pub struct OpenChannelCommand {
 /// A hop requirement need to meet when building router, do not including the source node,
 /// the last hop is the target node.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct HopRequire {
     /// The public key of the node
     pub(crate) pubkey: Pubkey,
     /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
     #[serde_as(as = "Option<EntityHex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes_optional")]
     pub(crate) channel_outpoint: Option<OutPoint>,
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildRouterCommand {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     pub amount: Option<u128>,
     #[serde_as(as = "Option<EntityHex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes_optional")]
     pub udt_type_script: Option<Script>,
     pub hops_info: Vec<HopRequire>,
     pub final_tlc_expiry_delta: Option<u64>,
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PaymentRouter {
     pub router_hops: Vec<RouterHop>,
 }

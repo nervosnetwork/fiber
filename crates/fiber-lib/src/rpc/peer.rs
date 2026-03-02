@@ -9,14 +9,16 @@ use jsonrpsee::types::ErrorObjectOwned;
 
 use ractor::call;
 use ractor::ActorRef;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 pub use tentacle::multiaddr::MultiAddr;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct ConnectPeerParams {
     /// The address of the peer to connect to.
     /// Either `address` or `pubkey` must be provided.
+    #[schemars(schema_with = "crate::rpc::schema_as_string_optional")]
     pub address: Option<MultiAddr>,
     /// The public key of the peer to connect to.
     /// The node resolves the address from locally synced graph data.
@@ -26,14 +28,14 @@ pub struct ConnectPeerParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct DisconnectPeerParams {
     /// The public key of the peer to disconnect.
     pub pubkey: Pubkey,
 }
 
 /// The information about a peer connected to the node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PeerInfo {
     /// The identity public key of the peer.
     pub pubkey: Pubkey,
@@ -41,11 +43,12 @@ pub struct PeerInfo {
     /// The multi-address associated with the connecting peer.
     /// Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
     /// The `graph_nodes` in Graph rpc module will return all addresses of the peer.
+    #[schemars(schema_with = "crate::rpc::schema_as_string")]
     pub address: MultiAddr,
 }
 
 /// The result of the `list_peers` RPC method.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ListPeersResult {
     /// A list of connected peers.
     pub peers: Vec<PeerInfo>,

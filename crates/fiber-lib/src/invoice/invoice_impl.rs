@@ -14,6 +14,7 @@ use ckb_types::{
 };
 use core::time::Duration;
 use molecule::prelude::{Builder, Entity};
+use schemars::JsonSchema;
 use secp256k1::{
     self,
     ecdsa::{RecoverableSignature, RecoveryId},
@@ -29,7 +30,7 @@ pub(crate) const SIGNATURE_U5_SIZE: usize = 104;
 pub(crate) const MAX_DESCRIPTION_LENGTH: usize = 639;
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum CkbInvoiceStatus {
     /// The invoice is open and can be paid.
     Open,
@@ -56,7 +57,7 @@ impl Display for CkbInvoiceStatus {
 }
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default, JsonSchema)]
 pub enum Currency {
     /// The mainnet currency of CKB.
     Fibb,
@@ -104,21 +105,28 @@ impl FromStr for Currency {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CkbScript(
+    #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
+    pub Script,
+);
 
 /// The attributes of the invoice
 #[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     /// This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
     FinalHtlcTimeout(u64),
     #[serde(with = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     /// The final tlc minimum expiry delta, in milliseconds, default is 160 minutes
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     /// The expiry time of the invoice, in seconds
     ExpiryTime(Duration),
     /// The description of the invoice
@@ -128,7 +136,7 @@ pub enum Attribute {
     /// The udt type script of the invoice
     UdtScript(CkbScript),
     /// The payee public key of the invoice
-    PayeePublicKey(PublicKey),
+    PayeePublicKey(#[schemars(schema_with = "crate::rpc::schema_as_hex_no_prefix")] PublicKey),
     /// The hash algorithm of the invoice
     HashAlgorithm(HashAlgorithm),
     /// The feature flags of the invoice
@@ -376,8 +384,10 @@ impl CkbInvoice {
 }
 
 /// Recoverable signature
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvoiceSignature(pub RecoverableSignature);
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema)]
+pub struct InvoiceSignature(
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_no_prefix")] pub RecoverableSignature,
+);
 
 impl PartialOrd for InvoiceSignature {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {

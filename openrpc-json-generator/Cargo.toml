@@ -1,0 +1,14 @@
+[package]
+edition = "2024"
+name = "openrpc-json-generator"
+version = "0.1.0"
+
+[dependencies]
+fnn = {path = "../crates/fiber-lib"}
+openrpsee = {git = "https://github.com/Officeyutong/openrpsee"}
+phf = {version = "0.13.1", features = ["macros"]}
+
+[build-dependencies]
+openrpsee = {git = "https://github.com/Officeyutong/openrpsee"}
+
+[workspace]

@@ -15,6 +15,7 @@ use super::serde_utils::{
 use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 use crate::fiber::payment::{PaymentCustomRecords, USER_CUSTOM_RECORDS_MAX_INDEX};
+use schemars::JsonSchema;
 use serde_with::IfIsHumanReadable;
 
 use anyhow::anyhow;
@@ -82,8 +83,8 @@ impl From<PubNonce> for Byte66 {
 }
 
 /// A wrapper for secp256k1 secret key
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Privkey(pub SecretKey);
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Privkey(#[schemars(schema_with = "crate::rpc::schema_as_any")] pub SecretKey);
 
 impl From<Privkey> for Scalar {
     fn from(pk: Privkey) -> Self {
@@ -152,8 +153,12 @@ impl AsRef<[u8; 32]> for Privkey {
 
 /// A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
 #[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
-pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
+#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default, JsonSchema)]
+pub struct Hash256(
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
+    [u8; 32],
+);
 
 impl From<[u8; 32]> for Hash256 {
     fn from(value: [u8; 32]) -> Self {
@@ -326,8 +331,12 @@ impl Privkey {
 /// In the RPC interface this value is exposed as fields such as `pubkey`.
 /// It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
 #[serde_as]
-#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHexNoPrefix, [_; 33]>")] pub [u8; 33]);
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct Pubkey(
+    #[serde_as(as = "IfIsHumanReadable<SliceHexNoPrefix, [_; 33]>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_no_prefix")]
+    pub [u8; 33],
+);
 
 impl std::fmt::Debug for Pubkey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

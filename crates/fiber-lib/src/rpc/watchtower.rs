@@ -1,5 +1,6 @@
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::proc_macros::rpc;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -11,7 +12,7 @@ use crate::fiber::{
     types::{Hash256, Privkey, Pubkey},
 };
 #[cfg(feature = "watchtower")]
-use crate::rpc::context::RpcContext;
+pub use crate::rpc::context::RpcContext;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 
@@ -125,7 +126,7 @@ trait WatchtowerRpc {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct CreateWatchChannelParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -144,14 +145,14 @@ pub struct CreateWatchChannelParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct RemoveWatchChannelParams {
     /// Channel ID
     pub channel_id: Hash256,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct UpdateRevocationParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -162,7 +163,7 @@ pub struct UpdateRevocationParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct UpdatePendingRemoteSettlementParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -171,7 +172,7 @@ pub struct UpdatePendingRemoteSettlementParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct UpdateLocalSettlementParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -180,7 +181,7 @@ pub struct UpdateLocalSettlementParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct CreatePreimageParams {
     /// Payment hash
     pub payment_hash: Hash256,
@@ -189,7 +190,7 @@ pub struct CreatePreimageParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct RemovePreimageParams {
     /// Payment hash
     pub payment_hash: Hash256,

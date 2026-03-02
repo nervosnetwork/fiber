@@ -30,6 +30,7 @@ use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
+use schemars::JsonSchema;
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -241,24 +242,29 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
 
 /// The channel update info with a single direction of channel
 #[serde_as]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ChannelUpdateInfo {
     /// The timestamp is the time when the channel update was received by the node.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
     /// The exact amount of balance that we can send to the other party via the channel.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub outbound_liquidity: Option<u128>,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub tlc_minimum_value: u128,
     /// The forwarding fee rate for the channel.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub fee_rate: u64,
 }
 
@@ -512,21 +518,24 @@ pub enum PathFindError {
 /// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
 /// Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
 #[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RouterHop {
     /// The node that is sending the TLC to the next node.
     pub(crate) target: Pubkey,
     /// The channel of this hop used to receive TLC
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
     pub(crate) channel_outpoint: OutPoint,
     /// The amount that the source node will transfer to the target node.
     /// We have already added up all the fees along the path, so this amount can be used directly for the TLC.
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub(crate) amount_received: u128,
     /// The expiry for the TLC that the source node sends to the target node.
     /// We have already added up all the expiry deltas along the path,
     /// the only thing missing is current time. So the expiry is the current time plus the expiry delta.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub(crate) incoming_tlc_expiry: u64,
 }
 

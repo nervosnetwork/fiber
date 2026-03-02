@@ -16,6 +16,7 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 
 use ractor::call;
+use schemars::JsonSchema;
 use std::str::FromStr;
 use std::{collections::HashMap, sync::Arc};
 
@@ -30,44 +31,48 @@ use crate::{
 };
 
 // TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct CommitmentSignedParams {
     /// The channel ID of the channel to send the commitment_signed message to
     pub channel_id: Hash256,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct AddTlcParams {
     /// The channel ID of the channel to add the TLC to
     pub channel_id: Hash256,
     /// The amount of the TLC
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub amount: u128,
     /// The payment hash of the TLC
     pub payment_hash: Hash256,
     /// The expiry of the TLC
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub expiry: u64,
     /// The hash algorithm of the TLC
     pub hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AddTlcResult {
     /// The ID of the TLC
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub tlc_id: u64,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct RemoveTlcParams {
     /// The channel ID of the channel to remove the TLC from
     pub channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
     /// The ID of the TLC to remove
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub tlc_id: u64,
     /// The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
     pub reason: RemoveTlcReason,
@@ -75,7 +80,7 @@ pub struct RemoveTlcParams {
 
 /// The reason for removing a TLC
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 #[serde(untagged)]
 pub enum RemoveTlcReason {
     /// The reason for removing the TLC is that it was fulfilled
@@ -85,17 +90,18 @@ pub enum RemoveTlcReason {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct SubmitCommitmentTransactionParams {
     /// Channel ID
     pub channel_id: Hash256,
     /// Commitment number
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub commitment_number: u64,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 
 pub struct SubmitCommitmentTransactionResult {
     /// Submitted commitment transaction hash
@@ -103,7 +109,7 @@ pub struct SubmitCommitmentTransactionResult {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct CheckChannelShutdownParams {
     /// Channel ID
     pub channel_id: Hash256,

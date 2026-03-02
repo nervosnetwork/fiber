@@ -1,9 +1,10 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{fiber::payment::PaymentStatus, invoice::CkbInvoiceStatus};
 
 /// The status of a cross-chain hub order, will update as the order progresses.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CchOrderStatus {
     /// Order is created and waiting for the incoming invoice to collect enough TLCs.

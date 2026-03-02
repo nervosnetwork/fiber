@@ -1,4 +1,5 @@
 use paste::paste;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -79,7 +80,7 @@ pub mod feature_bits {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct FeatureVector {
     inner: Vec<u8>,
 }

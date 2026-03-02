@@ -1,12 +1,13 @@
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
 use ckb_hash::blake2b_256;
 use ckb_types::packed;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// HashAlgorithm is the hash algorithm used in the hash lock.
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, Hash, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HashAlgorithm {
     /// The default hash algorithm, CkbHash

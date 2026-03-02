@@ -22,6 +22,15 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::types::ErrorObjectOwned;
 
+use schemars::schema::InstanceType;
+use schemars::schema::Metadata;
+use schemars::schema::ObjectValidation;
+use schemars::schema::Schema;
+use schemars::schema::SchemaObject;
+use schemars::schema::SingleOrVec;
+use schemars::schema::StringValidation;
+use schemars::JsonSchema;
+use schemars::SchemaGenerator;
 use serde_with::serde_as;
 use std::collections::HashMap;
 
@@ -29,29 +38,32 @@ use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct GetPaymentCommandParams {
     /// The payment hash of the payment to retrieve
     pub payment_hash: Hash256,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
     /// The status of the payment
     pub status: PaymentStatus,
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     /// The time the payment was created at, in milliseconds from UNIX epoch
     created_at: u64,
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     /// The time the payment was last updated at, in milliseconds from UNIX epoch
     pub last_updated_at: u64,
     /// The error message if the payment failed
     pub failed_error: Option<String>,
     /// fee paid for the payment
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub fee: u128,
 
     /// The custom records to be included in the payment.
@@ -88,6 +100,50 @@ pub struct PaymentCustomRecords {
     pub data: HashMap<u32, Vec<u8>>,
 }
 
+impl JsonSchema for PaymentCustomRecords {
+    fn schema_name() -> String {
+        "PaymentCustomRecords".to_string()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        let key_schema = SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+            string: Some(Box::new(StringValidation {
+                pattern: Some("^0x(0|[1-9a-fA-F][0-9a-fA-F]{0,3})$".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        let value_schema = Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+            string: Some(Box::new(StringValidation {
+                pattern: Some("^0x([0-9a-fA-F]{2})*$".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+
+        let mut schema = SchemaObject::default();
+        schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Object)));
+        schema.object = Some(Box::new(ObjectValidation {
+            property_names: Some(Box::new(key_schema.into())),
+            additional_properties: Some(Box::new(value_schema)),
+            ..Default::default()
+        }));
+        schema.metadata = Some(Box::new(Metadata {
+            description: Some(
+                "Custom records map. Keys are hex-encoded u32 (0~65535), \
+                 values are hex-encoded bytes. Both prefixed with 0x."
+                    .to_string(),
+            ),
+            ..Default::default()
+        }));
+
+        schema.into()
+    }
+}
+
 impl From<PaymentCustomRecords> for crate::fiber::PaymentCustomRecords {
     fn from(records: PaymentCustomRecords) -> Self {
         crate::fiber::PaymentCustomRecords { data: records.data }
@@ -95,7 +151,7 @@ impl From<PaymentCustomRecords> for crate::fiber::PaymentCustomRecords {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SendPaymentCommandParams {
     /// The public key (`Pubkey`) of the payment target node, serialized as a hex string.
     /// You can obtain a node's pubkey via the `node_info` or `graph_nodes` RPC.
@@ -104,6 +160,7 @@ pub struct SendPaymentCommandParams {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     /// If not set and there is a invoice, the amount will be set to the invoice amount
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub amount: Option<u128>,
 
     /// the hash to use within the payment's HTLC.
@@ -114,12 +171,14 @@ pub struct SendPaymentCommandParams {
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub final_tlc_expiry_delta: Option<u64>,
 
     /// the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
     /// suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
     /// this is also the default value for the payment if this parameter is not provided
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_expiry_limit: Option<u64>,
 
     /// the encoded invoice to send to the recipient
@@ -127,19 +186,23 @@ pub struct SendPaymentCommandParams {
 
     /// the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub timeout: Option<u64>,
 
     /// the maximum fee amounts in shannons that the sender is willing to pay.
     /// Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub max_fee_amount: Option<u128>,
 
     /// the maximum fee rate per thousand (‰), default is 5 (0.5%)
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub max_fee_rate: Option<u64>,
 
     /// max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub max_parts: Option<u64>,
 
     /// Optional explicit trampoline hops.
@@ -195,19 +258,22 @@ pub struct SendPaymentCommandParams {
 
 /// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct HopHint {
     /// The public key of the node
     pub pubkey: Pubkey,
     /// The outpoint of the channel
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
 
     /// The fee rate to use this hop to forward the payment.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub(crate) fee_rate: u64,
     /// The TLC expiry delta to use this hop to forward the payment.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub(crate) tlc_expiry_delta: u64,
 }
 
@@ -223,11 +289,12 @@ impl From<HopHint> for NetworkHopHint {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildRouterParams {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     /// If not set, the minimum routable amount `1` is used
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub amount: Option<u128>,
 
     /// udt type script for the payment router
@@ -244,19 +311,20 @@ pub struct BuildRouterParams {
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub final_tlc_expiry_delta: Option<u64>,
 }
 
 /// The router returned by build_router
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct BuildPaymentRouterResult {
     /// The hops information for router
     router_hops: Vec<RouterHop>,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct SendPaymentWithRouterParams {
     /// the hash to use within the payment's HTLC.
     /// If not set and `keysend` is set to true, a random hash will be generated.

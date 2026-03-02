@@ -1,3 +1,8 @@
+use schemars::{
+    schema::{Schema, SchemaObject},
+    JsonSchema, SchemaGenerator,
+};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod biscuit;
 #[cfg(not(target_arch = "wasm32"))]
@@ -393,4 +398,137 @@ pub mod server {
         assert!(is_public_addr("0.0.0.0:0").unwrap());
         assert!(!is_public_addr("127.0.0.1:0").unwrap());
     }
+}
+
+pub(crate) fn schema_as_string(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = String::json_schema(generator).into();
+    schema.format = Some(String::from("string"));
+    schema.into()
+}
+
+pub(crate) fn schema_as_hex_no_prefix(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = String::json_schema(generator).into();
+    schema.string = Some(Box::new(schemars::schema::StringValidation {
+        pattern: Some("^([0-9a-fA-F]{2})*$".to_string()),
+        ..Default::default()
+    }));
+    schema.into()
+}
+
+pub(crate) fn schema_as_any(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = String::json_schema(generator).into();
+    schema.format = Some(String::from("any"));
+    schema.into()
+}
+
+pub(crate) fn schema_as_string_array(generator: &mut SchemaGenerator) -> Schema {
+    use schemars::schema::*;
+
+    let item_schema = schema_as_string(generator);
+    let mut schema = SchemaObject::default();
+    schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Array)));
+    schema.array = Some(Box::new(ArrayValidation {
+        items: Some(SingleOrVec::Single(Box::new(item_schema))),
+        ..Default::default()
+    }));
+    schema.into()
+}
+
+pub(crate) fn schema_as_string_optional(generator: &mut SchemaGenerator) -> Schema {
+    use schemars::schema::*;
+
+    let string_schema = schema_as_string(generator);
+    let null_schema: Schema = SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Null))),
+        ..Default::default()
+    }
+    .into();
+
+    let mut schema = SchemaObject::default();
+    schema.subschemas = Some(Box::new(SubschemaValidation {
+        any_of: Some(vec![string_schema, null_schema]),
+        ..Default::default()
+    }));
+    schema.into()
+}
+
+pub(crate) fn schema_as_integer(_generator: &mut SchemaGenerator) -> Schema {
+    use schemars::schema::*;
+
+    let mut schema = SchemaObject::default();
+    schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Integer)));
+    schema.into()
+}
+
+pub(crate) fn schema_as_byte_array(_generator: &mut SchemaGenerator) -> Schema {
+    use schemars::schema::*;
+
+    let mut item_schema = SchemaObject::default();
+    item_schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Integer)));
+    item_schema.number = Some(Box::new(NumberValidation {
+        minimum: Some(0.0),
+        maximum: Some(255.0),
+        ..Default::default()
+    }));
+
+    let mut schema = SchemaObject::default();
+    schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Array)));
+    schema.array = Some(Box::new(ArrayValidation {
+        items: Some(SingleOrVec::Single(Box::new(item_schema.into()))),
+        ..Default::default()
+    }));
+    schema.into()
+}
+
+pub(crate) fn schema_as_hex_bytes(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = String::json_schema(generator).into();
+    schema.string = Some(Box::new(schemars::schema::StringValidation {
+        pattern: Some("^0x([0-9a-fA-F]{2})*$".to_string()),
+        ..Default::default()
+    }));
+    schema.into()
+}
+
+pub(crate) fn schema_as_hex_bytes_optional(generator: &mut SchemaGenerator) -> Schema {
+    use schemars::schema::*;
+
+    let hex_schema = schema_as_hex_bytes(generator);
+    let null_schema: Schema = SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Null))),
+        ..Default::default()
+    }
+    .into();
+
+    let mut schema = SchemaObject::default();
+    schema.subschemas = Some(Box::new(SubschemaValidation {
+        any_of: Some(vec![hex_schema, null_schema]),
+        ..Default::default()
+    }));
+    schema.into()
+}
+
+pub(crate) fn schema_as_uint_hex(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = String::json_schema(generator).into();
+    schema.string = Some(Box::new(schemars::schema::StringValidation {
+        pattern: Some("^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$".to_string()),
+        ..Default::default()
+    }));
+    schema.into()
+}
+pub(crate) fn schema_as_uint_hex_optional(generator: &mut SchemaGenerator) -> Schema {
+    use schemars::schema::*;
+
+    let hex_schema = schema_as_uint_hex(generator);
+    let null_schema: Schema = SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Null))),
+        ..Default::default()
+    }
+    .into();
+
+    let mut schema = SchemaObject::default();
+    schema.subschemas = Some(Box::new(SubschemaValidation {
+        any_of: Some(vec![hex_schema, null_schema]),
+        ..Default::default()
+    }));
+    schema.into()
 }

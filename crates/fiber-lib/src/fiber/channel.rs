@@ -76,6 +76,7 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort,
 };
+use schemars::JsonSchema;
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -3017,7 +3018,9 @@ impl CommitmentNumbers {
 }
 
 /// The id of a tlc, it can be either offered or received.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash, JsonSchema,
+)]
 pub enum TLCId {
     /// Offered tlc id
     Offered(u64),
@@ -3056,7 +3059,7 @@ impl TLCId {
 }
 
 /// The status of an outbound tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
 pub enum OutboundTlcStatus {
     // Offered tlc created and sent to remote party
     LocalAnnounced,
@@ -3074,7 +3077,7 @@ pub enum OutboundTlcStatus {
 }
 
 /// The status of an inbound tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
 pub enum InboundTlcStatus {
     // Received tlc from remote party, but not committed yet
     RemoteAnnounced,
@@ -3092,7 +3095,7 @@ pub enum InboundTlcStatus {
 }
 
 /// The status of a tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
 pub enum TlcStatus {
     /// Outbound tlc
     Outbound(OutboundTlcStatus),
@@ -3604,24 +3607,27 @@ impl ChannelConstraints {
 
 /// Data needed to revoke an outdated commitment transaction.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct RevocationData {
     /// The commitment transaction version number that was revoked
     pub commitment_number: u64,
     /// The aggregated signature from both parties that authorizes the revocation
     #[serde_as(as = "CompactSignatureAsBytes")]
+    #[schemars(schema_with = "crate::rpc::schema_as_byte_array")]
     pub aggregated_signature: CompactSignature,
     /// The output cell from the revoked commitment transaction
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
     pub output: CellOutput,
     /// The associated data for the output cell (e.g., UDT amount for token transfers)
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
     pub output_data: Bytes,
 }
 
 /// Data needed to authorize and execute a settlement transaction.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SettlementData {
     /// The total amount of CKB/UDT being settled for the local party
     pub local_amount: u128,
@@ -3659,7 +3665,7 @@ impl SettlementData {
 }
 
 /// Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SettlementTlc {
     /// The ID of the TLC (either offered or received)
     pub tlc_id: TLCId,

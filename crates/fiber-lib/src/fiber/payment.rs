@@ -36,6 +36,7 @@ use ckb_types::packed::{OutPoint, Script};
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
 use rand::Rng;
+use schemars::JsonSchema;
 use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -53,7 +54,7 @@ const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 ///
 /// **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum PaymentStatus {
     /// Initial status. A payment session is created, but no HTLC has been dispatched.
     Created,
@@ -77,15 +78,17 @@ impl PaymentStatus {
 
 /// The node and channel information in a payment route hop
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SessionRouteNode {
     /// the public key of the node
     pub pubkey: Pubkey,
     /// the amount for this hop
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub amount: u128,
     /// the channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
 }
 
@@ -95,7 +98,7 @@ pub struct SessionRouteNode {
 /// For example:
 ///    `A(amount, channel) -> B -> C -> D`
 /// means A will send `amount` with `channel` to B.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
 pub struct SessionRoute {
     /// the nodes in the route
     pub nodes: Vec<SessionRouteNode>,

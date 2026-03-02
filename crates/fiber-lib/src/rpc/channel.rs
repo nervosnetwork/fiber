@@ -26,12 +26,13 @@ use jsonrpsee::proc_macros::rpc;
 
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use ractor::{call, ActorRef};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::cmp::Reverse;
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct OpenChannelParams {
     /// The public key of the peer to open a channel with.
     /// The peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
@@ -39,6 +40,7 @@ pub struct OpenChannelParams {
 
     /// The amount of CKB or UDT to fund the channel with.
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub funding_amount: u128,
 
     /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
@@ -58,22 +60,26 @@ pub struct OpenChannelParams {
 
     /// The fee rate for the commitment transaction, an optional parameter.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub commitment_fee_rate: Option<u64>,
 
     /// The fee rate for the funding transaction, an optional parameter.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub funding_fee_rate: Option<u64>,
 
     /// The expiry delta to forward a tlc, in milliseconds, default to 4 hours, which is 4 * 60 * 60 * 1000 milliseconds
     /// Expect it >= 2/3 commitment_delay_epoch.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_expiry_delta: Option<u64>,
 
     /// The minimum value for a TLC our side can send,
     /// an optional parameter, default is 0, which means we can send any TLC is larger than 0.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_min_value: Option<u128>,
 
     /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
@@ -83,38 +89,42 @@ pub struct OpenChannelParams {
     /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
     /// the channel configuration of B and C, not A and B.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_fee_proportional_millionths: Option<u128>,
 
     /// The maximum value in flight for TLCs, an optional parameter.
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub max_tlc_value_in_flight: Option<u128>,
 
     /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub max_tlc_number_in_flight: Option<u64>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OpenChannelResult {
     /// The temporary channel ID of the channel being opened
     pub temporary_channel_id: Hash256,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct AbandonChannelParams {
     /// The temporary channel ID or real channel ID of the channel being abandoned
     pub channel_id: Hash256,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct AcceptChannelParams {
     /// The temporary channel ID of the channel to accept
     pub temporary_channel_id: Hash256,
 
     /// The amount of CKB or UDT to fund the channel with
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub funding_amount: u128,
 
     /// The script used to receive the channel balance, an optional parameter,
@@ -124,17 +134,20 @@ pub struct AcceptChannelParams {
     /// The max tlc sum value in flight for the channel, default is u128::MAX
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub max_tlc_value_in_flight: Option<u128>,
 
     /// The max tlc number in flight send from our side, default is 125
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub max_tlc_number_in_flight: Option<u64>,
 
     /// The minimum value for a TLC our side can send,
     /// an optional parameter, default is 0, which means we can send any TLC is larger than 0.
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_min_value: Option<u128>,
 
     /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
@@ -144,22 +157,24 @@ pub struct AcceptChannelParams {
     /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
     /// the channel configuration of B and C, not A and B.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_fee_proportional_millionths: Option<u128>,
 
     /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_expiry_delta: Option<u64>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AcceptChannelResult {
     /// The final ID of the channel that was accepted, it's different from the temporary channel ID
     pub channel_id: Hash256,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListChannelsParams {
     /// The public key to list channels for.
     /// An optional parameter, if not provided, all channels will be listed.
@@ -173,7 +188,7 @@ pub struct ListChannelsParams {
     pub only_pending: Option<bool>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
 pub struct ListChannelsResult {
     /// The list of channels
     pub channels: Vec<Channel>,
@@ -182,7 +197,7 @@ pub struct ListChannelsResult {
 /// The state of a channel
 // `ChannelState` is a copy of `ChannelState` with `#[serde(...)]` attributes for compatibility
 // `bincode` does not support deserialize_identifier
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     rename_all = "SCREAMING_SNAKE_CASE",
     tag = "state_name",
@@ -190,24 +205,34 @@ pub struct ListChannelsResult {
 )]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
-    NegotiatingFunding(NegotiatingFundingFlags),
+    NegotiatingFunding(
+        #[schemars(schema_with = "crate::rpc::schema_as_integer")] NegotiatingFundingFlags,
+    ),
     /// We're collaborating with the other party on the funding transaction.
-    CollaboratingFundingTx(CollaboratingFundingTxFlags),
+    CollaboratingFundingTx(
+        #[schemars(schema_with = "crate::rpc::schema_as_integer")] CollaboratingFundingTxFlags,
+    ),
     /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
-    SigningCommitment(SigningCommitmentFlags),
+    SigningCommitment(
+        #[schemars(schema_with = "crate::rpc::schema_as_integer")] SigningCommitmentFlags,
+    ),
     /// We've received and sent `commitment_signed` and are now waiting for both
     /// party to collaborate on creating a valid funding transaction.
-    AwaitingTxSignatures(AwaitingTxSignaturesFlags),
+    AwaitingTxSignatures(
+        #[schemars(schema_with = "crate::rpc::schema_as_integer")] AwaitingTxSignaturesFlags,
+    ),
     /// We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
     /// funding transaction to confirm.
-    AwaitingChannelReady(AwaitingChannelReadyFlags),
+    AwaitingChannelReady(
+        #[schemars(schema_with = "crate::rpc::schema_as_integer")] AwaitingChannelReadyFlags,
+    ),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
     ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-    ShuttingDown(ShuttingDownFlags),
+    ShuttingDown(#[schemars(schema_with = "crate::rpc::schema_as_integer")] ShuttingDownFlags),
     /// This channel is closed.
-    Closed(CloseFlags),
+    Closed(#[schemars(schema_with = "crate::rpc::schema_as_integer")] CloseFlags),
 }
 
 impl ChannelState {
@@ -253,7 +278,7 @@ impl From<RawChannelState> for ChannelState {
 
 /// The channel data structure
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
 pub struct Channel {
     /// The channel ID
     pub channel_id: Hash256,
@@ -266,6 +291,7 @@ pub struct Channel {
     /// Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
     pub is_one_way: bool,
     #[serde_as(as = "Option<EntityHex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes_optional")]
     /// The outpoint of the channel
     pub channel_outpoint: Option<OutPoint>,
     /// The public key of the channel counterparty.
@@ -276,15 +302,19 @@ pub struct Channel {
     pub state: ChannelState,
     /// The local balance of the channel
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub local_balance: u128,
     /// The offered balance of the channel
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub offered_tlc_balance: u128,
     /// The remote balance of the channel
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub remote_balance: u128,
     /// The received balance of the channel
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub received_tlc_balance: u128,
     /// The list of pending tlcs
     pub pending_tlcs: Vec<Htlc>,
@@ -292,12 +322,14 @@ pub struct Channel {
     pub latest_commitment_transaction_hash: Option<H256>,
     /// The time the channel was created at, in milliseconds from UNIX epoch
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub created_at: u64,
     /// Whether the channel is enabled
     pub enabled: bool,
     /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
     /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub tlc_expiry_delta: u64,
     /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
     /// The unit is millionths of the amount. default is 1000 which means 0.1%.
@@ -306,6 +338,7 @@ pub struct Channel {
     /// if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
     /// the channel configuration of B and C, not A and B.
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub tlc_fee_proportional_millionths: u128,
     /// The hash of the shutdown transaction
     pub shutdown_transaction_hash: Option<H256>,
@@ -316,31 +349,35 @@ pub struct Channel {
 
 /// The htlc data structure
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
 pub struct Htlc {
     /// The id of the htlc
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub id: u64,
     /// The amount of the htlc
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub amount: u128,
     /// The payment hash of the htlc
     pub payment_hash: Hash256,
     /// The expiry of the htlc
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub expiry: u64,
     /// If this HTLC is involved in a forwarding operation, this field indicates the forwarding channel.
     /// For an outbound htlc, it is the inbound channel. For an inbound htlc, it is the outbound channel.
     pub forwarding_channel_id: Option<Hash256>,
     /// If this HTLC is involved in a forwarding operation, this field indicates the forwarding tlc id.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub forwarding_tlc_id: Option<u64>,
     /// The status of the htlc
     pub status: TlcStatus,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct ShutdownChannelParams {
     /// The channel ID of the channel to shut down
     pub channel_id: Hash256,
@@ -350,6 +387,7 @@ pub struct ShutdownChannelParams {
     /// The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
     /// default is 1000 shannons/KW
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub fee_rate: Option<u64>,
     /// Whether to force the channel to close, when set to false, `close_script` and `fee_rate` should be set, default is false.
     /// When set to true, `close_script` and `fee_rate` will be ignored and will use the default value when opening the channel.
@@ -357,7 +395,7 @@ pub struct ShutdownChannelParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct UpdateChannelParams {
     /// The channel ID of the channel to update
     pub channel_id: Hash256,
@@ -365,12 +403,15 @@ pub struct UpdateChannelParams {
     pub enabled: Option<bool>,
     /// The expiry delta for the TLC locktime
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_expiry_delta: Option<u64>,
     /// The minimum value for a TLC
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_minimum_value: Option<u128>,
     /// The fee proportional millionths for a TLC
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub tlc_fee_proportional_millionths: Option<u128>,
 }
 

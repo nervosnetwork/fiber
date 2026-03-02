@@ -3,6 +3,7 @@ pub(crate) mod state_machine;
 mod status;
 
 pub use order_store::CchOrderStore;
+use schemars::JsonSchema;
 pub use state_machine::CchOrderStateMachine;
 pub use status::CchOrderStatus;
 
@@ -26,12 +27,20 @@ use crate::{
 /// { "Fiber": String } | { "Lightning": String }
 /// ```
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum CchInvoice {
     /// Fiber invoice that once paid, the hub will send the outgoing payment to Lightning
-    Fiber(#[serde_as(as = "DisplayFromStr")] CkbInvoice),
+    Fiber(
+        #[serde_as(as = "DisplayFromStr")]
+        #[schemars(schema_with = "crate::rpc::schema_as_string")]
+        CkbInvoice,
+    ),
     /// Lightning invoice that once paid, the hub will send the outgoing payment to Fiber
-    Lightning(#[serde_as(as = "DisplayFromStr")] Bolt11Invoice),
+    Lightning(
+        #[serde_as(as = "DisplayFromStr")]
+        #[schemars(schema_with = "crate::rpc::schema_as_string")]
+        Bolt11Invoice,
+    ),
 }
 
 #[serde_as]
