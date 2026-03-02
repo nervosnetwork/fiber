@@ -1,5 +1,5 @@
 use crate::time::SystemTimeError;
-use fiber_types::{CchOrderStatus, Hash256};
+use fiber_types::{CchOrderStatus, Currency, Hash256};
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
@@ -14,6 +14,8 @@ pub enum CchStoreError {
 
 #[derive(Error, Debug)]
 pub enum CchError {
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
     #[error("Store error: {0}")]
     StoreError(#[from] CchStoreError),
     #[error("Outgoing invoice expiry time is too short")]
@@ -36,6 +38,13 @@ pub enum CchError {
     CKBInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("CKB invoice hash algorithm is not SHA256, which is required for LND compatibility")]
     CKBInvoiceIncompatibleHashAlgorithm,
+    #[error("BTC invoice network mismatch: expected {expected}, got {actual}")]
+    BTCInvoiceNetworkMismatch { expected: String, actual: String },
+    #[error("CKB invoice network mismatch: expected {expected}, got {actual}")]
+    CKBInvoiceNetworkMismatch {
+        expected: Currency,
+        actual: Currency,
+    },
     #[error("ReceiveBTC order payment amount is too small")]
     ReceiveBTCOrderAmountTooSmall,
     #[error("ReceiveBTC order payment amount is too large")]
