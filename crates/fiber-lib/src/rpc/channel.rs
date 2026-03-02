@@ -56,6 +56,8 @@ pub struct OpenChannelParams {
     pub shutdown_script: Option<Script>,
 
     /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
 
     /// The fee rate for the commitment transaction, an optional parameter.
@@ -319,6 +321,7 @@ pub struct Channel {
     /// The list of pending tlcs
     pub pending_tlcs: Vec<Htlc>,
     /// The hash of the latest commitment transaction
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes_optional")]
     pub latest_commitment_transaction_hash: Option<H256>,
     /// The time the channel was created at, in milliseconds from UNIX epoch
     #[serde_as(as = "U64Hex")]
@@ -341,6 +344,7 @@ pub struct Channel {
     #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
     pub tlc_fee_proportional_millionths: u128,
     /// The hash of the shutdown transaction
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes_optional")]
     pub shutdown_transaction_hash: Option<H256>,
     /// Human-readable reason why the channel opening failed.
     /// Only present when the channel is in a failed state (e.g. abandoned or funding aborted).

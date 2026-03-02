@@ -38,6 +38,7 @@ pub struct GraphNodesParams {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct UdtScript {
     /// The code hash of the script.
+    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
     pub code_hash: H256,
     /// The hash type of the script.
     pub hash_type: ScriptHashType,
