@@ -15,6 +15,7 @@ mod in_flight_ckb_tx_actor;
 mod key;
 mod path;
 mod settle_tlc_set_command;
+mod watchtower_query_actor;
 
 pub use config::FiberConfig;
 pub use fiber_types::*;
