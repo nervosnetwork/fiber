@@ -1,5 +1,7 @@
 # Testnet Public Nodes User Manual
 
+> **Version note:** This document is for the current `develop` branch. For the `v0.7.1` release version, please see [docs/testnet-nodes.md@v0.7.1](https://github.com/nervosnetwork/fiber/blob/v0.7.1/docs/testnet-nodes.md).
+
 ## Testnet Public Nodes
 #### node1
 
