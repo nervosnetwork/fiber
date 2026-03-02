@@ -16,7 +16,11 @@ pub use tentacle::multiaddr::MultiAddr;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConnectPeerParams {
     /// The address of the peer to connect to.
-    pub address: MultiAddr,
+    /// Either `address` or `pubkey` must be provided.
+    pub address: Option<MultiAddr>,
+    /// The public key of the peer to connect to.
+    /// The node resolves the address from locally synced graph data.
+    pub pubkey: Option<Pubkey>,
     /// Whether to save the peer address to the peer store.
     pub save: Option<bool>,
 }
@@ -94,11 +98,27 @@ impl PeerRpcServer for PeerRpcServerImpl {
 
 impl PeerRpcServerImpl {
     pub async fn connect_peer(&self, params: ConnectPeerParams) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
-            params.address.clone(),
-            params.save.unwrap_or(true),
-        ));
-        crate::handle_actor_cast!(self.actor, message, params)
+        if let Some(address) = params.address.clone() {
+            let save = params.save.unwrap_or(true);
+            let message =
+                NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(address, save));
+            return crate::handle_actor_cast!(self.actor, message, params);
+        }
+
+        if let Some(pubkey) = params.pubkey.clone() {
+            let message = |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
+                    pubkey, rpc_reply,
+                ))
+            };
+            return crate::handle_actor_call!(self.actor, message, params);
+        }
+
+        Err(ErrorObjectOwned::owned(
+            CALL_EXECUTION_FAILED_CODE,
+            "either `address` or `pubkey` is required",
+            Some(params),
+        ))
     }
 
     pub async fn disconnect_peer(

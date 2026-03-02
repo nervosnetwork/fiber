@@ -288,6 +288,8 @@ pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr, bool),
+    // Connect to a peer via pubkey, resolving address from local graph/saved state.
+    ConnectPeerWithPubkey(Pubkey, RpcReplyPort<Result<(), String>>),
     DisconnectPeer(Pubkey, PeerDisconnectReason),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
@@ -1104,6 +1106,24 @@ where
                 // TODO: note that the dial function does not return error immediately even if dial fails.
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
+            }
+            NetworkActorCommand::ConnectPeerWithPubkey(pubkey, reply) => {
+                let address = state
+                    .get_peer_addresses_by_pubkey(&pubkey)
+                    .into_iter()
+                    .choose(&mut rand::thread_rng());
+                let Some(addr) = address else {
+                    let _ = reply.send(Err(Error::PeerNotFound(pubkey).to_string()));
+                    return Ok(());
+                };
+                match state.control.dial(addr, TargetProtocol::All).await {
+                    Ok(()) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(err) => {
+                        let _ = reply.send(Err(err.to_string()));
+                    }
+                }
             }
             NetworkActorCommand::DisconnectPeer(pubkey, reason) => {
                 if let Some(session) = state.peer_session_map.get(&pubkey).map(|p| p.session_id) {

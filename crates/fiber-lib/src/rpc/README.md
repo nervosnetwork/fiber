@@ -865,7 +865,10 @@ Connect to a peer.
 
 ##### Params
 
-* `address` - <em>`MultiAddr`</em>, The address of the peer to connect to.
+* `address` - <em>`Option<MultiAddr>`</em>, The address of the peer to connect to.
+ Either `address` or `pubkey` must be provided.
+* `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key of the peer to connect to.
+ The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
 
 ##### Returns

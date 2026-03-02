@@ -18,7 +18,7 @@ use crate::{
         graph::{GraphNodesParams, GraphNodesResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
-        peer::ListPeersResult,
+        peer::{ConnectPeerParams, ListPeersResult},
     },
 };
 use biscuit_auth::macros::biscuit;
@@ -209,7 +209,7 @@ async fn test_rpc_list_peers() {
         Some(gen_rpc_config()),
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
@@ -231,6 +231,23 @@ async fn test_rpc_list_peers() {
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
 
+    let _res: () = node_0
+        .send_rpc_request(
+            "connect_peer",
+            ConnectPeerParams {
+                address: None,
+                pubkey: Some(node_1_pubkey),
+                save: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 1);
+    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey);
+
     let mut node_3 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some(format!("node-{}", 3)))
@@ -248,7 +265,6 @@ async fn test_rpc_list_peers() {
     assert_eq!(list_peers.peers.len(), 1);
     assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey);
 
-    node_0.connect_to(&mut node_1).await;
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 2);
     dbg!("list_peers: {:?}", &list_peers);

@@ -72,42 +72,6 @@
 
 
 
-
-## Discover Public Nodes from `graph_nodes` (optional)
-
-1. Query graph nodes
-
-   ```bash
-   curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 1,
-       "jsonrpc": "2.0",
-       "method": "graph_nodes",
-       "params": [
-           {}
-       ]
-   }'
-   ```
-
-2. Find node1 / node2 by pubkey and read addresses
-
-   - node1 pubkey: `02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71`
-   - node1 address (current): `"/ip4/18.162.235.225/tcp/8119/p2p/QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo"`
-   - node2 pubkey: `0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc`
-   - node2 address (current): `"/ip4/18.163.221.211/tcp/8119/p2p/QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89"`
-   - use each node's `addresses` field in the `connect_peer` call below.
-
-   ```bash
-   curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 1,
-       "jsonrpc": "2.0",
-       "method": "graph_nodes",
-       "params": [
-           {}
-       ]
-   }' | jq '.result.nodes[] | select(.pubkey=="02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71" or .pubkey=="0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc") | {pubkey, addresses}'
-   ```
-
-
 ## Establishing a CKB Channel with Public Node 1
 
 
@@ -115,15 +79,15 @@
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 1,
-       "jsonrpc": "2.0",
-       "method": "connect_peer",
-       "params": [
-           {
-               "address": "/ip4/18.162.235.225/tcp/8119/p2p/QmXen3eUHhywmutEzydCsW4hXBoeVmdET2FJvMX69XJ1Eo"
-           }
-       ]
-   }'
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "connect_peer",
+        "params": [
+            {
+                "pubkey": "02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71"
+            }
+        ]
+    }'
    ```
 
    ```json
@@ -375,6 +339,19 @@
 ## Establishing a UDT Channel with Public Node 1
 
 1. Establish a network connection between nodeA and node1
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
+       "id": 1,
+       "jsonrpc": "2.0",
+       "method": "connect_peer",
+       "params": [
+           {
+               "pubkey": "02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71"
+           }
+       ]
+   }'
+   ```
 
 
 
