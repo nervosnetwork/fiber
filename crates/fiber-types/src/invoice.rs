@@ -2,13 +2,21 @@
 
 use crate::serde_utils::EntityHex;
 
+use crate::gen::invoice as gen_invoice;
 use arcode::bitbit::{BitReader, BitWriter, MSB};
 use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
 use ckb_hash::blake2b_256;
 use ckb_types::packed::Script as PackedScript;
+use ckb_types::prelude::{Pack, Unpack};
+use gen_invoice::{
+    Description, ExpiryTime, FallbackAddr, Feature, FinalHtlcMinimumExpiryDelta, FinalHtlcTimeout,
+    InvoiceAttr, InvoiceAttrUnion, InvoiceAttrsVec, PayeePublicKey, PaymentHash, PaymentSecret,
+    RawInvoiceDataBuilder, UdtScript,
+};
 use molecule::prelude::Byte;
+use molecule::prelude::{Builder, Entity};
 use nom::{branch::alt, combinator::opt};
 use nom::{
     bytes::{complete::take_while1, streaming::tag},
@@ -130,7 +138,7 @@ pub const MAX_DESCRIPTION_LENGTH: usize = 639;
 
 /// Encodes bytes and returns the compressed form.
 /// This is used for encoding the invoice data, to make the final Invoice encoded address shorter.
-pub fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
+pub(crate) fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
     let mut model = Model::builder().num_bits(8).eof(EOFKind::EndAddOne).build();
     let mut compressed_writer = BitWriter::new(Cursor::new(vec![]));
     let mut encoder = ArithmeticEncoder::new(48);
@@ -147,7 +155,7 @@ pub fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
 }
 
 /// Decompresses the data.
-pub fn ar_decompress(data: &[u8]) -> IoResult<Vec<u8>> {
+pub(crate) fn ar_decompress(data: &[u8]) -> IoResult<Vec<u8>> {
     let mut model = Model::builder().num_bits(8).eof(EOFKind::EndAddOne).build();
     let mut input_reader = BitReader::<_, MSB>::new(data);
     let mut decoder = ArithmeticDecoder::new(48);
@@ -634,7 +642,7 @@ impl CkbInvoice {
         }
         match self.recover_payee_pub_key() {
             Err(secp256k1::Error::InvalidRecoveryId) => {
-                return Err(InvoiceError::InvalidRecoveryId)
+                return Err(InvoiceError::InvalidRecoveryId);
             }
             Err(secp256k1::Error::InvalidSignature) => return Err(InvoiceError::InvalidSignature),
             Err(e) => panic!("no other error may occur, got {:?}", e),
@@ -942,21 +950,6 @@ impl FromStr for CkbInvoice {
 // Molecule conversions
 // ============================================================
 
-use crate::gen::invoice as gen_invoice;
-use ckb_types::prelude::{Pack, Unpack};
-use gen_invoice::{
-    Description, ExpiryTime, FallbackAddr, Feature, FinalHtlcMinimumExpiryDelta, FinalHtlcTimeout,
-    InvoiceAttr, InvoiceAttrUnion, InvoiceAttrsVec, PayeePublicKey, PaymentHash, PaymentSecret,
-    RawInvoiceDataBuilder, UdtScript,
-};
-use molecule::prelude::{Builder, Entity};
-
-/// Converts a `u8` to a molecule `Byte`.
-#[allow(dead_code)]
-fn u8_to_byte(u: u8) -> Byte {
-    Byte::new(u)
-}
-
 /// Converts a `[u8]` slice to `[Byte; 32]`.
 fn u8_slice_to_bytes(slice: &[u8]) -> Result<[Byte; 32], &'static str> {
     let vec: Vec<Byte> = slice.iter().map(|&x| Byte::new(x)).collect();
@@ -1159,7 +1152,7 @@ impl From<CkbInvoice> for gen_invoice::RawCkbInvoice {
                             let bytes: [Byte; SIGNATURE_U5_SIZE] = x
                                 .to_base32()
                                 .iter()
-                                .map(|x| u8_to_byte(x.to_u8()))
+                                .map(|x| Byte::new(x.to_u8()))
                                 .collect::<Vec<_>>()
                                 .as_slice()
                                 .try_into()
@@ -1172,4 +1165,80 @@ impl From<CkbInvoice> for gen_invoice::RawCkbInvoice {
             .data(invoice.data.into())
             .build()
     }
+}
+
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_parse_hrp() {
+    use super::InvoiceError;
+
+    let res = parse_hrp("fibb1280");
+    assert_eq!(res, Ok((Currency::Fibb, Some(1280))));
+
+    let res = parse_hrp("fibb");
+    assert_eq!(res, Ok((Currency::Fibb, None)));
+
+    let res = parse_hrp("fibt1023");
+    assert_eq!(res, Ok((Currency::Fibt, Some(1023))));
+
+    let res = parse_hrp("fibt10");
+    assert_eq!(res, Ok((Currency::Fibt, Some(10))));
+
+    let res = parse_hrp("fibt");
+    assert_eq!(res, Ok((Currency::Fibt, None)));
+
+    let res = parse_hrp("xnfibb");
+    assert_eq!(res, Err(InvoiceError::MalformedHRP("xnfibb".to_string())));
+
+    let res = parse_hrp("lxfibt");
+    assert_eq!(res, Err(InvoiceError::MalformedHRP("lxfibt".to_string())));
+
+    let res = parse_hrp("fibt");
+    assert_eq!(res, Ok((Currency::Fibt, None)));
+
+    let res = parse_hrp("fixt");
+    assert_eq!(res, Err(InvoiceError::MalformedHRP("fixt".to_string())));
+
+    let res = parse_hrp("fibtt");
+    assert_eq!(
+        res,
+        Err(InvoiceError::MalformedHRP(
+            "fibtt, unexpected ending `t`".to_string()
+        ))
+    );
+
+    let res = parse_hrp("fibt1x24");
+    assert_eq!(
+        res,
+        Err(InvoiceError::MalformedHRP(
+            "fibt1x24, unexpected ending `x24`".to_string()
+        ))
+    );
+
+    let res = parse_hrp("fibt000");
+    assert_eq!(res, Ok((Currency::Fibt, Some(0))));
+
+    let res = parse_hrp("fibt1024444444444444444444444444444444444444444444444444444444444444");
+    assert!(matches!(res, Err(InvoiceError::ParseAmountError(_))));
+
+    let res = parse_hrp("fibt0x");
+    assert!(matches!(res, Err(InvoiceError::MalformedHRP(_))));
+
+    let res = parse_hrp("");
+    assert!(matches!(res, Err(InvoiceError::MalformedHRP(_))));
+}
+
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_compress() {
+    let input = "hrp1gyqsqqq5qqqqq9gqqqqp6qqqqq0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq2qqqqqqqqqqqyvqsqqqsqqqqqvqqqqq8";
+    let bytes = input.as_bytes();
+    let compressed = ar_encompress(input.as_bytes()).unwrap();
+
+    let decompressed = ar_decompress(&compressed).unwrap();
+    let decompressed_str = std::str::from_utf8(&decompressed).unwrap();
+    assert_eq!(input, decompressed_str);
+    assert!(compressed.len() < bytes.len());
 }

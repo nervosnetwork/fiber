@@ -2,10 +2,7 @@ use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::{
     fiber::types::Hash256,
     gen_deterministic_secp256k1_keypair_tuple,
-    invoice::{
-        utils::{ar_decompress, ar_encompress},
-        Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceError, InvoiceSignature,
-    },
+    invoice::{Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceError, InvoiceSignature},
 };
 use crate::{
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_secp256k1_private_key,
@@ -193,19 +190,6 @@ fn test_invoice_bc32m_not_same() {
     let mock_invoice = mock_invoice();
     let mock_address = mock_invoice.to_string();
     assert_ne!(mock_address, address);
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_compress() {
-    let input = "hrp1gyqsqqq5qqqqq9gqqqqp6qqqqq0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq2qqqqqqqqqqqyvqsqqqsqqqqqvqqqqq8";
-    let bytes = input.as_bytes();
-    let compressed = ar_encompress(input.as_bytes()).unwrap();
-
-    let decompressed = ar_decompress(&compressed).unwrap();
-    let decompressed_str = std::str::from_utf8(&decompressed).unwrap();
-    assert_eq!(input, decompressed_str);
-    assert!(compressed.len() < bytes.len());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
