@@ -27,7 +27,7 @@ fn main() {
         .write(true)
         .open(output_dir.join("mod.rs"))
         .unwrap();
-
+    let mut rpc_mods = vec![];
     for [file_name, trait_name] in rpc_files {
         let patched_file_name = file_name.replace(".", "_");
 
@@ -46,6 +46,7 @@ fn main() {
         root_mod_file
             .write(format!("pub mod {};", patched_file_name).as_bytes())
             .unwrap();
+        rpc_mods.push(patched_file_name.clone());
         let mut generated_rpc_defs = std::fs::OpenOptions::new()
             .append(true)
             .open(current_output_dir.join("rpc_openrpc.rs"))
@@ -54,5 +55,12 @@ fn main() {
             .write(format!("use fnn::rpc::{}::*;", file_name.replace(".rs", "")).as_bytes())
             .unwrap();
     }
+    root_mod_file.write(format!("pub const API_METHODS: [ &::phf::Map<&str, openrpsee::openrpc::RpcMethod>; {}] = [",rpc_mods.len()).as_bytes()).unwrap();
+    for item in rpc_mods.iter() {
+        root_mod_file
+            .write(format!("&{}::rpc_openrpc::METHODS,", item).as_bytes())
+            .unwrap();
+    }
+    root_mod_file.write(b"];").unwrap();
     drop(root_mod_file);
 }
