@@ -105,7 +105,7 @@ impl PeerRpcServerImpl {
             return crate::handle_actor_cast!(self.actor, message, params);
         }
 
-        if let Some(pubkey) = params.pubkey.clone() {
+        if let Some(pubkey) = params.pubkey {
             let message = |rpc_reply| {
                 NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
                     pubkey, rpc_reply,
