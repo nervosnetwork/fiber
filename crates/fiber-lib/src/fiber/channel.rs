@@ -362,6 +362,8 @@ pub struct OpenChannelWithExternalFundingParameter {
     pub shutdown_script: Script,
     /// The lock script that controls the funding cells (user's wallet lock script).
     pub funding_lock_script: Script,
+    /// Optional extra cell deps required to use `funding_lock_script`.
+    pub funding_lock_script_cell_deps: Vec<packed::CellDep>,
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -375,6 +377,7 @@ pub struct OpenChannelWithExternalFundingParameter {
 pub struct ExternalFundingRuntime {
     pub enabled: bool,
     pub funding_lock_script: Option<Script>,
+    pub funding_lock_script_cell_deps: Vec<packed::CellDep>,
     pub unsigned_funding_tx: Option<Transaction>,
     pub started_at: Option<SystemTime>,
     pub signed_submitted: bool,
@@ -533,6 +536,11 @@ where
                                     .funding_lock_script
                                     .clone()
                                     .expect("external_funding_lock_script should be set"),
+                                funding_source_lock_script_cell_deps: state
+                                    .ephemeral_config
+                                    .external_funding
+                                    .funding_lock_script_cell_deps
+                                    .clone(),
                                 funding_cell_lock_script: state.get_funding_lock_script(),
                                 funding_udt_type_script: state.funding_udt_type_script.clone(),
                                 local_reserved_ckb_amount: state.local_reserved_ckb_amount,
@@ -563,6 +571,14 @@ where
                 Ok(())
             }
             FiberChannelMessage::TxUpdate(tx) => {
+                if state.ephemeral_config.external_funding.enabled
+                    && !state.ephemeral_config.external_funding.signed_submitted
+                    && matches!(state.state, ChannelState::AwaitingExternalFunding)
+                {
+                    self.handle_external_funding_tx_sync(myself, state, tx.tx)
+                        .await?;
+                    return Ok(());
+                }
                 state
                     .handle_tx_collaboration_msg(myself, TxCollaborationMsg::TxUpdate(tx))
                     .await
@@ -573,8 +589,15 @@ where
                     .await?;
                 if let ChannelState::CollaboratingFundingTx(flags) = state.state {
                     if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) {
-                        state.increment_local_commitment_number();
-                        self.handle_commitment_signed_command(myself, state).await?;
+                        if state.ephemeral_config.external_funding.enabled
+                            && !state.ephemeral_config.external_funding.signed_submitted
+                        {
+                            let funding_tx = state.must_get_funding_transaction().clone();
+                            self.enter_awaiting_external_funding(myself, state, funding_tx)?;
+                        } else {
+                            state.increment_local_commitment_number();
+                            self.handle_commitment_signed_command(myself, state).await?;
+                        }
                     }
                 }
                 Ok(())
@@ -587,6 +610,67 @@ where
                 // We're the one who sent tx_signature first, and we received a tx_signature message.
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
+
+                if state.ephemeral_config.external_funding.enabled
+                    && state.ephemeral_config.external_funding.signed_submitted
+                    && state
+                        .ephemeral_config
+                        .external_funding
+                        .funding_lock_script
+                        .is_some()
+                    && !state.should_local_send_tx_signatures_first()
+                {
+                    let Some(funding_tx) = state.funding_tx.clone() else {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Received TxSignatures message, but the channel's funding tx is none {:?}",
+                            state.state
+                        )));
+                    };
+                    let new_witnesses: Vec<_> = tx_signatures
+                        .witnesses
+                        .into_iter()
+                        .map(|x| x.pack())
+                        .collect();
+                    debug!(
+                        "Updating external funding tx witnesses of {:?} to {:?}",
+                        funding_tx.calc_tx_hash(),
+                        new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
+                    );
+                    state.funding_tx = Some(
+                        funding_tx
+                            .as_advanced_builder()
+                            .set_witnesses(new_witnesses.clone())
+                            .build()
+                            .data(),
+                    );
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                state.must_get_funding_transaction().clone(),
+                                state.must_get_funding_transaction_outpoint(),
+                                state.get_id(),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                state.get_remote_peer_id(),
+                                FiberMessage::tx_signatures(TxSignatures {
+                                    channel_id: state.get_id(),
+                                    witnesses: new_witnesses
+                                        .into_iter()
+                                        .map(|x| x.unpack())
+                                        .collect(),
+                                }),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    state.update_state(ChannelState::AwaitingChannelReady(
+                        AwaitingChannelReadyFlags::empty(),
+                    ));
+                    return Ok(());
+                }
 
                 if state.should_local_send_tx_signatures_first() {
                     let Some(funding_tx) = state.funding_tx.clone() else {
@@ -824,6 +908,8 @@ where
         state: &mut ChannelActorState,
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
+        let previous_remote_nonce = state.last_committed_remote_nonce.clone();
+        let next_commitment_nonce = commitment_signed.next_commitment_nonce.clone();
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
             error!(
@@ -844,7 +930,29 @@ where
         // so the closing transaction is symmetric with peer
         state.maybe_transfer_to_shutdown().await?;
 
-        if need_commitment_signed && !state.tlc_state.waiting_ack {
+        let should_reply_external_funding_handshake =
+            state.ephemeral_config.external_funding.enabled
+                && state.ephemeral_config.external_funding.signed_submitted
+                && matches!(
+                    state.state,
+                    ChannelState::SigningCommitment(flags)
+                        if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+                            && !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
+                );
+
+        if should_reply_external_funding_handshake && !state.tlc_state.waiting_ack {
+            let previous_remote_nonce = previous_remote_nonce.ok_or_else(|| {
+                ProcessingChannelError::InvalidState(
+                    "Missing previous remote nonce during external funding handshake".to_string(),
+                )
+            })?;
+            // Sign the current commitment round with the same remote nonce that was
+            // just used to verify the peer's signature. The received next nonce
+            // should only become active after our response is sent.
+            state.commit_remote_nonce(previous_remote_nonce);
+            self.handle_commitment_signed_command(myself, state).await?;
+            state.commit_remote_nonce(next_commitment_nonce);
+        } else if need_commitment_signed && !state.tlc_state.waiting_ack {
             self.handle_commitment_signed_command(myself, state).await?;
         }
 
@@ -2332,25 +2440,7 @@ where
             }
             ChannelCommand::NotifyEvent(event) => self.handle_event(myself, state, event).await,
             ChannelCommand::SetUnsignedFundingTx(tx) => {
-                // Store the unsigned funding transaction for external funding channels.
-                // This is called when the peer accepts the channel.
-                if !state.ephemeral_config.external_funding.enabled {
-                    return Err(ProcessingChannelError::InvalidState(
-                        "SetUnsignedFundingTx can only be used for external funding channels"
-                            .to_string(),
-                    ));
-                }
-                debug!(
-                    "Storing unsigned funding tx for external funding channel {:?}: {:?}",
-                    state.get_id(),
-                    tx.calc_tx_hash()
-                );
-                state.ephemeral_config.external_funding.unsigned_funding_tx = Some(tx);
-                state.ephemeral_config.external_funding.started_at = Some(SystemTime::now());
-                // Transition to AwaitingExternalFunding state
-                state.update_state(ChannelState::AwaitingExternalFunding);
-                self.schedule_external_funding_timeout_check(myself, state);
-                Ok(())
+                self.store_external_unsigned_funding_tx(myself, state, tx)
             }
             ChannelCommand::SubmitExternalFundingTx(signed_tx, reply) => {
                 match self
@@ -2385,35 +2475,17 @@ where
         }
     }
 
-    /// Handle the submission of a signed funding transaction for external funding channels.
-    /// This validates the signed tx, stores it, and initiates the commitment exchange with the peer.
-    async fn handle_submit_external_funding_tx(
+    fn validate_external_funding_signed_tx(
         &self,
-        _myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        signed_tx: Transaction,
+        state: &ChannelActorState,
+        signed_tx: &Transaction,
     ) -> Result<Hash256, ProcessingChannelError> {
-        if state.ephemeral_config.external_funding.signed_submitted {
-            return Err(ProcessingChannelError::RepeatedProcessing(
-                "Signed funding tx has already been submitted".to_string(),
-            ));
-        }
-        // Validate channel is in AwaitingExternalFunding state
-        if state.state != ChannelState::AwaitingExternalFunding {
-            return Err(ProcessingChannelError::InvalidState(format!(
-                "Expected channel in AwaitingExternalFunding state, but got {:?}",
-                state.state
-            )));
-        }
-
-        // Validate the channel is using external funding
         if !state.ephemeral_config.external_funding.enabled {
             return Err(ProcessingChannelError::InvalidState(
                 "Channel is not configured for external funding".to_string(),
             ));
         }
 
-        // Get the unsigned funding tx for comparison
         let unsigned_tx = state
             .ephemeral_config
             .external_funding
@@ -2425,12 +2497,9 @@ where
                 )
             })?;
 
-        // Validate that the signed tx has the same structure as the unsigned tx
-        // (same inputs and outputs, just with witnesses added)
         let unsigned_view = unsigned_tx.clone().into_view();
         let signed_view = signed_tx.clone().into_view();
 
-        // Check inputs match
         if unsigned_view.inputs().len() != signed_view.inputs().len() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Input count mismatch: unsigned has {}, signed has {}",
@@ -2453,7 +2522,6 @@ where
             }
         }
 
-        // Check outputs match
         if unsigned_view.outputs().len() != signed_view.outputs().len() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Output count mismatch: unsigned has {}, signed has {}",
@@ -2476,7 +2544,6 @@ where
             }
         }
 
-        // Check outputs_data match
         if unsigned_view.outputs_data().len() != signed_view.outputs_data().len() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Outputs data count mismatch: unsigned has {}, signed has {}",
@@ -2499,37 +2566,141 @@ where
             }
         }
 
-        // External funding v1 requires the submitted tx to already be final.
-        if !state.is_tx_final(&signed_tx)? {
+        if !state.is_tx_final(signed_tx)? {
             return Err(ProcessingChannelError::InvalidParameter(
                 "Signed funding transaction is not final for external funding".to_string(),
             ));
         }
 
-        let tx_hash: Hash256 = signed_view.hash().into();
+        Ok(signed_view.hash().into())
+    }
+
+    fn install_external_funding_signed_tx(
+        &self,
+        state: &mut ChannelActorState,
+        signed_tx: Transaction,
+        preserve_signing_state: bool,
+    ) {
+        state.funding_tx = Some(signed_tx);
+        state.ephemeral_config.external_funding.signed_submitted = true;
+        state.ephemeral_config.external_funding.started_at = None;
+        if !(preserve_signing_state && matches!(state.state, ChannelState::SigningCommitment(_))) {
+            state.update_state(ChannelState::CollaboratingFundingTx(
+                CollaboratingFundingTxFlags::COLLABORATION_COMPLETED,
+            ));
+        }
+    }
+
+    async fn handle_external_funding_tx_sync(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        signed_tx: Transaction,
+    ) -> Result<(), ProcessingChannelError> {
+        let tx_hash = self.validate_external_funding_signed_tx(state, &signed_tx)?;
+        debug!(
+            "Synchronized final signed funding tx for external funding channel {:?}: {:?}",
+            state.get_id(),
+            tx_hash
+        );
+        self.install_external_funding_signed_tx(state, signed_tx, false);
+        self.handle_commitment_signed_command(myself, state).await?;
+        Ok(())
+    }
+
+    /// Handle the submission of a signed funding transaction for external funding channels.
+    /// This validates the signed tx, stores it, and initiates the commitment exchange with the peer.
+    async fn handle_submit_external_funding_tx(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        signed_tx: Transaction,
+    ) -> Result<Hash256, ProcessingChannelError> {
+        if state.ephemeral_config.external_funding.signed_submitted {
+            return Err(ProcessingChannelError::RepeatedProcessing(
+                "Signed funding tx has already been submitted".to_string(),
+            ));
+        }
+        // During external funding, the peer may send CommitmentSigned before the user
+        // submits the externally signed funding tx. We allow that early message to move
+        // us into SigningCommitment(THEIR_COMMITMENT_SIGNED_SENT), then continue from there.
+        let can_submit = matches!(
+            state.state,
+            ChannelState::AwaitingExternalFunding
+                | ChannelState::SigningCommitment(
+                    SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT
+                )
+        );
+        if !can_submit {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Expected channel in AwaitingExternalFunding-compatible state, but got {:?}",
+                state.state
+            )));
+        }
+
+        let tx_hash = self.validate_external_funding_signed_tx(state, &signed_tx)?;
         debug!(
             "Validated signed funding tx for external funding channel {:?}: {:?}",
             state.get_id(),
             tx_hash
         );
 
-        // Store the signed funding tx and start funding tx collaboration with peer.
-        // We must send TxUpdate/TxComplete so the peer uses the same funding tx,
-        // otherwise it will construct its own tx and fail verification.
-        state.funding_tx = Some(signed_tx.clone());
-        state.ephemeral_config.external_funding.signed_submitted = true;
-        state.ephemeral_config.external_funding.started_at = None;
-        state.update_state(ChannelState::CollaboratingFundingTx(
-            CollaboratingFundingTxFlags::empty(),
-        ));
-        self.handle_tx_collaboration_command(
-            state,
-            TxCollaborationCommand::TxUpdate(TxUpdateCommand {
-                transaction: signed_tx,
-            }),
-        )?;
+        self.install_external_funding_signed_tx(state, signed_tx.clone(), true);
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    state.get_remote_peer_id(),
+                    FiberMessage::tx_update(TxUpdate {
+                        channel_id: state.get_id(),
+                        tx: signed_tx,
+                    }),
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        if matches!(state.state, ChannelState::SigningCommitment(_)) {
+            self.handle_commitment_signed_command(myself, state).await?;
+        }
 
         Ok(tx_hash)
+    }
+
+    fn store_external_unsigned_funding_tx(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tx: Transaction,
+    ) -> Result<(), ProcessingChannelError> {
+        if !state.ephemeral_config.external_funding.enabled {
+            return Err(ProcessingChannelError::InvalidState(
+                "SetUnsignedFundingTx can only be used for external funding channels".to_string(),
+            ));
+        }
+        debug!(
+            "Storing unsigned funding tx for external funding channel {:?}: {:?}",
+            state.get_id(),
+            tx.calc_tx_hash()
+        );
+        state.ephemeral_config.external_funding.unsigned_funding_tx = Some(tx);
+        state.ephemeral_config.external_funding.started_at = Some(SystemTime::now());
+        state.update_state(ChannelState::AwaitingExternalFunding);
+        self.schedule_external_funding_timeout_check(myself, state);
+        Ok(())
+    }
+
+    fn enter_awaiting_external_funding(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tx: Transaction,
+    ) -> Result<(), ProcessingChannelError> {
+        state.increment_local_commitment_number();
+        self.store_external_unsigned_funding_tx(myself, state, tx.clone())?;
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ExternalFundingTxReady(state.get_id(), tx),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        Ok(())
     }
 
     pub async fn handle_event(
@@ -2888,6 +3059,16 @@ where
                 );
                 state.check_accept_channel_parameters()?;
 
+                // If the peer is using external funding, mark this channel accordingly
+                // so we wait for them to sign and submit the funding transaction.
+                if open_channel.is_external_funding() {
+                    state.ephemeral_config.external_funding.enabled = true;
+                    debug!(
+                        "Channel {:?} accepted with external funding from peer {:?}",
+                        channel_id, peer_id
+                    );
+                }
+
                 let channel_announcement_nonce = if public {
                     Some(state.get_channel_announcement_musig2_pubnonce())
                 } else {
@@ -3101,6 +3282,7 @@ where
                     funding_udt_type_script,
                     shutdown_script,
                     funding_lock_script,
+                    funding_lock_script_cell_deps,
                     channel_id_sender,
                     commitment_fee_rate,
                     commitment_delay_epoch,
@@ -3158,6 +3340,10 @@ where
                     .ephemeral_config
                     .external_funding
                     .funding_lock_script = Some(funding_lock_script);
+                channel
+                    .ephemeral_config
+                    .external_funding
+                    .funding_lock_script_cell_deps = funding_lock_script_cell_deps;
 
                 check_open_channel_parameters(
                     &channel.funding_udt_type_script,
@@ -3169,11 +3355,15 @@ where
                     channel.local_constraints.max_tlc_number_in_flight,
                 )?;
 
-                let channel_flags = if public {
+                let mut channel_flags = if public {
                     ChannelFlags::PUBLIC
                 } else {
                     ChannelFlags::empty()
                 };
+                // Mark this as an external funding channel so the peer knows
+                // to wait for the user to sign the funding transaction.
+                channel_flags.insert(ChannelFlags::EXTERNAL_FUNDING);
+
                 let channel_announcement_nonce = if public {
                     Some(channel.get_channel_announcement_musig2_pubnonce())
                 } else {
@@ -4525,6 +4715,9 @@ bitflags! {
     pub struct ChannelFlags: u8 {
         const PUBLIC = 1;
         const ONE_WAY = 1 << 1;
+        /// Indicates that the channel uses external funding, where the funding
+        /// transaction is signed by the user rather than the node.
+        const EXTERNAL_FUNDING = 1 << 2;
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -6989,6 +7182,12 @@ impl ChannelActorState {
                     )));
                 }
             }
+            ChannelState::AwaitingExternalFunding
+                if self.ephemeral_config.external_funding.enabled
+                    && !self.ephemeral_config.external_funding.signed_submitted =>
+            {
+                CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
+            }
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Unable to verify commitment signed message in state {:?}",
@@ -7109,6 +7308,37 @@ impl ChannelActorState {
             self.update_state(ChannelState::AwaitingTxSignatures(
                 flags | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT,
             ));
+        }
+
+        if self.ephemeral_config.external_funding.enabled
+            && self.ephemeral_config.external_funding.signed_submitted
+            && self
+                .ephemeral_config
+                .external_funding
+                .funding_lock_script
+                .is_some()
+            && partial_witnesses.is_none()
+        {
+            let witnesses = funding_tx
+                .witnesses()
+                .into_iter()
+                .map(|x| x.unpack())
+                .collect::<Vec<_>>();
+            self.network()
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        self.get_remote_peer_id(),
+                        FiberMessage::tx_signatures(TxSignatures {
+                            channel_id: self.get_id(),
+                            witnesses,
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            self.update_state(ChannelState::AwaitingTxSignatures(
+                flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
+            ));
+            return Ok(());
         }
 
         self.network()
@@ -8343,7 +8573,9 @@ impl ChannelActorState {
         if !self.can_abort_funding_on_timeout() {
             return false;
         }
-        let (started_at, timeout_seconds) = if self.state == ChannelState::AwaitingExternalFunding {
+        let waiting_for_external_submission = self.ephemeral_config.external_funding.enabled
+            && !self.ephemeral_config.external_funding.signed_submitted;
+        let (started_at, timeout_seconds) = if waiting_for_external_submission {
             (
                 self.ephemeral_config
                     .external_funding

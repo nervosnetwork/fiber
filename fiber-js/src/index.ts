@@ -119,9 +119,20 @@ class Fiber {
     async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
         return await this.invokeCommand("open_channel", [params]);
     }
+    /**
+     * Open a channel with external funding and return the final negotiated unsigned
+     * funding transaction. The caller should sign this tx once, without changing its
+     * structure, then submit it with submitSignedFundingTx. When `funding_lock_script`
+     * uses a custom wallet lock, pass `funding_lock_script_cell_deps` so the node can
+     * build the initial unsigned transaction.
+     */
     async openChannelWithExternalFunding(params: OpenChannelWithExternalFundingParams): Promise<OpenChannelWithExternalFundingResult> {
         return await this.invokeCommand("open_channel_with_external_funding", [params]);
     }
+    /**
+     * Submit the externally signed funding transaction. The transaction must match the
+     * unsigned_funding_tx returned by openChannelWithExternalFunding, except witnesses.
+     */
     async submitSignedFundingTx(params: SubmitSignedFundingTxParams): Promise<SubmitSignedFundingTxResult> {
         return await this.invokeCommand("submit_signed_funding_tx", [params]);
     }

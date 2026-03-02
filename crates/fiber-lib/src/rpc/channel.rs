@@ -17,7 +17,7 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
-use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
+use ckb_jsonrpc_types::{CellDep, EpochNumberWithFraction, Script};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
     packed::{self, OutPoint},
@@ -407,6 +407,10 @@ pub struct OpenChannelWithExternalFundingParams {
     /// to build the funding transaction. The user must be able to sign for this lock script.
     pub funding_lock_script: Script,
 
+    /// Optional extra cell deps required by `funding_lock_script`.
+    /// This is useful for custom wallet lock scripts whose deps are not part of the genesis defaults.
+    pub funding_lock_script_cell_deps: Option<Vec<CellDep>>,
+
     /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
 
@@ -527,8 +531,9 @@ trait ChannelRpc {
     /// This is useful when the user wants to fund a channel from an external wallet
     /// rather than having the node sign with its internal key.
     ///
-    /// Returns a final unsigned funding transaction that the user must sign and submit
-    /// using `submit_signed_funding_tx` without changing transaction structure.
+    /// Returns the final unsigned funding transaction after internal tx collaboration
+    /// has frozen the structure. The user must sign it and submit it with
+    /// `submit_signed_funding_tx` without changing the transaction structure.
     #[method(name = "open_channel_with_external_funding")]
     async fn open_channel_with_external_funding(
         &self,
@@ -538,8 +543,8 @@ trait ChannelRpc {
     /// Submits a signed funding transaction for an externally funded channel.
     ///
     /// After calling `open_channel_with_external_funding`, the user signs the returned
-    /// final unsigned transaction with their wallet and submits it here. The signed
-    /// transaction should be directly broadcastable and will not be structurally modified.
+    /// final negotiated unsigned transaction with their wallet and submits it here.
+    /// The signed transaction should be directly broadcastable and will not be structurally modified.
     #[method(name = "submit_signed_funding_tx")]
     async fn submit_signed_funding_tx(
         &self,
@@ -1014,6 +1019,13 @@ where
                     public: params.public.unwrap_or(true),
                     shutdown_script: params.shutdown_script.clone().into(),
                     funding_lock_script: params.funding_lock_script.clone().into(),
+                    funding_lock_script_cell_deps: params
+                        .funding_lock_script_cell_deps
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch
                         .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),

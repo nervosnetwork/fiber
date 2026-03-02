@@ -6471,6 +6471,7 @@ async fn open_external_funding_channel(
                 public: false,
                 shutdown_script: Script::default(),
                 funding_lock_script: Script::default(),
+                funding_lock_script_cell_deps: Vec::new(),
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
@@ -6604,9 +6605,91 @@ async fn test_submit_signed_funding_tx() {
             ChannelState::CollaboratingFundingTx(_)
                 | ChannelState::SigningCommitment(_)
                 | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
         ),
         "channel should have progressed beyond AwaitingExternalFunding, got {:?}",
         state.state
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_unblocks_acceptor_commitment_handshake() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let funding_amount: u128 = 100_000_000_000;
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, funding_amount).await;
+
+    let signed_tx: Transaction = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+    for _ in 0..20 {
+        let node_a_state = node_a.get_channel_actor_state(channel_id);
+        if matches!(node_a_state.state, ChannelState::AwaitingChannelReady(_)) {
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(
+            node_a_state.state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        ),
+        "initiator should progress beyond commitment signing after external funding submit, got {:?}",
+        node_a_state.state
+    );
+
+    for _ in 0..40 {
+        let node_b_ready =
+            node_b
+                .store
+                .get_channel_states(None)
+                .into_iter()
+                .any(|(_, _, state)| {
+                    matches!(
+                        state,
+                        ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+                    )
+                });
+        if node_b_ready {
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    let node_b_states = node_b.store.get_channel_states(None);
+    assert!(
+        node_b_states
+            .iter()
+            .any(|(_, _, state)| {
+                matches!(state, ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady)
+            }),
+        "acceptor should also progress beyond commitment signing after external funding submit, got {:?}",
+        node_b_states
+            .into_iter()
+            .map(|(_, _, state)| state)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -6820,6 +6903,7 @@ async fn test_external_funding_invalid_tlc_expiry_delta() {
                 public: false,
                 shutdown_script: Script::default(),
                 funding_lock_script: Script::default(),
+                funding_lock_script_cell_deps: Vec::new(),
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
@@ -6865,6 +6949,7 @@ async fn test_external_funding_invalid_commitment_delay() {
                 public: false,
                 shutdown_script: Script::default(),
                 funding_lock_script: Script::default(),
+                funding_lock_script_cell_deps: Vec::new(),
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
                 commitment_delay_epoch: Some(too_small_epoch),
@@ -6909,6 +6994,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
                     public: false,
                     shutdown_script: Script::default(),
                     funding_lock_script: Script::default(),
+                    funding_lock_script_cell_deps: Vec::new(),
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     commitment_delay_epoch: None,

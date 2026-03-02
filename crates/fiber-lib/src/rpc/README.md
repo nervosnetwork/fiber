@@ -368,8 +368,9 @@ Opens a channel with external funding. The node will negotiate the channel with 
  This is useful when the user wants to fund a channel from an external wallet
  rather than having the node sign with its internal key.
 
- Returns a final unsigned funding transaction that the user must sign and submit
- using `submit_signed_funding_tx` without changing transaction structure.
+ Returns the final unsigned funding transaction after internal tx collaboration
+ has frozen the structure. The user must sign it and submit it with
+ `submit_signed_funding_tx` without changing the transaction structure.
 
 ##### Params
 
@@ -380,6 +381,8 @@ Opens a channel with external funding. The node will negotiate the channel with 
 * `shutdown_script` - <em>`Script`</em>, The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
 * `funding_lock_script` - <em>`Script`</em>, The lock script that controls the funding cells. The node will collect cells with this lock script
  to build the funding transaction. The user must be able to sign for this lock script.
+* `funding_lock_script_cell_deps` - <em>`Option<Vec<CellDep>>`</em>, Optional extra cell deps required by `funding_lock_script`.
+ This is useful for custom wallet lock scripts whose deps are not part of the genesis defaults.
 * `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
 * `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
 * `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.
@@ -415,8 +418,8 @@ Opens a channel with external funding. The node will negotiate the channel with 
 Submits a signed funding transaction for an externally funded channel.
 
  After calling `open_channel_with_external_funding`, the user signs the returned
- final unsigned transaction with their wallet and submits it here. The signed
- transaction should be directly broadcastable and will not be structurally modified.
+ final negotiated unsigned transaction with their wallet and submits it here.
+ The signed transaction should be directly broadcastable and will not be structurally modified.
 
 ##### Params
 

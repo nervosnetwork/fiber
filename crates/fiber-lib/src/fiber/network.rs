@@ -2,7 +2,7 @@ use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
-use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
+use ckb_types::packed::{self, Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
@@ -438,6 +438,8 @@ pub struct OpenChannelWithExternalFundingCommand {
     pub shutdown_script: Script,
     /// The lock script that controls the funding cells (user's wallet lock script).
     pub funding_lock_script: Script,
+    /// Optional extra cell deps required to use `funding_lock_script`.
+    pub funding_lock_script_cell_deps: Vec<packed::CellDep>,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
@@ -628,6 +630,8 @@ pub enum NetworkActorEvent {
         remote_funding_amount: u128,
         /// The lock script of the user's wallet, used to collect input cells.
         funding_source_lock_script: Script,
+        /// Optional extra deps required by the user's funding lock script.
+        funding_source_lock_script_cell_deps: Vec<packed::CellDep>,
         /// The 2-of-2 multisig lock script for the funding cell output.
         funding_cell_lock_script: Script,
         funding_udt_type_script: Option<Script>,
@@ -635,6 +639,9 @@ pub enum NetworkActorEvent {
         remote_reserved_ckb_amount: u64,
         funding_fee_rate: u64,
     },
+    /// The final unsigned external funding transaction has been negotiated and is ready
+    /// for the user to sign without changing its structure.
+    ExternalFundingTxReady(Hash256, Transaction),
     /// A channel is ready to use.
     ChannelReady(Hash256, Pubkey, OutPoint),
     /// A channel is going to be closed, waiting the closing transaction to be broadcasted and confirmed.
@@ -1180,6 +1187,7 @@ where
                 funding_amount,
                 remote_funding_amount,
                 funding_source_lock_script,
+                funding_source_lock_script_cell_deps,
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 local_reserved_ckb_amount,
@@ -1206,7 +1214,8 @@ where
                     }
                 }
 
-                // Get the pending reply - it could be under old_channel_id or new_channel_id
+                // Move the pending reply to the final channel id. The actual RPC response is
+                // sent only after tx collaboration finishes and the unsigned tx is frozen.
                 let reply = state
                     .pending_external_funding_replies
                     .remove(&old_channel_id)
@@ -1217,7 +1226,8 @@ where
                     });
 
                 if let Some(reply) = reply {
-                    // Build the unsigned funding transaction
+                    // Build the local unsigned tx with the original external funding builder
+                    // so funding source lock and funding cell lock can differ.
                     let request = FundingRequest {
                         script: funding_source_lock_script.clone(),
                         udt_type_script: funding_udt_type_script,
@@ -1229,12 +1239,9 @@ where
                     };
 
                     let funding_tx = FundingTx::new();
-
-                    // Create a oneshot channel for the reply
                     let (send, recv) = oneshot::channel::<Result<FundingTx, FundingError>>();
                     let rpc_reply = RpcReplyPort::from(send);
 
-                    // Send the message to build the unsigned funding tx
                     let _ =
                         state
                             .chain_actor
@@ -1242,11 +1249,11 @@ where
                                 funding_tx,
                                 request,
                                 funding_source_lock_script,
+                                funding_source_lock_script_cell_deps,
                                 funding_cell_lock_script,
                                 reply: rpc_reply,
                             });
 
-                    // Wait for the result
                     match ractor::concurrency::timeout(
                         Duration::from_millis(DEFAULT_CHAIN_ACTOR_TIMEOUT),
                         recv,
@@ -1256,35 +1263,38 @@ where
                         Ok(Ok(Ok(built_tx))) => {
                             if let Some(tx) = built_tx.into_inner() {
                                 debug!(
-                                    "Built unsigned funding tx for external funding channel {:?}: {:?}",
+                                    "Starting external funding tx collaboration for channel {:?} with locally built tx {:?}",
                                     new_channel_id,
                                     tx.hash()
                                 );
-
-                                // Store the unsigned tx in the channel actor state
+                                state
+                                    .pending_external_funding_replies
+                                    .insert(new_channel_id, reply);
                                 if let Err(e) = state
                                     .send_command_to_channel(
                                         new_channel_id,
-                                        ChannelCommand::SetUnsignedFundingTx(tx.data()),
+                                        ChannelCommand::TxCollaborationCommand(
+                                            TxCollaborationCommand::TxUpdate(TxUpdateCommand {
+                                                transaction: tx.data(),
+                                            }),
+                                        ),
                                     )
                                     .await
                                 {
                                     error!(
-                                        "Failed to store unsigned funding tx in channel: {:?}",
+                                        "Failed to start external funding tx collaboration: {:?}",
                                         e
                                     );
-                                    let _ = reply.send(Err(format!(
-                                        "Failed to store unsigned funding tx: {}",
-                                        e
-                                    )));
-                                    return Ok(());
+                                    if let Some(reply) = state
+                                        .pending_external_funding_replies
+                                        .remove(&new_channel_id)
+                                    {
+                                        let _ = reply.send(Err(format!(
+                                            "Failed to start external funding tx collaboration: {}",
+                                            e
+                                        )));
+                                    }
                                 }
-
-                                // Send the response
-                                let _ = reply.send(Ok(OpenChannelWithExternalFundingResponse {
-                                    channel_id: new_channel_id,
-                                    unsigned_funding_tx: tx.data(),
-                                }));
                             } else {
                                 error!(
                                     "Built funding tx is empty for channel {:?}",
@@ -1323,6 +1333,24 @@ where
                     warn!(
                         "No pending reply found for external funding channel {:?} (old: {:?})",
                         new_channel_id, old_channel_id
+                    );
+                }
+            }
+            NetworkActorEvent::ExternalFundingTxReady(channel_id, funding_tx) => {
+                if let Some(reply) = state.pending_external_funding_replies.remove(&channel_id) {
+                    debug!(
+                        "Returning negotiated unsigned external funding tx for channel {:?}: {:?}",
+                        channel_id,
+                        funding_tx.calc_tx_hash()
+                    );
+                    let _ = reply.send(Ok(OpenChannelWithExternalFundingResponse {
+                        channel_id,
+                        unsigned_funding_tx: funding_tx,
+                    }));
+                } else {
+                    warn!(
+                        "No pending external funding reply found when tx became ready for channel {:?}",
+                        channel_id
                     );
                 }
             }
@@ -3703,6 +3731,7 @@ where
             public,
             shutdown_script,
             funding_lock_script,
+            funding_lock_script_cell_deps,
             funding_udt_type_script,
             commitment_fee_rate,
             commitment_delay_epoch,
@@ -3766,6 +3795,7 @@ where
                         funding_udt_type_script,
                         shutdown_script,
                         funding_lock_script,
+                        funding_lock_script_cell_deps,
                         channel_id_sender: tx,
                         commitment_fee_rate,
                         commitment_delay_epoch,

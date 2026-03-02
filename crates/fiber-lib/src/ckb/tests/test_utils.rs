@@ -659,6 +659,7 @@ impl Actor for MockChainActor {
                 funding_tx,
                 request,
                 funding_source_lock_script: _,
+                funding_source_lock_script_cell_deps: _,
                 funding_cell_lock_script,
                 reply,
             } => {

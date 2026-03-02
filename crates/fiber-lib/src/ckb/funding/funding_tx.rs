@@ -164,8 +164,27 @@ pub struct ExternalFundingContext {
     pub rpc_url: String,
     /// The lock script of the cells to use for funding (user's wallet lock script)
     pub funding_source_lock_script: packed::Script,
+    /// Optional extra deps required by `funding_source_lock_script`.
+    pub funding_source_lock_script_cell_deps: Vec<packed::CellDep>,
     /// The lock script of the funding cell (channel multisig lock)
     pub funding_cell_lock_script: packed::Script,
+}
+
+struct ExternalFundingCellDepResolver {
+    default: DefaultCellDepResolver,
+    funding_source_lock_script: packed::Script,
+    funding_source_lock_script_cell_dep: Option<packed::CellDep>,
+}
+
+impl CellDepResolver for ExternalFundingCellDepResolver {
+    fn resolve(&self, script: &Script) -> Option<packed::CellDep> {
+        if script == &self.funding_source_lock_script {
+            if let Some(cell_dep) = &self.funding_source_lock_script_cell_dep {
+                return Some(cell_dep.clone());
+            }
+        }
+        self.default.resolve(script)
+    }
 }
 
 /// Collect UDT inputs and build change outputs for funding transactions.
@@ -326,6 +345,7 @@ async fn build_and_balance_tx<T: TxBuilder>(
     builder: &T,
     rpc_url: &str,
     funding_source_lock_script: &packed::Script,
+    funding_source_lock_script_cell_deps: &[packed::CellDep],
     funding_fee_rate: u64,
     live_cells_exclusion_map: &mut LiveCellsExclusionMap,
 ) -> Result<TransactionView, FundingError> {
@@ -370,6 +390,11 @@ async fn build_and_balance_tx<T: TxBuilder>(
                 ))
             }
         }
+    };
+    let cell_dep_resolver = ExternalFundingCellDepResolver {
+        default: cell_dep_resolver,
+        funding_source_lock_script: funding_source_lock_script.clone(),
+        funding_source_lock_script_cell_dep: funding_source_lock_script_cell_deps.first().cloned(),
     };
 
     let header_dep_resolver = DefaultHeaderDepResolver::new(rpc_url);
@@ -522,6 +547,7 @@ impl FundingTxBuilder {
             &self,
             &self.context.rpc_url,
             &self.context.funding_source_lock_script,
+            &[],
             self.request.funding_fee_rate,
             live_cells_exclusion_map,
         )
@@ -571,19 +597,42 @@ impl TxBuilder for ExternalFundingTxBuilder {
 }
 
 impl ExternalFundingTxBuilder {
+    fn with_extra_cell_deps(&self, tx: TransactionView) -> TransactionView {
+        if self.context.funding_source_lock_script_cell_deps.is_empty() {
+            return tx;
+        }
+
+        let mut cell_deps: Vec<_> = tx.cell_deps_iter().collect();
+        for cell_dep in &self.context.funding_source_lock_script_cell_deps {
+            if !cell_deps.contains(cell_dep) {
+                cell_deps.push(cell_dep.clone());
+            }
+        }
+
+        tx.as_advanced_builder().set_cell_deps(cell_deps).build()
+    }
+
     fn build_funding_cell(&self) -> Result<(packed::CellOutput, packed::Bytes), FundingError> {
+        let remote_funded = self
+            .funding_tx
+            .tx
+            .as_ref()
+            .map(|tx| !tx.outputs().is_empty())
+            .unwrap_or(false);
+
         match self.request.udt_type_script {
             Some(ref udt_type_script) => {
-                let udt_amount = self
-                    .request
-                    .local_amount
-                    .checked_add(self.request.remote_amount)
-                    .ok_or(FundingError::OverflowError)?;
-                let ckb_amount = self
-                    .request
-                    .local_reserved_ckb_amount
-                    .checked_add(self.request.remote_reserved_ckb_amount)
-                    .ok_or(FundingError::OverflowError)?;
+                let mut udt_amount = self.request.local_amount;
+                let mut ckb_amount = self.request.local_reserved_ckb_amount;
+
+                if remote_funded {
+                    udt_amount = udt_amount
+                        .checked_add(self.request.remote_amount)
+                        .ok_or(FundingError::OverflowError)?;
+                    ckb_amount = ckb_amount
+                        .checked_add(self.request.remote_reserved_ckb_amount)
+                        .ok_or(FundingError::OverflowError)?;
+                }
 
                 let udt_output = packed::CellOutput::new_builder()
                     .capacity(Capacity::shannons(ckb_amount).pack())
@@ -599,13 +648,21 @@ impl ExternalFundingTxBuilder {
             None => {
                 let local_amount = u64::try_from(self.request.local_amount)
                     .map_err(|_| FundingError::OverflowError)?;
-                let remote_amount = u64::try_from(self.request.remote_amount)
-                    .map_err(|_| FundingError::OverflowError)?;
-                let ckb_amount = local_amount
+                let mut ckb_amount = local_amount
                     .checked_add(self.request.local_reserved_ckb_amount)
-                    .and_then(|amount| amount.checked_add(remote_amount))
-                    .and_then(|amount| amount.checked_add(self.request.remote_reserved_ckb_amount))
                     .ok_or(FundingError::OverflowError)?;
+
+                if remote_funded {
+                    let remote_amount = u64::try_from(self.request.remote_amount)
+                        .map_err(|_| FundingError::OverflowError)?;
+                    ckb_amount = ckb_amount
+                        .checked_add(remote_amount)
+                        .and_then(|amount| {
+                            amount.checked_add(self.request.remote_reserved_ckb_amount)
+                        })
+                        .ok_or(FundingError::OverflowError)?;
+                }
+
                 let ckb_output = packed::CellOutput::new_builder()
                     .capacity(Capacity::shannons(ckb_amount).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
@@ -625,10 +682,12 @@ impl ExternalFundingTxBuilder {
             &self,
             &self.context.rpc_url,
             &self.context.funding_source_lock_script,
+            &self.context.funding_source_lock_script_cell_deps,
             self.request.funding_fee_rate,
             live_cells_exclusion_map,
         )
         .await?;
+        let tx = self.with_extra_cell_deps(tx);
         debug!("built unsigned funding tx: {:?}", tx);
         Ok(finalize_funding_tx_update(
             self.funding_tx,
@@ -916,6 +975,7 @@ mod tests {
         ExternalFundingContext {
             rpc_url: String::new(),
             funding_source_lock_script: script.clone(),
+            funding_source_lock_script_cell_deps: Vec::new(),
             funding_cell_lock_script: script,
         }
     }
@@ -941,11 +1001,10 @@ mod tests {
 
         let (output, data) = builder.build_funding_cell().expect("build funding cell");
 
-        // For CKB channels: capacity = local_amount + remote_amount + local_reserved + remote_reserved
-        let expected_capacity: u64 = request.local_amount as u64
-            + request.remote_amount as u64
-            + request.local_reserved_ckb_amount
-            + request.remote_reserved_ckb_amount;
+        // First round only includes the local contribution. The remote contribution is added
+        // later during tx collaboration.
+        let expected_capacity: u64 =
+            request.local_amount as u64 + request.local_reserved_ckb_amount;
         let actual_capacity: u64 = output.capacity().unpack();
         assert_eq!(actual_capacity, expected_capacity);
 
@@ -985,9 +1044,8 @@ mod tests {
 
         let (output, data) = builder.build_funding_cell().expect("build funding cell");
 
-        // For UDT channels: capacity = local_reserved + remote_reserved
-        let expected_capacity =
-            request.local_reserved_ckb_amount + request.remote_reserved_ckb_amount;
+        // First round only includes the local reserved capacity.
+        let expected_capacity = request.local_reserved_ckb_amount;
         let actual_capacity: u64 = output.capacity().unpack();
         assert_eq!(actual_capacity, expected_capacity);
 
@@ -1000,13 +1058,106 @@ mod tests {
             udt_type_script
         );
 
-        // Data should contain the total UDT amount (16 bytes, little-endian)
-        let expected_udt_amount: u128 = request.local_amount + request.remote_amount;
+        // First round only includes the local UDT amount.
+        let expected_udt_amount: u128 = request.local_amount;
         let data_bytes = data.raw_data();
         assert_eq!(data_bytes.len(), 16);
         let mut amount_bytes = [0u8; 16];
         amount_bytes.copy_from_slice(&data_bytes[..16]);
         assert_eq!(u128::from_le_bytes(amount_bytes), expected_udt_amount);
+    }
+
+    #[test]
+    fn test_external_funding_build_ckb_funding_cell_after_remote_added() {
+        let context = dummy_external_context();
+        let request = FundingRequest {
+            script: Script::default(),
+            udt_type_script: None,
+            local_amount: 100_000_000_000,
+            remote_amount: 50_000_000_000,
+            funding_fee_rate: 1000,
+            local_reserved_ckb_amount: 6_200_000_000,
+            remote_reserved_ckb_amount: 6_200_000_000,
+        };
+        let existing_funding_output = packed::CellOutput::new_builder()
+            .capacity(
+                Capacity::shannons(request.local_amount as u64 + request.local_reserved_ckb_amount)
+                    .pack(),
+            )
+            .lock(context.funding_cell_lock_script.clone())
+            .build();
+        let existing_tx = packed::Transaction::default()
+            .as_advanced_builder()
+            .set_outputs(vec![existing_funding_output])
+            .set_outputs_data(vec![packed::Bytes::default()])
+            .build();
+        let builder = ExternalFundingTxBuilder {
+            funding_tx: existing_tx.into(),
+            request: request.clone(),
+            context: context.clone(),
+        };
+
+        let (output, data) = builder.build_funding_cell().expect("build funding cell");
+        let expected_capacity: u64 = request.local_amount as u64
+            + request.remote_amount as u64
+            + request.local_reserved_ckb_amount
+            + request.remote_reserved_ckb_amount;
+        let actual_capacity: u64 = output.capacity().unpack();
+        assert_eq!(actual_capacity, expected_capacity);
+        assert_eq!(output.lock(), context.funding_cell_lock_script);
+        assert_eq!(data, packed::Bytes::default());
+    }
+
+    #[test]
+    fn test_external_funding_build_udt_funding_cell_after_remote_added() {
+        let context = dummy_external_context();
+        let udt_type_script = Script::new_builder()
+            .code_hash(packed::Byte32::from_slice(&[1u8; 32]).unwrap())
+            .hash_type(packed::Byte::new(0))
+            .build();
+        let request = FundingRequest {
+            script: Script::default(),
+            udt_type_script: Some(udt_type_script.clone()),
+            local_amount: 1_000_000,
+            remote_amount: 500_000,
+            funding_fee_rate: 1000,
+            local_reserved_ckb_amount: 14_200_000_000,
+            remote_reserved_ckb_amount: 14_200_000_000,
+        };
+        let existing_funding_output = packed::CellOutput::new_builder()
+            .capacity(Capacity::shannons(request.local_reserved_ckb_amount).pack())
+            .type_(Some(udt_type_script.clone()).pack())
+            .lock(context.funding_cell_lock_script.clone())
+            .build();
+        let existing_tx = packed::Transaction::default()
+            .as_advanced_builder()
+            .set_outputs(vec![existing_funding_output])
+            .set_outputs_data(vec![request.local_amount.to_le_bytes().to_vec().pack()])
+            .build();
+        let builder = ExternalFundingTxBuilder {
+            funding_tx: existing_tx.into(),
+            request: request.clone(),
+            context,
+        };
+
+        let (output, data) = builder.build_funding_cell().expect("build funding cell");
+        let expected_capacity =
+            request.local_reserved_ckb_amount + request.remote_reserved_ckb_amount;
+        let actual_capacity: u64 = output.capacity().unpack();
+        assert_eq!(actual_capacity, expected_capacity);
+        assert_eq!(
+            output.type_().to_opt().expect("has type script"),
+            udt_type_script
+        );
+
+        let data_bytes = data.raw_data();
+        assert_eq!(data_bytes.len(), 16);
+        let mut amount_bytes = [0u8; 16];
+        amount_bytes.copy_from_slice(&data_bytes[..16]);
+        assert_eq!(
+            u128::from_le_bytes(amount_bytes),
+            request.local_amount + request.remote_amount
+        );
     }
 
     #[test]
@@ -1049,16 +1200,26 @@ mod tests {
         // UDT amounts that overflow u128
         let request = FundingRequest {
             script: Script::default(),
-            udt_type_script: Some(udt_type_script),
+            udt_type_script: Some(udt_type_script.clone()),
             local_amount: u128::MAX,
             remote_amount: 1,
             funding_fee_rate: 1000,
             local_reserved_ckb_amount: 14_200_000_000,
             remote_reserved_ckb_amount: 14_200_000_000,
         };
+        let existing_funding_output = packed::CellOutput::new_builder()
+            .capacity(Capacity::shannons(request.local_reserved_ckb_amount).pack())
+            .type_(Some(udt_type_script.clone()).pack())
+            .lock(context.funding_cell_lock_script.clone())
+            .build();
+        let existing_tx = packed::Transaction::default()
+            .as_advanced_builder()
+            .set_outputs(vec![existing_funding_output])
+            .set_outputs_data(vec![request.local_amount.to_le_bytes().to_vec().pack()])
+            .build();
 
         let builder = ExternalFundingTxBuilder {
-            funding_tx: FundingTx::new(),
+            funding_tx: existing_tx.into(),
             request,
             context,
         };
