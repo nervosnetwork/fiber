@@ -56,7 +56,13 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 rpc_post() {
   local url="$1"
   local payload_file="$2"
-  curl -sS -X POST -H "Content-Type: application/json" --data @"$payload_file" "$url"
+  local response
+  response="$(curl --fail-with-body -sS -X POST -H "Content-Type: application/json" --data @"$payload_file" "$url")"
+  if [[ -z "${response//[[:space:]]/}" ]]; then
+    echo "Empty RPC response from $url (payload: $(basename "$payload_file"))" >&2
+    return 1
+  fi
+  printf '%s' "$response"
 }
 
 echo "[external-funding-open] connect node1 -> node3"

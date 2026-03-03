@@ -16,7 +16,7 @@ This test validates a success-only scenario:
 - Wait funding tx `committed`, then wait channel state to become `ChannelReady`.
 - Check balances after open:
   - node1 unchanged;
-  - node3 unchanged;
+  - node3 unchanged or lower (temporary reserved capacity is possible);
   - node2 decreased (funding amount + fee).
 - Node3 generates an invoice, node1 pays node3 over fiber.
 - Node1 initiates `shutdown_channel` with node2 `close_script`.

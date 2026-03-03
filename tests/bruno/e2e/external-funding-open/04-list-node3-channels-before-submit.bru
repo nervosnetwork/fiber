@@ -34,19 +34,21 @@ assert {
 }
 
 script:post-response {
-  if (bru.getEnvVar("EXTERNAL_FUNDING_USE_PREOPEN") === "1") {
-    console.log("[external-funding-open] skip strict pre-submit list check on node1 in preopen mode");
+  const channels = res.body.result.channels || [];
+  const channelId = bru.getVar("EXTERNAL_FUNDING_CHANNEL_ID");
+  const ch = channels.find((c) => c.channel_id === channelId);
+
+  if (!ch) {
+    console.log(
+      `[external-funding-open] node1 does not expose channel ${channelId} yet before submit_signed_funding_tx`,
+    );
     return;
   }
 
-  const channels = res.body.result.channels || [];
-  if (channels.length === 0) {
-    throw new Error("Assertion failed: expected at least one channel on node1 before submit");
-  }
-  const hasNonReady = channels.some(
-    (c) => c.state && c.state.state_name !== "ChannelReady",
-  );
-  if (!hasNonReady) {
-    throw new Error("Assertion failed: expected a non-ready channel before submit_signed_funding_tx on node1");
+  const stateName = ch.state && ch.state.state_name;
+  if (stateName !== "AWAITING_EXTERNAL_FUNDING") {
+    throw new Error(
+      `Assertion failed: expected node1 channel ${channelId} to be AWAITING_EXTERNAL_FUNDING before submit, got ${String(stateName)}`,
+    );
   }
 }

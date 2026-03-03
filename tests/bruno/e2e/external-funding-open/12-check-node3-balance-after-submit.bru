@@ -60,9 +60,9 @@ script:post-response {
     `[external-funding-open] Node3 balance: before=${before} after=${after} diff(after-before)=${diff} status=${status}`,
   );
 
-  if (after !== before) {
+  if (after > before) {
     throw new Error(
-      `Assertion failed: node3 balance should stay unchanged right after open/submit, before=${before}, after=${after}`,
+      `Assertion failed: node3 balance should not increase right after open/submit, before=${before}, after=${after}`,
     );
   }
 

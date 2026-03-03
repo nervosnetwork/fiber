@@ -43,6 +43,7 @@ assert {
 }
 
 script:post-response {
+  const axios = require("axios");
   const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
   if (status !== "submitted") {
     console.log(
@@ -62,9 +63,34 @@ script:post-response {
   const stateName = ch && ch.state && ch.state.state_name;
 
   if (stateName === "ChannelReady" || stateName === "CHANNEL_READY") {
-    bru.setVar("channel_ready_wait_iteration", 0);
-    console.log(`[external-funding-open] channel is ready: ${channelId}`);
-    return;
+    const node3Resp = await axios.post(
+      bru.getEnvVar("NODE3_RPC_URL"),
+      {
+        id: "external-funding-node3-ready-check",
+        jsonrpc: "2.0",
+        method: "list_channels",
+        params: [{ peer_id: bru.getEnvVar("NODE1_PEERID") }],
+      },
+      {
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+      },
+    );
+
+    if (node3Resp.data && node3Resp.data.error) {
+      throw new Error(
+        `Assertion failed: node3 list_channels failed while checking ready state: ${node3Resp.data.error.message}`,
+      );
+    }
+
+    const node3Channels = (node3Resp.data && node3Resp.data.result && node3Resp.data.result.channels) || [];
+    const node3Channel = node3Channels.find((item) => item.channel_id === channelId);
+    const node3State = node3Channel && node3Channel.state && node3Channel.state.state_name;
+
+    if (node3Channel && (node3State === "CHANNEL_READY" || node3State === "ChannelReady")) {
+      bru.setVar("channel_ready_wait_iteration", 0);
+      console.log(`[external-funding-open] channel is ready on node1 and node3: ${channelId}`);
+      return;
+    }
   }
 
   if (i + 1 < n) {
