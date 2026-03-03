@@ -12,7 +12,7 @@
     "fiber-wasm-db-worker": "*",
     "jest": "^30.2.0",
     "ts-jest": "^29.4.6",
-    "@types/jest": "^29.5.0"
+    "@types/jest": "^30.0.0"
   },
   "dependencies": {
     "async-mutex": "^0.5.0",
