@@ -49,7 +49,6 @@ pub use serde_utils::{
 };
 
 pub use tentacle_multiaddr::Multiaddr;
-pub use tentacle_secio::PeerId;
 
 // ============================================================
 // WASM-compatible time

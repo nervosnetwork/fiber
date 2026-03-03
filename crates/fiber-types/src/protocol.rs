@@ -692,11 +692,6 @@ impl NodeAnnouncement {
         ))
     }
 
-    /// Get the peer ID for this node.
-    pub fn peer_id(&self) -> tentacle_secio::PeerId {
-        tentacle_secio::PeerId::from_public_key(&self.node_id.into())
-    }
-
     /// Get the cursor for this node announcement.
     pub fn cursor(&self) -> Cursor {
         Cursor::new(
