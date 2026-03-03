@@ -3,8 +3,7 @@
 Start nodes with a clean state:
 
 ```bash
-export REMOVE_OLD_STATE=y
-./tests/nodes/start.sh e2e/external-funding-open
+REMOVE_OLD_STATE=y && ./tests/nodes/start.sh e2e/external-funding-open
 ```
 
 This test validates a success-only scenario:
