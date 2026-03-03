@@ -89,7 +89,7 @@ gen-rpc-doc:
 check-dirty-rpc-doc: gen-rpc-doc
 	git diff --exit-code ./crates/fiber-lib/src/rpc/README.md
 
-MIGRATION_CHECK_VERSION := 0.4.1
+MIGRATION_CHECK_VERSION := 0.5.0
 install-migration-check:
 	@if ! command -v migration-check >/dev/null 2>&1 || [ "$$(migration-check --version | awk '{print $$2}')" != "$(MIGRATION_CHECK_VERSION)" ]; then \
 		echo "Installing migration-check $(MIGRATION_CHECK_VERSION)..."; \

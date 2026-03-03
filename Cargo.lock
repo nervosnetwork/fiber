@@ -2234,6 +2234,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
  "fiber-sphinx",
+ "getrandom 0.2.17",
  "hex",
  "lightning-invoice",
  "molecule 0.8.0",

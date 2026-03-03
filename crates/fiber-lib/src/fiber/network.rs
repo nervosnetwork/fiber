@@ -94,14 +94,15 @@ use crate::invoice::{
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
+#[cfg(any(debug_assertions, test, feature = "bench"))]
+use fiber_types::SessionRoute;
 use fiber_types::{
     AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord, ChannelOpeningStatus,
     ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256,
     NodeAnnouncement, PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket,
     PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SessionRoute,
-    SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SettlementData,
+    ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
