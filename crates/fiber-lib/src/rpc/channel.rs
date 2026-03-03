@@ -1,3 +1,4 @@
+use crate::ckb::config::json_dep_type;
 use crate::fiber::channel::{TLCId, TlcStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::{
@@ -40,37 +41,8 @@ pub struct CellDep {
     /// The out point of the cell dep.
     pub out_point: ckb_jsonrpc_types::OutPoint,
     /// The type of the cell dep.
-    #[serde(with = "dep_type_serde")]
+    #[serde(with = "json_dep_type")]
     pub dep_type: DepType,
-}
-
-/// Custom serde module for DepType to support both `dep_group` and `depGroup` formats.
-pub mod dep_type_serde {
-    use super::DepType;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S>(dep_type: &DepType, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let s = match dep_type {
-            DepType::Code => "code",
-            DepType::DepGroup => "dep_group",
-        };
-        s.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<DepType, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.to_lowercase().as_str() {
-            "code" => Ok(DepType::Code),
-            "dep_group" | "depgroup" => Ok(DepType::DepGroup),
-            _ => Err(serde::de::Error::custom("invalid dep type")),
-        }
-    }
 }
 
 impl From<CellDep> for CkbJsonRpcCellDep {
