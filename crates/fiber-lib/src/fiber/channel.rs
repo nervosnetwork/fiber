@@ -5137,6 +5137,24 @@ impl ChannelActorState {
         );
     }
 
+    /// Restore the `remote_revocation_nonce_for_send` from `_verify` or `_next`
+    /// if it was lost during persistence (e.g. the nonce was consumed before the state was saved).
+    /// This prevents a deadlock during channel reestablishment when `send` nonce is None
+    /// but `verify`/`next` nonces are available.
+    fn restore_missing_revocation_send_nonce(&mut self) {
+        if self.remote_revocation_nonce_for_send.is_some() || self.last_revoke_ack_msg.is_some() {
+            return;
+        }
+        let restored = self
+            .remote_revocation_nonce_for_verify
+            .clone()
+            .or_else(|| self.remote_revocation_nonce_for_next.clone());
+        if let Some(nonce) = restored {
+            self.remote_revocation_nonce_for_send = Some(nonce);
+            self.log_ack_state("[ack] restore_missing_revocation_send_nonce");
+        }
+    }
+
     pub fn try_create_channel_messages(&mut self) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
         let channel_announcement = self.try_create_channel_announcement_message()?;
         let channel_update = self.try_create_channel_update_message()?;
@@ -7780,6 +7798,7 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady => {
                 self.clear_waiting_peer_response();
+                self.restore_missing_revocation_send_nonce();
 
                 let my_local_commitment_number = self.get_local_commitment_number();
                 let my_remote_commitment_number = self.get_remote_commitment_number();
