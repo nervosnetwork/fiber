@@ -1,7 +1,6 @@
 /// StoreSample implementation for `ChannelOpenRecord` (prefix 201).
 use crate::fiber::channel::{ChannelOpenRecord, ChannelOpeningStatus};
 use crate::store::schema::CHANNEL_OPEN_RECORD_PREFIX;
-use tentacle::secio::PeerId;
 
 use super::{deterministic_hash256, deterministic_pubkey, StoreSample};
 
@@ -22,17 +21,14 @@ impl StoreSample for ChannelOpenRecord {
     }
 }
 
-fn make_peer_id(seed: u64, index: u32) -> PeerId {
-    let pubkey = deterministic_pubkey(seed, index);
-    let pk_bytes = pubkey.serialize();
-    let tentacle_pk = tentacle::secio::PublicKey::from_raw_key(pk_bytes.to_vec());
-    PeerId::from_public_key(&tentacle_pk)
+fn make_pubkey(seed: u64, index: u32) -> crate::fiber::types::Pubkey {
+    deterministic_pubkey(seed, index)
 }
 
 fn sample_waiting_for_peer(seed: u64) -> ChannelOpenRecord {
     ChannelOpenRecord {
         channel_id: deterministic_hash256(seed, 0),
-        peer_id: make_peer_id(seed, 1),
+        pubkey: make_pubkey(seed, 1),
         is_acceptor: false,
         status: ChannelOpeningStatus::WaitingForPeer,
         funding_amount: 100_0000_0000,
@@ -45,7 +41,7 @@ fn sample_waiting_for_peer(seed: u64) -> ChannelOpenRecord {
 fn sample_funding_tx_building(seed: u64) -> ChannelOpenRecord {
     ChannelOpenRecord {
         channel_id: deterministic_hash256(seed, 10),
-        peer_id: make_peer_id(seed, 11),
+        pubkey: make_pubkey(seed, 11),
         is_acceptor: false,
         status: ChannelOpeningStatus::FundingTxBuilding,
         funding_amount: 200_0000_0000,
@@ -58,7 +54,7 @@ fn sample_funding_tx_building(seed: u64) -> ChannelOpenRecord {
 fn sample_funding_tx_broadcasted(seed: u64) -> ChannelOpenRecord {
     ChannelOpenRecord {
         channel_id: deterministic_hash256(seed, 20),
-        peer_id: make_peer_id(seed, 21),
+        pubkey: make_pubkey(seed, 21),
         is_acceptor: false,
         status: ChannelOpeningStatus::FundingTxBroadcasted,
         funding_amount: 300_0000_0000,
@@ -71,7 +67,7 @@ fn sample_funding_tx_broadcasted(seed: u64) -> ChannelOpenRecord {
 fn sample_channel_ready(seed: u64) -> ChannelOpenRecord {
     ChannelOpenRecord {
         channel_id: deterministic_hash256(seed, 30),
-        peer_id: make_peer_id(seed, 31),
+        pubkey: make_pubkey(seed, 31),
         is_acceptor: false,
         status: ChannelOpeningStatus::ChannelReady,
         funding_amount: 400_0000_0000,
@@ -84,7 +80,7 @@ fn sample_channel_ready(seed: u64) -> ChannelOpenRecord {
 fn sample_failed(seed: u64) -> ChannelOpenRecord {
     ChannelOpenRecord {
         channel_id: deterministic_hash256(seed, 40),
-        peer_id: make_peer_id(seed, 41),
+        pubkey: make_pubkey(seed, 41),
         is_acceptor: false,
         status: ChannelOpeningStatus::Failed,
         funding_amount: 100_0000_0000,
@@ -97,7 +93,7 @@ fn sample_failed(seed: u64) -> ChannelOpenRecord {
 fn sample_inbound_waiting(seed: u64) -> ChannelOpenRecord {
     ChannelOpenRecord {
         channel_id: deterministic_hash256(seed, 50),
-        peer_id: make_peer_id(seed, 51),
+        pubkey: make_pubkey(seed, 51),
         is_acceptor: true,
         status: ChannelOpeningStatus::WaitingForPeer,
         funding_amount: 100_0000_0000,
@@ -110,7 +106,7 @@ fn sample_inbound_waiting(seed: u64) -> ChannelOpenRecord {
 fn sample_inbound_failed(seed: u64) -> ChannelOpenRecord {
     ChannelOpenRecord {
         channel_id: deterministic_hash256(seed, 60),
-        peer_id: make_peer_id(seed, 61),
+        pubkey: make_pubkey(seed, 61),
         is_acceptor: true,
         status: ChannelOpeningStatus::Failed,
         funding_amount: 100_0000_0000,

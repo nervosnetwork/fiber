@@ -66,7 +66,7 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir as OldTempDir;
-use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use tentacle::multiaddr::MultiAddr;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock as TokioRwLock;
 use tokio::{
@@ -258,7 +258,6 @@ pub struct NetworkNode {
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
     pub gossip_actor: Option<ActorRef<GossipActorMessage>>,
     pub private_key: Privkey,
-    pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
@@ -436,7 +435,7 @@ pub(crate) async fn create_channel_with_nodes(
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: params.public,
                 one_way: params.one_way,
                 shutdown_script: None,
@@ -460,9 +459,9 @@ pub(crate) async fn create_channel_with_nodes(
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                debug!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                debug!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -492,12 +491,12 @@ pub(crate) async fn create_channel_with_nodes(
 
     let funding_tx_outpoint = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, funding_tx_outpoint) => {
                 debug!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(funding_tx_outpoint.clone())
             }
@@ -507,12 +506,12 @@ pub(crate) async fn create_channel_with_nodes(
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 debug!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -690,10 +689,6 @@ impl NetworkNode {
 
     pub fn get_public_key(&self) -> Pubkey {
         self.private_key.pubkey()
-    }
-
-    pub fn get_peer_id(&self) -> PeerId {
-        self.private_key.pubkey().tentacle_peer_id()
     }
 
     pub fn get_node_address(&self) -> &MultiAddr {
@@ -938,14 +933,14 @@ impl NetworkNode {
 
     pub async fn send_channel_shutdown_tx_confirmed_event(
         &self,
-        peer_id: PeerId,
+        pubkey: Pubkey,
         channel_id: Hash256,
         force: bool,
     ) {
         use crate::fiber::NetworkActorEvent::ClosingTransactionConfirmed;
 
         let tx_hash = TransactionBuilder::default().build().hash();
-        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force, true);
+        let event = ClosingTransactionConfirmed(pubkey, channel_id, tx_hash, force, true);
         self.network_actor
             .send_message(NetworkActorMessage::Event(event))
             .expect("network actor alive");
@@ -1345,8 +1340,8 @@ impl NetworkNode {
         let state = self.get_channel_actor_state(channel_id);
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    state.get_remote_peer_id(),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    state.get_remote_pubkey(),
                     FiberMessage::shutdown(Shutdown {
                         channel_id: state.get_id(),
                         close_script: command
@@ -1531,17 +1526,17 @@ impl NetworkNode {
         .0;
 
         #[allow(clippy::never_loop)]
-        let (peer_id, _listening_addr, announced_addrs) = loop {
+        let (started_pubkey, _listening_addr, announced_addrs) = loop {
             select! {
-                Some(NetworkServiceEvent::NetworkStarted(peer_id, listening_addr, announced_addrs)) = event_receiver.recv() => {
-                    break (peer_id, listening_addr, announced_addrs);
+                Some(NetworkServiceEvent::NetworkStarted(pubkey, listening_addr, announced_addrs)) = event_receiver.recv() => {
+                    break (pubkey, listening_addr, announced_addrs);
                 }
                 _ = sleep(Duration::from_secs(5)) => {
                     panic!("Failed to start network actor");
                 }
             }
         };
-
+        assert_eq!(started_pubkey, pubkey);
         let mut unexpected_events: HashSet<String> = HashSet::new();
 
         // Some usual unexpected events that we want to not happened
@@ -1581,13 +1576,13 @@ impl NetworkNode {
         });
 
         info!(
-            "Network node started for peer_id {:?} in directory {:?}",
-            &peer_id,
+            "Network node started for pubkey {:?} in directory {:?}",
+            &started_pubkey,
             base_dir.as_ref()
         );
 
         let gossip_actor =
-            ractor::registry::where_is(get_gossip_actor_name(&peer_id)).map(Into::into);
+            ractor::registry::where_is(get_gossip_actor_name(&started_pubkey)).map(Into::into);
         #[cfg(not(target_arch = "wasm32"))]
         let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
@@ -1627,7 +1622,6 @@ impl NetworkNode {
             chain_actor,
             gossip_actor,
             private_key,
-            peer_id,
             event_emitter: self_event_receiver,
             pubkey,
             unexpected_events,
@@ -1656,11 +1650,11 @@ impl NetworkNode {
             .expect("send ckb chain message");
     }
 
-    pub fn send_init_peer_message(&self, remote_peer_id: PeerId, message: Init) {
+    pub fn send_init_peer_message(&self, remote_pubkey: Pubkey, message: Init) {
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    remote_peer_id,
+                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    remote_pubkey,
                     FiberMessage::Init(message),
                 )),
             ))
@@ -1701,9 +1695,9 @@ impl NetworkNode {
     pub async fn stop(&mut self) {
         self.network_actor
             .stop(Some("stopping actor on request".to_string()));
-        let my_peer_id = self.peer_id.clone();
+        let my_pubkey = self.pubkey;
         self.expect_event(
-            |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
+            |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_pubkey),
         )
         .await;
     }
@@ -1803,16 +1797,16 @@ impl NetworkNode {
 
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ConnectPeer(peer_addr.clone()),
+                NetworkActorCommand::ConnectPeer(peer_addr.clone(), false),
             ))
             .expect("self alive");
     }
 
     pub async fn connect_to(&mut self, other: &mut Self) {
         self.connect_to_nonblocking(other).await;
-        let peer_id = &other.peer_id;
+        let pubkey = &other.pubkey;
         self.expect_event(
-            |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id),
+            |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == pubkey),
         )
         .await;
         self.expect_debug_event("PeerInit").await;
@@ -1962,9 +1956,12 @@ impl NetworkNode {
             .expect("send message to gossip actor");
     }
 
-    pub fn mock_received_gossip_message_from_peer(&self, peer_id: PeerId, message: GossipMessage) {
+    pub fn mock_received_gossip_message_from_peer(&self, pubkey: Pubkey, message: GossipMessage) {
         self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
-            GossipMessageWithPeerId { peer_id, message },
+            GossipMessageWithTarget {
+                target: pubkey,
+                message,
+            },
         ));
     }
 

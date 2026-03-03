@@ -1,6 +1,6 @@
 use ckb_sdk::RpcError;
 use ractor::{MessagingErr, SpawnErr};
-use tentacle::{error::SendErrorKind, secio::PeerId};
+use tentacle::error::SendErrorKind;
 use thiserror::Error;
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
         graph::PathFindError,
-        types::Hash256,
+        types::{Hash256, Pubkey},
         InFlightCkbTxActorMessage, NetworkActorMessage,
     },
 };
@@ -20,7 +20,7 @@ pub enum Error {
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
     #[error("Peer not found error: {0:?}")]
-    PeerNotFound(PeerId),
+    PeerNotFound(Pubkey),
     #[error("Channel not found error: {0:?}")]
     ChannelNotFound(Hash256),
     #[error("Failed to send tentacle message: {0}")]

@@ -5,13 +5,12 @@ use ckb_types::{
 };
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use strum::AsRefStr;
-use tentacle::secio::PeerId;
 
 use crate::{
     ckb::{
         client::CkbChainClient, CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
     },
-    fiber::NetworkActorEvent,
+    fiber::{types::Pubkey, NetworkActorEvent},
     utils::actor::ActorHandleLogGuard,
 };
 
@@ -41,8 +40,8 @@ const DUMMY_FUNDING_TX_INDEX: u32 = 0;
 pub enum InFlightCkbTxKind {
     /// Funding(channel_id)
     Funding(Hash256),
-    /// Closing(peer_id, channel_id, force_closing)
-    Closing(PeerId, Hash256, bool),
+    /// Closing(pubkey, channel_id, force_closing)
+    Closing(Pubkey, Hash256, bool),
 }
 
 pub struct InFlightCkbTxActor<C> {
@@ -305,7 +304,7 @@ where
                 ))
             }
             (
-                InFlightCkbTxKind::Closing(peer_id, channel_id, force_closing),
+                InFlightCkbTxKind::Closing(pubkey, channel_id, force_closing),
                 TxStatus::Committed(..),
             ) => {
                 tracing::info!("Closing transaction {:?} confirmed", self.tx_hash);
@@ -313,24 +312,20 @@ where
                 // set close_by_us if we broadcast a force close
                 let close_by_us = force_closing;
                 NetworkActorEvent::ClosingTransactionConfirmed(
-                    peer_id,
+                    pubkey,
                     channel_id,
                     self.tx_hash.into(),
                     force_closing,
                     close_by_us,
                 )
             }
-            (InFlightCkbTxKind::Closing(peer_id, channel_id, _force_closing), status) => {
+            (InFlightCkbTxKind::Closing(pubkey, channel_id, _force_closing), status) => {
                 tracing::error!(
                     "Closing transaction {:?} failed to be confirmed with final status {:?}",
                     self.tx_hash,
                     status
                 );
-                NetworkActorEvent::ClosingTransactionFailed(
-                    peer_id,
-                    channel_id,
-                    self.tx_hash.into(),
-                )
+                NetworkActorEvent::ClosingTransactionFailed(pubkey, channel_id, self.tx_hash.into())
             }
         };
 

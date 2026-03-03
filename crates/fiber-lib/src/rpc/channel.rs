@@ -10,7 +10,7 @@ use crate::fiber::{
     },
     network::{AcceptChannelCommand, OpenChannelCommand, PendingAcceptChannel},
     serde_utils::{U128Hex, U64Hex},
-    types::Hash256,
+    types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
@@ -27,18 +27,15 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 use std::cmp::Reverse;
-use tentacle::secio::PeerId;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenChannelParams {
-    /// The peer ID to open a channel with (base58 string, derived from the peer's `Pubkey`).
+    /// The public key of the peer to open a channel with.
     /// The peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
-    /// You can obtain a peer's `peer_id` from the `list_peers` RPC.
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
+    pub pubkey: Pubkey,
 
     /// The amount of CKB or UDT to fund the channel with.
     #[serde_as(as = "U128Hex")]
@@ -164,10 +161,9 @@ pub struct AcceptChannelResult {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct ListChannelsParams {
-    /// The peer ID to list channels for (base58 string, derived from the peer's `Pubkey`).
+    /// The public key to list channels for.
     /// An optional parameter, if not provided, all channels will be listed.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub peer_id: Option<PeerId>,
+    pub pubkey: Option<Pubkey>,
     /// Whether to include closed channels in the list, an optional parameter, default value is false
     pub include_closed: Option<bool>,
     /// When set to true, only return channels that are still being opened (non-final states:
@@ -272,9 +268,8 @@ pub struct Channel {
     #[serde_as(as = "Option<EntityHex>")]
     /// The outpoint of the channel
     pub channel_outpoint: Option<OutPoint>,
-    /// The peer ID of the channel counterparty (base58 string, derived from the peer's `Pubkey`).
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
+    /// The public key of the channel counterparty.
+    pub pubkey: Pubkey,
     /// The UDT type script of the channel
     pub funding_udt_type_script: Option<Script>,
     /// The state of the channel
@@ -432,7 +427,7 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
         is_public: false,
         is_one_way: false,
         channel_outpoint: None,
-        peer_id: pending.peer_id,
+        pubkey: pending.pubkey,
         funding_udt_type_script: pending.udt_type_script.map(Into::into),
         // Report as NegotiatingFunding since we're still awaiting local acceptance
         state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
@@ -522,7 +517,7 @@ where
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
-                    peer_id: params.peer_id.clone(),
+                    pubkey: params.pubkey,
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(true),
                     one_way: params.one_way.unwrap_or(false),
@@ -594,6 +589,7 @@ where
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
         let only_pending = params.only_pending.unwrap_or_default();
         let include_closed = params.include_closed.unwrap_or_default();
+        let filter_pubkey = params.pubkey;
 
         // The two filter options are mutually exclusive: `only_pending` narrows to channels
         // that are still opening (or failed to open), while `include_closed` broadens to
@@ -610,15 +606,15 @@ where
         let channel_states = if only_pending {
             // For pending mode, fetch all channel states (including non-active ones
             // like ABANDONED / FUNDING_ABORTED which are "closed" but represent failed openings)
-            self.store.get_channel_states(params.peer_id.clone())
+            self.store.get_channel_states(filter_pubkey)
         } else if include_closed {
-            self.store.get_channel_states(params.peer_id.clone())
+            self.store.get_channel_states(filter_pubkey)
         } else {
-            self.store.get_active_channel_states(params.peer_id.clone())
+            self.store.get_active_channel_states(filter_pubkey)
         };
         let mut channels: Vec<_> = channel_states
             .into_iter()
-            .filter_map(|(peer_id, channel_id, _state)| {
+            .filter_map(|(_pubkey, channel_id, _state)| {
                 self.store
                     .get_channel_actor_state(&channel_id)
                     .and_then(|state| {
@@ -638,7 +634,7 @@ where
                             is_acceptor: state.is_acceptor,
                             is_one_way: state.is_one_way,
                             channel_outpoint: state.get_funding_transaction_outpoint(),
-                            peer_id,
+                            pubkey: state.remote_pubkey,
                             funding_udt_type_script: state
                                 .funding_udt_type_script
                                 .clone()
@@ -717,9 +713,9 @@ where
                 {
                     continue;
                 }
-                // Apply peer_id filter if provided
-                if let Some(ref filter_peer) = params.peer_id {
-                    if filter_peer != &record.peer_id {
+                // Apply pubkey filter if provided
+                if let Some(filter_pubkey) = filter_pubkey.as_ref() {
+                    if filter_pubkey != &record.pubkey {
                         continue;
                     }
                 }
@@ -745,7 +741,7 @@ where
                     is_acceptor: record.is_acceptor,
                     is_one_way: false,
                     channel_outpoint: None,
-                    peer_id: record.peer_id,
+                    pubkey: record.pubkey,
                     funding_udt_type_script: None,
                     state: synthetic_state,
                     local_balance,
@@ -775,9 +771,9 @@ where
                 _ => vec![],
             };
             for pending in pending_accept {
-                // Apply peer_id filter if provided
-                if let Some(ref filter_peer) = params.peer_id {
-                    if filter_peer != &pending.peer_id {
+                // Apply pubkey filter if provided
+                if let Some(filter_pubkey) = filter_pubkey.as_ref() {
+                    if filter_pubkey != &pending.pubkey {
                         continue;
                     }
                 }

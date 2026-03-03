@@ -3,12 +3,12 @@
 /// Since `PersistentNetworkActorState` has private fields, we construct
 /// populated instances via `serde_json` deserialization.
 use crate::fiber::network::PersistentNetworkActorState;
-use crate::store::schema::PEER_ID_NETWORK_ACTOR_STATE_PREFIX;
+use crate::store::schema::PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX;
 
 use super::{deterministic_pubkey, StoreSample};
 
 impl StoreSample for PersistentNetworkActorState {
-    const STORE_PREFIX: u8 = PEER_ID_NETWORK_ACTOR_STATE_PREFIX;
+    const STORE_PREFIX: u8 = PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX;
     const TYPE_NAME: &'static str = "PersistentNetworkActorState";
 
     fn samples(seed: u64) -> Vec<Self> {
@@ -21,7 +21,7 @@ fn sample_minimal() -> PersistentNetworkActorState {
     PersistentNetworkActorState::new()
 }
 
-/// Full state: populated peer_pubkey_map and saved_peer_addresses.
+/// Full state: populated saved_peer_addresses.
 ///
 /// Because the struct fields are private, we construct it via JSON
 /// deserialization which has access to all fields through serde.
@@ -30,22 +30,13 @@ fn sample_minimal() -> PersistentNetworkActorState {
 /// (HashMap with one entry has a stable iteration order).
 fn sample_full(seed: u64) -> PersistentNetworkActorState {
     let pubkey1 = deterministic_pubkey(seed, 0);
-    // Derive PeerId from raw secp256k1 public key bytes via tentacle.
-    let pk1_bytes = pubkey1.serialize();
-    let tentacle_pk1 = tentacle::secio::PublicKey::from_raw_key(pk1_bytes.to_vec());
-    let peer_id1 = tentacle::secio::PeerId::from_public_key(&tentacle_pk1);
 
-    // Build JSON matching the serde_as format:
-    // peer_pubkey_map and saved_peer_addresses are serialized as Vec<(String, _)>
-    // because of #[serde_as(as = "Vec<(DisplayFromStr, _)>")].
-    // Use single entries to guarantee deterministic HashMap serialization.
+    // Build JSON for HashMap<Pubkey, Vec<Multiaddr>>.
+    // Use a single entry to guarantee deterministic HashMap serialization.
     let json = serde_json::json!({
-        "peer_pubkey_map": [
-            [peer_id1.to_base58(), pubkey1],
-        ],
-        "saved_peer_addresses": [
-            [peer_id1.to_base58(), ["/ip4/127.0.0.1/tcp/8000", "/ip4/10.0.0.1/tcp/7000"]],
-        ],
+        "saved_peer_addresses": {
+            (hex::encode(pubkey1.serialize())): ["/ip4/127.0.0.1/tcp/8000", "/ip4/10.0.0.1/tcp/7000"],
+        },
     });
 
     serde_json::from_value(json).expect("PersistentNetworkActorState JSON deserialization")
