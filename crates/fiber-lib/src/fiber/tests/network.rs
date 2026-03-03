@@ -216,7 +216,7 @@ async fn test_set_announced_addrs_with_valid_peer_id() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     node.stop().await;
 
-    let tentacle_pubkey: tentacle::secio::PublicKey = node.pubkey.into();
+    let tentacle_pubkey = crate::fiber::types::pubkey_to_tentacle(node.pubkey);
     let peer_id = PeerId::from_public_key(&tentacle_pubkey);
     let addr = format!("/ip4/1.1.1.1/tcp/8346/p2p/{}", peer_id);
     let multiaddr = Multiaddr::from_str(&addr).expect("valid multiaddr");
@@ -254,7 +254,7 @@ async fn test_set_announced_addrs_without_p2p() {
     .await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     node.stop().await;
-    let tentacle_pubkey: tentacle::secio::PublicKey = node.pubkey.into();
+    let tentacle_pubkey = crate::fiber::types::pubkey_to_tentacle(node.pubkey);
     let peer_id = PeerId::from_public_key(&tentacle_pubkey);
     let peer_id_bytes = peer_id.clone().into_bytes();
     let multiaddr =

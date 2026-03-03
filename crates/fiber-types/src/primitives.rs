@@ -28,21 +28,6 @@ impl From<Hash256> for [u8; 32] {
     }
 }
 
-// Pubkey <-> tentacle_secio::PublicKey
-impl From<tentacle_secio::PublicKey> for Pubkey {
-    fn from(pk: tentacle_secio::PublicKey) -> Self {
-        secp256k1::PublicKey::from_slice(pk.inner_ref())
-            .expect("valid tentacle pubkey can be converted to secp pubkey")
-            .into()
-    }
-}
-
-impl From<Pubkey> for tentacle_secio::PublicKey {
-    fn from(pk: Pubkey) -> Self {
-        tentacle_secio::PublicKey::from_raw_key(pk.serialize().to_vec())
-    }
-}
-
 // Pubkey <-> molecule_fiber::Pubkey
 
 impl From<Pubkey> for molecule_fiber::Pubkey {

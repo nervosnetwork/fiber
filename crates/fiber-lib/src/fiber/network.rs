@@ -3605,7 +3605,7 @@ where
 
     fn get_connected_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
         self.peer_session_map.iter().find_map(|(pubkey, _)| {
-            let peer_pubkey: tentacle::secio::PublicKey = (*pubkey).into();
+            let peer_pubkey = super::types::pubkey_to_tentacle(*pubkey);
             (PeerId::from_public_key(&peer_pubkey) == *peer_id).then_some(*pubkey)
         })
     }
@@ -3852,7 +3852,7 @@ where
             },
         );
         let remote_peer_id =
-            PeerId::from_public_key(&tentacle::secio::PublicKey::from(remote_pubkey));
+            PeerId::from_public_key(&super::types::pubkey_to_tentacle(remote_pubkey));
         if let Some(addresses) = self.pending_save_peer_addresses.remove(&remote_peer_id) {
             let mut changed = false;
             for address in addresses {
@@ -4859,7 +4859,7 @@ impl ServiceProtocol for FiberProtocolHandle {
             try_send_actor_message(
                 &self.actor,
                 NetworkActorMessage::new_event(NetworkActorEvent::PeerConnected(
-                    remote_pubkey.into(),
+                    super::types::pubkey_from_tentacle(remote_pubkey),
                     context.session.clone(),
                 )),
             );
@@ -4874,7 +4874,7 @@ impl ServiceProtocol for FiberProtocolHandle {
                 try_send_actor_message(
                     &self.actor,
                     NetworkActorMessage::new_event(NetworkActorEvent::PeerDisconnected(
-                        pubkey.clone().into(),
+                        super::types::pubkey_from_tentacle(pubkey.clone()),
                         context.session.clone(),
                     )),
                 );
@@ -4892,7 +4892,7 @@ impl ServiceProtocol for FiberProtocolHandle {
                 try_send_actor_message(
                     &self.actor,
                     NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
-                        pubkey.clone().into(),
+                        super::types::pubkey_from_tentacle(pubkey.clone()),
                         msg,
                     )),
                 );

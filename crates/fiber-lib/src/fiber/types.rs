@@ -32,6 +32,18 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use thiserror::Error;
 
+/// Convert a `tentacle::secio::PublicKey` to a `Pubkey`.
+pub fn pubkey_from_tentacle(pk: tentacle::secio::PublicKey) -> Pubkey {
+    secp256k1::PublicKey::from_slice(pk.inner_ref())
+        .expect("valid tentacle pubkey can be converted to secp pubkey")
+        .into()
+}
+
+/// Convert a `Pubkey` to a `tentacle::secio::PublicKey`.
+pub fn pubkey_to_tentacle(pk: Pubkey) -> tentacle::secio::PublicKey {
+    tentacle::secio::PublicKey::from_raw_key(pk.serialize().to_vec())
+}
+
 /// The error type wrap various ser/de errors.
 #[derive(Error, Debug)]
 pub enum Error {

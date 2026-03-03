@@ -2875,7 +2875,7 @@ impl ServiceProtocol for GossipProtocolHandle {
 
         if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
             let _ = self.actor.send_message(GossipActorMessage::PeerConnected(
-                remote_pubkey.into(),
+                super::types::pubkey_from_tentacle(remote_pubkey),
                 context.session.clone(),
             ));
         } else {
@@ -2897,7 +2897,7 @@ impl ServiceProtocol for GossipProtocolHandle {
                 let _ = self
                     .actor
                     .send_message(GossipActorMessage::PeerDisconnected(
-                        remote_pubkey.clone().into(),
+                        super::types::pubkey_from_tentacle(remote_pubkey.clone()),
                         context.session.clone(),
                     ));
             }
@@ -2915,7 +2915,7 @@ impl ServiceProtocol for GossipProtocolHandle {
                     .actor
                     .send_message(GossipActorMessage::GossipMessageReceived(
                         GossipMessageWithTarget {
-                            target: pubkey.clone().into(),
+                            target: super::types::pubkey_from_tentacle(pubkey.clone()),
                             message,
                         },
                     ));

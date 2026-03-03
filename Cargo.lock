@@ -2247,7 +2247,6 @@ dependencies = [
  "serde_with",
  "strum 0.26.3",
  "tentacle-multiaddr",
- "tentacle-secio",
  "thiserror 1.0.69",
  "tracing",
  "web-time",
