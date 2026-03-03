@@ -44,33 +44,12 @@ The "Asset Handling Fee." Intermediate nodes lock up their own liquidity to forw
 ## Watchtower
 Your "Asset Bodyguard." Since channel asset states are stored off-chain, a dishonest partner might try to broadcast an "old agreement" to steal funds while you are offline. A Watchtower monitors the CKB chain 24/7 and automatically intercepts any cheating attempts, punishing the attacker.
 
-## Node Identifiers: Pubkey, Node ID, and Peer ID
+## Node Identifiers: Pubkey and Peer ID
 
-A Fiber node has two forms of identity. They look different, serve different purposes, and are **not interchangeable** in RPC calls.
+Fiber uses two identity forms:
 
-### Pubkey (aka Node ID)
+- **Pubkey**: a 33-byte compressed secp256k1 public key (66-char hex), e.g. `"02ab1234..."`.
+- **Peer ID**: a base58 transport identifier derived from the pubkey.
 
-A 33-byte compressed secp256k1 public key, displayed as a 66-character hex string (e.g. `"02ab1234..."`). This is the cryptographic identity of a node. In the RPC interface it appears under several field names depending on context:
-
-| RPC Field | Used In |
-|-----------|---------|
-| `node_id` | `node_info`, `graph_nodes` |
-| `pubkey` | `list_peers`, `graph_nodes`, `hop_hints` |
-| `target_pubkey` | `send_payment` |
-| `node1` / `node2` | `graph_channels` |
-
-All of the above are the same type (`Pubkey`) and can be used wherever a `Pubkey` is expected.
-
-### Peer ID
-
-A base58-encoded string (e.g. `"QmYJnK7..."`), derived by **hashing** the node's `Pubkey`. This is used by the P2P transport layer to identify network connections. The derivation is one-way: you cannot recover a `Pubkey` from a `Peer ID`.
-
-| RPC Field | Used In |
-|-----------|---------|
-| `peer_id` | `open_channel`, `list_channels`, `disconnect_peer`, `list_peers` |
-
-### Which One to Use?
-
-- **Payment-related RPCs** (`send_payment`, `build_router`, etc.) expect a **`Pubkey`** (hex).
-- **Connection/channel management RPCs** (`open_channel`, `disconnect_peer`, etc.) expect a **`Peer ID`** (base58).
-- The `list_peers` RPC returns **both** `pubkey` and `peer_id` for each connected peer, making it easy to look up either value.
+For RPC usage, treat **`pubkey` as the standard node identity**.  
+`Peer ID` is mainly an internal/P2P transport identifier and is generally not what you pass around in normal RPC workflows.

@@ -27,7 +27,7 @@ use crate::{
         },
         key::blake2b_hash_with_salt,
         network::SendOnionPacketCommand,
-        network::{get_chain_hash, sign_network_message, FiberMessageWithPeerId},
+        network::{get_chain_hash, sign_network_message, FiberMessageWithTarget},
         types::{
             peeled_packet_mpp_custom_records, AcceptChannel, AddTlc, AnnouncementSignatures,
             ChannelReady, ClosingSigned, CommitmentSigned, FiberChannelMessage, FiberMessage,
@@ -94,7 +94,6 @@ use std::{
     sync::Arc,
 };
 use strum::AsRefStr;
-use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, trace, warn};
@@ -369,14 +368,6 @@ where
         self.remote_pubkey
     }
 
-    pub fn get_local_peer_id(&self) -> PeerId {
-        self.local_pubkey.tentacle_peer_id()
-    }
-
-    pub fn get_remote_peer_id(&self) -> PeerId {
-        self.remote_pubkey.tentacle_peer_id()
-    }
-
     pub async fn handle_peer_message(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -440,7 +431,7 @@ where
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelAccepted(
-                            state.get_remote_peer_id(),
+                            state.get_remote_pubkey(),
                             state.get_id(),
                             old_id,
                             state.to_local_amount,
@@ -794,7 +785,7 @@ where
                     .clone()
                     .send_message(NetworkActorMessage::new_notification(
                         NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
-                            state.get_local_peer_id(),
+                            state.get_local_pubkey(),
                             payment_hash,
                             error_detail.clone(),
                         )),
@@ -1520,8 +1511,8 @@ where
 
         self.network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    state.get_remote_peer_id(),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    state.get_remote_pubkey(),
                     FiberMessage::commitment_signed(commitment_signed),
                 )),
             ))
@@ -1577,8 +1568,8 @@ where
         };
 
         // Send tlc update message to peer.
-        let msg = FiberMessageWithPeerId::new(
-            state.get_remote_peer_id(),
+        let msg = FiberMessageWithTarget::new(
+            state.get_remote_pubkey(),
             FiberMessage::add_tlc(add_tlc.clone()),
         );
 
@@ -1610,8 +1601,8 @@ where
         }
         self.store
             .remove_payment_hold_tlc(&payment_hash, &state.id, command.id);
-        let msg = FiberMessageWithPeerId::new(
-            state.get_remote_peer_id(),
+        let msg = FiberMessageWithTarget::new(
+            state.get_remote_pubkey(),
             FiberMessage::remove_tlc(RemoveTlc {
                 channel_id: state.get_id(),
                 tlc_id: command.id,
@@ -1661,7 +1652,7 @@ where
                 .send_message(NetworkActorMessage::new_event(
                     NetworkActorEvent::ClosingTransactionPending(
                         state.get_id(),
-                        self.get_remote_peer_id(),
+                        self.get_remote_pubkey(),
                         transaction,
                         true,
                     ),
@@ -1709,8 +1700,8 @@ where
             state.check_shutdown_fee_rate(shutdown_fee_rate, &close_script)?;
             self.network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        self.get_remote_peer_id(),
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                        self.get_remote_pubkey(),
                         FiberMessage::shutdown(Shutdown {
                             channel_id: state.get_id(),
                             close_script: close_script.clone(),
@@ -2092,8 +2083,8 @@ where
                 });
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            state.get_remote_peer_id(),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                            state.get_remote_pubkey(),
                             fiber_message,
                         )),
                     ))
@@ -2113,8 +2104,8 @@ where
                 });
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            state.get_remote_peer_id(),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                            state.get_remote_pubkey(),
                             fiber_message,
                         )),
                     ))
@@ -2266,8 +2257,8 @@ where
                 state.funding_tx_confirmed_at = Some((block_hash, tx_index, timestamp));
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            state.get_remote_peer_id(),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                            state.get_remote_pubkey(),
                             FiberMessage::channel_ready(ChannelReady {
                                 channel_id: state.get_id(),
                             }),
@@ -2291,8 +2282,8 @@ where
                     state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
                 } else if reason == StopReason::AbortFunding {
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
-                    let abort_message = FiberMessageWithPeerId {
-                        peer_id: state.get_remote_peer_id(),
+                    let abort_message = FiberMessageWithTarget {
+                        target: state.get_remote_pubkey(),
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxAbort(TxAbort {
                                 channel_id: state.get_id(),
@@ -2321,7 +2312,7 @@ where
                     error!(
                         "Channel {} from peer {:?} is inactive for a time, shutting down it forcefully",
                         state.get_id(),
-                        state.get_remote_peer_id(),
+                        state.get_remote_pubkey(),
                     );
                     self.notify_network_actor_shutdown_me(state);
                 }
@@ -2454,10 +2445,10 @@ where
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
             }) => {
-                let peer_id = self.get_remote_peer_id();
+                let pubkey = self.get_remote_pubkey();
                 debug!(
                     "Accepting channel {:?} to peer {:?}",
-                    &open_channel, &peer_id
+                    &open_channel, &pubkey
                 );
 
                 let counterpart_pubkeys = (&open_channel).into();
@@ -2575,8 +2566,8 @@ where
 
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            peer_id,
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                            state.get_remote_pubkey(),
                             FiberMessage::accept_channel(accept_channel),
                         )),
                     ))
@@ -2606,8 +2597,8 @@ where
                 max_tlc_value_in_flight,
             }) => {
                 let public = public_channel_info.is_some();
-                let peer_id = self.get_remote_peer_id();
-                info!("Trying to open a channel to {:?}", &peer_id);
+                let pubkey = self.get_remote_pubkey();
+                info!("Trying to open a channel to {:?}", &pubkey);
 
                 let commitment_fee_rate =
                     commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
@@ -2697,25 +2688,25 @@ where
 
                 debug!(
                     "Created OpenChannel message to {:?}: {:?}",
-                    &peer_id, &message
+                    &pubkey, &message
                 );
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                            peer_id: peer_id.clone(),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                            target: self.get_remote_pubkey(),
                             message,
                         }),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 // TODO: note that we can't actually guarantee that this OpenChannel message is sent here.
-                // It is even possible that the peer_id is bogus, and we can't send a message to it.
+                // It is even possible that the remote pubkey is bogus, and we can't send a message to it.
                 // We need some book-keeping service to remove all the OUR_INIT_SENT channels.
                 channel.update_state(ChannelState::NegotiatingFunding(
                     NegotiatingFundingFlags::OUR_INIT_SENT,
                 ));
                 debug!(
                     "Channel to peer {:?} with id {:?} created",
-                    &peer_id,
+                    &pubkey,
                     &channel.get_id()
                 );
 
@@ -2741,8 +2732,8 @@ where
 
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            self.get_remote_peer_id(),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                            self.get_remote_pubkey(),
                             FiberMessage::reestablish_channel(reestablish_channel),
                         )),
                     ))
@@ -2764,7 +2755,7 @@ where
     ) -> Result<(), ActorProcessingErr> {
         trace!(
             "Channel actor processing message: peer: {:?} id: {:?}, state: {:?}, message: {:?}",
-            state.get_local_peer_id(),
+            state.get_local_pubkey(),
             &state.get_id(),
             &state.state,
             message,
@@ -2785,7 +2776,7 @@ where
                 {
                     error!(
                         "{:?} Error while processing channel message: {:?} with message: {:?}",
-                        state.get_local_peer_id(),
+                        state.get_local_pubkey(),
                         error,
                         message
                     );
@@ -2802,7 +2793,7 @@ where
                     if !matches!(err, ProcessingChannelError::WaitingTlcAck) {
                         error!(
                             "{:?} Error while processing channel command: {:?}",
-                            state.get_local_peer_id(),
+                            state.get_local_pubkey(),
                             err,
                         );
                     }
@@ -3609,13 +3600,13 @@ impl ChannelActorState {
     fn update_graph_for_remote_channel_change(&mut self) {
         if let Some(channel_update_info) = self.get_remote_channel_update_info() {
             if let Some(channel_outpoint) = self.get_funding_transaction_outpoint() {
-                let peer_id = self.get_remote_pubkey();
+                let pubkey = self.get_remote_pubkey();
                 self.network()
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::OwnedChannelUpdateEvent(
                             super::graph::OwnedChannelUpdateEvent::Updated(
                                 channel_outpoint,
-                                peer_id,
+                                pubkey,
                                 channel_update_info,
                             ),
                         ),
@@ -3641,14 +3632,14 @@ impl ChannelActorState {
         let Some(channel_outpoint) = self.get_funding_transaction_outpoint() else {
             return;
         };
-        let peer_id = self.get_local_pubkey();
+        let pubkey = self.get_local_pubkey();
         let channel_update_info = self.get_local_channel_update_info();
         self.network()
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::OwnedChannelUpdateEvent(
                     super::graph::OwnedChannelUpdateEvent::Updated(
                         channel_outpoint,
-                        peer_id,
+                        pubkey,
                         channel_update_info,
                     ),
                 ),
@@ -3660,8 +3651,8 @@ impl ChannelActorState {
         let update_tlc_info = self.create_update_tlc_info_message();
         self.network()
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                    peer_id: self.get_remote_peer_id(),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                    target: self.get_remote_pubkey(),
                     message: FiberMessage::ChannelNormalOperation(
                         FiberChannelMessage::UpdateTlcInfo(update_tlc_info),
                     ),
@@ -4075,7 +4066,7 @@ impl ChannelActorState {
         let agg_nonce = AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce));
         let key_agg_ctx = self.get_deterministic_musig2_agg_context();
         let channel_id = self.get_id();
-        let peer_id = self.get_remote_peer_id();
+        let pubkey = self.get_remote_pubkey();
         let channel_outpoint = self.must_get_funding_transaction_outpoint();
 
         let partial_signature: PartialSignature = sign_partial(
@@ -4090,8 +4081,8 @@ impl ChannelActorState {
         let node_signature = sign_network_message(self.private_key(), message);
         self.network()
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    peer_id,
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    pubkey,
                     FiberMessage::announcement_signatures(AnnouncementSignatures {
                         channel_id,
                         channel_outpoint,
@@ -4206,8 +4197,8 @@ impl ChannelActorState {
                 Some(ref revoke_and_ack) => {
                     self.network()
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                self.get_remote_peer_id(),
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
                                 FiberMessage::revoke_and_ack(revoke_and_ack.clone()),
                             )),
                         ))
@@ -4304,8 +4295,8 @@ impl ChannelActorState {
 
         self.network()
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    self.get_remote_peer_id(),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    self.get_remote_pubkey(),
                     FiberMessage::revoke_and_ack(
                         self.last_revoke_ack_msg.as_ref().unwrap().clone(),
                     ),
@@ -4331,10 +4322,6 @@ impl ChannelActorState {
         self.local_pubkey
     }
 
-    pub fn get_local_peer_id(&self) -> PeerId {
-        self.local_pubkey.tentacle_peer_id()
-    }
-
     pub fn get_local_channel_update_info(&self) -> ChannelUpdateInfo {
         let balance = self.get_local_balance();
         let mut info = ChannelUpdateInfo::from(&self.local_tlc_info);
@@ -4348,10 +4335,6 @@ impl ChannelActorState {
 
     pub fn get_remote_pubkey(&self) -> Pubkey {
         self.remote_pubkey
-    }
-
-    pub fn get_remote_peer_id(&self) -> PeerId {
-        self.remote_pubkey.tentacle_peer_id()
     }
 
     pub fn get_remote_channel_update_info(&self) -> Option<ChannelUpdateInfo> {
@@ -5240,8 +5223,8 @@ impl ChannelActorState {
 
                     self.network()
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                self.get_remote_peer_id(),
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
                                 FiberMessage::closing_signed(ClosingSigned {
                                     partial_signature: signature,
                                     channel_id: self.get_id(),
@@ -5274,7 +5257,7 @@ impl ChannelActorState {
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ClosingTransactionPending(
                             self.get_id(),
-                            self.get_remote_peer_id(),
+                            self.get_remote_pubkey(),
                             tx,
                             false,
                         ),
@@ -5460,7 +5443,7 @@ impl ChannelActorState {
                 network
                     .send_message(NetworkActorMessage::new_notification(
                         NetworkServiceEvent::RemoteTxComplete(
-                            self.get_remote_peer_id(),
+                            self.get_remote_pubkey(),
                             self.get_id(),
                             self.funding_udt_type_script.clone(),
                             local_settlement_key,
@@ -5549,7 +5532,7 @@ impl ChannelActorState {
         self.network()
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RemoteCommitmentSigned(
-                    self.get_remote_peer_id(),
+                    self.get_remote_pubkey(),
                     self.get_id(),
                     commitment_tx.clone(),
                     settlement_data,
@@ -5648,7 +5631,7 @@ impl ChannelActorState {
         self.network()
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SignFundingTx(
-                    self.get_remote_peer_id(),
+                    self.get_remote_pubkey(),
                     self.get_id(),
                     funding_tx,
                     partial_witnesses,
@@ -5712,13 +5695,13 @@ impl ChannelActorState {
         self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
-        let peer_id = self.get_remote_peer_id();
+        let pubkey = self.get_remote_pubkey();
         self.on_owned_channel_updated(myself, false);
         self.network()
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(
                     self.get_id(),
-                    peer_id.clone(),
+                    pubkey,
                     self.must_get_funding_transaction_outpoint(),
                 ),
             ))
@@ -5735,11 +5718,11 @@ impl ChannelActorState {
         // If the channel is already ready, we should notify the network actor.
         // so that we update the network.outpoint_channel_map
         let channel_id = self.get_id();
-        let peer_id = self.get_remote_peer_id();
+        let pubkey = self.get_remote_pubkey();
         self.network()
             .send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, move || {
                 NetworkActorMessage::new_event(NetworkActorEvent::ChannelReady(
-                    channel_id, peer_id, outpoint,
+                    channel_id, pubkey, outpoint,
                 ))
             });
         self.on_owned_channel_updated(myself, false);
@@ -5782,9 +5765,9 @@ impl ChannelActorState {
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let peer_id = self.get_remote_peer_id();
-                    let peer_message = FiberMessageWithPeerId {
-                        peer_id,
+                    let pubkey = self.get_remote_pubkey();
+                    let peer_message = FiberMessageWithTarget {
+                        target: pubkey,
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxSignatures(TxSignatures {
                                 channel_id,
@@ -5805,7 +5788,7 @@ impl ChannelActorState {
                     self.network()
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::SignFundingTx(
-                                self.get_remote_peer_id(),
+                                self.get_remote_pubkey(),
                                 self.get_id(),
                                 funding_tx,
                                 if self.should_local_send_tx_signatures_first() {
@@ -5827,8 +5810,8 @@ impl ChannelActorState {
                         // If we are ready, resend the ChannelReady message
                         self.network()
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                    self.get_remote_peer_id(),
+                                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                    self.get_remote_pubkey(),
                                     FiberMessage::channel_ready(ChannelReady {
                                         channel_id: self.get_id(),
                                     }),
@@ -5981,7 +5964,7 @@ impl ChannelActorState {
         self.network()
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RevokeAndAckReceived(
-                    self.get_remote_peer_id(),
+                    self.get_remote_pubkey(),
                     self.get_id(),
                     revocation_data,
                     settlement_data,
@@ -5998,7 +5981,7 @@ impl ChannelActorState {
     ) -> ProcessingChannelResult {
         debug!(
             "peer: {:?} Handling reestablish channel message: {:?}, our commitment_numbers {:?} in channel state {:?}",
-            self.get_local_peer_id(),
+            self.get_local_pubkey(),
             reestablish_channel, self.commitment_numbers, self.state
         );
         let network = self.network();
@@ -6033,7 +6016,7 @@ impl ChannelActorState {
                     local_commitment_number ({:?}, {:?}) \
                     peer_commitment_number ({:?} {:?}) \
                     waiting_ack: {:?}",
-                    self.get_local_peer_id(),
+                    self.get_local_pubkey(),
                     my_local_commitment_number,
                     my_remote_commitment_number,
                     peer_local_commitment_number,
@@ -6082,8 +6065,8 @@ impl ChannelActorState {
                 if !flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) {
                     self.network()
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                self.get_remote_peer_id(),
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
                                 FiberMessage::shutdown(Shutdown {
                                     channel_id: self.get_id(),
                                     close_script: self.get_local_shutdown_script().clone(),
@@ -6112,8 +6095,8 @@ impl ChannelActorState {
                 // resend AddTlc message
                 network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            self.get_remote_peer_id(),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                            self.get_remote_pubkey(),
                             FiberMessage::add_tlc(AddTlc {
                                 channel_id: self.get_id(),
                                 tlc_id: info.tlc_id.into(),
@@ -6135,8 +6118,8 @@ impl ChannelActorState {
                     // resend RemoveTlc message
                     network
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                self.get_remote_peer_id(),
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
                                 FiberMessage::remove_tlc(RemoveTlc {
                                     channel_id: self.get_id(),
                                     tlc_id: info.tlc_id.into(),
@@ -6231,8 +6214,8 @@ impl ChannelActorState {
             // is processed first, thus breaking the order of messages.
             self.network()
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        self.get_remote_peer_id(),
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                        self.get_remote_pubkey(),
                         FiberMessage::tx_complete(TxComplete {
                             channel_id: self.get_id(),
                             next_commitment_nonce: self.get_next_commitment_nonce(),
@@ -6888,8 +6871,8 @@ impl ChannelActorState {
             let close_script = self.get_local_shutdown_script();
             self.network()
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        self.get_remote_peer_id(),
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                        self.get_remote_pubkey(),
                         FiberMessage::shutdown(Shutdown {
                             channel_id: self.get_id(),
                             close_script: close_script.clone(),
@@ -6921,21 +6904,21 @@ pub trait ChannelActorStateStore {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
-    fn get_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256>;
-    fn get_active_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
-        self.get_channel_ids_by_peer(peer_id)
+    fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256>;
+    fn get_active_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
+        self.get_channel_ids_by_pubkey(pubkey)
             .into_iter()
             .filter(
                 |id| matches!(self.get_channel_actor_state(id), Some(state) if !state.is_closed()),
             )
             .collect()
     }
-    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)>;
+    fn get_channel_states(&self, pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)>;
     fn get_active_channel_states(
         &self,
-        peer_id: Option<PeerId>,
-    ) -> Vec<(PeerId, Hash256, ChannelState)> {
-        self.get_channel_states(peer_id)
+        pubkey: Option<Pubkey>,
+    ) -> Vec<(Pubkey, Hash256, ChannelState)> {
+        self.get_channel_states(pubkey)
             .into_iter()
             .filter(|(_, _, state)| !state.is_closed())
             .collect()

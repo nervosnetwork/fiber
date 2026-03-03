@@ -1,28 +1,25 @@
 //! Tests for SettleTlcSetCommand
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
-use ckb_types::packed::{OutPoint, Script};
-use fiber_types::TlcState;
-use tentacle::secio::PeerId;
-
 use crate::fiber::channel::InMemorySignerExt;
 use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
-use crate::fiber::types::HoldTlc;
-use crate::fiber::{
-    AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelConstraints, ChannelState,
-    ChannelTlcInfo, CommitmentNumbers, Hash256, HashAlgorithm, InMemorySigner, InboundTlcStatus,
-    PaymentCustomRecords, RemoveTlcReason, TLCId, TlcErrorCode, TlcInfo, TlcStatus,
-    NO_SHARED_SECRET,
-};
+use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
 use crate::invoice::{InvoiceStore, PreimageStore};
 use crate::now_timestamp_as_millis_u64;
 use crate::tests::gen_utils::gen_rand_fiber_public_key;
 use crate::time::SystemTime;
+use ckb_types::packed::{OutPoint, Script};
+use fiber_types::{
+    AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelState, ChannelTlcInfo,
+    CommitmentNumbers, InMemorySigner, PaymentCustomRecords, TLCId, TlcInfo, TlcState, TlcStatus,
+    NO_SHARED_SECRET,
+};
+use fiber_types::{ChannelConstraints, InboundTlcStatus};
+use fiber_types::{HashAlgorithm, TlcErrorCode};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// Mock store for testing that implements PreimageStore, InvoiceStore, and ChannelActorStateStore
 struct MockStore {
@@ -138,11 +135,11 @@ impl ChannelActorStateStore for MockStore {
         self.channel_states.borrow_mut().remove(id);
     }
 
-    fn get_channel_ids_by_peer(&self, _peer_id: &PeerId) -> Vec<Hash256> {
+    fn get_channel_ids_by_pubkey(&self, _pubkey: &Pubkey) -> Vec<Hash256> {
         self.channel_states.borrow().keys().cloned().collect()
     }
 
-    fn get_channel_states(&self, _peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
+    fn get_channel_states(&self, _pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)> {
         vec![]
     }
 

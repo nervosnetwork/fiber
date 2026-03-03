@@ -122,8 +122,6 @@ make update-migrate-check
 ```rust
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Peer not found error: {0:?}")]
-    PeerNotFound(PeerId),
     #[error("Channel not found error: {0:?}")]
     ChannelNotFound(Hash256),
     #[error("Invalid parameter: {0}")]

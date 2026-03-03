@@ -583,9 +583,9 @@ fn test_channel_actor_state_store() {
     assert!(get_state.is_some());
     assert!(!get_state.unwrap().is_tlc_forwarding_enabled());
 
-    let remote_peer_id = state.get_remote_peer_id();
+    let remote_pubkey = state.get_remote_pubkey();
     assert_eq!(
-        store.get_channel_ids_by_peer(&remote_peer_id),
+        store.get_channel_ids_by_pubkey(&remote_pubkey),
         vec![state.id]
     );
     let channel_point = state.must_get_funding_transaction_outpoint();
@@ -595,7 +595,7 @@ fn test_channel_actor_state_store() {
 
     store.delete_channel_actor_state(&state.id);
     assert!(store.get_channel_actor_state(&state.id).is_none());
-    assert_eq!(store.get_channel_ids_by_peer(&remote_peer_id), vec![]);
+    assert_eq!(store.get_channel_ids_by_pubkey(&remote_pubkey), vec![]);
     let channel_point = state.must_get_funding_transaction_outpoint();
     assert!(store
         .get_channel_state_by_outpoint(&channel_point)
@@ -1034,12 +1034,12 @@ fn test_store_sample_channel_actor_state() {
             sample.shutdown_transaction_hash
         );
 
-        // Verify peer-id index
-        let remote_peer_id = sample.get_remote_peer_id();
-        let channel_ids = store.get_channel_ids_by_peer(&remote_peer_id);
+        // Verify pubkey index
+        let remote_pubkey = sample.get_remote_pubkey();
+        let channel_ids = store.get_channel_ids_by_pubkey(&remote_pubkey);
         assert!(
             channel_ids.contains(&sample.id),
-            "peer-id index should contain the channel id"
+            "pubkey index should contain the channel id"
         );
     }
 
@@ -1056,9 +1056,8 @@ fn test_store_sample_channel_actor_state() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_channel_open_record() {
+    use crate::{fiber::channel::ChannelOpenRecordStore, store::sample::deterministic_pubkey};
     use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus};
-
-    use crate::fiber::channel::ChannelOpenRecordStore;
 
     let samples = ChannelOpenRecord::samples(42);
     assert!(!samples.is_empty());
@@ -1096,9 +1095,9 @@ fn test_store_channel_open_record() {
     assert!(store.get_channel_open_records().is_empty());
 
     // Test update_status helper
-    let mut record = ChannelOpenRecord::new_outbound(
+    let mut record = ChannelOpenRecord::new(
         deterministic_hash256(42, 99),
-        sample_peer_id(),
+        deterministic_pubkey(999, 0),
         100_0000_0000,
     );
     assert_eq!(record.status, ChannelOpeningStatus::WaitingForPeer);
@@ -1107,15 +1106,6 @@ fn test_store_channel_open_record() {
     record.fail("test failure".to_string());
     assert_eq!(record.status, ChannelOpeningStatus::Failed);
     assert_eq!(record.failure_detail.as_deref(), Some("test failure"));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn sample_peer_id() -> tentacle::secio::PeerId {
-    use crate::store::sample::deterministic_pubkey;
-    let pubkey = deterministic_pubkey(999, 0);
-    let pk_bytes = pubkey.serialize();
-    let tentacle_pk = tentacle::secio::PublicKey::from_raw_key(pk_bytes.to_vec());
-    tentacle::secio::PeerId::from_public_key(&tentacle_pk)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

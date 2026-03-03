@@ -390,26 +390,6 @@ impl ChannelTlcInfo {
 }
 
 // ============================================================
-// ChannelOpeningStatus
-// ============================================================
-
-/// The status of a channel opening operation initiated by the local node.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChannelOpeningStatus {
-    /// The `open_channel` RPC has been submitted and the `OpenChannel` message has been sent
-    /// to the peer. We are waiting for the peer to respond with an `AcceptChannel` message.
-    WaitingForPeer,
-    /// The peer accepted the channel. We are now collaborating on the funding transaction.
-    FundingTxBuilding,
-    /// The funding transaction has been submitted to the chain and is awaiting confirmation.
-    FundingTxBroadcasted,
-    /// The funding transaction has been confirmed and the channel is fully open.
-    ChannelReady,
-    /// The channel opening failed. The `failure_detail` field contains the reason.
-    Failed,
-}
-
-// ============================================================
 // ChannelBasePublicKeys
 // ============================================================
 
@@ -1042,8 +1022,21 @@ impl fmt::Debug for InMemorySigner {
 // ChannelOpenRecord
 // ============================================================
 
-use serde_with::DisplayFromStr;
-use tentacle_secio::PeerId;
+/// The status of a channel opening operation initiated by the local node.Add a comment on  line R7954Add diff commentMarkdown input:  edit mode selected.WritePreviewAdd a suggestionHeadingBoldItalicQuoteCodeLinkUnordered listNumbered listTask listMentionReferenceSaved repliesAdd FilesPaste, drop, or click to add filesCancelCommentStart a review
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelOpeningStatus {
+    /// The `open_channel` RPC has been submitted and the `OpenChannel` message has been sent
+    /// to the peer. We are waiting for the peer to respond with an `AcceptChannel` message.
+    WaitingForPeer,
+    /// The peer accepted the channel. We are now collaborating on the funding transaction.
+    FundingTxBuilding,
+    /// The funding transaction has been submitted to the chain and is awaiting confirmation.
+    FundingTxBroadcasted,
+    /// The funding transaction has been confirmed and the channel is fully open.
+    ChannelReady,
+    /// The channel opening failed. The `failure_detail` field contains the reason.
+    Failed,
+}
 
 /// A record that tracks a channel-opening attempt — either outbound (initiated by us)
 /// or inbound (initiated by a remote peer and pending local acceptance).
@@ -1058,9 +1051,8 @@ pub struct ChannelOpenRecord {
     /// channels, the temp ID is replaced by the computed new ID when `accept_channel` is
     /// called.
     pub channel_id: Hash256,
-    /// The remote peer involved in this channel-opening attempt.
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
+    /// The remote peer public key.
+    pub pubkey: Pubkey,
     /// Whether the local node is the accepting side (received the `OpenChannel` request).
     pub is_acceptor: bool,
     /// Current status of the opening process.
@@ -1079,11 +1071,11 @@ pub struct ChannelOpenRecord {
 
 impl ChannelOpenRecord {
     /// Create a new outbound record in the `WaitingForPeer` state.
-    pub fn new(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
+    pub fn new(channel_id: Hash256, pubkey: Pubkey, funding_amount: u128) -> Self {
         let now = crate::now_timestamp_as_millis_u64();
         Self {
             channel_id,
-            peer_id,
+            pubkey,
             is_acceptor: false,
             status: ChannelOpeningStatus::WaitingForPeer,
             funding_amount,
@@ -1093,16 +1085,10 @@ impl ChannelOpenRecord {
         }
     }
 
-    /// Create a new outbound record in the `WaitingForPeer` state.
-    /// Used when `open_channel` is called.
-    pub fn new_outbound(channel_id: Hash256, peer_id: PeerId, funding_amount: u128) -> Self {
-        Self::new(channel_id, peer_id, funding_amount)
-    }
-
     /// Create a new inbound record in the `WaitingForPeer` state.
     /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
-    pub fn new_inbound(channel_id: Hash256, peer_id: PeerId, remote_funding_amount: u128) -> Self {
-        let mut record = Self::new(channel_id, peer_id, remote_funding_amount);
+    pub fn new_inbound(channel_id: Hash256, pubkey: Pubkey, remote_funding_amount: u128) -> Self {
+        let mut record = Self::new(channel_id, pubkey, remote_funding_amount);
         record.is_acceptor = true;
         record
     }
@@ -1119,6 +1105,18 @@ impl ChannelOpenRecord {
         self.failure_detail = Some(reason);
         self.last_updated_at = crate::now_timestamp_as_millis_u64();
     }
+}
+
+/// Store trait for persisting and querying outbound channel-opening records.
+pub trait ChannelOpenRecordStore {
+    /// Return all stored channel-opening records.
+    fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord>;
+    /// Return the record for the given channel ID, if any.
+    fn get_channel_open_record(&self, channel_id: &Hash256) -> Option<ChannelOpenRecord>;
+    /// Persist (insert or overwrite) a channel-opening record.
+    fn insert_channel_open_record(&self, record: ChannelOpenRecord);
+    /// Delete the record for the given channel ID.
+    fn delete_channel_open_record(&self, channel_id: &Hash256);
 }
 
 // ============================================================
