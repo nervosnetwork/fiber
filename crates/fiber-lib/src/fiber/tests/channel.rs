@@ -7152,9 +7152,60 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
     node_a.add_unexpected_events(panic_events.clone()).await;
     node_d.add_unexpected_events(panic_events.clone()).await;
 
-    // Wait for reestablish and TLC settlement
-    debug!("=== Waiting for reestablish and TLC settlement ===");
-    tokio::time::sleep(Duration::from_secs(30)).await;
+    // Channel groups used by post-restart checks.
+    let chs_a = [channels[0], channels[3]];
+    let chs_b = [channels[0], channels[1]];
+    let chs_c = [channels[1], channels[2]];
+    let chs_d = [channels[2], channels[3]];
+    let checks: Vec<(&str, &NetworkNode, &[Hash256])> = vec![
+        ("A", &node_a, &chs_a),
+        ("B", &node_b, &chs_b),
+        ("C", &node_c, &chs_c),
+        ("D", &node_d, &chs_d),
+    ];
+
+    // Wait until reestablish and TLC settlement complete, but proceed early once conditions pass.
+    // If timeout is reached, continue to post-check assertions for diagnostics.
+    debug!("=== Waiting for reestablish and TLC settlement (timeout=120s) ===");
+    let wait_start = tokio::time::Instant::now();
+    let wait_timeout = Duration::from_secs(120);
+    let wait_interval = Duration::from_millis(500);
+    loop {
+        let reestablished = chs_a
+            .iter()
+            .all(|ch| !node_a.get_channel_actor_state(*ch).reestablishing)
+            && chs_d
+                .iter()
+                .all(|ch| !node_d.get_channel_actor_state(*ch).reestablishing);
+
+        let tlcs_settled = checks.iter().all(|(_, node, chs)| {
+            chs.iter().all(|ch| {
+                node.get_channel_actor_state(*ch)
+                    .tlc_state
+                    .all_tlcs()
+                    .next()
+                    .is_none()
+            })
+        });
+
+        if reestablished && tlcs_settled {
+            debug!(
+                "Reestablish and TLC settlement conditions reached after {:?}",
+                wait_start.elapsed()
+            );
+            break;
+        }
+
+        if wait_start.elapsed() >= wait_timeout {
+            debug!(
+                "Waited {:?} without full settlement, continuing to assertions",
+                wait_timeout
+            );
+            break;
+        }
+
+        tokio::time::sleep(wait_interval).await;
+    }
 
     // Verify: no unexpected events after restart
     for (name, node) in [
@@ -7192,17 +7243,7 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
 
     // Verify: all TLCs should be settled (none stuck inflight)
     // Each node checks its own channels.
-    let chs_a = [channels[0], channels[3]];
-    let chs_b = [channels[0], channels[1]];
-    let chs_c = [channels[1], channels[2]];
-    let chs_d = [channels[2], channels[3]];
     let source_nodes = [&node_a, &node_b, &node_c, &node_d];
-    let checks: Vec<(&str, &NetworkNode, &[Hash256])> = vec![
-        ("A", &node_a, &chs_a),
-        ("B", &node_b, &chs_b),
-        ("C", &node_c, &chs_c),
-        ("D", &node_d, &chs_d),
-    ];
     let mut stuck_channels: Vec<(&str, Hash256, usize)> = vec![];
     for (name, node, chs) in &checks {
         for ch in *chs {
