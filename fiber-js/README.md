@@ -13,7 +13,8 @@ After that, `fiber-js` will be ready to use in npm.
 
 ## APIs
 
-`fiber-js` provide the same API ad Fiber RPC, see `fiber-js/src/index.ts` for details. For documentation, please refer to the docs of Fiber RPC.
+`fiber-js` provide the same API as Fiber RPC, see `fiber-js/src/index.ts` for details. For documentation, please refer to the docs of Fiber RPC.
+
 
 For external funding:
 
