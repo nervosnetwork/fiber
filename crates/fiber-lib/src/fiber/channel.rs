@@ -372,7 +372,17 @@ pub struct OpenChannelWithExternalFundingParameter {
     pub max_tlc_number_in_flight: u64,
 }
 
-// Ephemeral config for channel which does not need to persist.
+/// Runtime state for external funding flow; this is intentionally not persisted.
+///
+/// This struct tracks the progress of external funding alongside the `ChannelState`.
+/// The relationship between `ExternalFundingRuntime` fields and `ChannelState`:
+///
+/// | State | `enabled` | `signed_submitted` | `unsigned_funding_tx` |
+/// |-------|-----------|-------------------|----------------------|
+/// | Normal channel | `false` | - | - |
+/// | `AwaitingExternalFunding` | `true` | `false` | `Some(tx)` |
+/// | `SigningCommitment` (after submit) | `true` | `true` | `Some(tx)` |
+/// | `ChannelReady` | `true` | `true` | `None` (cleared) |
 #[derive(Clone, Debug, Default)]
 pub struct ExternalFundingRuntime {
     pub enabled: bool,
@@ -2609,7 +2619,38 @@ where
     }
 
     /// Handle the submission of a signed funding transaction for external funding channels.
-    /// This validates the signed tx, stores it, and initiates the commitment exchange with the peer.
+    ///
+    /// # State Transition
+    ///
+    /// This function handles the transition from `AwaitingExternalFunding` to the signing phase:
+    ///
+    /// ## Current State Checks
+    /// - Must be in `AwaitingExternalFunding` OR
+    /// - `SigningCommitment(THEIR_COMMITMENT_SIGNED_SENT)` (if peer sent early CommitmentSigned)
+    ///
+    /// ## State Transition Flow
+    /// ```text
+    /// AwaitingExternalFunding ───────┐
+    ///     │                          │
+    ///     │ submit_signed_funding_tx │
+    ///     ↓                          │
+    /// install_external_funding_signed_tx
+    ///     │                          │
+    ///     ├─→ if peer already sent   │
+    ///     │   CommitmentSigned       │
+    ///     │     ↓                    │
+    ///     │   stay in SigningCommitment(THEIR_COMMITMENT_SIGNED_SENT)
+    ///     │     ↓                    │
+    ///     │   handle_commitment_signed_command()
+    ///     │                          │
+    ///     └─→ otherwise              │
+    ///           ↓                    │
+    ///   CollaboratingFundingTx(COLLABORATION_COMPLETED)
+    ///           ↓                    │
+    ///   TxUpdate (send signed tx)    │
+    /// ```
+    ///
+    /// After this function, the normal funding flow resumes towards `ChannelReady`.
     async fn handle_submit_external_funding_tx(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -4835,7 +4876,52 @@ pub enum ChannelState {
     /// This channel is closed.
     Closed(CloseFlags),
     /// We're waiting for the user to sign and submit the funding transaction externally.
-    /// This state is used when the channel is opened with external funding.
+    ///
+    /// # State Machine Context
+    ///
+    /// This state is part of the **external funding flow**, where the user signs the funding
+    /// transaction with their own wallet instead of the node automatically signing it.
+    ///
+    /// # State Transitions
+    ///
+    /// ## Normal Funding Flow (for comparison)
+    /// ```text
+    /// CollaboratingFundingTx(COLLABORATION_COMPLETED)
+    ///     ↓
+    /// SigningCommitment → AwaitingTxSignatures → AwaitingChannelReady → ChannelReady
+    /// ```
+    ///
+    /// ## External Funding Flow (Initiator)
+    /// ```text
+    /// CollaboratingFundingTx(COLLABORATION_COMPLETED)
+    ///     ↓
+    /// AwaitingExternalFunding  ←── user gets unsigned_funding_tx via RPC
+    ///     ↓                           ↓
+    ///     └───────────────────────────┘
+    ///     (user signs and submits via submit_signed_funding_tx)
+    ///     ↓
+    /// SigningCommitment → AwaitingTxSignatures → AwaitingChannelReady → ChannelReady
+    /// ```
+    ///
+    /// ## External Funding Flow (Acceptor)
+    /// ```text
+    /// CollaboratingFundingTx(COLLABORATION_COMPLETED)
+    ///     ↓
+    /// SigningCommitment → AwaitingTxSignatures (special handling for tx_sync)
+    ///     ↓
+    /// AwaitingChannelReady → ChannelReady
+    /// ```
+    ///
+    /// # Timeout
+    ///
+    /// Uses `external_funding_timeout_seconds` (default: 5 minutes). The channel is aborted
+    /// if the user does not submit the signed transaction within this period.
+    ///
+    /// # Important Invariants
+    ///
+    /// - Only valid when `external_funding.enabled == true`
+    /// - Peer may send `CommitmentSigned` before user submits tx; handled by allowing
+    ///   early transition to `SigningCommitment(THEIR_COMMITMENT_SIGNED_SENT)`
     AwaitingExternalFunding,
 }
 
@@ -7870,7 +7956,11 @@ impl ChannelActorState {
                     .ok_or(ProcessingChannelError::InvalidParameter(
                         "Funding transaction should have at least one output".to_string(),
                     ))?;
-            assert!(data.as_ref().len() >= 16);
+            if data.as_ref().len() < 16 {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "UDT output data too short, expected at least 16 bytes".to_string(),
+                ));
+            }
             let mut amount_bytes = [0u8; 16];
             amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
             let udt_amount = u128::from_le_bytes(amount_bytes);
