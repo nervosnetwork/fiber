@@ -199,7 +199,8 @@ serde_with::serde_conv!(
 );
 
 serde_with::serde_conv!(
-    DepTypeWrapper,
+    /// Wrapper for DepType serialization that supports both `dep_group` and `depGroup` formats.
+    pub DepTypeWrapper,
     DepType,
     |s: &DepType| -> String {
         let v = match s {
@@ -209,10 +210,11 @@ serde_with::serde_conv!(
         v.to_string()
     },
     |s: String| {
+        // Support both snake_case (dep_group) and camelCase (depGroup) from JS libraries
         let v = match s.to_lowercase().as_str() {
             "code" => DepType::Code,
-            "dep_group" => DepType::DepGroup,
-            _ => return Err("invalid hash type"),
+            "dep_group" | "depgroup" => DepType::DepGroup,
+            _ => return Err("invalid dep type"),
         };
         Ok(v)
     }

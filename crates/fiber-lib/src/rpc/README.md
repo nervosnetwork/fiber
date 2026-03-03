@@ -68,6 +68,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Attribute`](#type-attribute)
     * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
+    * [Type `CellDep`](#type-celldep)
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
     * [Type `ChannelState`](#type-channelstate)
@@ -381,7 +382,7 @@ Opens a channel with external funding. The node will negotiate the channel with 
 * `shutdown_script` - <em>`Script`</em>, The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
 * `funding_lock_script` - <em>`Script`</em>, The lock script that controls the funding cells. The node will collect cells with this lock script
  to build the funding transaction. The user must be able to sign for this lock script.
-* `funding_lock_script_cell_deps` - <em>`Option<Vec<CellDep>>`</em>, Optional extra cell deps required by `funding_lock_script`.
+* `funding_lock_script_cell_deps` - <em>Option<Vec<[CellDep](#type-celldep)>></em>, Optional extra cell deps required by `funding_lock_script`.
  This is useful for custom wallet lock scripts whose deps are not part of the genesis defaults.
 * `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
 * `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
@@ -1206,6 +1207,19 @@ The status of a cross-chain hub order, will update as the order progresses.
 * `OutgoingSucceeded` - The outgoing payment is settled and preimage has been obtained.
 * `Succeeded` - Both payments are settled and the order succeeds.
 * `Failed` - Order is failed.
+---
+
+<a id="#type-celldep"></a>
+### Type `CellDep`
+
+A wrapper type for `CellDep` that supports both `dep_group` and `depGroup` formats.
+ This handles compatibility with JS libraries like Lumos that use camelCase.
+
+
+#### Fields
+
+* `out_point` - <em>`ckb_jsonrpc_types::OutPoint`</em>, The out point of the cell dep.
+* `dep_type` - <em>`DepType`</em>, The type of the cell dep.
 ---
 
 <a id="#type-channel"></a>

@@ -17,7 +17,7 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, log_and_error};
-use ckb_jsonrpc_types::{CellDep, EpochNumberWithFraction, Script};
+use ckb_jsonrpc_types::{CellDep as CkbJsonRpcCellDep, DepType, EpochNumberWithFraction, Script};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
     packed::{self, OutPoint},
@@ -32,6 +32,61 @@ use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::cmp::Reverse;
+
+/// A wrapper type for `CellDep` that supports both `dep_group` and `depGroup` formats.
+/// This handles compatibility with JS libraries like Lumos that use camelCase.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CellDep {
+    /// The out point of the cell dep.
+    pub out_point: ckb_jsonrpc_types::OutPoint,
+    /// The type of the cell dep.
+    #[serde(with = "dep_type_serde")]
+    pub dep_type: DepType,
+}
+
+/// Custom serde module for DepType to support both `dep_group` and `depGroup` formats.
+pub mod dep_type_serde {
+    use super::DepType;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(dep_type: &DepType, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let s = match dep_type {
+            DepType::Code => "code",
+            DepType::DepGroup => "dep_group",
+        };
+        s.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DepType, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "code" => Ok(DepType::Code),
+            "dep_group" | "depgroup" => Ok(DepType::DepGroup),
+            _ => Err(serde::de::Error::custom("invalid dep type")),
+        }
+    }
+}
+
+impl From<CellDep> for CkbJsonRpcCellDep {
+    fn from(dep: CellDep) -> Self {
+        CkbJsonRpcCellDep {
+            out_point: dep.out_point,
+            dep_type: dep.dep_type,
+        }
+    }
+}
+
+impl From<CellDep> for packed::CellDep {
+    fn from(dep: CellDep) -> Self {
+        CkbJsonRpcCellDep::from(dep).into()
+    }
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]

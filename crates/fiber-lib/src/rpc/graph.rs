@@ -78,6 +78,7 @@ pub struct UdtCellDep {
     /// The out point of the cell dep.
     pub out_point: OutPointWrapper,
     /// The type of the cell dep.
+    #[serde(with = "crate::rpc::channel::dep_type_serde")]
     pub dep_type: DepType,
 }
 
