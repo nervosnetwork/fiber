@@ -4051,7 +4051,7 @@ async fn test_send_payment_shutdown_with_force() {
             let _ = node_3.send_shutdown(channels[2], true).await;
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             node_3
-                .send_channel_shutdown_tx_confirmed_event(node_2.peer_id.clone(), channels[2], true)
+                .send_channel_shutdown_tx_confirmed_event(node_2.pubkey, channels[2], true)
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let channel_actor_state = node_3.get_channel_actor_state(channels[2]);
@@ -4103,11 +4103,7 @@ async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
         // send multiple shutdown transaction confirmed events
         for _k in 0..5 {
             nodes[i]
-                .send_channel_shutdown_tx_confirmed_event(
-                    nodes[i + 1].peer_id.clone(),
-                    channels[i],
-                    true,
-                )
+                .send_channel_shutdown_tx_confirmed_event(nodes[i + 1].pubkey, channels[i], true)
                 .await;
         }
         let channel_actor_state = nodes[i].get_channel_actor_state(channels[i]);
@@ -5038,19 +5034,18 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
         }
     }
 
-    let node1_id = node_1.peer_id.clone();
-    let node0_id = node_0.peer_id.clone();
+    let node1_pubkey = node_1.pubkey;
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node_1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node0_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_0.pubkey);
                 true
             }
             _ => false,
@@ -5088,19 +5083,19 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             .as_secs();
         if elapsed > 50 {
             let node0_state = node_0.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
+            eprintln!("peer {:?} node_0_state:", node_0.pubkey);
             node0_state.tlc_state.debug();
 
             let node1_state = node_1.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node1_left_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_left_actor_state:", node_1.pubkey);
             node1_state.tlc_state.debug();
 
             let node1_right_state = node_1.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node1_right_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_right_actor_state:", node_1.pubkey);
             node1_right_state.tlc_state.debug();
 
             let node2_state = node_2.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node_2_state:", node_2.get_peer_id());
+            eprintln!("peer {:?} node_2_state:", node_2.pubkey);
             node2_state.tlc_state.debug();
 
             panic!("timeout");
@@ -5137,19 +5132,18 @@ async fn test_send_payment_send_each_other_reestablishing() {
         }
     }
 
-    let node1_id = node_1.peer_id.clone();
-    let node0_id = node_0.peer_id.clone();
+    let node1_pubkey = node_1.pubkey;
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node_1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node0_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_0.pubkey);
                 true
             }
             _ => false,
@@ -5186,15 +5180,15 @@ async fn test_send_payment_send_each_other_reestablishing() {
             .as_secs();
         if elapsed > 50 {
             let node0_state = node_0.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
+            eprintln!("peer {:?} node_0_state:", node_0.pubkey);
             node0_state.tlc_state.debug();
 
             let node1_state = node_1.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node1_left_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_left_actor_state:", node_1.pubkey);
             node1_state.tlc_state.debug();
 
             let node1_right_state = node_1.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node1_right_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_right_actor_state:", node_1.pubkey);
             node1_right_state.tlc_state.debug();
 
             panic!("timeout");
@@ -5773,22 +5767,18 @@ async fn test_send_payment_with_reconnect_two_times() {
         }
 
         // disconnect peer
-        let node1_id = node1.peer_id.clone();
-        let node0_id = node0.peer_id.clone();
+        let node1_pubkey = node1.pubkey;
         node0
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::DisconnectPeer(
-                    node1_id.clone(),
-                    PeerDisconnectReason::Requested,
-                ),
+                NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
             ))
             .expect("node_a alive");
 
         node1
             .expect_event(|event| match event {
-                NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                    assert_eq!(peer_id, &node0_id);
+                NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                    assert_eq!(pubkey, &node0.pubkey);
                     true
                 }
                 _ => false,

@@ -132,7 +132,13 @@ impl CkbConfig {
 
         let path = self.base_dir().join("key");
         if let Ok(plain_key_hex) = fs::read_to_string(&path) {
-            if let Ok(plain_key) = hex::decode(plain_key_hex.trim()) {
+            let trimmed = plain_key_hex.trim();
+            if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                return Err(crate::Error::SecretKeyFileError(
+                    "key file appears to be plaintext but has an unsupported 0x prefix, please remove it".to_string(),
+                ));
+            }
+            if let Ok(plain_key) = hex::decode(trimmed) {
                 info!("secret key is using plain key format, start migrating to encrypted format");
                 encrypt_to_file(&path, plain_key.as_ref(), password_bytes)
                     .map_err(crate::Error::SecretKeyFileError)?;

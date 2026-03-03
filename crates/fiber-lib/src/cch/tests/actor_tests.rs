@@ -358,7 +358,24 @@ async fn setup_test_harness() -> TestHarness {
     setup_test_harness_with_store(MockCchOrderStore::new()).await
 }
 
+async fn setup_test_harness_with_config(config: CchConfig) -> TestHarness {
+    setup_test_harness_with_config_and_store(config, MockCchOrderStore::new()).await
+}
+
 async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+    setup_test_harness_with_config_and_store(config, store).await
+}
+
+async fn setup_test_harness_with_config_and_store(
+    config: CchConfig,
+    store: MockCchOrderStore,
+) -> TestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 
     let mock_state = MockNetworkState {
@@ -371,13 +388,6 @@ async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness 
         .await
         .expect("spawn mock network actor");
 
-    let config = CchConfig {
-        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
-        min_outgoing_invoice_expiry_delta_seconds: 60,
-        ..Default::default()
-    };
-
     let args = CchArgs {
         config,
         tracker: TaskTracker::new(),
@@ -385,6 +395,7 @@ async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness 
         network_actor,
         node_keypair: crate::fiber::KeyPair::try_from([42u8; 32].as_slice()).unwrap(),
         store,
+        currency: Currency::Fibb,
     };
 
     let (actor_ref, _handle) = Actor::spawn(None, CchActor::default(), args)
@@ -438,13 +449,18 @@ fn create_test_lightning_invoice_with_payment_hash(
 
 /// Create a test Fiber invoice for testing
 fn create_test_fiber_invoice(payment_hash: Hash256) -> CkbInvoice {
+    create_test_fiber_invoice_with_amount(payment_hash, 100000)
+}
+
+/// Create a test Fiber invoice with a specific amount
+fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) -> CkbInvoice {
     // Create a deterministic keypair for tests
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
 
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
-        amount: Some(100000),
+        amount: Some(amount),
         signature: None,
         data: InvoiceData {
             payment_hash,
@@ -736,4 +752,388 @@ async fn test_resume_skips_final_orders() {
     let order2 = harness.get_order(payment_hash2).await.unwrap();
     assert_eq!(order2.status, CchOrderStatus::Failed);
     assert_eq!(order2.failure_reason, Some("Test failure".to_string()));
+}
+
+// =============================================================================
+// Invoice Validation Tests
+// =============================================================================
+
+/// Create a test Lightning invoice with a specific payment hash and currency/network
+fn create_test_lightning_invoice_with_currency(
+    payment_hash: Hash256,
+    ln_currency: lightning_invoice::Currency,
+) -> lightning_invoice::Bolt11Invoice {
+    use bitcoin::hashes::Hash as _;
+    use lightning_invoice::InvoiceBuilder as LnInvoiceBuilder;
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let private_key = bitcoin::secp256k1::SecretKey::from_slice(&[43u8; 32]).unwrap();
+
+    let payment_hash_btc = bitcoin::hashes::sha256::Hash::from_slice(payment_hash.as_ref())
+        .expect("valid 32-byte hash");
+
+    let payment_secret = lightning_invoice::PaymentSecret([0u8; 32]);
+
+    let duration_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time");
+    LnInvoiceBuilder::new(ln_currency)
+        .description("test invoice".to_string())
+        .payment_hash(payment_hash_btc)
+        .payment_secret(payment_secret)
+        .duration_since_epoch(duration_since_epoch)
+        .min_final_cltv_expiry_delta(36)
+        .amount_milli_satoshis(100_000_000) // 100k sats
+        .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
+        .expect("build lightning invoice")
+}
+
+/// Create a test Fiber invoice with a specified currency
+fn create_test_fiber_invoice_with_currency(
+    payment_hash: Hash256,
+    currency: Currency,
+) -> CkbInvoice {
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+
+    let mut invoice = CkbInvoice {
+        currency,
+        amount: Some(100000),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("test".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::PayeePublicKey(public_key),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    invoice
+}
+
+/// Tests that send_btc rejects when the currency parameter doesn't match the configured network.
+/// Issue #981: send_btc should fail when currency (e.g. Fibb) doesn't match node's network (e.g. Fibd)
+#[tokio::test]
+async fn test_send_btc_rejects_currency_mismatch() {
+    let harness = setup_test_harness().await;
+    // The harness is configured with Currency::Fibb
+
+    let (_, payment_hash) = create_valid_preimage_pair(100);
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+    let btc_pay_req = lightning_invoice.to_string();
+
+    // Try to send with Fibd currency (node is configured for Fibb)
+    let result = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::actor::SendBTC {
+            btc_pay_req,
+            currency: Currency::Fibd,
+        }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::CKBInvoiceNetworkMismatch { expected, actual }) => {
+            assert_eq!(expected, Currency::Fibb);
+            assert_eq!(actual, Currency::Fibd);
+        }
+        other => panic!("Expected CKBInvoiceNetworkMismatch, got {:?}", other),
+    }
+}
+
+/// Tests that send_btc rejects when the BTC invoice network doesn't match the expected network.
+/// Issue #978: send_btc should fail when BTC invoice is for regtest but node expects mainnet
+#[tokio::test]
+async fn test_send_btc_rejects_btc_invoice_network_mismatch() {
+    let harness = setup_test_harness().await;
+    // The harness is configured with Currency::Fibb, expecting LnCurrency::Bitcoin
+
+    let (_, payment_hash) = create_valid_preimage_pair(101);
+    // Create a regtest invoice (but node expects mainnet)
+    let lightning_invoice = create_test_lightning_invoice_with_currency(
+        payment_hash,
+        lightning_invoice::Currency::Regtest,
+    );
+    let btc_pay_req = lightning_invoice.to_string();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::actor::SendBTC {
+            btc_pay_req,
+            currency: Currency::Fibb, // Matches configured currency
+        }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::BTCInvoiceNetworkMismatch { expected, actual }) => {
+            assert_eq!(expected, "Bitcoin");
+            assert_eq!(actual, "Regtest");
+        }
+        other => panic!("Expected BTCInvoiceNetworkMismatch, got {:?}", other),
+    }
+}
+
+/// Tests that receive_btc rejects when the CKB invoice currency doesn't match the configured network.
+/// Issue #982: receive_btc should fail when invoice currency (e.g. Fibt) doesn't match node's network (e.g. Fibd)
+#[tokio::test]
+async fn test_receive_btc_rejects_currency_mismatch() {
+    let harness = setup_test_harness().await;
+    // The harness is configured with Currency::Fibb
+
+    let (_, payment_hash) = create_valid_preimage_pair(102);
+    // Create a Fibt invoice (wrong currency for this node)
+    let invoice = create_test_fiber_invoice_with_currency(payment_hash, Currency::Fibt);
+    let fiber_pay_req = invoice.to_string();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC { fiber_pay_req }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::CKBInvoiceNetworkMismatch { expected, actual }) => {
+            assert_eq!(expected, Currency::Fibb);
+            assert_eq!(actual, Currency::Fibt);
+        }
+        other => panic!("Expected CKBInvoiceNetworkMismatch, got {:?}", other),
+    }
+}
+
+/// Tests that receive_btc rejects a plain CKB invoice without UDT type script.
+/// Issue #983: receive_btc should fail when invoice has no wrapped BTC UDT type script
+#[tokio::test]
+async fn test_receive_btc_rejects_ckb_invoice_without_udt() {
+    let harness = setup_test_harness().await;
+    // The harness is configured with Currency::Fibb
+
+    let (_, payment_hash) = create_valid_preimage_pair(103);
+    // create_test_fiber_invoice_with_currency creates an invoice WITHOUT UDT type script
+    let invoice = create_test_fiber_invoice_with_currency(payment_hash, Currency::Fibb);
+    let fiber_pay_req = invoice.to_string();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC { fiber_pay_req }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::WrappedBTCTypescriptMismatch) => {} // Expected
+        other => panic!("Expected WrappedBTCTypescriptMismatch, got {:?}", other),
+    }
+}
+
+/// Tests that receive_btc rejects an invoice where amount + fee overflows i64 in msat.
+/// The total_msat = (amount_sats + fee_sats) * 1000 must fit in i64.
+#[tokio::test]
+async fn test_receive_btc_amount_too_large() {
+    let harness = setup_test_harness().await;
+
+    let (_preimage, payment_hash) = create_valid_preimage_pair(170);
+    // i64::MAX / 1000 + 1 = 9_223_372_036_854_776 sats, which makes total_msat overflow i64
+    let large_amount: u128 = (i64::MAX / 1_000) as u128 + 1;
+    let invoice = create_test_fiber_invoice_with_amount(payment_hash, large_amount);
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CchError::ReceiveBTCOrderAmountTooLarge),
+        "expected ReceiveBTCOrderAmountTooLarge, got: {:?}",
+        err
+    );
+}
+
+/// Tests that receive_btc rejects an invoice where amount_sats + fee_sats overflows u128.
+#[tokio::test]
+async fn test_receive_btc_amount_overflow_u128() {
+    let harness = setup_test_harness().await;
+
+    let (_preimage, payment_hash) = create_valid_preimage_pair(171);
+    // u128::MAX will cause amount_sats * fee_rate to wrap and checked_add/checked_mul to fail
+    let invoice = create_test_fiber_invoice_with_amount(payment_hash, u128::MAX);
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CchError::ReceiveBTCOrderAmountTooLarge),
+        "expected ReceiveBTCOrderAmountTooLarge, got: {:?}",
+        err
+    );
+}
+
+/// Tests that the send_btc proxy Fiber invoice includes the fee in its amount.
+///
+/// In the SendBTC flow, the hub creates a Fiber invoice (the proxy invoice) for the
+/// user to pay. Its amount must be `ceil(btc_amount_msat / 1000) + fee_sats` so
+/// the hub collects enough to cover the outgoing Lightning payment plus its fee.
+#[tokio::test]
+async fn test_send_btc_proxy_invoice_includes_fee() {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        base_fee_sats: 1_000, // 1000 sat base fee to make the fee clearly visible
+        fee_rate_per_million_sats: 10_000, // 1% proportional fee
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    // The lightning invoice has 100_000_000 msat = 100_000 sats
+    let (order, _preimage) = harness.create_send_btc_order_with_preimage().await.unwrap();
+    let btc_amount_sats: u128 = 100_000; // 100_000_000 msat / 1000
+
+    // fee_sats = amount_msat * fee_rate / 1_000_000_000 + base_fee
+    //          = 100_000_000 * 10_000 / 1_000_000_000 + 1_000
+    //          = 1_000 + 1_000
+    //          = 2_000
+    let expected_fee: u128 = 2_000;
+    assert_eq!(
+        order.fee_sats, expected_fee,
+        "fee_sats should be calculated from rate + base"
+    );
+
+    // The proxy invoice amount must include the fee
+    let expected_total = btc_amount_sats + expected_fee;
+    assert_eq!(
+        order.amount_sats, expected_total,
+        "proxy invoice amount should be btc_amount + fee"
+    );
+
+    // Verify the Fiber invoice stored in the order also has the correct amount
+    let fiber_invoice = match &order.incoming_invoice {
+        CchInvoice::Fiber(inv) => inv.clone(),
+        other => panic!("expected Fiber invoice, got: {:?}", other),
+    };
+    assert_eq!(
+        fiber_invoice.amount(),
+        Some(expected_total),
+        "Fiber proxy invoice amount should include the fee"
+    );
+}
+
+/// Tests that the receive_btc order correctly calculates fee_sats and total_msat
+/// that would be used for the LND hold invoice.
+///
+/// Note: We cannot directly test the LND hold invoice creation since it requires
+/// an LND server. Instead we verify that the fee calculation and amount validation
+/// pass correctly (the call fails only at LND), confirming the hold invoice would
+/// be created with `value_msat = (amount_sats + fee_sats) * 1000`.
+#[tokio::test]
+async fn test_receive_btc_fee_calculation() {
+    use crate::ckb::contracts::{get_script_by_contract, Contract};
+    use crate::fiber::hash_algorithm::HashAlgorithm;
+    use crate::invoice::CkbScript;
+
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        base_fee_sats: 500,
+        fee_rate_per_million_sats: 5_000, // 0.5% proportional fee
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (_preimage, payment_hash) = create_valid_preimage_pair(180);
+    let amount_sats: u128 = 200_000;
+
+    // Build a Fiber invoice with the correct UDT type script and SHA256 hash algorithm
+    // to pass all validations before the LND call.
+    let wrapped_btc_type_script = get_script_by_contract(Contract::SimpleUDT, &[]);
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(amount_sats),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("test".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::PayeePublicKey(public_key),
+                Attribute::UdtScript(CkbScript(wrapped_btc_type_script)),
+                Attribute::HashAlgorithm(HashAlgorithm::Sha256),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    // receive_btc will fail at the LND call, but all prior validations
+    // (amount, fee, UDT script, hash algorithm) should pass.
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    // The call should fail due to LND being unavailable, not due to amount validation.
+    // This confirms the fee calculation and overflow checks passed successfully,
+    // meaning the hold invoice would have been created with the correct total_msat.
+    let err = result.unwrap_err();
+
+    // fee_sats = 200_000 * 5_000 / 1_000_000 + 500 = 1_000 + 500 = 1_500
+    // total_msat = (200_000 + 1_500) * 1_000 = 201_500_000
+    let expected_fee: u128 = 1_500;
+    let expected_total_msat: i64 = ((amount_sats + expected_fee) * 1_000) as i64;
+    assert_eq!(expected_total_msat, 201_500_000);
+
+    match err {
+        CchError::LndRpcError(msg) => {
+            assert!(
+                msg.contains(&format!("value_msat: {}", expected_total_msat)),
+                "hold invoice request should contain value_msat={}, got: {}",
+                expected_total_msat,
+                msg
+            );
+        }
+        other => panic!(
+            "expected LND connection error (no LND server), got: {:?}. \
+             If this is an amount error, the fee calculation may be wrong.",
+            other
+        ),
+    }
 }

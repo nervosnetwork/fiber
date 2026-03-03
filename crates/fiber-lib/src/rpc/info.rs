@@ -27,8 +27,8 @@ pub struct NodeInfoResult {
     /// The commit hash of the node software.
     pub commit_hash: String,
 
-    /// The identity public key of the node.
-    pub node_id: Pubkey,
+    /// The identity public key of this node (secp256k1 compressed, hex string).
+    pub pubkey: Pubkey,
 
     /// The features supported by the node.
     pub features: Vec<String>,
@@ -135,7 +135,7 @@ impl InfoRpcServerImpl {
             version,
             commit_hash,
             features: response.features.enabled_features_names(),
-            node_id: response.node_id,
+            pubkey: response.node_id,
             node_name: response.node_name.map(|name| name.to_string()),
             addresses: response.addresses,
             chain_hash: response.chain_hash,

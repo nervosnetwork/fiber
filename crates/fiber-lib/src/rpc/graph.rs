@@ -145,8 +145,8 @@ pub struct NodeInfo {
     pub addresses: Vec<MultiAddr>,
     /// The node features supported by the node.
     pub features: Vec<String>,
-    /// The identity public key of the node.
-    pub node_id: Pubkey,
+    /// The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
+    pub pubkey: Pubkey,
     #[serde_as(as = "U64Hex")]
     /// The latest timestamp set by the owner for the node announcement.
     /// When a Node is online this timestamp will be updated to the latest value.
@@ -166,7 +166,7 @@ impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
             node_name: value.node_name.to_string(),
             version: value.version,
             addresses: value.addresses,
-            node_id: value.node_id,
+            pubkey: value.node_id,
             timestamp: value.timestamp,
             features: value.features.enabled_features_names(),
             chain_hash: get_chain_hash(),
@@ -201,9 +201,9 @@ pub struct ChannelInfo {
     /// The outpoint of the channel.
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
-    /// The identity public key of the first node.
+    /// The identity public key of the first node (secp256k1 compressed, hex string).
     pub node1: Pubkey,
-    /// The identity public key of the second node.
+    /// The identity public key of the second node (secp256k1 compressed, hex string).
     pub node2: Pubkey,
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.

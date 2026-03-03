@@ -102,6 +102,13 @@ rule(
     allow if right({channel_id}, "watchtower"); 
     "#, 
 ); 
+rule(
+    "update_pending_remote_settlement",
+    r#"
+    allow if write("watchtower");
+    allow if right({channel_id}, "watchtower");
+    "#,
+);
 rule( 
     "update_local_settlement", 
     r#" 

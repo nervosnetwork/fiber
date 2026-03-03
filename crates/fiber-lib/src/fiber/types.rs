@@ -49,7 +49,6 @@ use std::fmt::Display;
 use std::str::FromStr;
 use strum::{AsRefStr, EnumString};
 use tentacle::multiaddr::MultiAddr;
-use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::{error, trace};
 
@@ -323,8 +322,9 @@ impl Privkey {
     }
 }
 
-/// The public key for a Node
-/// It stores the serialized form ([u8; 33]) directly for fast comparison and hashing
+/// A compressed secp256k1 public key (33 bytes), used as the primary identity of a node.
+/// In the RPC interface this value is exposed as fields such as `pubkey`.
+/// It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
 #[serde_as]
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHexNoPrefix, [_; 33]>")] pub [u8; 33]);
@@ -416,11 +416,6 @@ impl Pubkey {
         let result = Point::from(self) + scalar.base_point_mul();
         let point = result.not_inf().expect("valid public key");
         PublicKey::from(point).into()
-    }
-
-    pub fn tentacle_peer_id(&self) -> PeerId {
-        let pubkey = (*self).into();
-        PeerId::from_public_key(&pubkey)
     }
 }
 
@@ -1931,10 +1926,6 @@ impl NodeAnnouncement {
         deterministically_hash(&molecule_gossip::NodeAnnouncement::from(
             unsigned_announcement,
         ))
-    }
-
-    pub fn peer_id(&self) -> PeerId {
-        PeerId::from_public_key(&self.node_id.into())
     }
 
     pub fn cursor(&self) -> Cursor {

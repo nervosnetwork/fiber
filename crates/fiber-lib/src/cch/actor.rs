@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use lightning_invoice::Bolt11Invoice;
+use lightning_invoice::Currency as LnCurrency;
 use lnd_grpc_tonic_client::{invoicesrpc, Uri};
 use ractor::{
     call, port::OutputPortSubscriberTrait as _, Actor, ActorProcessingErr, ActorRef, OutputPort,
@@ -31,6 +32,9 @@ use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
 pub const ACTION_RETRY_MAX_MILLIS: u64 = 600_000; // 10 minute max delay
+
+/// Average time per Bitcoin block in milliseconds (10 minutes = 600 seconds = 600,000 ms).
+pub const BTC_BLOCK_TIME_MILLIS: u64 = 600_000;
 
 fn calculate_retry_delay(retry_count: u32) -> Duration {
     // Exponential backoff starting from ACTION_RETRY_BASE_MILLIS, capped at ACTION_RETRY_MAX_MILLIS
@@ -98,6 +102,9 @@ pub struct CchArgs<S> {
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub node_keypair: crate::fiber::KeyPair,
     pub store: S,
+    /// The CKB network currency this node is configured for.
+    /// Used to validate that incoming invoices match the expected network.
+    pub currency: Currency,
 }
 
 pub struct CchState<S> {
@@ -108,6 +115,8 @@ pub struct CchState<S> {
     pub(super) lnd_tracker: ActorRef<LndTrackerMessage>,
     pub(super) scheduler: ActorRef<SchedulerMessage>,
     pub(super) store: S,
+    /// The CKB network currency this node is configured for.
+    pub(super) currency: Currency,
 }
 
 #[async_trait::async_trait]
@@ -182,6 +191,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             lnd_connection,
             lnd_tracker,
             scheduler,
+            currency: args.currency,
         };
 
         Ok(state)
@@ -346,6 +356,19 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
     }
 }
 
+/// Maps a CKB network currency to the expected Lightning Network invoice currency.
+///
+/// - Fibb (CKB mainnet) → Bitcoin mainnet
+/// - Fibt (CKB testnet) → Bitcoin testnet
+/// - Fibd (CKB devnet) → Bitcoin regtest
+fn expected_ln_currency(currency: Currency) -> LnCurrency {
+    match currency {
+        Currency::Fibb => LnCurrency::Bitcoin,
+        Currency::Fibt => LnCurrency::BitcoinTestnet,
+        Currency::Fibd => LnCurrency::Regtest,
+    }
+}
+
 impl<S: CchOrderStore> CchState<S> {
     /// Get a CCH order by payment hash, returning None if not found.
     /// This handles the common pattern of checking for NotFound vs other errors.
@@ -413,8 +436,27 @@ impl<S: CchOrderStore> CchState<S> {
     async fn send_btc(&self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
+        // Validate that the currency matches the configured CKB network (#981)
+        if send_btc.currency != self.currency {
+            return Err(CchError::CKBInvoiceNetworkMismatch {
+                expected: self.currency,
+                actual: send_btc.currency,
+            });
+        }
+
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
         tracing::debug!("BTC invoice: {:?}", invoice);
+
+        // Validate that the BTC invoice network matches the expected BTC network (#978)
+        let expected_ln_currency = expected_ln_currency(self.currency);
+        let actual_ln_currency = invoice.currency();
+        if actual_ln_currency != expected_ln_currency {
+            return Err(CchError::BTCInvoiceNetworkMismatch {
+                expected: format!("{:?}", expected_ln_currency),
+                actual: format!("{:?}", actual_ln_currency),
+            });
+        }
+
         let payment_hash = Hash256::from(*invoice.payment_hash());
 
         // Validate that outgoing BTC invoice's final CLTV is less than half of incoming CKB invoice's final TLC expiry.
@@ -458,7 +500,10 @@ impl<S: CchOrderStore> CchState<S> {
             .as_ref(),
         )
         .into();
-        let invoice_amount_sats = amount_msat.div_ceil(1_000u128) + fee_sats;
+        let invoice_amount_sats = amount_msat
+            .div_ceil(1_000u128)
+            .checked_add(fee_sats)
+            .ok_or(CchError::SendBTCOrderAmountTooLarge)?;
 
         let invoice = InvoiceBuilder::new(send_btc.currency)
             .amount(Some(invoice_amount_sats))
@@ -502,6 +547,15 @@ impl<S: CchOrderStore> CchState<S> {
 
     async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<CchOrder, CchError> {
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
+
+        // Validate that the CKB invoice currency matches the configured network (#982)
+        if invoice.currency != self.currency {
+            return Err(CchError::CKBInvoiceNetworkMismatch {
+                expected: self.currency,
+                actual: invoice.currency,
+            });
+        }
+
         let payment_hash = *invoice.payment_hash();
         let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
 
@@ -512,7 +566,16 @@ impl<S: CchOrderStore> CchState<S> {
             .final_tlc_minimum_expiry_delta()
             .copied()
             .unwrap_or(0);
-        let btc_final_cltv_millis = self.config.btc_final_tlc_expiry_delta_blocks * 600 * 1000;
+        let btc_final_cltv_millis = self
+            .config
+            .btc_final_tlc_expiry_delta_blocks
+            .checked_mul(BTC_BLOCK_TIME_MILLIS)
+            .ok_or_else(|| {
+                CchError::ConfigError(format!(
+                    "btc_final_tlc_expiry_delta_blocks ({}) is too large and causes overflow when converting to milliseconds",
+                    self.config.btc_final_tlc_expiry_delta_blocks
+                ))
+            })?;
         if ckb_final_tlc_millis >= btc_final_cltv_millis / 2 {
             return Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge);
         }
@@ -539,15 +602,18 @@ impl<S: CchOrderStore> CchState<S> {
             return Err(CchError::OutgoingInvoiceExpiryTooShort);
         }
 
-        let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
-            / 1_000_000u128
-            + (self.config.base_fee_sats as u128);
-        if amount_sats <= fee_sats {
-            return Err(CchError::ReceiveBTCOrderAmountTooSmall);
-        }
-        if amount_sats > (i64::MAX / 1_000i64) as u128 {
-            return Err(CchError::ReceiveBTCOrderAmountTooLarge);
-        }
+        let fee_sats = amount_sats
+            .checked_mul(self.config.fee_rate_per_million_sats as u128)
+            .and_then(|v| v.checked_div(1_000_000u128))
+            .and_then(|v| v.checked_add(self.config.base_fee_sats as u128))
+            .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
+        let total_msat = i64::try_from(
+            amount_sats
+                .checked_add(fee_sats)
+                .and_then(|s| s.checked_mul(1_000u128))
+                .unwrap_or(u128::MAX),
+        )
+        .map_err(|_| CchError::ReceiveBTCOrderAmountTooLarge)?;
 
         // Verify wrapped_btc_type_script matches invoice UDT type script
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
@@ -586,15 +652,15 @@ impl<S: CchOrderStore> CchState<S> {
         let mut client = self.lnd_connection.create_invoices_client().await?;
         let req = invoicesrpc::AddHoldInvoiceRequest {
             hash: payment_hash.as_ref().to_vec(),
-            value_msat: (amount_sats * 1_000u128) as i64,
+            value_msat: total_msat,
             expiry: outgoing_invoice_expiry_delta_seconds as i64,
             cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
             ..Default::default()
         };
         let add_invoice_resp = client
-            .add_hold_invoice(req)
+            .add_hold_invoice(req.clone())
             .await
-            .map_err(|err| CchError::LndRpcError(err.to_string()))?
+            .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
             .into_inner();
         let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
 
