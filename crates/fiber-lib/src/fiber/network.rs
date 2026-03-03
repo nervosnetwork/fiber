@@ -836,41 +836,11 @@ where
             FiberMessage::ChannelNormalOperation(msg) => {
                 state.check_feature_compatibility(&peer_pubkey)?;
                 let channel_id = msg.get_channel_id();
-                let mut found = state
+                let found = state
                     .peer_session_map
                     .get(&peer_pubkey)
                     .and_then(|peer| state.session_channels_map.get(&peer.session_id))
                     .is_some_and(|channels| channels.contains(&channel_id));
-
-                // NOTE: Independent robustness fix unrelated to external funding.
-                // If a channel message arrives for a channel not yet tracked in session_channels_map
-                // (e.g. after reconnect), attempt to reestablish it on-the-fly so the message
-                // is not dropped. This can happen when the peer sends a message before we have
-                // completed the reestablish handshake.
-                if !found {
-                    if let Some(session) = state.get_peer_session(&peer_id) {
-                        if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id)
-                        {
-                            if !actor_state.is_closed()
-                                && actor_state.get_remote_peer_id() == peer_id
-                            {
-                                let channel_ready = state.channels.contains_key(&channel_id)
-                                    || state
-                                        .reestablish_channel(&peer_id, channel_id)
-                                        .await
-                                        .is_ok();
-                                if channel_ready {
-                                    state
-                                        .session_channels_map
-                                        .entry(session)
-                                        .or_default()
-                                        .insert(channel_id);
-                                    found = true;
-                                }
-                            }
-                        }
-                    }
-                }
 
                 if !found {
                     error!(

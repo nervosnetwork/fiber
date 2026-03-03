@@ -5051,26 +5051,6 @@ impl ChannelActorState {
         );
     }
 
-    /// Bug fix: restore the `remote_revocation_nonce_for_send` from `_verify` or `_next`
-    /// if it was lost during persistence (e.g. the nonce was consumed before the state was saved).
-    /// This prevents a deadlock during channel reestablishment when `send` nonce is None
-    /// but `verify`/`next` nonces are available.
-    ///
-    /// NOTE: This is an independent bug fix unrelated to external funding.
-    fn restore_missing_revocation_send_nonce(&mut self) {
-        if self.remote_revocation_nonce_for_send.is_some() || self.last_revoke_ack_msg.is_some() {
-            return;
-        }
-        let restored = self
-            .remote_revocation_nonce_for_verify
-            .clone()
-            .or_else(|| self.remote_revocation_nonce_for_next.clone());
-        if let Some(nonce) = restored {
-            self.remote_revocation_nonce_for_send = Some(nonce);
-            self.log_ack_state("[ack] restore_missing_revocation_send_nonce");
-        }
-    }
-
     pub fn try_create_channel_messages(&mut self) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
         let channel_announcement = self.try_create_channel_announcement_message()?;
         let channel_update = self.try_create_channel_update_message()?;
@@ -7714,7 +7694,6 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady => {
                 self.clear_waiting_peer_response();
-                self.restore_missing_revocation_send_nonce();
 
                 let my_local_commitment_number = self.get_local_commitment_number();
                 let my_remote_commitment_number = self.get_remote_commitment_number();
@@ -7891,11 +7870,7 @@ impl ChannelActorState {
                     .ok_or(ProcessingChannelError::InvalidParameter(
                         "Funding transaction should have at least one output".to_string(),
                     ))?;
-            if data.as_ref().len() < 16 {
-                return Err(ProcessingChannelError::InvalidParameter(
-                    "UDT output data too short, expected at least 16 bytes".to_string(),
-                ));
-            }
+            assert!(data.as_ref().len() >= 16);
             let mut amount_bytes = [0u8; 16];
             amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
             let udt_amount = u128::from_le_bytes(amount_bytes);

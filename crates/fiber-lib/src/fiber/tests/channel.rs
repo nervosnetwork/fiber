@@ -6384,26 +6384,39 @@ async fn test_reestablish_restores_send_nonce() {
     let (mut node_a, mut node_b, channel_id) =
         create_nodes_with_established_channel(100000000000, 100000000000, true).await;
 
-    // Stop node B and force the stored state into a known "send nonce missing" state
-    // to deterministically exercise the reestablish path.
-    node_b.stop().await;
-    let mut stored_state = node_b
-        .store
-        .get_channel_actor_state(&channel_id)
-        .expect("channel state exists");
-    let verify_nonce = stored_state
-        .remote_revocation_nonce_for_verify
-        .clone()
-        .or_else(|| stored_state.remote_revocation_nonce_for_send.clone())
-        .or_else(|| stored_state.remote_revocation_nonce_for_next.clone())
-        .expect("revocation nonce for verify");
-    stored_state.remote_revocation_nonce_for_verify = Some(verify_nonce);
-    stored_state.remote_revocation_nonce_for_send = None;
-    node_b.store.insert_channel_actor_state(stored_state);
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Trigger payment A -> B
+    // This will cause A to send AddTlc + CommitmentSigned
+    // B will respond with RevokeAndAck
+    // This puts B in a state where remote_revocation_nonce_for_send might be None
+    let payment_hash = node_a
+        .send_payment_keysend(&node_b, 1000, false)
+        .await
+        .unwrap()
+        .payment_hash;
+
+    // Wait for B to reach the target state where send is None but verify is Some.
+    // This confirms we are in the potential deadlock state if persistent.
+    let mut caught = false;
+    for _ in 0..100 {
+        let state = node_b.get_channel_actor_state(channel_id);
+        if state.remote_revocation_nonce_for_verify.is_some()
+            && state.remote_revocation_nonce_for_send.is_none()
+        {
+            debug!("Caught target state on Node B!");
+            caught = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        caught,
+        "Failed to reach target state where send nonce is None"
+    );
+
+    assert_eq!(node_a.get_inflight_payment_count().await, 1);
 
     // Now restart node B to simulate disconnect/reconnect
-    node_b.start().await;
+    node_b.restart().await;
     node_b.connect_to(&mut node_a).await;
 
     node_a
@@ -6413,17 +6426,69 @@ async fn test_reestablish_restores_send_nonce() {
         .expect_debug_event("Reestablished channel in ChannelReady")
         .await;
 
-    // Verify that send nonce is restored after reestablish.
-    let state = node_b.get_channel_actor_state(channel_id);
-    assert!(state.remote_revocation_nonce_for_send.is_some());
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
-    // Further verification: behavior matches the current test expectation.
-    let err = node_a
-        .send_payment_keysend(&node_b, 1000, false)
-        .await
-        .expect_err("expect send payment failed")
-        .to_string();
-    assert!(err.contains(
+    // check inflight until 5s
+    let now = std::time::Instant::now();
+    loop {
+        if node_a.get_inflight_payment_count().await == 0 {
+            break;
+        }
+        assert!(now.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(node_a.get_inflight_payment_count().await, 0);
+
+    assert_eq!(
+        node_a.get_payment_status(payment_hash).await,
+        PaymentStatus::Success
+    );
+
+    let state = node_b.get_channel_actor_state(channel_id);
+    println!("Node B State after wait:");
+    println!(
+        "  Local Commitment Number: {}",
+        state.get_local_commitment_number()
+    );
+    println!(
+        "  Remote Commitment Number: {}",
+        state.get_remote_commitment_number()
+    );
+    println!(
+        "  Send Nonce: {:?}",
+        state.remote_revocation_nonce_for_send.is_some()
+    );
+    println!(
+        "  Verify Nonce: {:?}",
+        state.remote_revocation_nonce_for_verify.is_some()
+    );
+
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    println!("Node A State:");
+    println!(
+        "  Local Commitment Number: {}",
+        state_a.get_local_commitment_number()
+    );
+    println!(
+        "  Remote Commitment Number: {}",
+        state_a.get_remote_commitment_number()
+    );
+    println!(
+        "  Send Nonce: {:?}",
+        state_a.remote_revocation_nonce_for_send.is_some()
+    );
+    println!(
+        "  Verify Nonce: {:?}",
+        state_a.remote_revocation_nonce_for_verify.is_some()
+    );
+
+    // Further verification: A can send another payment.
+    // Use a new payment to differentiate.
+    let res = node_a.send_payment_keysend(&node_b, 2000, false).await;
+    let err_string = res.unwrap_err().to_string();
+    println!("err: {err_string}");
+    // check error string
+    assert!(err_string.contains(
         "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
     ));
 }
