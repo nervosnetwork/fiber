@@ -9,9 +9,9 @@ fn main() {
     let mut generator = Generator::new();
     let mut methods = Vec::new();
 
-    for item in output::API_METHODS.iter() {
+    for (tag, item) in output::API_METHODS.iter() {
         for (name, method) in item.entries() {
-            methods.push(method.generate(&mut generator, name));
+            methods.push(method.generate_with_tag(&mut generator, name, Some(tag)));
         }
     }
 

@@ -55,10 +55,11 @@ fn main() {
             .write(format!("use fnn::rpc::{}::*;", file_name.replace(".rs", "")).as_bytes())
             .unwrap();
     }
-    root_mod_file.write(format!("pub const API_METHODS: [ &::phf::Map<&str, openrpsee::openrpc::RpcMethod>; {}] = [",rpc_mods.len()).as_bytes()).unwrap();
+    root_mod_file.write(format!("pub const API_METHODS: [ (&str, &::phf::Map<&str, openrpsee::openrpc::RpcMethod>); {}] = [",rpc_mods.len()).as_bytes()).unwrap();
     for item in rpc_mods.iter() {
+        let tag_name = item.trim_end_matches("_rs");
         root_mod_file
-            .write(format!("&{}::rpc_openrpc::METHODS,", item).as_bytes())
+            .write(format!("(\"{}\", &{}::rpc_openrpc::METHODS),", tag_name, item).as_bytes())
             .unwrap();
     }
     root_mod_file.write(b"];").unwrap();
