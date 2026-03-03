@@ -746,6 +746,24 @@ async fn test_sync_node_announcement_after_restart() {
 }
 
 #[tokio::test]
+async fn test_peer_disconnect_without_active_channel_skips_backoff_reconnect() {
+    init_tracing();
+
+    let [mut node1, mut node2] = NetworkNode::new_n_interconnected_nodes().await;
+
+    node2.stop().await;
+
+    node1
+        .expect_debug_event("PeerReconnectBackoffSkippedNoDirectChannel")
+        .await;
+    node1
+        .expect_event(|event| {
+            matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node2.peer_id)
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn test_persisting_network_state() {
     let mut node = NetworkNode::new().await;
     let state = node.store.clone();
