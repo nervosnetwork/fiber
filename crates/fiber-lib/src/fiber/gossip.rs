@@ -4,7 +4,7 @@ use std::{
     cmp::max,
     collections::{HashMap, HashSet},
     marker::PhantomData,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -14,20 +14,19 @@ use ckb_types::{
     packed::OutPoint,
     prelude::Unpack,
 };
+use futures::StreamExt as _;
 use ractor::{
     call, call_t, concurrency::JoinHandle, Actor, ActorCell, ActorProcessingErr, ActorRef,
     ActorRuntime, MessagingErr, OutputPort, RpcReplyPort, SupervisionEvent,
 };
 use strum::AsRefStr;
 use tentacle::{
-    async_trait as tasync_trait,
     builder::MetaBuilder,
-    bytes::Bytes,
-    context::{ProtocolContext, ProtocolContextMutRef, SessionContext},
-    service::{ProtocolHandle, ProtocolMeta, ServiceAsyncControl, SessionType},
-    traits::ServiceProtocol,
+    context::SessionContext,
+    service::{ProtocolMeta, ServiceAsyncControl, SessionType},
+    traits::ProtocolSpawn,
     utils::{is_reachable, multiaddr_to_socketaddr},
-    SessionId,
+    SessionId, SubstreamReadPart,
 };
 use tokio::sync::oneshot;
 use tokio_util::codec::length_delimited;
@@ -38,7 +37,7 @@ use crate::fiber::network::DEFAULT_CHAIN_ACTOR_TIMEOUT;
 use crate::{
     ckb::{client::CkbChainClient, CkbChainMessage, GetTxResponse},
     fiber::network::MAX_SERVICE_PROTOCOAL_DATA_SIZE,
-    now_timestamp_as_millis_u64, unwrap_or_return,
+    now_timestamp_as_millis_u64,
     utils::actor::ActorHandleLogGuard,
     Error,
 };
@@ -332,9 +331,6 @@ pub trait SubscribableGossipMessageStore {
 
 #[derive(AsRefStr)]
 pub enum GossipActorMessage {
-    // The control for the service async control is received.
-    ReceivedControl(ServiceAsyncControl),
-
     // Network events to be processed by this actor.
     PeerConnected(Pubkey, SessionContext),
     PeerDisconnected(Pubkey, SessionContext),
@@ -456,7 +452,7 @@ where
             num_targeted_outbound_passive_syncing_peers,
         } = gossip_config;
 
-        let (network_control_sender, network_control_receiver) = oneshot::channel();
+        let network_control = SharedControl::new();
 
         let (store_sender, store_receiver) = oneshot::channel();
 
@@ -465,7 +461,7 @@ where
             actor_name,
             GossipActor::new(),
             (
-                network_control_receiver,
+                network_control.clone(),
                 store_sender,
                 gossip_network_maintenance_interval,
                 gossip_store_maintenance_interval,
@@ -486,7 +482,7 @@ where
                 extended_store: store,
                 _marker: std::marker::PhantomData,
             },
-            GossipProtocolHandle::new(actor, network_control_sender),
+            GossipProtocolHandle::new(actor, network_control),
         )
     }
 
@@ -1771,7 +1767,7 @@ pub enum ExtendedGossipMessageStoreMessage {
 
 pub(crate) struct GossipActorState<S, C> {
     store: ExtendedGossipMessageStore<S>,
-    control: Option<ServiceAsyncControl>,
+    control: SharedControl<ServiceAsyncControl>,
     // The number of active syncing peers that we have finished syncing with.
     // Together with the number of current active syncing peers, this is
     // used to determine if we should start a new active syncing peer.
@@ -2004,7 +2000,7 @@ where
     }
 
     fn get_control(&self) -> &ServiceAsyncControl {
-        self.control.as_ref().expect("control exists")
+        self.control.get().expect("control exists")
     }
 
     async fn send_message_to_session(
@@ -2047,7 +2043,24 @@ async fn send_message_to_session(
 
 pub(crate) struct GossipProtocolHandle {
     actor: ActorRef<GossipActorMessage>,
-    sender: Option<oneshot::Sender<ServiceAsyncControl>>,
+    control: SharedControl<ServiceAsyncControl>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SharedControl<T>(Arc<OnceLock<T>>);
+
+impl<T> SharedControl<T> {
+    fn new() -> Self {
+        Self(Arc::new(OnceLock::new()))
+    }
+
+    fn get(&self) -> Option<&T> {
+        self.0.get()
+    }
+
+    fn set(&self, value: T) -> Result<(), T> {
+        self.0.set(value)
+    }
 }
 
 async fn get_message_cursor<S: GossipMessageStore>(
@@ -2450,12 +2463,9 @@ fn verify_node_announcement<S: GossipMessageStore>(
 impl GossipProtocolHandle {
     pub(crate) fn new(
         actor: ActorRef<GossipActorMessage>,
-        sender: oneshot::Sender<ServiceAsyncControl>,
+        control: SharedControl<ServiceAsyncControl>,
     ) -> Self {
-        Self {
-            actor,
-            sender: Some(sender),
-        }
+        Self { actor, control }
     }
 
     pub(crate) fn actor(&self) -> &ActorRef<GossipActorMessage> {
@@ -2472,10 +2482,7 @@ impl GossipProtocolHandle {
                         .new_codec(),
                 )
             })
-            .service_handle(move || {
-                let handle = Box::new(self);
-                ProtocolHandle::Callback(handle)
-            })
+            .protocol_spawn(self)
             .build()
     }
 }
@@ -2489,7 +2496,7 @@ where
     type Msg = GossipActorMessage;
     type State = GossipActorState<S, C>;
     type Arguments = (
-        oneshot::Receiver<ServiceAsyncControl>,
+        SharedControl<ServiceAsyncControl>,
         oneshot::Sender<ExtendedGossipMessageStore<S>>,
         Duration,
         Duration,
@@ -2506,7 +2513,7 @@ where
         &self,
         myself: ActorRef<Self::Msg>,
         (
-            rx,
+            control,
             tx,
             network_maintenance_interval,
             store_maintenance_interval,
@@ -2533,25 +2540,6 @@ where
             panic!("failed to send store to the caller");
         }
 
-        let cloned_myself = myself.clone();
-        ractor::concurrency::spawn(async move {
-            match rx.await {
-                Ok(control) => {
-                    if let Err(error) =
-                        cloned_myself.send_message(GossipActorMessage::ReceivedControl(control))
-                    {
-                        error!(
-                            "Failed to send ReceivedControl message to gossip actor: {:?}",
-                            error
-                        );
-                    }
-                }
-                Err(_) => {
-                    error!("Failed to receive control");
-                }
-            }
-        });
-
         myself.send_interval(network_maintenance_interval, || {
             GossipActorMessage::TickNetworkMaintenance
         });
@@ -2564,7 +2552,7 @@ where
         });
         let state = Self::State {
             store,
-            control: Default::default(),
+            control,
             num_targeted_active_syncing_peers,
             num_targeted_outbound_passive_syncing_peers,
             myself,
@@ -2609,10 +2597,6 @@ where
             ACTOR_HANDLE_WARN_THRESHOLD_MS,
         );
         match message {
-            GossipActorMessage::ReceivedControl(control) => {
-                state.control = Some(control);
-            }
-
             GossipActorMessage::PeerConnected(pubkey, session) => {
                 if state.is_peer_connected(&pubkey) {
                     return Ok(());
@@ -2851,80 +2835,108 @@ where
     }
 }
 
-#[tasync_trait]
-impl ServiceProtocol for GossipProtocolHandle {
-    async fn init(&mut self, context: &mut ProtocolContext) {
-        let sender = self
-            .sender
-            .take()
-            .expect("service control sender set and init called once");
-        if sender.send(context.control().clone()).is_err() {
-            panic!("Failed to send service control");
-        }
-    }
-
-    async fn connected(&mut self, context: ProtocolContextMutRef<'_>, version: &str) {
+impl ProtocolSpawn for GossipProtocolHandle {
+    fn spawn(
+        &self,
+        context: Arc<SessionContext>,
+        control: &ServiceAsyncControl,
+        mut read_part: SubstreamReadPart,
+    ) {
+        let _ = self.control.set(control.clone());
         trace!(
             "proto id [{}] open on session [{}], address: [{}], type: [{:?}], version: {}",
-            context.proto_id,
-            context.session.id,
-            context.session.address,
-            context.session.ty,
-            version
+            read_part.protocol_id(),
+            context.id,
+            context.address,
+            context.ty,
+            "spawn"
         );
 
-        if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
+        if let Some(remote_pubkey) = context.remote_pubkey.clone() {
             let _ = self.actor.send_message(GossipActorMessage::PeerConnected(
                 super::types::pubkey_from_tentacle(remote_pubkey),
-                context.session.clone(),
+                context.as_ref().clone(),
             ));
         } else {
-            warn!("Peer connected without remote pubkey {:?}", context.session);
+            warn!("Peer connected without remote pubkey {:?}", context);
         }
-    }
 
-    async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
-        trace!(
-            "proto id [{}] close on session [{}], address: [{}], type: [{:?}]",
-            context.proto_id,
-            context.session.id,
-            &context.session.address,
-            &context.session.ty
-        );
+        let actor = self.actor.clone();
+        tentacle::runtime::spawn(async move {
+            while let Some(frame) = read_part.next().await {
+                let data = match frame {
+                    Ok(data) => data,
+                    Err(err) => {
+                        warn!("Failed to read gossip protocol stream data: {:?}", err);
+                        break;
+                    }
+                };
+                let message = match GossipMessage::from_molecule_slice(&data) {
+                    Ok(message) => message,
+                    Err(err) => {
+                        warn!("Failed to parse gossip protocol message: {:?}", err);
+                        continue;
+                    }
+                };
+                match context.remote_pubkey.as_ref() {
+                    Some(pubkey) => {
+                        let _ = actor.send_message(GossipActorMessage::GossipMessageReceived(
+                            GossipMessageWithTarget {
+                                target: super::types::pubkey_from_tentacle(pubkey.clone()),
+                                message,
+                            },
+                        ));
+                    }
+                    None => {
+                        unreachable!("Received message without remote pubkey");
+                    }
+                }
+            }
 
-        match context.session.remote_pubkey.as_ref() {
-            Some(remote_pubkey) => {
-                let _ = self
-                    .actor
-                    .send_message(GossipActorMessage::PeerDisconnected(
+            trace!(
+                "proto id [{}] close on session [{}], address: [{}], type: [{:?}]",
+                read_part.protocol_id(),
+                context.id,
+                &context.address,
+                &context.ty
+            );
+
+            match context.remote_pubkey.as_ref() {
+                Some(remote_pubkey) => {
+                    let _ = actor.send_message(GossipActorMessage::PeerDisconnected(
                         super::types::pubkey_from_tentacle(remote_pubkey.clone()),
-                        context.session.clone(),
+                        context.as_ref().clone(),
                     ));
+                }
+                None => {
+                    unreachable!("Received message without remote pubkey");
+                }
             }
-            None => {
-                unreachable!("Received message without remote pubkey");
-            }
-        }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedControl;
+
+    #[tokio::test]
+    async fn test_shared_control_is_visible_across_clones() {
+        let control = SharedControl::new();
+        let cloned = control.clone();
+
+        assert!(control.get().is_none());
+
+        assert!(cloned.set(1_u8).is_ok());
+        assert_eq!(control.get(), Some(&1_u8));
     }
 
-    async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
-        let message = unwrap_or_return!(GossipMessage::from_molecule_slice(&data), "parse message");
-        match context.session.remote_pubkey.as_ref() {
-            Some(pubkey) => {
-                let _ = self
-                    .actor
-                    .send_message(GossipActorMessage::GossipMessageReceived(
-                        GossipMessageWithTarget {
-                            target: super::types::pubkey_from_tentacle(pubkey.clone()),
-                            message,
-                        },
-                    ));
-            }
-            None => {
-                unreachable!("Received message without remote pubkey");
-            }
-        }
-    }
+    #[tokio::test]
+    async fn test_shared_control_only_initializes_once() {
+        let control = SharedControl::new();
 
-    async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
+        assert!(control.set(1_u8).is_ok());
+        assert_eq!(control.set(2_u8), Err(2_u8));
+        assert_eq!(control.get(), Some(&1_u8));
+    }
 }
