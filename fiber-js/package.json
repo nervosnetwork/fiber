@@ -19,9 +19,9 @@
     "stream-browserify": "^3.0.0"
   },
   "scripts": {
-    "build-debug": "npm -w fiber-wasm run build-debug && npm -w fiber-wasm-db-worker run build-debug && PROFILE=debug npx node ./esbuild.config.mjs",
-    "build": "npm -w fiber-wasm run build && npm -w fiber-wasm-db-worker run build && PROFILE=prod npx node ./esbuild.config.mjs",
-    "test": "jest --passWithNoTests"
+    "build-debug": "PROFILE=debug npx node ./esbuild.config.mjs",
+    "build": "PROFILE=prod npx node ./esbuild.config.mjs",
+    "test": "jest"
   },
   "exports": {
     ".": "./dist/index.js"
