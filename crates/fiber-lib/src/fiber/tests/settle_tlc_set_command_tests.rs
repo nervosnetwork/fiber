@@ -3,9 +3,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use ckb_types::packed::{OutPoint, Script};
-use tentacle::secio::PeerId;
-
 use crate::fiber::channel::InboundTlcStatus;
 use crate::fiber::channel::{
     AppliedFlags, ChannelActorState, ChannelActorStateStore, ChannelBasePublicKeys,
@@ -15,13 +12,16 @@ use crate::fiber::channel::{
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::payment::PaymentCustomRecords;
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
-use crate::fiber::types::{Hash256, HoldTlc, RemoveTlcReason, TlcErrorCode, NO_SHARED_SECRET};
+use crate::fiber::types::{
+    Hash256, HoldTlc, Pubkey, RemoveTlcReason, TlcErrorCode, NO_SHARED_SECRET,
+};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
 use crate::invoice::{InvoiceStore, PreimageStore};
 use crate::now_timestamp_as_millis_u64;
 use crate::tests::gen_utils::gen_rand_fiber_public_key;
 use crate::time::SystemTime;
+use ckb_types::packed::{OutPoint, Script};
 
 /// Mock store for testing that implements PreimageStore, InvoiceStore, and ChannelActorStateStore
 struct MockStore {
@@ -137,11 +137,11 @@ impl ChannelActorStateStore for MockStore {
         self.channel_states.borrow_mut().remove(id);
     }
 
-    fn get_channel_ids_by_peer(&self, _peer_id: &PeerId) -> Vec<Hash256> {
+    fn get_channel_ids_by_pubkey(&self, _pubkey: &Pubkey) -> Vec<Hash256> {
         self.channel_states.borrow().keys().cloned().collect()
     }
 
-    fn get_channel_states(&self, _peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
+    fn get_channel_states(&self, _pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)> {
         vec![]
     }
 

@@ -7,7 +7,6 @@ use ckb_types::{
 };
 use molecule::prelude::Byte;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
-use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
 use crate::tests::test_utils::{establish_channel_between_nodes, ChannelParameters, NetworkNode};
@@ -98,7 +97,7 @@ impl GossipTestingContext {
     fn save_message(&self, message: BroadcastMessage) {
         self.get_extended_actor()
             .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
-                PeerId::random(),
+                crate::gen_rand_fiber_public_key(),
                 vec![message],
             ))
             .expect("send message");
