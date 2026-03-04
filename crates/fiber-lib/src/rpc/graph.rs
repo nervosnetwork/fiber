@@ -1,17 +1,15 @@
-use crate::ckb::config::{
-    UdtArgInfo as ConfigUdtArgInfo, UdtCellDep as ConfigUdtCellDep,
-    UdtCfgInfos as ConfigUdtCfgInfos, UdtDep as ConfigUdtDep, UdtScript as ConfigUdtScript,
-};
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{ChannelUpdateInfo, NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::network::get_chain_hash;
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::{Cursor, Hash256, Pubkey};
 use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script, ScriptHashType};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
+use fiber_types::{
+    Cursor, EntityHex, Hash256, Pubkey, U128Hex, U64Hex, UdtArgInfo as ConfigUdtArgInfo,
+    UdtCellDep as ConfigUdtCellDep, UdtCfgInfos as ConfigUdtCfgInfos, UdtDep as ConfigUdtDep,
+    UdtScript as ConfigUdtScript,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::{types::error::INVALID_PARAMS_CODE, types::ErrorObjectOwned};

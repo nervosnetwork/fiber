@@ -5,23 +5,17 @@ use tracing::debug;
 use crate::{
     create_n_nodes_network_with_params,
     fiber::{
-        channel::{
-            AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
-        },
+        channel::{ChannelActorStateStore, ChannelCommand, ChannelCommandWithId},
         config::{
             CKB_SHANNONS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
             PAYMENT_MAX_PARTS_LIMIT,
         },
-        features::FeatureVector,
-        hash_algorithm::HashAlgorithm,
         network::DebugEvent,
-        payment::{
-            AttemptStatus, PaymentStatus, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX,
-        },
-        types::{
-            BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
-        },
-        NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
+        payment::SendPaymentCommand,
+        types::RemoveTlcReason,
+        AddTlcCommand, AttemptStatus, BasicMppPaymentData, FeatureVector, Hash256, HashAlgorithm,
+        NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords, PaymentHopData,
+        PaymentStatus, PeeledPaymentOnionPacket, TLCId, USER_CUSTOM_RECORDS_MAX_INDEX,
     },
     gen_rand_secp256k1_public_key, gen_rand_sha256_hash, gen_rpc_config,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},

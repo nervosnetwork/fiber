@@ -6,14 +6,11 @@ use serde_with::serde_as;
 #[cfg(feature = "watchtower")]
 use jsonrpsee::types::error::{ErrorObjectOwned, CALL_EXECUTION_FAILED_CODE};
 
-use crate::fiber::{
-    channel::{RevocationData, SettlementData},
-    types::{Hash256, Privkey, Pubkey},
-};
 #[cfg(feature = "watchtower")]
 use crate::rpc::context::RpcContext;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
+use fiber_types::{Hash256, Privkey, Pubkey, RevocationData, SettlementData};
 
 /// RPC module for watchtower related operations
 #[cfg(feature = "watchtower")]
@@ -283,7 +280,7 @@ where
         ctx: RpcContext,
         params: CreatePreimageParams,
     ) -> Result<(), ErrorObjectOwned> {
-        use crate::fiber::hash_algorithm::HashAlgorithm;
+        use fiber_types::HashAlgorithm;
         let CreatePreimageParams {
             payment_hash,
             preimage,

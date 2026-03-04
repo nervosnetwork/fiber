@@ -1,10 +1,10 @@
-/// StoreSample implementation for `CkbInvoice` and `CkbInvoiceStatus`.
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::invoice::{
     Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, InvoiceSignature,
 };
-use crate::store::schema::{CKB_INVOICE_PREFIX, CKB_INVOICE_STATUS_PREFIX};
 use core::time::Duration;
+use fiber_types::schema::{CKB_INVOICE_PREFIX, CKB_INVOICE_STATUS_PREFIX};
+/// StoreSample implementation for `CkbInvoice` and `CkbInvoiceStatus`.
+use fiber_types::HashAlgorithm;
 
 use super::{deterministic_hash256, deterministic_recoverable_signature, StoreSample};
 

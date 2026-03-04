@@ -11,14 +11,12 @@ use crate::{
         },
         actor::CchState,
         trackers::{map_lnd_payment_changed_event, CchTrackingEvent, LndConnectionInfo},
-        CchMessage, CchOrder, CchOrderStatus, CchOrderStore,
+        CchMessage, CchOrderStore,
     },
-    fiber::{
-        payment::{PaymentStatus, SendPaymentCommand},
-        types::Hash256,
-        NetworkActorCommand, NetworkActorMessage,
-    },
+    fiber::{payment::SendPaymentCommand, NetworkActorCommand, NetworkActorMessage},
 };
+use fiber_types::{payment::PaymentStatus, CchOrder};
+use fiber_types::{CchOrderStatus, Hash256};
 
 const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 
