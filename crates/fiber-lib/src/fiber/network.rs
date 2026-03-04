@@ -5093,7 +5093,7 @@ impl ServiceHandle for NetworkServiceHandle {
                 try_send_actor_message(
                     &self.actor,
                     NetworkActorMessage::new_command(
-                        NetworkActorCommand::RemovePendingSavePeerAddress(peer_id),
+                        NetworkActorCommand::RemovePendingSavePeerAddress(peer_id.clone()),
                     ),
                 );
                 debug!(
