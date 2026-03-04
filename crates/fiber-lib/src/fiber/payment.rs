@@ -1,28 +1,21 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
-use super::types::{Hash256, Privkey, Pubkey, TlcErrData};
-use crate::fiber::channel::{ChannelActorStateStore, PrevTlcInfo, ProcessingChannelError};
+use super::types::BroadcastMessageWithTimestamp;
+use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
 use crate::fiber::config::{
-    DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_MAX_PARTS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-    MIN_TLC_EXPIRY_DELTA, PAYMENT_MAX_PARTS_LIMIT,
+    DEFAULT_FINAL_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
+    PAYMENT_MAX_PARTS_LIMIT,
 };
 use crate::fiber::fee::{calculate_fee_with_base, calculate_tlc_forward_fee};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{
-    GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, RouterHop,
+    GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, SendPaymentState,
 };
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::{
-    NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT,
-    DEFAULT_PAYMENT_TRY_LIMIT, MAX_CUSTOM_RECORDS_SIZE,
-};
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::U128Hex;
-use crate::fiber::types::{
-    BasicMppPaymentData, BroadcastMessageWithTimestamp, PaymentHopData, PeeledPaymentOnionPacket,
-    RemoveTlcReason, TlcErr, TlcErrorCode,
+    NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_TRY_LIMIT,
+    MAX_CUSTOM_RECORDS_SIZE,
 };
 use crate::fiber::{
     KeyPair, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
@@ -31,8 +24,18 @@ use crate::fiber::{
 use crate::invoice::{CkbInvoice, InvoiceStore, PreimageStore};
 use crate::Error;
 use crate::{debug_event, now_timestamp_as_millis_u64};
+use fiber_types::{
+    Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, PaymentCustomRecords,
+    PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey, RemoveTlcReason,
+    RouterHop, TlcErr, TlcErrData, TlcErrorCode, TrampolineContext, DEFAULT_MAX_PARTS,
+    DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
+};
+// Re-export SendPaymentData and PaymentSession so that downstream code can still import them
+// from crate::fiber::payment.
 use ckb_hash::blake2b_256;
 use ckb_types::packed::{OutPoint, Script};
+pub use fiber_types::PaymentSession;
+pub use fiber_types::SendPaymentData;
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
 use rand::Rng;
@@ -48,143 +51,6 @@ use tracing::{debug, error, instrument, warn};
 const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
 const DEFAULT_MAX_FEE_RATE: u64 = 5;
 const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
-
-/// The status of a payment, will update as the payment progresses.
-/// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
-///
-/// **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum PaymentStatus {
-    /// Initial status. A payment session is created, but no HTLC has been dispatched.
-    Created,
-    /// The first hop AddTlc is sent successfully and waiting for the response.
-    ///
-    /// > **MPP Logic**: Status `Inflight` means at least one attempt is still not in `Success`, payment needs more retrying or waiting for HTLC settlement.
-    Inflight,
-    /// The payment is finished. All related HTLCs are successfully settled,
-    /// and the aggregate amount equals the total requested amount.
-    Success,
-    /// The payment session has terminated. HTLCs have failed and the target
-    /// amount cannot be fulfilled after exhausting all retries.
-    Failed,
-}
-
-impl PaymentStatus {
-    pub fn is_final(&self) -> bool {
-        matches!(self, PaymentStatus::Success | PaymentStatus::Failed)
-    }
-}
-
-/// The node and channel information in a payment route hop
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SessionRouteNode {
-    /// the public key of the node
-    pub pubkey: Pubkey,
-    /// the amount for this hop
-    #[serde_as(as = "U128Hex")]
-    pub amount: u128,
-    /// the channel outpoint for this hop
-    #[serde_as(as = "EntityHex")]
-    pub channel_outpoint: OutPoint,
-}
-
-/// The router is a list of nodes that the payment will go through.
-/// We store in the payment session and then will use it to track the payment history.
-/// The router is a list of nodes that the payment will go through.
-/// For example:
-///    `A(amount, channel) -> B -> C -> D`
-/// means A will send `amount` with `channel` to B.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct SessionRoute {
-    /// the nodes in the route
-    pub nodes: Vec<SessionRouteNode>,
-}
-
-impl SessionRoute {
-    // Create a new route from the source to the target with the given payment hops.
-    // The payment hops are the hops that the payment will go through.
-    // for a payment route A -> B -> C -> D
-    // the `payment_hops` is [B, C, D], which is a convenient way for onion routing.
-    // here we need to create a session route with source, which is A -> B -> C -> D
-    pub fn new(source: Pubkey, target: Pubkey, payment_hops: &[PaymentHopData]) -> Self {
-        //dbg!(payment_hops);
-        let nodes = std::iter::once(source)
-            .chain(
-                payment_hops
-                    .iter()
-                    .map(|hop| hop.next_hop.unwrap_or(target)),
-            )
-            .zip(payment_hops)
-            .map(|(pubkey, hop)| SessionRouteNode {
-                pubkey,
-                channel_outpoint: OutPoint::new(
-                    if hop.funding_tx_hash != Hash256::default() {
-                        hop.funding_tx_hash.into()
-                    } else {
-                        Hash256::default().into()
-                    },
-                    0,
-                ),
-                amount: hop.amount,
-            })
-            .collect();
-        Self { nodes }
-    }
-
-    pub fn receiver_amount(&self) -> u128 {
-        self.nodes.last().map_or(0, |s| s.amount)
-    }
-
-    pub fn fee(&self) -> u128 {
-        let first_amount = self.nodes.first().map_or(0, |s| s.amount);
-        let last_amount = self.receiver_amount();
-        debug_assert!(first_amount >= last_amount);
-        first_amount - last_amount
-    }
-
-    pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
-        self.nodes
-            .iter()
-            .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
-    }
-}
-
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendPaymentData {
-    pub target_pubkey: Pubkey,
-    pub amount: u128,
-    pub payment_hash: Hash256,
-    pub invoice: Option<String>,
-    pub final_tlc_expiry_delta: u64,
-    pub tlc_expiry_limit: u64,
-    pub timeout: Option<u64>,
-    pub max_fee_amount: Option<u128>,
-    /// The number of parts for the payment, only used for multi-part payment
-    pub max_parts: Option<u64>,
-    pub keysend: bool,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub udt_type_script: Option<Script>,
-    pub preimage: Option<Hash256>,
-    pub custom_records: Option<PaymentCustomRecords>,
-    pub allow_self_payment: bool,
-    pub hop_hints: Vec<HopHint>,
-    pub router: Vec<RouterHop>,
-    /// This flag indicates the invoice whether to allow multi-path payment.
-    pub allow_mpp: bool,
-    pub dry_run: bool,
-
-    /// Optional explicit trampoline hops.
-    ///
-    /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
-    /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
-    pub trampoline_hops: Option<Vec<Pubkey>>,
-    #[serde(default)]
-    pub trampoline_context: Option<TrampolineContext>,
-    #[serde(skip)]
-    pub channel_stats: GraphChannelStat,
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct SendPaymentDataBuilder {
@@ -208,7 +74,6 @@ pub struct SendPaymentDataBuilder {
     dry_run: bool,
     trampoline_hops: Option<Vec<Pubkey>>,
     trampoline_context: Option<TrampolineContext>,
-    channel_stats: GraphChannelStat,
 }
 
 impl SendPaymentDataBuilder {
@@ -321,11 +186,6 @@ impl SendPaymentDataBuilder {
 
     pub fn trampoline_context(mut self, trampoline_context: Option<TrampolineContext>) -> Self {
         self.trampoline_context = trampoline_context;
-        self
-    }
-
-    pub fn channel_stats(mut self, channel_stats: GraphChannelStat) -> Self {
-        self.channel_stats = channel_stats;
         self
     }
 
@@ -481,14 +341,20 @@ impl SendPaymentDataBuilder {
             allow_mpp: self.allow_mpp,
             dry_run: self.dry_run,
             trampoline_hops: self.trampoline_hops,
-            channel_stats: self.channel_stats,
             trampoline_context: self.trampoline_context,
         })
     }
 }
 
-impl SendPaymentData {
-    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
+pub trait SendPaymentDataExt {
+    fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String>;
+    fn trampoline_hops(&self) -> Option<&[Pubkey]>;
+    fn payment_invoice(&self) -> Option<CkbInvoice>;
+    fn hash_algorithm(&self) -> HashAlgorithm;
+}
+
+impl SendPaymentDataExt for SendPaymentData {
+    fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
         let invoice = command
             .invoice
             .as_ref()
@@ -644,36 +510,20 @@ impl SendPaymentData {
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
             .trampoline_hops(command.trampoline_hops)
-            .channel_stats(Default::default())
             .build()
     }
 
-    pub fn max_parts(&self) -> usize {
-        self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) as usize
-    }
-
-    pub fn allow_mpp(&self) -> bool {
-        // only allow mpp if max_parts is greater than 1 and not keysend
-        self.allow_mpp && self.max_parts() > 1 && !self.keysend
-    }
-
-    pub fn use_trampoline_routing(&self) -> bool {
-        self.trampoline_hops
-            .as_ref()
-            .is_some_and(|hops| !hops.is_empty())
-    }
-
-    pub fn trampoline_hops(&self) -> Option<&[Pubkey]> {
+    fn trampoline_hops(&self) -> Option<&[Pubkey]> {
         self.trampoline_hops.as_deref()
     }
 
-    pub fn payment_invoice(&self) -> Option<CkbInvoice> {
+    fn payment_invoice(&self) -> Option<CkbInvoice> {
         self.invoice
             .as_ref()
             .and_then(|x| x.parse::<CkbInvoice>().ok())
     }
 
-    pub fn hash_algorithm(&self) -> HashAlgorithm {
+    fn hash_algorithm(&self) -> HashAlgorithm {
         let invoice = self.payment_invoice();
         invoice
             .as_ref()
@@ -687,31 +537,24 @@ impl SendPaymentData {
     }
 }
 
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PaymentSession {
-    pub request: SendPaymentData,
-    pub last_error: Option<String>,
-    #[serde(default)]
-    pub last_error_code: Option<TlcErrorCode>,
-    // For non-MPP, this is the maximum number of single attempt retry limit
-    // For MPP, this is the sum limit of all parts' retry times.
-    pub try_limit: u32,
-    pub status: PaymentStatus,
-    pub created_at: u64,
-    pub last_updated_at: u64,
-    #[serde(skip)]
-    pub cached_attempts: Vec<Attempt>, // Add a cache for attempts
-}
-
-impl PaymentSession {
-    pub fn new(
+pub trait PaymentSessionExt {
+    fn new_session(
         store: &impl NetworkGraphStateStore,
         request: SendPaymentData,
         try_limit: u32,
-    ) -> Self {
+    ) -> PaymentSession;
+    fn init_attempts(self, store: &impl NetworkGraphStateStore) -> PaymentSession;
+    fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore);
+}
+
+impl PaymentSessionExt for PaymentSession {
+    fn new_session(
+        store: &impl NetworkGraphStateStore,
+        request: SendPaymentData,
+        try_limit: u32,
+    ) -> PaymentSession {
         let now = now_timestamp_as_millis_u64();
-        Self {
+        PaymentSession {
             request,
             last_error: None,
             last_error_code: None,
@@ -724,228 +567,14 @@ impl PaymentSession {
         .init_attempts(store)
     }
 
-    pub fn init_attempts(mut self, store: &impl NetworkGraphStateStore) -> Self {
+    fn init_attempts(mut self, store: &impl NetworkGraphStateStore) -> PaymentSession {
         self.flush_attempts(store);
         self
     }
 
-    pub fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore) {
+    fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore) {
         self.cached_attempts = store.get_attempts(self.request.payment_hash);
         self.status = self.calc_payment_status();
-    }
-
-    pub fn update_with_attempt(&mut self, attempt: Attempt) {
-        if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
-            *a = attempt;
-        }
-        self.status = self.calc_payment_status();
-    }
-
-    pub fn retry_times(&self) -> u32 {
-        self.attempts().map(|a| a.tried_times).sum()
-    }
-
-    pub fn allow_mpp(&self) -> bool {
-        self.request.allow_mpp()
-    }
-
-    pub fn payment_hash(&self) -> Hash256 {
-        self.request.payment_hash
-    }
-
-    pub fn is_payment_with_router(&self) -> bool {
-        !self.request.router.is_empty()
-    }
-
-    pub fn is_dry_run(&self) -> bool {
-        self.request.dry_run
-    }
-
-    pub fn attempts(&self) -> impl Iterator<Item = &Attempt> {
-        self.cached_attempts.iter()
-    }
-
-    #[cfg(test)]
-    pub fn all_attempts_with_status(&self) -> Vec<(u64, AttemptStatus, Option<String>, u32, u128)> {
-        self.cached_attempts
-            .iter()
-            .map(|a| {
-                (
-                    a.id,
-                    a.status,
-                    a.last_error.clone(),
-                    a.tried_times,
-                    a.route.receiver_amount(),
-                )
-            })
-            .collect()
-    }
-
-    pub fn attempts_count(&self) -> usize {
-        self.cached_attempts.len()
-    }
-
-    pub fn max_parts(&self) -> usize {
-        if self.allow_mpp() && !self.request.use_trampoline_routing() {
-            self.request.max_parts()
-        } else {
-            1
-        }
-    }
-
-    pub fn active_attempts(&self) -> impl Iterator<Item = &Attempt> {
-        self.attempts().filter(|a| a.is_active())
-    }
-
-    pub fn fee_paid(&self) -> u128 {
-        if self.request.use_trampoline_routing() {
-            // For trampoline routing, calculate the actual total fee
-            // which includes both trampoline service fee and routing fee
-            let total_sent: u128 = self
-                .active_attempts()
-                .map(|a| {
-                    // The first node's amount is what we send
-                    a.route.nodes.first().map_or(0, |n| n.amount)
-                })
-                .sum();
-            let total_received = self.request.amount;
-            total_sent.saturating_sub(total_received)
-        } else {
-            // For normal routing, sum up the fee from each route
-            self.active_attempts().map(|a| a.route.fee()).sum()
-        }
-    }
-
-    fn success_attempts_amount_is_enough(&self) -> bool {
-        let success_amount: u128 = self
-            .attempts()
-            .filter_map(|a| {
-                if a.is_success() {
-                    Some(a.route.receiver_amount())
-                } else {
-                    None
-                }
-            })
-            .sum();
-        success_amount >= self.request.amount
-    }
-
-    pub fn remain_fee_amount(&self) -> Option<u128> {
-        let max_fee_amount = self.request.max_fee_amount?;
-        let remain_fee = max_fee_amount.saturating_sub(self.fee_paid());
-        Some(remain_fee)
-    }
-
-    pub fn remain_amount(&self) -> u128 {
-        let sent_amount = self
-            .active_attempts()
-            .map(|a| a.route.receiver_amount())
-            .sum::<u128>();
-        self.request.amount.saturating_sub(sent_amount)
-    }
-
-    pub fn new_attempt(
-        &self,
-        attempt_id: u64,
-        source: Pubkey,
-        target: Pubkey,
-        route_hops: Vec<PaymentHopData>,
-    ) -> Attempt {
-        let now = now_timestamp_as_millis_u64();
-        let payment_hash = self.payment_hash();
-        // For HTLC, the attempt hash is the payment hash
-        let hash = payment_hash;
-        let try_limit = if self.allow_mpp() {
-            DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT
-        } else {
-            self.try_limit
-        };
-
-        let route = SessionRoute::new(source, target, &route_hops);
-
-        Attempt {
-            id: attempt_id,
-            hash,
-            try_limit,
-            tried_times: 1,
-            payment_hash,
-            route,
-            route_hops,
-            session_key: [0; 32],
-            preimage: None,
-            created_at: now,
-            last_updated_at: now,
-            last_error: None,
-            status: AttemptStatus::Created,
-        }
-    }
-
-    pub fn append_attempt(&mut self, attempt: Attempt) {
-        self.cached_attempts.push(attempt);
-    }
-
-    pub fn allow_more_attempts(&self) -> bool {
-        if self.status.is_final() {
-            return false;
-        }
-
-        if self.remain_amount() == 0 {
-            // no remaining amount, imply no need to retry
-            return false;
-        }
-
-        if self.retry_times() >= self.try_limit {
-            // already reached the retry limit, no more attempts allowed
-            return false;
-        }
-
-        if self.active_attempts().count() >= self.max_parts() {
-            return false;
-        }
-
-        // otherwise, should continue retry
-        true
-    }
-
-    pub fn calc_payment_status(&self) -> PaymentStatus {
-        if self.cached_attempts.is_empty() || self.status.is_final() {
-            return self.status;
-        }
-
-        if self.attempts().any(|a| a.is_inflight()) {
-            // if any attempt is created or inflight, the payment is inflight
-            return PaymentStatus::Inflight;
-        }
-
-        if self.attempts().all(|a| a.is_failed()) && !self.allow_more_attempts() {
-            return PaymentStatus::Failed;
-        }
-
-        if self.success_attempts_amount_is_enough() {
-            return PaymentStatus::Success;
-        }
-
-        return PaymentStatus::Created;
-    }
-
-    fn set_status(&mut self, status: PaymentStatus) {
-        self.status = status;
-        self.last_updated_at = now_timestamp_as_millis_u64();
-    }
-
-    pub fn set_inflight_status(&mut self) {
-        self.set_status(PaymentStatus::Inflight);
-    }
-
-    pub fn set_success_status(&mut self) {
-        self.set_status(PaymentStatus::Success);
-        self.last_error = None;
-        self.last_error_code = None;
-    }
-
-    pub fn set_failed_status(&mut self, error: &str) {
-        self.set_status(PaymentStatus::Failed);
-        self.last_error = Some(error.to_string());
     }
 }
 
@@ -985,171 +614,6 @@ impl From<PaymentSession> for SendPaymentResponse {
             routers: attempts.iter().map(|a| a.route.clone()).collect::<Vec<_>>(),
         }
     }
-}
-
-/// The status of a payment attempt, will update as the payment progresses.
-/// The transfer path for attempt status is:
-///
-///    Created --> Inflight ----> Success
-//                 /   |
-///               /    |
-///              |     | ----- no retry ----> Failed
-///               \    |
-///                \  retry
-///                 \  |
-///                  \ |
-///                  Retrying
-///
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum AttemptStatus {
-    /// initial status, a payment attempt is created, no HTLC is sent
-    Created,
-    /// the first hop AddTlc is sent successfully and waiting for the response
-    Inflight,
-    /// the attempt is retrying after failed
-    Retrying,
-    /// related HTLC is successfully settled
-    Success,
-    /// related HTLC is failed
-    Failed,
-}
-
-impl AttemptStatus {
-    pub fn is_final(&self) -> bool {
-        matches!(self, AttemptStatus::Success | AttemptStatus::Failed)
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Attempt {
-    pub id: u64,
-    pub try_limit: u32,
-    pub tried_times: u32,
-    pub hash: Hash256,
-    pub status: AttemptStatus,
-    pub payment_hash: Hash256,
-    pub route: SessionRoute,
-    pub route_hops: Vec<PaymentHopData>,
-    pub session_key: [u8; 32],
-    pub preimage: Option<Hash256>,
-    pub created_at: u64,
-    pub last_updated_at: u64,
-    pub last_error: Option<String>,
-}
-
-impl std::fmt::Debug for Attempt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Attempt")
-            .field("id", &self.id)
-            .field("try_limit", &self.try_limit)
-            .field("tried_times", &self.tried_times)
-            .field("hash", &self.hash)
-            .field("status", &self.status)
-            .field("payment_hash", &self.payment_hash)
-            .field("route", &self.route)
-            .field("route_hops", &self.route_hops)
-            .field("session_key", &"[REDACTED]")
-            .field("preimage", &self.preimage.as_ref().map(|_| "[REDACTED]"))
-            .field("created_at", &self.created_at)
-            .field("last_updated_at", &self.last_updated_at)
-            .field("last_error", &self.last_error)
-            .finish()
-    }
-}
-
-impl Attempt {
-    pub fn set_inflight_status(&mut self) {
-        self.status = AttemptStatus::Inflight;
-        self.last_error = None;
-    }
-
-    pub fn set_success_status(&mut self) {
-        self.status = AttemptStatus::Success;
-        self.last_error = None;
-    }
-
-    pub fn set_failed_status(&mut self, error: &str, retryable: bool) {
-        self.last_error = Some(error.to_string());
-        self.last_updated_at = now_timestamp_as_millis_u64();
-        if !retryable || self.tried_times > self.try_limit {
-            self.status = AttemptStatus::Failed;
-        } else {
-            self.status = AttemptStatus::Retrying;
-            self.tried_times += 1;
-        }
-    }
-
-    pub fn update_route(&mut self, new_route_hops: Vec<PaymentHopData>) {
-        self.route_hops = new_route_hops;
-        let sender = self.route.nodes[0].pubkey;
-        let receiver = self.route.nodes.last().unwrap().pubkey;
-        self.route = SessionRoute::new(sender, receiver, &self.route_hops);
-    }
-
-    pub fn is_success(&self) -> bool {
-        self.status == AttemptStatus::Success
-    }
-
-    pub fn is_inflight(&self) -> bool {
-        self.status == AttemptStatus::Inflight
-    }
-
-    pub fn is_failed(&self) -> bool {
-        self.status == AttemptStatus::Failed
-    }
-
-    pub fn is_active(&self) -> bool {
-        self.status != AttemptStatus::Failed
-    }
-
-    pub fn is_retrying(&self) -> bool {
-        self.status == AttemptStatus::Retrying
-    }
-
-    pub fn first_hop_channel_outpoint_eq(&self, out_point: &OutPoint) -> bool {
-        self.first_hop_channel_outpoint()
-            .map(|x| x.eq(out_point))
-            .unwrap_or_default()
-    }
-
-    pub fn first_hop_channel_outpoint(&self) -> Option<&OutPoint> {
-        self.route.nodes.first().map(|x| &x.channel_outpoint)
-    }
-
-    pub(crate) fn channel_outpoints(&self) -> impl Iterator<Item = (Pubkey, &OutPoint, u128)> {
-        self.route.channel_outpoints()
-    }
-
-    pub fn hops_public_keys(&self) -> Vec<Pubkey> {
-        // Skip the first node, which is the sender.
-        self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
-    }
-}
-
-/// A hop hint is a hint for a node to use a specific channel,
-/// will usually used for the last hop to the target node.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HopHint {
-    /// The public key of the node
-    pub(crate) pubkey: Pubkey,
-    /// The outpoint for the channel
-    #[serde_as(as = "EntityHex")]
-    pub(crate) channel_outpoint: OutPoint,
-    /// The fee rate to use this hop to forward the payment.
-    pub(crate) fee_rate: u64,
-    /// The TLC expiry delta to use this hop to forward the payment.
-    pub(crate) tlc_expiry_delta: u64,
-}
-
-// 0 ~ 65535 is reserved for endpoint usage, index aboving 65535 is reserved for internal usage
-pub const USER_CUSTOM_RECORDS_MAX_INDEX: u32 = 65535;
-/// The custom records to be included in the payment.
-/// The key is hex encoded of `u32`, and the value is hex encoded of `Vec<u8>` with `0x` as prefix.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
-pub struct PaymentCustomRecords {
-    /// The custom records to be included in the payment.
-    pub data: HashMap<u32, Vec<u8>>,
 }
 
 #[serde_as]
@@ -1193,20 +657,6 @@ pub struct SendPaymentCommand {
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
     pub trampoline_hops: Option<Vec<Pubkey>>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct TrampolineContext {
-    /// Optional final trampoline onion packet.
-    ///
-    /// When provided, this onion packet will be attached to the payload of the next hop
-    /// (which in this context is the next trampoline node).
-    pub remaining_trampoline_onion: Vec<u8>,
-    /// Previous TLCs information for the payment session.
-    /// This is used to associate the outgoing payment with the incoming payment.
-    pub previous_tlcs: Vec<PrevTlcInfo>,
-    /// Hash algorighm used for the payment.
-    pub hash_algorithm: HashAlgorithm,
 }
 
 impl SendPaymentCommand {
@@ -1477,7 +927,7 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        request: SendPaymentData,
+        request: SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let network_graph = self.network_graph.clone();
         tokio::task::spawn_blocking(move || {
@@ -1495,7 +945,7 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        request: SendPaymentData,
+        request: SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let network_graph = self.network_graph.clone();
         let graph = network_graph.read().await;
@@ -1573,7 +1023,7 @@ where
                 )));
             } else {
                 // Payment is still not final, log the current status for debugging
-                let active_attempts = session.active_attempts().count();
+                let active_attempts = session.active_attempts().len();
                 let inflight_attempts = session.attempts().filter(|a| a.is_inflight()).count();
                 let failed_attempts = session.attempts().filter(|a| a.is_failed()).count();
                 let total_attempts = session.attempts_count();
@@ -1689,10 +1139,12 @@ where
                 graph.channel_stats()
             };
 
-            session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
+            let channel_stats = GraphChannelStat::new(Some(channel_stats));
+            let payment_state =
+                SendPaymentState::with_channel_stats(session.request.clone(), channel_stats);
             #[cfg(not(target_arch = "wasm32"))]
             let hops = self
-                .build_route_in_spawn_task(amount, None, max_fee, session.request.clone())
+                .build_route_in_spawn_task(amount, None, max_fee, payment_state)
                 .await
                 .map_err(|e| {
                     Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
@@ -1700,7 +1152,7 @@ where
 
             #[cfg(target_arch = "wasm32")]
             let hops = self
-                .build_route(amount, None, max_fee, session.request.clone())
+                .build_route(amount, None, max_fee, payment_state)
                 .await
                 .map_err(|e| {
                     Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
@@ -1732,7 +1184,7 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
-        session.request.channel_stats = GraphChannelStat::new(Some(channel_stats));
+        let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
         let amount_low_bound = Some(1);
         let mut attempt_id = session.attempts_count() as u64;
         let mut target_amount = remain_amount;
@@ -1742,7 +1194,10 @@ where
         if session.max_parts() > 1 && !is_self_pay {
             let path_max = {
                 let graph = self.network_graph.read().await;
-                graph.find_path_max_capacity(&session.request)?
+                graph.find_path_max_capacity(&SendPaymentState::with_channel_stats(
+                    session.request.clone(),
+                    channel_stats.clone(),
+                ))?
             };
             if path_max * (session.max_parts() as u128) < remain_amount {
                 let error = "Failed to build enough routes for MPP payment".to_string();
@@ -1763,23 +1218,22 @@ where
                 session.max_parts(),
                 max_fee,
             );
+            let payment_state = SendPaymentState::with_channel_stats(
+                session.request.clone(),
+                channel_stats.clone(),
+            );
             #[cfg(not(target_arch = "wasm32"))]
             let build_route_result = self
                 .build_route_in_spawn_task(
                     target_amount,
                     amount_low_bound,
                     max_fee,
-                    session.request.clone(),
+                    payment_state.clone(),
                 )
                 .await;
             #[cfg(target_arch = "wasm32")]
             let build_route_result = self
-                .build_route(
-                    target_amount,
-                    amount_low_bound,
-                    max_fee,
-                    session.request.clone(),
-                )
+                .build_route(target_amount, amount_low_bound, max_fee, payment_state)
                 .await;
 
             match build_route_result {
@@ -1831,11 +1285,7 @@ where
                             if let Some(sent_node) =
                                 graph.get_channel_sent_node(channel_outpoint, *from)
                             {
-                                session.request.channel_stats.add_channel(
-                                    channel_outpoint,
-                                    sent_node,
-                                    *amount,
-                                );
+                                channel_stats.add_channel(channel_outpoint, sent_node, *amount);
                             }
                         }
                     }
@@ -2043,7 +1493,7 @@ where
         error: &str,
         retryable: bool,
     ) {
-        if !retryable && !session.active_attempts().any(|a| a.id != attempt.id) {
+        if !retryable && !session.active_attempts().iter().any(|a| a.id != attempt.id) {
             self.set_payment_fail_with_error(session, error, error_code);
         }
 
@@ -2418,7 +1868,7 @@ where
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
-            let mut payment_session = PaymentSession::new(&self.store, payment_data, 0);
+            let mut payment_session = PaymentSession::new_session(&self.store, payment_data, 0);
             self.build_payment_routes(&mut payment_session).await?;
             return Ok(payment_session.into());
         }
@@ -2428,7 +1878,7 @@ where
         } else {
             DEFAULT_PAYMENT_TRY_LIMIT
         };
-        let mut payment_session = PaymentSession::new(&self.store, payment_data, try_limit);
+        let mut payment_session = PaymentSession::new_session(&self.store, payment_data, try_limit);
         assert!(payment_session.attempts_count() == 0);
         self.store.insert_payment_session(payment_session.clone());
 

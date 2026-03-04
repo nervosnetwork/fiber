@@ -1,7 +1,5 @@
-use crate::{
-    fiber::{payment::PaymentStatus, types::Hash256},
-    invoice::CkbInvoiceStatus,
-};
+use crate::invoice::CkbInvoiceStatus;
+use fiber_types::{Hash256, PaymentStatus};
 
 #[derive(Debug, Clone)]
 pub enum CchTrackingEvent {

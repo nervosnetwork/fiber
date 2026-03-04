@@ -108,31 +108,31 @@ pub fn deterministic_seckey(seed: u64, index: u32) -> secp256k1::SecretKey {
 }
 
 /// Generate a deterministic Pubkey from a seed and index.
-pub fn deterministic_pubkey(seed: u64, index: u32) -> crate::fiber::types::Pubkey {
+pub fn deterministic_pubkey(seed: u64, index: u32) -> crate::fiber::Pubkey {
     let sk = deterministic_seckey(seed, index);
     let pk = secp256k1::PublicKey::from_secret_key(secp256k1::SECP256K1, &sk);
     pk.into()
 }
 
 /// Generate a deterministic Privkey from a seed and index.
-pub fn deterministic_privkey(seed: u64, index: u32) -> crate::fiber::types::Privkey {
+pub fn deterministic_privkey(seed: u64, index: u32) -> crate::fiber::Privkey {
     let sk = deterministic_seckey(seed, index);
     sk.into()
 }
 
 /// Generate a deterministic Hash256 from a seed and index.
-pub fn deterministic_hash256(seed: u64, index: u32) -> crate::fiber::types::Hash256 {
+pub fn deterministic_hash256(seed: u64, index: u32) -> fiber_types::Hash256 {
     deterministic_hash(seed, index).into()
 }
 
 /// Create a deterministic EcdsaSignature from a seed and index.
-pub fn deterministic_ecdsa_signature(seed: u64, index: u32) -> crate::fiber::types::EcdsaSignature {
+pub fn deterministic_ecdsa_signature(seed: u64, index: u32) -> crate::fiber::EcdsaSignature {
     use secp256k1::{Message, SECP256K1};
     let sk = deterministic_seckey(seed, index);
     let message = Message::from_digest_slice(&deterministic_hash(seed, index.wrapping_add(1000)))
         .expect("32 bytes");
     let signature = SECP256K1.sign_ecdsa(&message, &sk);
-    crate::fiber::types::EcdsaSignature(signature)
+    crate::fiber::EcdsaSignature(signature)
 }
 
 /// Create a deterministic SchnorrSignature from a seed and index.

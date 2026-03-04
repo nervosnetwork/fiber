@@ -1,6 +1,4 @@
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::payment::SendPaymentCommand;
-use crate::fiber::types::Hash256;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{
     CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore, SettleInvoiceError,
@@ -10,6 +8,8 @@ use crate::tests::test_utils::{
     create_n_nodes_network, create_n_nodes_network_with_params, gen_rpc_config, init_tracing,
     ChannelParameters, NetworkNode, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
 };
+use fiber_types::Hash256;
+use fiber_types::HashAlgorithm;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[tokio::test]

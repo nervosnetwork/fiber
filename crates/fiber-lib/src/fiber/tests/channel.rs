@@ -1,20 +1,18 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus,
-    ReplayOrderHint, TLCId, TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS,
+    AddTlcResponse, ReplayOrderHint, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS,
     MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
     MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
-use crate::fiber::features::FeatureVector;
+
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithTarget, PeerDisconnectReason};
-use crate::fiber::payment::{PaymentStatus, SendPaymentCommand};
+use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
-    TlcErrorCode, NO_SHARED_SECRET,
+    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, TlcErr,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode};
@@ -23,14 +21,11 @@ use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
         channel::{
-            derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelActorStateStore,
-            ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
+            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand,
             ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
-        hash_algorithm::HashAlgorithm,
         network::{AcceptChannelCommand, OpenChannelCommand},
-        types::{Privkey, RemoveTlcFulfill, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage,
     },
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
@@ -42,6 +37,12 @@ use ckb_types::{
     packed::{CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
+use fiber_types::{
+    derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelState, HashAlgorithm,
+    InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
+    Privkey, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+};
+use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
 use musig2::KeyAggContext;
 use ractor::call;
@@ -258,11 +259,11 @@ async fn test_create_channel_with_remote_tlc_info() {
         let node_b_channel_state = node_b.store.get_channel_actor_state(&channel_id).unwrap();
 
         assert_eq!(
-            Some(node_a_channel_state.local_tlc_info),
+            Some(node_a_channel_state.local_tlc_info.clone()),
             node_b_channel_state.remote_tlc_info
         );
         assert_eq!(
-            Some(node_b_channel_state.local_tlc_info),
+            Some(node_b_channel_state.local_tlc_info.clone()),
             node_a_channel_state.remote_tlc_info
         );
     }
