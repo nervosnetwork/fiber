@@ -104,6 +104,8 @@ use fiber_types::{
     RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
     TrampolineContext, UdtCfgInfos,
 };
+// Re-export HopRequire so internal modules can still use `network::HopRequire`.
+pub use fiber_types::HopRequire;
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -407,18 +409,6 @@ pub struct OpenChannelCommand {
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
-}
-
-/// A hop requirement need to meet when building router, do not including the source node,
-/// the last hop is the target node.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HopRequire {
-    /// The public key of the node
-    pub(crate) pubkey: Pubkey,
-    /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
-    #[serde_as(as = "Option<EntityHex>")]
-    pub(crate) channel_outpoint: Option<OutPoint>,
 }
 
 #[serde_as]

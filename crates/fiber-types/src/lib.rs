@@ -33,7 +33,7 @@ pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
 pub use channel::*;
 pub use config::*;
 pub use invoice::*;
-pub use network::PersistentNetworkActorState;
+pub use network::{HopRequire, PersistentNetworkActorState};
 pub use onion::*;
 pub use payment::*;
 pub use primitives::{Hash256, NodeId, Privkey, Pubkey};

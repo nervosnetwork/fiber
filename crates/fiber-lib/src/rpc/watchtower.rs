@@ -1,7 +1,4 @@
-use ckb_jsonrpc_types::Script;
 use jsonrpsee::proc_macros::rpc;
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 #[cfg(feature = "watchtower")]
 use jsonrpsee::types::error::{ErrorObjectOwned, CALL_EXECUTION_FAILED_CODE};
@@ -10,7 +7,11 @@ use jsonrpsee::types::error::{ErrorObjectOwned, CALL_EXECUTION_FAILED_CODE};
 use crate::rpc::context::RpcContext;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
-use fiber_types::{Hash256, Privkey, Pubkey, RevocationData, SettlementData};
+
+pub use fiber_json_types::{
+    CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
+    UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
+};
 
 /// RPC module for watchtower related operations
 #[cfg(feature = "watchtower")]
@@ -119,77 +120,6 @@ trait WatchtowerRpc {
     /// Remove preimage
     #[method(name = "remove_preimage")]
     async fn remove_preimage(&self, params: RemovePreimageParams) -> Result<(), ErrorObjectOwned>;
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CreateWatchChannelParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Funding UDT type script
-    pub funding_udt_type_script: Option<Script>,
-    /// The local party's private key used to settle the commitment transaction
-    pub local_settlement_key: Privkey,
-    /// The remote party's public key used to settle the commitment transaction
-    pub remote_settlement_key: Pubkey,
-    /// The local party's funding public key
-    pub local_funding_pubkey: Pubkey,
-    /// The remote party's funding public key
-    pub remote_funding_pubkey: Pubkey,
-    /// Settlement data
-    pub settlement_data: SettlementData,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RemoveWatchChannelParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct UpdateRevocationParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Revocation data
-    pub revocation_data: RevocationData,
-    /// Settlement data
-    pub settlement_data: SettlementData,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct UpdatePendingRemoteSettlementParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Settlement data
-    pub settlement_data: SettlementData,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct UpdateLocalSettlementParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Settlement data
-    pub settlement_data: SettlementData,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CreatePreimageParams {
-    /// Payment hash
-    pub payment_hash: Hash256,
-    /// Preimage
-    pub preimage: Hash256,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RemovePreimageParams {
-    /// Payment hash
-    pub payment_hash: Hash256,
 }
 
 #[cfg(feature = "watchtower")]

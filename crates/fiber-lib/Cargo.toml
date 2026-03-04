@@ -23,6 +23,7 @@ clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
 either = "1.15.0"
 fiber-sphinx = "2.3"
+fiber-json-types = { path = "../fiber-json-types", features = ["cch"] }
 fiber-types = { path = "../fiber-types", features = ["cch", "watchtower"] }
 futures = "0.3.30"
 getrandom = { version = "0.2", features = ["js"] }

@@ -1,22 +1,7 @@
-use fiber_types::U64Hex;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PprofParams {
-    /// Duration to profile in seconds. Defaults 10s.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub duration_secs: Option<u64>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PprofResult {
-    /// Path of the generated flamegraph SVG.
-    pub path: String,
-}
+pub use fiber_json_types::{PprofParams, PprofResult};
 
 /// RPC module for profiling
 /// This module require build with pprof feature and debug symbol.

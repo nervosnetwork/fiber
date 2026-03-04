@@ -2206,6 +2206,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-json-types"
+version = "0.7.1"
+dependencies = [
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "fiber-types",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_with",
+ "tentacle-multiaddr",
+]
+
+[[package]]
 name = "fiber-sphinx"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2360,6 +2373,7 @@ dependencies = [
  "console_error_panic_hook",
  "criterion",
  "either",
+ "fiber-json-types",
  "fiber-sphinx",
  "fiber-types",
  "fiber-wasm-db-common",
