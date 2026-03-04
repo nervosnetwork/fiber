@@ -18,12 +18,11 @@ use musig2::LiftedSignature;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
 use std::cmp::Ordering;
+use std::time::Duration;
 
+/// The size of a serialized cursor in bytes.
+pub const CURSOR_SIZE: usize = 45;
 pub use feature_bits::*;
-
-// ============================================================
-// EcdsaSignature
-// ============================================================
 
 type Secp256k1Signature = secp256k1::ecdsa::Signature;
 
@@ -81,10 +80,6 @@ impl TryFrom<molecule_fiber::EcdsaSignature> for EcdsaSignature {
         Secp256k1Signature::from_compact(&signature).map(Into::into)
     }
 }
-
-// ============================================================
-// AnnouncedNodeName
-// ============================================================
 
 /// A node's announced name (up to 32 bytes, UTF-8 encoded).
 /// If the length is less than 32 bytes, it will be padded with 0.
@@ -156,10 +151,6 @@ impl<'de> Deserialize<'de> for AnnouncedNodeName {
         Self::from_string(&s).map_err(serde::de::Error::custom)
     }
 }
-
-// ============================================================
-// FeatureVector
-// ============================================================
 
 /// Feature bit type alias.
 pub type FeatureBit = u16;
@@ -360,10 +351,6 @@ impl std::fmt::Debug for FeatureVector {
     }
 }
 
-// ============================================================
-// SchnorrSignature
-// ============================================================
-
 /// A wrapper around secp256k1 Schnorr signature with serde and molecule support.
 #[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub struct SchnorrSignature(pub secp256k1::schnorr::Signature);
@@ -438,10 +425,6 @@ impl TryFrom<molecule_gossip::SchnorrSignature> for SchnorrSignature {
     }
 }
 
-// ============================================================
-// ChannelAnnouncement
-// ============================================================
-
 /// Announcement of a new channel in the network.
 ///
 /// This message is broadcast to all nodes to inform them about a new channel.
@@ -513,10 +496,6 @@ impl ChannelAnnouncement {
         }
     }
 }
-
-// ============================================================
-// ChannelUpdate
-// ============================================================
 
 /// Update to an existing channel's routing parameters.
 ///
@@ -715,10 +694,6 @@ pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice())
 }
 
-// ============================================================
-// BroadcastMessage
-// ============================================================
-
 /// A broadcast message in the gossip protocol.
 ///
 /// This enum represents the different types of messages that can be broadcast
@@ -774,10 +749,6 @@ impl BroadcastMessage {
     }
 }
 
-// ============================================================
-// NodeAnnouncement
-// ============================================================
-
 /// Announcement of a node's presence and capabilities.
 ///
 /// This message is broadcast to inform other nodes about this node's
@@ -805,10 +776,6 @@ pub struct NodeAnnouncement {
     /// UDT configuration info
     pub udt_cfg_infos: UdtCfgInfos,
 }
-
-// ============================================================
-// BroadcastMessageID
-// ============================================================
 
 /// The ID of a broadcast message.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -907,15 +874,6 @@ impl BroadcastMessageID {
     }
 }
 
-// ============================================================
-// Cursor
-// ============================================================
-
-use std::time::Duration;
-
-/// The size of a serialized cursor in bytes.
-pub const CURSOR_SIZE: usize = 45;
-
 /// A cursor for paginating broadcast messages.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Default)]
 pub struct Cursor {
@@ -981,10 +939,6 @@ impl Cursor {
         self.timestamp == u64::MAX
     }
 }
-
-// ============================================================
-// Molecule Conversions
-// ============================================================
 
 // NodeAnnouncement molecule conversions
 
@@ -1061,10 +1015,6 @@ impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
     }
 }
 
-// ============================================================
-// Molecule Conversions for ChannelAnnouncement
-// ============================================================
-
 impl From<ChannelAnnouncement> for molecule_gossip::ChannelAnnouncement {
     fn from(channel_announcement: ChannelAnnouncement) -> Self {
         let builder = molecule_gossip::ChannelAnnouncement::new_builder()
@@ -1122,10 +1072,6 @@ impl TryFrom<molecule_gossip::ChannelAnnouncement> for ChannelAnnouncement {
     }
 }
 
-// ============================================================
-// Molecule Conversions for ChannelUpdate
-// ============================================================
-
 impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
     fn from(channel_update: ChannelUpdate) -> Self {
         let builder = molecule_fiber::ChannelUpdate::new_builder()
@@ -1172,10 +1118,6 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
         })
     }
 }
-
-// ============================================================
-// BroadcastMessage Ord/PartialOrd and Molecule Conversions
-// ============================================================
 
 impl Ord for BroadcastMessage {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -1248,10 +1190,6 @@ impl TryFrom<molecule_gossip::BroadcastMessage> for BroadcastMessage {
         fiber_broadcast_message.to_enum().try_into()
     }
 }
-
-// ============================================================
-// Cursor Ord/PartialOrd and Molecule Conversions
-// ============================================================
 
 impl Ord for Cursor {
     fn cmp(&self, other: &Self) -> Ordering {

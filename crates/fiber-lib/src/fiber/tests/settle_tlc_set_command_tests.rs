@@ -1,6 +1,5 @@
 //! Tests for SettleTlcSetCommand
 
-use crate::fiber::channel::InMemorySignerExt;
 use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
 use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};

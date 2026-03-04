@@ -6,6 +6,7 @@ use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
 use crate::fiber::{
+    blake2b_hash_with_salt,
     config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT},
     graph::*,
     payment::{PaymentSessionExt, SendPaymentDataBuilder},
@@ -31,7 +32,6 @@ use crate::time::SystemTime;
 use crate::watchtower::*;
 #[cfg(not(target_arch = "wasm32"))]
 use ckb_hash::blake2b_256;
-use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
 use ckb_types::prelude::*;
 use ckb_types::H256;
@@ -468,14 +468,6 @@ fn test_channel_state_serialize() {
     assert_eq!(flags, new_flags);
 }
 
-fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
-    let mut hasher = new_blake2b();
-    hasher.update(salt);
-    hasher.update(data);
-    let mut result = [0u8; 32];
-    hasher.finalize(&mut result);
-    result
-}
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

@@ -1,16 +1,31 @@
 //! Channel-related types: state flags, TLC status, channel state enum.
 
+use crate::crate_time::SystemTime;
+use crate::gen::fiber as molecule_fiber;
 use crate::invoice::HashAlgorithm;
 use crate::onion::PaymentOnionPacket;
 use crate::onion::TlcErrPacket;
+use crate::protocol::{ChannelAnnouncement, ChannelUpdate, EcdsaSignature};
+use crate::serde_utils::PartialSignatureAsBytes;
+use crate::serde_utils::PubNonceAsBytes;
+use crate::EntityHex;
 use crate::Hash256;
+use crate::Privkey;
 use crate::Pubkey;
 use bitflags::bitflags;
+use ckb_types::packed::Byte32 as MByte32;
+use ckb_types::packed::Script;
+use ckb_types::packed::Transaction;
+use ckb_types::H256;
+use molecule::prelude::{Builder, Entity};
+use musig2::BinaryEncoding;
+use musig2::PartialSignature;
+use musig2::PubNonce;
+use musig2::{SecNonce, SecNonceBuilder};
 use serde::{Deserialize, Serialize};
-
-// ============================================================
-// Channel bitflags
-// ============================================================
+use serde_with::serde_as;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::{Debug, Formatter};
 
 bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,10 +118,6 @@ bitflags! {
         const REMOVE = 1 << 1;
     }
 }
-
-// ============================================================
-// TLC types
-// ============================================================
 
 /// The id of a tlc, it can be either offered or received.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash)]
@@ -212,10 +223,6 @@ impl TlcStatus {
     }
 }
 
-// ============================================================
-// Channel state
-// ============================================================
-
 /// The state of a channel.
 ///
 /// Note: fiber-lib uses default serde (bincode-compatible), while fiber-json-types
@@ -276,10 +283,6 @@ impl ShuttingDownFlags {
     }
 }
 
-// ============================================================
-// CommitmentNumbers
-// ============================================================
-
 /// The initial commitment number for a channel.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
@@ -321,10 +324,6 @@ impl CommitmentNumbers {
     }
 }
 
-// ============================================================
-// ChannelConstraints
-// ============================================================
-
 /// Channel constraints for TLC value and number limits.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct ChannelConstraints {
@@ -342,10 +341,6 @@ impl ChannelConstraints {
         }
     }
 }
-
-// ============================================================
-// ChannelTlcInfo
-// ============================================================
 
 /// TLC-related information for a channel.
 /// We can update this information through the channel update message.
@@ -389,10 +384,6 @@ impl ChannelTlcInfo {
     }
 }
 
-// ============================================================
-// ChannelBasePublicKeys
-// ============================================================
-
 /// One counterparty's public keys which do not change over the life of a channel.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelBasePublicKeys {
@@ -404,9 +395,6 @@ pub struct ChannelBasePublicKeys {
     pub tlc_base_key: Pubkey,
 }
 
-// ============================================================
-// PrevTlcInfo
-// ============================================================
 /// When we are forwarding a TLC, we need to know the previous TLC information.
 /// This struct keeps the information of the previous TLC.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -443,9 +431,6 @@ impl PrevTlcInfo {
     }
 }
 
-// ============================================================
-// TlcInfo
-// ============================================================
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TlcInfo {
     pub status: TlcStatus,
@@ -577,10 +562,6 @@ impl TlcInfo {
     }
 }
 
-// ============================================================
-// PendingTlcs
-// ============================================================
-
 /// A collection of pending TLCs.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct PendingTlcs {
@@ -605,10 +586,6 @@ impl PendingTlcs {
         self.tlcs.push(tlc);
     }
 }
-
-// ============================================================
-// TlcState
-// ============================================================
 
 /// The state of all TLCs for a channel.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
@@ -865,10 +842,6 @@ impl TlcState {
     }
 }
 
-// ============================================================
-// AddTlcCommand
-// ============================================================
-
 /// Command to add a new TLC to a channel.
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct AddTlcCommand {
@@ -903,26 +876,12 @@ impl fmt::Debug for AddTlcCommand {
     }
 }
 
-// ============================================================
-// RetryableTlcOperation
-// ============================================================
-
 /// A retryable TLC operation that may need to be replayed after reconnection.
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug, Hash)]
 pub enum RetryableTlcOperation {
     RemoveTlc(TLCId, RemoveTlcReason),
     AddTlc(AddTlcCommand),
 }
-
-// ============================================================
-// ShutdownInfo
-// ============================================================
-
-use crate::serde_utils::PartialSignatureAsBytes;
-use crate::EntityHex;
-use ckb_types::packed::Script;
-use musig2::PartialSignature;
-use serde_with::serde_as;
 
 /// Information about a channel shutdown.
 #[serde_as]
@@ -935,13 +894,6 @@ pub struct ShutdownInfo {
     pub signature: Option<PartialSignature>,
 }
 
-// ============================================================
-// RevokeAndAck
-// ============================================================
-
-use crate::serde_utils::PubNonceAsBytes;
-use musig2::PubNonce;
-
 /// Message to revoke the previous commitment and acknowledge the new one.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -953,13 +905,6 @@ pub struct RevokeAndAck {
     #[serde_as(as = "PubNonceAsBytes")]
     pub next_revocation_nonce: PubNonce,
 }
-
-// ============================================================
-// PublicChannelInfo
-// ============================================================
-
-use crate::protocol::{ChannelAnnouncement, ChannelUpdate, EcdsaSignature};
-
 // This struct holds the channel information that are only relevant when the channel
 // is public. The information includes signatures to the channel announcement message,
 // our config for the channel that will be published to the network (via ChannelUpdate).
@@ -985,12 +930,6 @@ impl PublicChannelInfo {
         Default::default()
     }
 }
-
-// ============================================================
-// InMemorySigner
-// ============================================================
-
-use crate::Privkey;
 
 /// A simple implementation of a channel signer that keeps the private keys in memory.
 ///
@@ -1019,11 +958,149 @@ impl fmt::Debug for InMemorySigner {
     }
 }
 
-// ============================================================
-// ChannelOpenRecord
-// ============================================================
+/// Hash data with a salt using blake2b.
+pub fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
+    let mut hasher = ckb_hash::new_blake2b();
+    hasher.update(salt);
+    hasher.update(data);
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
+}
 
-/// The status of a channel opening operation initiated by the local node.Add a comment on  line R7954Add diff commentMarkdown input:  edit mode selected.WritePreviewAdd a suggestionHeadingBoldItalicQuoteCodeLinkUnordered listNumbered listTask listMentionReferenceSaved repliesAdd FilesPaste, drop, or click to add filesCancelCommentStart a review
+/// Compute a tweak value from a commitment point using blake2b.
+pub fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
+    let mut hasher = ckb_hash::new_blake2b();
+    hasher.update(&commitment_point.serialize());
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
+}
+
+/// Derive a private key by tweaking a secret with a commitment point.
+pub fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privkey {
+    secret.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+/// Derive a public key by tweaking a base key with a commitment point.
+pub fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    base_key.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+/// Derive the TLC public key from a base key and commitment point.
+pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+/// Derive the commitment secret for a given commitment number from a seed.
+///
+/// The commitment number should be in the range \[0, 2^48).
+pub fn get_commitment_secret(commitment_seed: &[u8; 32], commitment_number: u64) -> [u8; 32] {
+    let mut res: [u8; 32] = *commitment_seed;
+    for i in 0..48 {
+        let bitpos = 47 - i;
+        if commitment_number & (1 << bitpos) == (1 << bitpos) {
+            res[bitpos / 8] ^= 1 << (bitpos & 7);
+            res = ckb_hash::blake2b_256(res);
+        }
+    }
+    res
+}
+
+/// Derive the commitment point (public key) for a given commitment number from a seed.
+pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) -> Pubkey {
+    Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
+}
+
+/// Context for musig2 nonce derivation.
+pub enum Musig2Context {
+    /// Commitment transaction context.
+    Commitment,
+    /// Revocation context.
+    Revoke,
+}
+
+impl std::fmt::Display for Musig2Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let context_str = match self {
+            Musig2Context::Commitment => "COMMITMENT",
+            Musig2Context::Revoke => "REVOKE",
+        };
+        write!(f, "{}", context_str)
+    }
+}
+
+impl InMemorySigner {
+    /// Generate an `InMemorySigner` from a seed.
+    pub fn generate_from_seed(params: &[u8]) -> InMemorySigner {
+        let seed = ckb_hash::blake2b_256(params);
+
+        let commitment_seed = {
+            let mut hasher = ckb_hash::new_blake2b();
+            hasher.update(&seed);
+            hasher.update(&b"commitment seed"[..]);
+            let mut result = [0u8; 32];
+            hasher.finalize(&mut result);
+            result
+        };
+
+        let key_derive = |seed: &[u8], info: &[u8]| {
+            let result = blake2b_hash_with_salt(seed, info);
+            Privkey::from_slice(&result)
+        };
+
+        let funding_key = key_derive(&seed, b"funding key");
+        let tlc_base_key = key_derive(funding_key.as_ref(), b"HTLC base key");
+        let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
+
+        InMemorySigner {
+            funding_key,
+            tlc_base_key,
+            musig2_base_nonce,
+            commitment_seed,
+        }
+    }
+
+    /// Get the base public keys for this signer.
+    pub fn get_base_public_keys(&self) -> ChannelBasePublicKeys {
+        ChannelBasePublicKeys {
+            funding_pubkey: self.funding_key.pubkey(),
+            tlc_base_key: self.tlc_base_key.pubkey(),
+        }
+    }
+
+    /// Returns the commitment point for the given commitment number.
+    ///
+    /// The commitment point is the public key derived from the commitment seed
+    /// and the commitment number. It is used to derive the pubkeys used in
+    /// TLC (htlc and revocation outputs).
+    pub fn get_commitment_point(&self, commitment_number: u64) -> Pubkey {
+        get_commitment_point(&self.commitment_seed, commitment_number)
+    }
+
+    /// Returns the commitment secret for the given commitment number.
+    pub fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32] {
+        get_commitment_secret(&self.commitment_seed, commitment_number)
+    }
+
+    /// Derive the TLC key for the given commitment number.
+    pub fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {
+        let per_commitment_point = self.get_commitment_point(new_commitment_number);
+        derive_private_key(&self.tlc_base_key, &per_commitment_point)
+    }
+
+    /// Derive a musig2 nonce for the given commitment number and context.
+    pub fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce {
+        let commitment_point = self.get_commitment_point(commitment_number);
+        let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
+
+        SecNonceBuilder::new(seckey.as_ref())
+            .with_extra_input(&context.to_string())
+            .build()
+    }
+}
+
+/// The status of a channel opening operation initiated by the local node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelOpeningStatus {
     /// The `open_channel` RPC has been submitted and the `OpenChannel` message has been sent
@@ -1147,15 +1224,6 @@ impl PendingNotifySettleTlc {
         )
     }
 }
-
-// ============================================================
-// ChannelActorData
-// ============================================================
-
-use crate::crate_time::SystemTime;
-use ckb_types::packed::Transaction;
-use ckb_types::H256;
-use std::collections::{HashMap, VecDeque};
 
 /// The core serializable state of a channel actor.
 ///
@@ -1283,15 +1351,6 @@ pub struct ChannelActorData {
     pub created_at: SystemTime,
 }
 
-// ============================================================
-// Molecule conversions
-// ============================================================
-
-use crate::gen::fiber as molecule_fiber;
-use ckb_types::packed::Byte32 as MByte32;
-use molecule::prelude::{Builder, Entity};
-use musig2::BinaryEncoding;
-
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
     MByte32::from_slice(partial_signature.serialize().as_ref()).expect("[Byte; 32] from [u8; 32]")
 }
@@ -1351,20 +1410,11 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
     }
 }
 
-// ============================================================
-// RemoveTlcFulfill
-// ============================================================
 /// The fulfillment of a TLC removal.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct RemoveTlcFulfill {
     pub payment_preimage: Hash256,
 }
-
-// ============================================================
-// RemoveTlcReason
-// ============================================================
-
-use std::fmt::{Debug, Formatter};
 
 /// The reason for removing a TLC.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -1434,10 +1484,6 @@ impl From<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
         }
     }
 }
-
-// ============================================================
-// Molecule conversions
-// ============================================================
 
 impl From<RemoveTlcFulfill> for molecule_fiber::RemoveTlcFulfill {
     fn from(remove_tlc_fulfill: RemoveTlcFulfill) -> Self {

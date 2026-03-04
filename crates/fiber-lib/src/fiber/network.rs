@@ -58,7 +58,6 @@ use super::channel::{
 };
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
-use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
 };
@@ -97,12 +96,13 @@ use fiber_types::protocol::AnnouncedNodeName;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
 use fiber_types::{
-    AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord, ChannelOpeningStatus,
-    ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256,
-    NodeAnnouncement, PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket,
-    PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SettlementData,
-    ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos,
+    blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
+    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
+    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
+    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
+    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
+    TrampolineContext, UdtCfgInfos,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);

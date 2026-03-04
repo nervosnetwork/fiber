@@ -13,10 +13,6 @@ use fiber_sphinx::OnionErrorPacket;
 use molecule::prelude::{Builder, Entity};
 use serde::{Deserialize, Serialize};
 
-// ============================================================
-// Onion packet version constants
-// ============================================================
-
 /// Onion packet version with u64 BE length header for hop data.
 pub const ONION_PACKET_VERSION_V0: u8 = 0;
 /// Onion packet version with molecule's native u32 LE length for hop data.
@@ -26,10 +22,6 @@ const PACKET_DATA_LEN: usize = 6500;
 
 /// Length of the u64 BE header used in v0 hop data format.
 const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
-
-// ============================================================
-// TlcErrPacket
-// ============================================================
 
 /// An encrypted error packet for TLC failures.
 /// The sender should decode it and then decide what to do with the error.
@@ -153,10 +145,6 @@ impl TlcErrPacket {
     }
 }
 
-// ============================================================
-// OnionPacketError
-// ============================================================
-
 /// Errors that can occur when processing an onion packet.
 #[derive(thiserror::Error, Debug)]
 pub enum OnionPacketError {
@@ -169,10 +157,6 @@ pub enum OnionPacketError {
     #[error("Sphinx protocol error")]
     Sphinx(#[from] fiber_sphinx::SphinxError),
 }
-
-// ============================================================
-// PaymentOnionPacket
-// ============================================================
 
 /// An encrypted onion packet for payment routing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -232,10 +216,6 @@ impl PaymentOnionPacket {
         })
     }
 }
-
-// ============================================================
-// PeeledPaymentOnionPacket
-// ============================================================
 
 /// A peeled payment onion packet, containing the current hop data and the packet for the next hop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,10 +291,6 @@ impl PeeledPaymentOnionPacket {
             .and_then(BasicMppPaymentData::read)
     }
 }
-
-// ============================================================
-// Sphinx Onion Codec infrastructure
-// ============================================================
 
 /// Trait for encoding/decoding Sphinx onion packet hop data.
 ///
@@ -412,10 +388,6 @@ pub fn create_sphinx_onion<C: secp256k1::Signing, Codec: SphinxOnionCodec>(
     Ok(packet.into_bytes())
 }
 
-// ============================================================
-// PaymentSphinxCodec
-// ============================================================
-
 /// Codec for payment onion packets (used by the outer payment onion layer).
 pub struct PaymentSphinxCodec;
 
@@ -494,10 +466,6 @@ impl SphinxOnionCodec for PaymentSphinxCodec {
     }
 }
 
-// ============================================================
-// Onion packet helper functions
-// ============================================================
-
 /// Packs data with u64 BE length header (v0 format).
 /// Used by Trampoline (bincode serialization) and v0 payment hop data.
 pub fn pack_len_prefixed(mut payload: Vec<u8>) -> Vec<u8> {
@@ -545,10 +513,6 @@ pub fn molecule_table_data_len(buf: &[u8]) -> Option<usize> {
     }
     Some(len)
 }
-
-// ============================================================
-// TrampolineOnionData
-// ============================================================
 
 /// Helper to store the trampoline onion packet inside `custom_records`.
 ///

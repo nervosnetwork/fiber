@@ -52,18 +52,10 @@ pub use serde_utils::{
 
 pub use tentacle_multiaddr::Multiaddr;
 
-// ============================================================
-// WASM-compatible time
-// ============================================================
-
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use std::time as crate_time;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web_time as crate_time;
-
-// ============================================================
-// Utility functions
-// ============================================================
 
 /// Get the current timestamp as milliseconds since the Unix epoch.
 pub fn now_timestamp_as_millis_u64() -> u64 {
@@ -72,10 +64,6 @@ pub fn now_timestamp_as_millis_u64() -> u64 {
         .expect("Duration since unix epoch")
         .as_millis() as u64
 }
-
-// ============================================================
-// Store serialization utilities
-// ============================================================
 
 /// Deserialize a value from bincode-encoded bytes.
 ///

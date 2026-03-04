@@ -226,10 +226,6 @@ where
     }
 }
 
-// ============================================================
-// musig2 signature types serialization
-// ============================================================
-
 /// Serde helper for serializing `CompactSignature` as raw bytes.
 pub struct CompactSignatureAsBytes;
 

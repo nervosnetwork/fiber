@@ -17,10 +17,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, IfIsHumanReadable};
 use tracing::trace;
 
-// ============================================================
-// Hash256
-// ============================================================
-
 impl From<Hash256> for [u8; 32] {
     fn from(val: Hash256) -> Self {
         val.0
@@ -86,10 +82,6 @@ impl AsRef<[u8; 32]> for Privkey {
     }
 }
 
-// ============================================================
-// NodeId
-// ============================================================
-
 /// Used as identifier of node.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq)]
@@ -123,10 +115,6 @@ impl ::std::str::FromStr for NodeId {
         Ok(Self::from_bytes(bytes))
     }
 }
-
-// ============================================================
-// Molecule conversions for external crate types
-// ============================================================
 
 // u16 <-> molecule_fiber::Uint16
 
