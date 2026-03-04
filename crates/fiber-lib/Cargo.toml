@@ -133,6 +133,7 @@ jsonrpsee = { version = "0.25.1", features = [
 ] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+fiber-store = { path = "../fiber-store", features = ["browser-test"] }
 wasm-bindgen-test = "0.3.50"
 
 [lints.clippy]

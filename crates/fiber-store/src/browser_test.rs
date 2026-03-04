@@ -50,6 +50,10 @@ impl Store {
         guard.insert(key.as_ref().to_vec(), value.as_ref().to_vec());
     }
 
+    pub fn shutdown(self) {
+        // no-op for in-memory test store
+    }
+
     pub fn batch(&self) -> Batch {
         Batch {
             data: self.data.clone(),
