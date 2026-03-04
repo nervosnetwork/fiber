@@ -46,7 +46,10 @@ impl Store {
     pub fn open_db(path: &Path) -> Result<Self, String> {
         let chan = CommunicationChannel::prepare_from_global();
         if !DB_INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
-            chan.open_database(path.to_str().unwrap());
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| "database path is not valid UTF-8".to_string())?;
+            chan.open_database(path_str);
             DB_INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
         } else {
             warn!("Database has already been initialized");

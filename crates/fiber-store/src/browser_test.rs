@@ -88,7 +88,7 @@ impl Store {
             },
         };
         let mut result = vec![];
-        for (key, value) in iter.skip_while(move |(key, _)| skip_while(&key)) {
+        for (key, value) in iter.skip_while(move |(key, _)| skip_while(key)) {
             if !key.starts_with(prefix) {
                 break;
             }

@@ -22,9 +22,9 @@ unsafe impl Sync for Store {}
 
 impl Store {
     /// Open a store, with migration check
-    pub fn new<P: AsRef<Path>>(_path: P) -> Result<Self, String> {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         Ok(Self {
-            inner: fiber_store::Store::open_db(std::path::Path::new(""))?,
+            inner: fiber_store::Store::open_db(path.as_ref())?,
         })
     }
     /// Open a store, without migration check
