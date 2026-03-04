@@ -21,6 +21,7 @@ use molecule::prelude::{Builder, Entity};
 use musig2::BinaryEncoding;
 use musig2::PartialSignature;
 use musig2::PubNonce;
+use musig2::{SecNonce, SecNonceBuilder};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, VecDeque};
@@ -957,7 +958,149 @@ impl fmt::Debug for InMemorySigner {
     }
 }
 
-/// The status of a channel opening operation initiated by the local node.Add a comment on  line R7954Add diff commentMarkdown input:  edit mode selected.WritePreviewAdd a suggestionHeadingBoldItalicQuoteCodeLinkUnordered listNumbered listTask listMentionReferenceSaved repliesAdd FilesPaste, drop, or click to add filesCancelCommentStart a review
+/// Hash data with a salt using blake2b.
+pub fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
+    let mut hasher = ckb_hash::new_blake2b();
+    hasher.update(salt);
+    hasher.update(data);
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
+}
+
+/// Compute a tweak value from a commitment point using blake2b.
+pub fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
+    let mut hasher = ckb_hash::new_blake2b();
+    hasher.update(&commitment_point.serialize());
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
+}
+
+/// Derive a private key by tweaking a secret with a commitment point.
+pub fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privkey {
+    secret.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+/// Derive a public key by tweaking a base key with a commitment point.
+pub fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    base_key.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+/// Derive the TLC public key from a base key and commitment point.
+pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+/// Derive the commitment secret for a given commitment number from a seed.
+///
+/// The commitment number should be in the range \[0, 2^48).
+pub fn get_commitment_secret(commitment_seed: &[u8; 32], commitment_number: u64) -> [u8; 32] {
+    let mut res: [u8; 32] = *commitment_seed;
+    for i in 0..48 {
+        let bitpos = 47 - i;
+        if commitment_number & (1 << bitpos) == (1 << bitpos) {
+            res[bitpos / 8] ^= 1 << (bitpos & 7);
+            res = ckb_hash::blake2b_256(res);
+        }
+    }
+    res
+}
+
+/// Derive the commitment point (public key) for a given commitment number from a seed.
+pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) -> Pubkey {
+    Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
+}
+
+/// Context for musig2 nonce derivation.
+pub enum Musig2Context {
+    /// Commitment transaction context.
+    Commitment,
+    /// Revocation context.
+    Revoke,
+}
+
+impl std::fmt::Display for Musig2Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let context_str = match self {
+            Musig2Context::Commitment => "COMMITMENT",
+            Musig2Context::Revoke => "REVOKE",
+        };
+        write!(f, "{}", context_str)
+    }
+}
+
+impl InMemorySigner {
+    /// Generate an `InMemorySigner` from a seed.
+    pub fn generate_from_seed(params: &[u8]) -> InMemorySigner {
+        let seed = ckb_hash::blake2b_256(params);
+
+        let commitment_seed = {
+            let mut hasher = ckb_hash::new_blake2b();
+            hasher.update(&seed);
+            hasher.update(&b"commitment seed"[..]);
+            let mut result = [0u8; 32];
+            hasher.finalize(&mut result);
+            result
+        };
+
+        let key_derive = |seed: &[u8], info: &[u8]| {
+            let result = blake2b_hash_with_salt(seed, info);
+            Privkey::from_slice(&result)
+        };
+
+        let funding_key = key_derive(&seed, b"funding key");
+        let tlc_base_key = key_derive(funding_key.as_ref(), b"HTLC base key");
+        let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
+
+        InMemorySigner {
+            funding_key,
+            tlc_base_key,
+            musig2_base_nonce,
+            commitment_seed,
+        }
+    }
+
+    /// Get the base public keys for this signer.
+    pub fn get_base_public_keys(&self) -> ChannelBasePublicKeys {
+        ChannelBasePublicKeys {
+            funding_pubkey: self.funding_key.pubkey(),
+            tlc_base_key: self.tlc_base_key.pubkey(),
+        }
+    }
+
+    /// Returns the commitment point for the given commitment number.
+    ///
+    /// The commitment point is the public key derived from the commitment seed
+    /// and the commitment number. It is used to derive the pubkeys used in
+    /// TLC (htlc and revocation outputs).
+    pub fn get_commitment_point(&self, commitment_number: u64) -> Pubkey {
+        get_commitment_point(&self.commitment_seed, commitment_number)
+    }
+
+    /// Returns the commitment secret for the given commitment number.
+    pub fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32] {
+        get_commitment_secret(&self.commitment_seed, commitment_number)
+    }
+
+    /// Derive the TLC key for the given commitment number.
+    pub fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {
+        let per_commitment_point = self.get_commitment_point(new_commitment_number);
+        derive_private_key(&self.tlc_base_key, &per_commitment_point)
+    }
+
+    /// Derive a musig2 nonce for the given commitment number and context.
+    pub fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce {
+        let commitment_point = self.get_commitment_point(commitment_number);
+        let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
+
+        SecNonceBuilder::new(seckey.as_ref())
+            .with_extra_input(&context.to_string())
+            .build()
+    }
+}
+
+/// The status of a channel opening operation initiated by the local node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelOpeningStatus {
     /// The `open_channel` RPC has been submitted and the `OpenChannel` message has been sent

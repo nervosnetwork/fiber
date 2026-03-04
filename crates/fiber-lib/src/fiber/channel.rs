@@ -25,7 +25,6 @@ use crate::{
             calculate_commitment_tx_fee, calculate_shutdown_tx_fee, calculate_tlc_forward_fee,
             shutdown_tx_size,
         },
-        key::blake2b_hash_with_salt,
         network::SendOnionPacketCommand,
         network::{get_chain_hash, sign_network_message, FiberMessageWithTarget},
         types::{
@@ -40,7 +39,7 @@ use crate::{
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
 use crate::{debug_event, fiber::types::TxAbort, utils::tx::compute_tx_message};
-use ckb_hash::{blake2b_256, new_blake2b};
+use ckb_hash::blake2b_256;
 use ckb_sdk::{util::blake160, Since, SinceType};
 use ckb_types::{
     core::{
@@ -52,22 +51,21 @@ use ckb_types::{
     H256,
 };
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
-    BasicMppPaymentData, ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys,
-    ChannelConstraints, ChannelFlags, ChannelOpenRecord, ChannelState, ChannelTlcInfo,
-    ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, CloseFlags,
-    CollaboratingFundingTxFlags, CommitmentNumbers, EcdsaSignature, Hash256, InMemorySigner,
-    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords,
-    PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    blake2b_hash_with_salt, derive_tlc_pubkey, AddTlcCommand, AppliedFlags,
+    AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData, ChannelActorData,
+    ChannelAnnouncement, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
+    ChannelOpenRecord, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
+    ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
+    EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
+    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
+    PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
+    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr,
+    TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
 use molecule::prelude::{Builder, Entity};
 #[cfg(test)]
 use musig2::BinaryEncoding;
-use musig2::SecNonceBuilder;
 use musig2::{
     aggregate_partial_signatures,
     errors::{RoundFinalizeError, SigningError, VerifyError},
@@ -3220,24 +3218,6 @@ fn derive_channel_id_from_tlc_keys(tlc_basepoint1: &Pubkey, tlc_basepoint2: &Pub
 fn derive_temp_channel_id_from_tlc_key(tlc_basepoint: &Pubkey) -> Hash256 {
     let preimage = [tlc_basepoint.0, [0; 33]].concat();
     new_channel_id_from_seed(&preimage)
-}
-
-pub fn get_commitment_secret(commitment_seed: &[u8; 32], commitment_number: u64) -> [u8; 32] {
-    // Note that here, we hold the same assumption to bolts for commitment number,
-    // i.e. this number should be in the range [0, 2^48).
-    let mut res: [u8; 32] = *commitment_seed;
-    for i in 0..48 {
-        let bitpos = 47 - i;
-        if commitment_number & (1 << bitpos) == (1 << bitpos) {
-            res[bitpos / 8] ^= 1 << (bitpos & 7);
-            res = blake2b_256(res);
-        }
-    }
-    res
-}
-
-pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) -> Pubkey {
-    Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
 }
 
 pub(crate) fn get_funding_and_reserved_amount(
@@ -7101,121 +7081,5 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
             tlc_base_key: value.tlc_basepoint,
         }
-    }
-}
-
-pub(crate) fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
-    let mut hasher = new_blake2b();
-    hasher.update(&commitment_point.serialize());
-    let mut result = [0u8; 32];
-    hasher.finalize(&mut result);
-    result
-}
-
-pub(crate) fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privkey {
-    secret.tweak(get_tweak_by_commitment_point(commitment_point))
-}
-
-fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    base_key.tweak(get_tweak_by_commitment_point(commitment_point))
-}
-
-pub(crate) fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    derive_public_key(base_key, commitment_point)
-}
-
-pub enum Musig2Context {
-    Commitment,
-    Revoke,
-}
-
-impl std::fmt::Display for Musig2Context {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let context_str = match self {
-            Musig2Context::Commitment => "COMMITMENT",
-            Musig2Context::Revoke => "REVOKE",
-        };
-        write!(f, "{}", context_str)
-    }
-}
-
-/// Extension trait providing methods for `InMemorySigner` that depend on
-/// fiber-lib-only functions (key derivation, ckb_hash, Musig2Context).
-pub trait InMemorySignerExt {
-    /// Generate an `InMemorySigner` from a seed.
-    fn generate_from_seed(params: &[u8]) -> InMemorySigner;
-    /// Get the base public keys for this signer.
-    fn get_base_public_keys(&self) -> ChannelBasePublicKeys;
-    /// Returns the commitment point for the given commitment number.
-    fn get_commitment_point(&self, commitment_number: u64) -> Pubkey;
-    /// Returns the commitment secret for the given commitment number.
-    fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32];
-    /// Derive the TLC key for the given commitment number.
-    fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey;
-    /// Derive a musig2 nonce for the given commitment number and context.
-    fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce;
-}
-
-impl InMemorySignerExt for InMemorySigner {
-    fn generate_from_seed(params: &[u8]) -> InMemorySigner {
-        let seed = ckb_hash::blake2b_256(params);
-
-        let commitment_seed = {
-            let mut hasher = new_blake2b();
-            hasher.update(&seed);
-            hasher.update(&b"commitment seed"[..]);
-            let mut result = [0u8; 32];
-            hasher.finalize(&mut result);
-            result
-        };
-
-        let key_derive = |seed: &[u8], info: &[u8]| {
-            let result = blake2b_hash_with_salt(seed, info);
-            Privkey::from_slice(&result)
-        };
-
-        let funding_key = key_derive(&seed, b"funding key");
-        let tlc_base_key = key_derive(funding_key.as_ref(), b"HTLC base key");
-        let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
-
-        InMemorySigner {
-            funding_key,
-            tlc_base_key,
-            musig2_base_nonce,
-            commitment_seed,
-        }
-    }
-
-    fn get_base_public_keys(&self) -> ChannelBasePublicKeys {
-        ChannelBasePublicKeys {
-            funding_pubkey: self.funding_key.pubkey(),
-            tlc_base_key: self.tlc_base_key.pubkey(),
-        }
-    }
-
-    /// Returns the commitment point for the given commitment number.
-    ///
-    /// The commitment point is the public key derived from the commitment seed and the commitment number.
-    /// The commitment point is used to derive the pubkeys used in the TLC (htlc and revocation outputs).
-    fn get_commitment_point(&self, commitment_number: u64) -> Pubkey {
-        get_commitment_point(&self.commitment_seed, commitment_number)
-    }
-
-    fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32] {
-        get_commitment_secret(&self.commitment_seed, commitment_number)
-    }
-
-    fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {
-        let per_commitment_point = self.get_commitment_point(new_commitment_number);
-        derive_private_key(&self.tlc_base_key, &per_commitment_point)
-    }
-
-    fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce {
-        let commitment_point = self.get_commitment_point(commitment_number);
-        let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
-
-        SecNonceBuilder::new(seckey.as_ref())
-            .with_extra_input(&context.to_string())
-            .build()
     }
 }

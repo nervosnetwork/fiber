@@ -1,4 +1,3 @@
-use ckb_hash::new_blake2b;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use tracing::warn;
@@ -137,13 +136,4 @@ pub(crate) fn read_secret_key(path: &Path) -> Result<Option<KeyPair>, Error> {
             .map(Some)
             .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid secret key data"))
     })
-}
-
-pub(crate) fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
-    let mut hasher = new_blake2b();
-    hasher.update(salt);
-    hasher.update(data);
-    let mut result = [0u8; 32];
-    hasher.finalize(&mut result);
-    result
 }

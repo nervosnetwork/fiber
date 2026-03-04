@@ -1,5 +1,4 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
-use crate::fiber::channel::InMemorySignerExt;
 use crate::fiber::channel::{
     AddTlcResponse, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
     XUDT_COMPATIBLE_WITNESS,
@@ -22,8 +21,8 @@ use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
         channel::{
-            derive_private_key, derive_tlc_pubkey, ChannelActorStateStore, ChannelCommand,
-            ChannelCommandWithId, RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand,
+            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         network::{AcceptChannelCommand, OpenChannelCommand},
@@ -39,9 +38,9 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
 use fiber_types::{
-    AddTlcCommand, ChannelState, HashAlgorithm, InMemorySigner, NegotiatingFundingFlags,
-    OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason,
-    TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelState, HashAlgorithm,
+    InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
+    Privkey, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;

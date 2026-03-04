@@ -12,7 +12,6 @@ use musig2::secp::MaybeScalar;
 use musig2::SecNonceBuilder;
 
 use crate::fiber::channel::ChannelActorState;
-use crate::fiber::channel::InMemorySignerExt;
 use crate::fiber::{
     AddTlcCommand, AppliedFlags, ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys,
     ChannelConstraints, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
