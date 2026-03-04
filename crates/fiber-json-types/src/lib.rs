@@ -25,12 +25,16 @@ use ckb_jsonrpc_types::{DepType, EpochNumberWithFraction, JsonBytes, Script, Scr
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 use fiber_types::{
-    AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelState as RawChannelState,
-    ChannelUpdateInfo, CloseFlags, CollaboratingFundingTxFlags, EntityHex, Hash256,
-    HopHint as NetworkHopHint, HopRequire, NegotiatingFundingFlags, NodeId, PaymentStatus, Privkey,
-    Pubkey, RevocationData, RouterHop, SettlementData, ShuttingDownFlags, SigningCommitmentFlags,
-    TlcStatus, U128Hex, U32Hex, U64Hex,
+    duration_hex, Attribute as InternalAttribute, AwaitingChannelReadyFlags,
+    AwaitingTxSignaturesFlags, ChannelState as RawChannelState, ChannelUpdateInfo,
+    CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, CkbScript, CloseFlags,
+    CollaboratingFundingTxFlags, Currency, EntityHex, Hash256, HashAlgorithm,
+    HopHint as NetworkHopHint, HopRequire, InvoiceData as InternalInvoiceData, InvoiceSignature,
+    NegotiatingFundingFlags, NodeId, PaymentCustomRecords as InternalPaymentCustomRecords,
+    PaymentStatus, Privkey, Pubkey, RevocationData, RouterHop, SettlementData, ShuttingDownFlags,
+    SigningCommitmentFlags, TlcStatus, U128Hex, U32Hex, U64Hex,
 };
+use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -41,10 +45,6 @@ use fiber_types::SessionRoute;
 
 #[cfg(feature = "cch")]
 use fiber_types::{CchInvoice, CchOrder, CchOrderStatus};
-
-// ============================================================================
-// Channel types
-// ============================================================================
 
 /// Parameters for opening a channel.
 #[serde_as]
@@ -58,19 +58,24 @@ pub struct OpenChannelParams {
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
 
-    /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+    /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs),
+    /// an optional parameter, default value is true.
     pub public: Option<bool>,
 
-    /// Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
+    /// Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way),
+    /// an optional parameter, default value is false.
     pub one_way: Option<bool>,
 
     /// The type script of the UDT to fund the channel with, an optional parameter.
     pub funding_udt_type_script: Option<Script>,
 
-    /// The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
+    /// The script used to receive the channel balance, an optional parameter,
+    /// default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
     pub shutdown_script: Option<Script>,
 
-    /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
+    /// The delay time for the commitment transaction, must be an
+    /// [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png)
+    /// in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
 
     /// The fee rate for the commitment transaction, an optional parameter.
@@ -400,10 +405,6 @@ pub struct UpdateChannelParams {
     pub tlc_fee_proportional_millionths: Option<u128>,
 }
 
-// ============================================================================
-// Payment types
-// ============================================================================
-
 /// Parameters for getting a payment.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -695,10 +696,6 @@ pub struct SendPaymentWithRouterParams {
     pub dry_run: Option<bool>,
 }
 
-// ============================================================================
-// Graph types
-// ============================================================================
-
 /// Parameters for querying graph nodes.
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -899,19 +896,6 @@ pub struct GraphChannelsResult {
     pub last_cursor: JsonBytes,
 }
 
-// ============================================================================
-// Invoice types
-// ============================================================================
-
-use fiber_types::{
-    duration_hex, CkbInvoiceStatus, CkbScript, Currency, HashAlgorithm, InvoiceSignature,
-};
-use fiber_types::{
-    Attribute as InternalAttribute, CkbInvoice as InternalCkbInvoice,
-    InvoiceData as InternalInvoiceData, PaymentCustomRecords as InternalPaymentCustomRecords,
-};
-use secp256k1::PublicKey;
-
 /// The attributes of the invoice.
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -986,9 +970,11 @@ pub struct NewInvoiceParams {
     pub description: Option<String>,
     /// The currency of the invoice.
     pub currency: Currency,
-    /// The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
+    /// The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
+    /// If both preimage and hash are absent, a random preimage is generated.
     pub payment_preimage: Option<Hash256>,
-    /// The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
+    /// The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
+    /// for which the tlc must be accepted and held until the preimage becomes known.
     pub payment_hash: Option<Hash256>,
     /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
@@ -1063,10 +1049,6 @@ pub struct GetInvoiceResult {
     pub status: CkbInvoiceStatus,
 }
 
-// ============================================================================
-// Info types
-// ============================================================================
-
 /// Node information result.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -1111,7 +1093,8 @@ pub struct NodeInfoResult {
     #[serde_as(as = "U128Hex")]
     pub tlc_min_value: u128,
 
-    /// The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
+    /// The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC),
+    /// expressed in millionths and serialized as a hexadecimal string.
     #[serde_as(as = "U128Hex")]
     pub tlc_fee_proportional_millionths: u128,
 
@@ -1130,10 +1113,6 @@ pub struct NodeInfoResult {
     /// Configuration information for User-Defined Tokens (UDT) associated with the node.
     pub udt_cfg_infos: UdtCfgInfos,
 }
-
-// ============================================================================
-// Peer types
-// ============================================================================
 
 /// Parameters for connecting to a peer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1174,10 +1153,6 @@ pub struct ListPeersResult {
     /// A list of connected peers.
     pub peers: Vec<PeerInfo>,
 }
-
-// ============================================================================
-// CCH types (feature-gated)
-// ============================================================================
 
 /// Parameters for sending BTC via cross-chain hub.
 #[cfg(feature = "cch")]
@@ -1259,10 +1234,6 @@ impl From<CchOrder> for CchOrderResponse {
         }
     }
 }
-
-// ============================================================================
-// Dev types
-// ============================================================================
 
 /// Parameters for sending a commitment_signed message.
 // TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
@@ -1350,10 +1321,6 @@ pub struct CheckChannelShutdownParams {
     pub channel_id: Hash256,
 }
 
-// ============================================================================
-// Watchtower types
-// ============================================================================
-
 /// Parameters for creating a watch channel.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1432,10 +1399,6 @@ pub struct RemovePreimageParams {
     pub payment_hash: Hash256,
 }
 
-// ============================================================================
-// Prof types
-// ============================================================================
-
 /// Parameters for profiling.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1452,10 +1415,6 @@ pub struct PprofResult {
     pub path: String,
 }
 
-// ============================================================================
-// Context types
-// ============================================================================
-
 /// RPC context for watchtower operations.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1463,10 +1422,6 @@ pub struct RpcContext {
     /// Node ID, read from user RPC biscuit token
     pub node_id: NodeId,
 }
-
-// ============================================================================
-// From impls bridging fiber_types <-> fiber_json_types
-// ============================================================================
 
 impl From<InternalAttribute> for Attribute {
     fn from(attr: InternalAttribute) -> Self {

@@ -127,7 +127,7 @@ Creates a CCH order for a BTC Lightning payee.
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
 * `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
-* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
+* `wrapped_btc_type_script` - <em>`Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
@@ -155,7 +155,7 @@ Creates a CCH order for a CKB Fiber payee.
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
 * `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
-* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
+* `wrapped_btc_type_script` - <em>`Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
@@ -180,7 +180,7 @@ Get a CCH order by payment hash.
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
 * `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
-* `wrapped_btc_type_script` - <em>`ckb_jsonrpc_types::Script`</em>, Wrapped BTC type script
+* `wrapped_btc_type_script` - <em>`Script`</em>, Wrapped BTC type script
 * `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
@@ -207,11 +207,16 @@ Attempts to open a channel with a peer.
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the peer to open a channel with.
  The peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
 * `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
-* `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
-* `one_way` - <em>`Option<bool>`</em>, Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
+* `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs),
+ an optional parameter, default value is true.
+* `one_way` - <em>`Option<bool>`</em>, Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way),
+ an optional parameter, default value is false.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
-* `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
-* `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
+* `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter,
+ default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
+* `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an
+ [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png)
+ in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
 * `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
 * `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.
 * `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 4 hours, which is 4 * 60 * 60 * 1000 milliseconds
@@ -527,7 +532,8 @@ Get the node information.
 * `default_funding_lock_script` - <em>`Script`</em>, The default funding lock script for the node.
 * `tlc_expiry_delta` - <em>`u64`</em>, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_min_value` - <em>`u128`</em>, The minimum value for Time-Locked Contracts (TLC) we can send, serialized as a hexadecimal string.
-* `tlc_fee_proportional_millionths` - <em>`u128`</em>, The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
+* `tlc_fee_proportional_millionths` - <em>`u128`</em>, The fee (to forward payments) proportional to the value of Time-Locked Contracts (TLC),
+ expressed in millionths and serialized as a hexadecimal string.
 * `channel_count` - <em>`u32`</em>, The number of channels associated with the node, serialized as a hexadecimal string.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.
@@ -552,8 +558,10 @@ Generates a new invoice.
 * `amount` - <em>`u128`</em>, The amount of the invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
-* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
-* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
+ If both preimage and hash are absent, a random preimage is generated.
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
+ for which the tlc must be accepted and held until the preimage becomes known.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
@@ -1099,14 +1107,14 @@ Remove preimage
 <a id="#type-attribute"></a>
 ### Type `Attribute`
 
-The attributes of the invoice
+The attributes of the invoice.
 
 
 #### Enum with values of
 
 * `FinalHtlcTimeout` - <em>`u64`</em>, This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
 * `FinalHtlcMinimumExpiryDelta` - <em>`u64`</em>, The final tlc minimum expiry delta, in milliseconds, default is 1 day
-* `ExpiryTime` - <em>`Duration`</em>, The expiry time of the invoice, in seconds
+* `ExpiryTime` - <em>`std::time::Duration`</em>, The expiry time of the invoice, in seconds
 * `Description` - <em>`String`</em>, The description of the invoice
 * `FallbackAddr` - <em>`String`</em>, The fallback address of the invoice
 * `UdtScript` - <em>[CkbScript](#type-ckbscript)</em>, The udt type script of the invoice
@@ -1153,7 +1161,7 @@ The status of a cross-chain hub order, will update as the order progresses.
 <a id="#type-channel"></a>
 ### Type `Channel`
 
-The channel data structure
+The channel data structure.
 
 
 #### Fields
@@ -1212,7 +1220,7 @@ The Channel information.
 <a id="#type-channelstate"></a>
 ### Type `ChannelState`
 
-The state of a channel
+The state of a channel.
 
 
 #### Enum with values of
@@ -1233,7 +1241,10 @@ The state of a channel
 <a id="#type-channelupdateinfo"></a>
 ### Type `ChannelUpdateInfo`
 
-The channel update info with a single direction of channel
+The channel update info with a single direction of channel.
+
+ This is a pure data struct used by both the internal graph representation
+ and the RPC JSON response types.
 
 
 #### Fields
@@ -1249,7 +1260,7 @@ The channel update info with a single direction of channel
 <a id="#type-ckbinvoice"></a>
 ### Type `CkbInvoice`
 
-Represents a syntactically and semantically correct lightning BOLT11 invoice
+Represents a syntactically and semantically correct lightning BOLT11 invoice.
 
  There are three ways to construct a `CkbInvoice`:
   1. using [`CkbInvoiceBuilder`]
@@ -1355,7 +1366,7 @@ A hop hint is a hint for a node to use a specific channel.
 <a id="#type-hoprequire"></a>
 ### Type `HopRequire`
 
-A hop requirement need to meet when building router, do not including the source node,
+A hop requirement to meet when building a router. Does not include the source node;
  the last hop is the target node.
 
 
@@ -1368,7 +1379,7 @@ A hop requirement need to meet when building router, do not including the source
 <a id="#type-htlc"></a>
 ### Type `Htlc`
 
-The htlc data structure
+The htlc data structure.
 
 
 #### Fields
@@ -1386,7 +1397,7 @@ The htlc data structure
 <a id="#type-invoicedata"></a>
 ### Type `InvoiceData`
 
-The metadata of the invoice
+The metadata of the invoice.
 
 
 #### Fields
@@ -1504,7 +1515,7 @@ A compressed secp256k1 public key (33 bytes), used as the primary identity of a 
 <a id="#type-removetlcreason"></a>
 ### Type `RemoveTlcReason`
 
-The reason for removing a TLC
+The reason for removing a TLC.
 
 
 #### Enum with values of
@@ -1632,7 +1643,7 @@ The status of a tlc
 <a id="#type-udtarginfo"></a>
 ### Type `UdtArgInfo`
 
-The UDT argument info which is used to identify the UDT configuration
+The UDT argument info which is used to identify the UDT configuration.
 
 
 #### Fields
@@ -1646,7 +1657,7 @@ The UDT argument info which is used to identify the UDT configuration
 <a id="#type-udtcelldep"></a>
 ### Type `UdtCellDep`
 
-The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
+The UDT cell dep which is used to identify the UDT configuration for a Fiber Node.
 
 
 #### Fields
@@ -1679,7 +1690,7 @@ Udt script on-chain dependencies.
 <a id="#type-udtscript"></a>
 ### Type `UdtScript`
 
-The UDT script which is used to identify the UDT configuration for a Fiber Node
+The UDT script which is used to identify the UDT configuration for a Fiber Node.
 
 
 #### Fields
