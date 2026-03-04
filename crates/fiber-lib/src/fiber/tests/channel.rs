@@ -7050,7 +7050,11 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
     let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(node_b.pubkey));
     let node_a_actor = node_a.network_actor.clone();
 
-    let open_task = tokio::spawn(async move {
+    // Use oneshot channel to get result from spawned task
+    // This works on both native and WASM targets
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    let open_fut = async move {
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
                 OpenChannelWithExternalFundingCommand {
@@ -7073,8 +7077,15 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
                 rpc_reply,
             ))
         };
-        call!(node_a_actor, message).expect("node_a alive")
-    });
+        let result = call!(node_a_actor, message).expect("node_a alive");
+        let _ = tx.send(result);
+    };
+
+    // Spawn the task using platform-specific method
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::spawn(open_fut);
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(open_fut);
 
     let temp_channel_id = node_a
         .expect_to_process_event(|event| match event {
@@ -7092,7 +7103,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
     let abandon_result = call!(node_a.network_actor, abandon_message).expect("node_a alive");
     assert!(abandon_result.is_ok(), "abandon channel should succeed");
 
-    let open_result = open_task.await.expect("open task join");
+    let open_result = rx.await.expect("open task result");
     assert!(
         open_result.is_err(),
         "pending open_channel_with_external_funding should return error after channel stops"
