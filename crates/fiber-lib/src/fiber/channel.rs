@@ -6577,18 +6577,20 @@ impl ChannelActorState {
 
         // 2. Reuse the original partial signature when available.
         //    Fallback to re-sign only for backward compatibility with old CommitDiff entries.
-        let commit_tx_view = commit_diff.commit_tx.clone().into_view();
-        let (funding_tx_partial_signature, reused_stored_signature) = commit_diff
-            .commitment_signed_template
-            .as_ref()
-            .and_then(|template| template.funding_tx_partial_signature)
-            .map(|signature| (signature, true))
-            .map(Ok)
-            .unwrap_or_else(|| {
-                self.get_funding_sign_context()
-                    .sign(&compute_tx_message(&commit_tx_view))
-                    .map(|signature| (signature, false))
-            })?;
+        let (funding_tx_partial_signature, reused_stored_signature) = if let Some(signature) =
+            commit_diff
+                .commitment_signed_template
+                .as_ref()
+                .and_then(|template| template.funding_tx_partial_signature)
+        {
+            (signature, true)
+        } else {
+            let commit_tx_view = commit_diff.commit_tx.clone().into_view();
+            let signature = self
+                .get_funding_sign_context()
+                .sign(&compute_tx_message(&commit_tx_view))?;
+            (signature, false)
+        };
 
         let next_commitment_nonce = commit_diff
             .commitment_signed_template
@@ -6596,7 +6598,7 @@ impl ChannelActorState {
             .map(|template| template.next_commitment_nonce.clone())
             .unwrap_or_else(|| self.get_next_commitment_nonce());
 
-        // 3. Send CommitmentSigned with new signature
+        // 3. Send CommitmentSigned with reused or fallback re-signed signature.
         let commitment_signed = CommitmentSigned {
             channel_id: self.get_id(),
             funding_tx_partial_signature,
