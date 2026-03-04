@@ -49,10 +49,6 @@ impl From<PaymentStatus> for CchOrderStatus {
     }
 }
 
-// ============================================================
-// CchInvoice
-// ============================================================
-
 /// The generated proxy invoice for the incoming payment.
 ///
 /// The JSON representation:
@@ -68,10 +64,6 @@ pub enum CchInvoice {
     /// Lightning invoice that once paid, the hub will send the outgoing payment to Fiber
     Lightning(#[serde_as(as = "DisplayFromStr")] Bolt11Invoice),
 }
-
-// ============================================================
-// CchOrder
-// ============================================================
 
 /// A cross-chain hub order.
 #[serde_as]

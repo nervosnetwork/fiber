@@ -11,10 +11,6 @@ use serde_with::serde_as;
 use std::collections::HashMap;
 use strum::{AsRefStr, EnumString};
 
-// ============================================================
-// Payment status
-// ============================================================
-
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 ///
@@ -41,10 +37,6 @@ impl PaymentStatus {
     }
 }
 
-// ============================================================
-// Payment custom records
-// ============================================================
-
 /// 0 ~ 65535 is reserved for endpoint usage, index above 65535 is reserved for internal usage
 pub const USER_CUSTOM_RECORDS_MAX_INDEX: u32 = 65535;
 
@@ -55,10 +47,6 @@ pub struct PaymentCustomRecords {
     /// The custom records to be included in the payment.
     pub data: HashMap<u32, Vec<u8>>,
 }
-
-// ============================================================
-// Conversions with molecule types
-// ============================================================
 
 impl From<PaymentCustomRecords> for molecule_fiber::CustomRecords {
     fn from(custom_records: PaymentCustomRecords) -> Self {
@@ -90,10 +78,6 @@ impl From<molecule_fiber::CustomRecords> for PaymentCustomRecords {
         }
     }
 }
-
-// ============================================================
-// BasicMppPaymentData
-// ============================================================
 
 /// Bolt04 basic MPP payment data record
 #[derive(Eq, PartialEq, Debug)]
@@ -143,10 +127,6 @@ impl BasicMppPaymentData {
     }
 }
 
-// ============================================================
-// AttemptStatus
-// ============================================================
-
 /// The status of a payment attempt.
 ///
 /// State transitions:
@@ -173,10 +153,6 @@ impl AttemptStatus {
         matches!(self, AttemptStatus::Success | AttemptStatus::Failed)
     }
 }
-
-// ============================================================
-// TlcErr / TlcErrData
-// ============================================================
 
 use crate::protocol::ChannelUpdate;
 use ckb_types::packed::OutPoint;
@@ -408,10 +384,6 @@ impl TryFrom<molecule_fiber::TlcErr> for TlcErr {
     }
 }
 
-// ============================================================
-// CurrentPaymentHopData
-// ============================================================
-
 use crate::invoice::HashAlgorithm;
 
 /// The decrypted hop data for the current hop, without the `next_hop` field.
@@ -468,10 +440,6 @@ impl CurrentPaymentHopData {
     }
 }
 
-// ============================================================
-// SessionRouteNode
-// ============================================================
-
 use crate::U128Hex;
 
 /// The node and channel information in a payment route hop
@@ -487,10 +455,6 @@ pub struct SessionRouteNode {
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
 }
-
-// ============================================================
-// RouterHop
-// ============================================================
 
 use crate::U64Hex;
 
@@ -516,10 +480,6 @@ pub struct RouterHop {
     pub incoming_tlc_expiry: u64,
 }
 
-// ============================================================
-// HopHint
-// ============================================================
-
 /// A hop hint is a hint for a node to use a specific channel,
 /// usually used for the last hop to the target node.
 #[serde_as]
@@ -535,10 +495,6 @@ pub struct HopHint {
     /// The TLC expiry delta to use this hop to forward the payment.
     pub tlc_expiry_delta: u64,
 }
-
-// ============================================================
-// SessionRoute
-// ============================================================
 
 /// The router is a list of nodes that the payment will go through.
 /// We store in the payment session and then will use it to track the payment history.
@@ -599,10 +555,6 @@ impl SessionRoute {
             .map(|x| (x.pubkey, &x.channel_outpoint, x.amount))
     }
 }
-
-// ============================================================
-// PaymentHopData
-// ============================================================
 
 /// The data for a single hop in a payment route.
 #[serde_as]
@@ -704,10 +656,6 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
         }
     }
 }
-
-// ============================================================
-// Attempt
-// ============================================================
 
 /// A payment attempt.
 #[derive(Clone, Serialize, Deserialize)]
@@ -816,10 +764,6 @@ impl Attempt {
     }
 }
 
-// ============================================================
-// TrampolineContext
-// ============================================================
-
 use crate::channel::PrevTlcInfo;
 
 /// Context for trampoline routing payments.
@@ -837,9 +781,6 @@ pub struct TrampolineContext {
     pub hash_algorithm: HashAlgorithm,
 }
 
-// ============================================================
-// TlcErrorCode
-// ============================================================
 // The onion packet is invalid
 const BADONION: u16 = 0x8000;
 // Permanent errors (otherwise transient)
@@ -910,10 +851,6 @@ impl TlcErrorCode {
     }
 }
 
-// ============================================================
-// SendPaymentData
-// ============================================================
-
 use ckb_types::packed::Script;
 
 /// Data for sending a payment.
@@ -950,10 +887,6 @@ pub struct SendPaymentData {
     pub trampoline_context: Option<TrampolineContext>,
 }
 
-// ============================================================
-// PaymentSession
-// ============================================================
-
 /// A payment session tracking the state of a payment attempt.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
@@ -972,19 +905,12 @@ pub struct PaymentSession {
     pub cached_attempts: Vec<Attempt>,
 }
 
-// ============================================================
-// Payment constants
-// ============================================================
-
 /// Default maximum number of parts for a multi-part payment.
 pub const DEFAULT_MAX_PARTS: u64 = 12;
 
 /// Default retry limit per attempt in MPP mode.
 pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
 
-// ============================================================
-// SendPaymentData methods
-// ============================================================
 impl SendPaymentData {
     /// Maximum number of parallel parts for this payment.
     pub fn max_parts(&self) -> usize {
@@ -1005,9 +931,6 @@ impl SendPaymentData {
     }
 }
 
-// ============================================================
-// PaymentSession methods
-// ============================================================
 impl PaymentSession {
     pub fn update_with_attempt(&mut self, attempt: Attempt) {
         if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
@@ -1213,10 +1136,6 @@ impl PaymentSession {
         success_amount >= self.request.amount
     }
 }
-
-// ============================================================
-// Payment history types
-// ============================================================
 
 /// A timed payment result for a channel direction, used to track success/failure
 /// history for probability-based routing.

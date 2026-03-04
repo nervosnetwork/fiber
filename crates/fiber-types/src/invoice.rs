@@ -32,10 +32,6 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 use thiserror::Error;
 
-// ============================================================
-// Invoice error types
-// ============================================================
-
 /// Wrapper for molecule verification errors.
 #[derive(Error, Debug)]
 pub struct VerificationError(pub molecule::error::VerificationError);
@@ -125,10 +121,6 @@ pub enum InvoiceError {
     #[error("Deprecated attribute: {0}")]
     DeprecatedAttribute(String),
 }
-
-// ============================================================
-// Compression utilities
-// ============================================================
 
 /// Size of the signature in u5 encoding.
 pub const SIGNATURE_U5_SIZE: usize = 104;
@@ -221,10 +213,6 @@ pub fn parse_hrp(input: &str) -> Result<(Currency, Option<u128>), InvoiceError> 
     }
 }
 
-// ============================================================
-// Invoice status
-// ============================================================
-
 /// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CkbInvoiceStatus {
@@ -251,10 +239,6 @@ impl Display for CkbInvoiceStatus {
         }
     }
 }
-
-// ============================================================
-// Currency
-// ============================================================
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
@@ -308,10 +292,6 @@ impl TryFrom<u8> for Currency {
         }
     }
 }
-
-// ============================================================
-// Hash algorithm
-// ============================================================
 
 /// HashAlgorithm is the hash algorithm used in the hash lock.
 #[repr(u8)]
@@ -371,18 +351,10 @@ impl TryFrom<Byte> for HashAlgorithm {
     }
 }
 
-// ============================================================
-// CkbScript wrapper
-// ============================================================
-
 /// A wrapper around `ckb_types::packed::Script` with hex serialization.
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CkbScript(#[serde_as(as = "EntityHex")] pub PackedScript);
-
-// ============================================================
-// InvoiceSignature
-// ============================================================
 
 /// Recoverable signature
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -535,10 +507,6 @@ impl InvoiceSignature {
     }
 }
 
-// ============================================================
-// Attribute
-// ============================================================
-
 use crate::protocol::FeatureVector;
 use crate::serde_utils::{duration_hex, U128Hex, U64Hex};
 use crate::Hash256;
@@ -575,10 +543,6 @@ pub enum Attribute {
     PaymentSecret(Hash256),
 }
 
-// ============================================================
-// InvoiceData
-// ============================================================
-
 /// The metadata of the invoice.
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -591,10 +555,6 @@ pub struct InvoiceData {
     /// The attributes of the invoice, e.g. description, expiry time, etc.
     pub attrs: Vec<Attribute>,
 }
-
-// ============================================================
-// CkbInvoice
-// ============================================================
 
 /// Represents a syntactically and semantically correct Fiber invoice.
 ///
@@ -945,10 +905,6 @@ impl FromStr for CkbInvoice {
         Ok(invoice)
     }
 }
-
-// ============================================================
-// Molecule conversions
-// ============================================================
 
 /// Converts a `[u8]` slice to `[Byte; 32]`.
 fn u8_slice_to_bytes(slice: &[u8]) -> Result<[Byte; 32], &'static str> {

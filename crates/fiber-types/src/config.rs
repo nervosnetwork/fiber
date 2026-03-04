@@ -6,10 +6,6 @@ use molecule::prelude::{Builder, Entity};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-// ============================================================
-// UDT Config Types (for NodeAnnouncement)
-// ============================================================
-
 // Serde converters for CKB types
 serde_with::serde_conv!(
     ScriptHashTypeWrapper,
