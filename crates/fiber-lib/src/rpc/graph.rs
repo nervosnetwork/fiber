@@ -78,6 +78,7 @@ pub struct UdtCellDep {
     /// The out point of the cell dep.
     pub out_point: OutPointWrapper,
     /// The type of the cell dep.
+    #[serde(with = "crate::ckb::config::json_dep_type")]
     pub dep_type: DepType,
 }
 

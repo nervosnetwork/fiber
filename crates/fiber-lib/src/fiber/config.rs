@@ -90,6 +90,9 @@ pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 /// Funding timeout in seconds since the channel is created.
 pub const DEFAULT_FUNDING_TIMEOUT_SECONDS: u64 = 60 * 60 * 24; // 1 day
 
+/// External funding timeout in seconds (how long to wait for user to submit signed funding tx).
+pub const DEFAULT_EXTERNAL_FUNDING_TIMEOUT_SECONDS: u64 = 60 * 5; // 5 minutes
+
 /// The interval to maintain the gossip network, in milli-seconds.
 #[cfg(not(any(test, feature = "bench")))]
 pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
@@ -369,6 +372,16 @@ pub struct FiberConfig {
     )]
     #[default(DEFAULT_FUNDING_TIMEOUT_SECONDS)]
     pub funding_timeout_seconds: u64,
+
+    /// Timeout to abort external funding channel while waiting for signed tx. [default: 5 minutes]
+    #[arg(
+        name = "FIBER_EXTERNAL_FUNDING_TIMEOUT_SECONDS",
+        long = "fiber-external-funding-timeout-seconds",
+        env,
+        help = "Timeout to abort external funding channel while waiting for signed tx. [default: 5 minutes]"
+    )]
+    #[default(DEFAULT_EXTERNAL_FUNDING_TIMEOUT_SECONDS)]
+    pub external_funding_timeout_seconds: u64,
 
     /// Listen to WebSocket on the same TCP port
     #[arg(

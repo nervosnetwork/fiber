@@ -1,0 +1,55 @@
+meta {
+  name: node3 generate invoice
+  type: http
+  seq: 19
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "new_invoice",
+    "params": [
+      {
+        "amount": "0x2dc6c0",
+        "currency": "Fibd",
+        "description": "external-funding-open payment node1->node3",
+        "expiry": "0xe10",
+        "final_expiry_delta": "0xDFFA0",
+        "payment_preimage": "{{payment_preimage}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  function generateRandomPreimage() {
+    let hash = "0x";
+    for (let i = 0; i < 64; i++) {
+      hash += Math.floor(Math.random() * 16).toString(16);
+    }
+    return hash;
+  }
+  const paymentPreimage = generateRandomPreimage();
+  bru.setVar("payment_preimage", paymentPreimage);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  bru.setVar("EXTERNAL_FUNDING_INVOICE", res.body.result.invoice_address);
+}

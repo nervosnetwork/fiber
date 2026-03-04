@@ -199,7 +199,8 @@ serde_with::serde_conv!(
 );
 
 serde_with::serde_conv!(
-    DepTypeWrapper,
+    /// Wrapper for DepType serialization that supports both `dep_group` and `depGroup` formats.
+    pub DepTypeWrapper,
     DepType,
     |s: &DepType| -> String {
         let v = match s {
@@ -209,14 +210,45 @@ serde_with::serde_conv!(
         v.to_string()
     },
     |s: String| {
+        // Support both snake_case (dep_group) and camelCase (depGroup) from JS libraries
         let v = match s.to_lowercase().as_str() {
             "code" => DepType::Code,
-            "dep_group" => DepType::DepGroup,
-            _ => return Err("invalid hash type"),
+            "dep_group" | "depgroup" => DepType::DepGroup,
+            _ => return Err("invalid dep type"),
         };
         Ok(v)
     }
 );
+
+/// Wrapper for ckb_jsonrpc_types::DepType that supports both `dep_group` and `depGroup` formats.
+/// This is used for RPC serialization compatibility with JS libraries like Lumos.
+pub mod json_dep_type {
+    use ckb_jsonrpc_types::DepType;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(dep_type: &DepType, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let s = match dep_type {
+            DepType::Code => "code",
+            DepType::DepGroup => "dep_group",
+        };
+        s.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DepType, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "code" => Ok(DepType::Code),
+            "dep_group" | "depgroup" => Ok(DepType::DepGroup),
+            _ => Err(serde::de::Error::custom("invalid dep type")),
+        }
+    }
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, Default, Eq, PartialEq, Hash)]

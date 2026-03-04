@@ -2238,6 +2238,7 @@ dependencies = [
  "ckb-resource",
  "console_error_panic_hook",
  "fnn",
+ "js-sys",
  "jsonrpsee",
  "ractor",
  "secp256k1 0.30.0",
@@ -2247,6 +2248,7 @@ dependencies = [
  "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-bindgen-test",
  "wasm-logger",
 ]
 
@@ -2387,6 +2389,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
  "web-time",

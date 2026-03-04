@@ -117,6 +117,28 @@ pub mod channel {
     }
 }
 
+/// LocalSign: open channel with external funding (user signs tx locally).
+/// Exported at crate root in lib.rs for fiber-js worker lookup.
+pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
+    fiber_wasm()?
+        .channel
+        .open_channel_with_external_funding(param(params)?)
+        .await
+        .map(result)
+        .map_err(error)
+}
+
+/// LocalSign: submit signed funding tx after user signs locally.
+/// Exported at crate root in lib.rs for fiber-js worker lookup.
+pub async fn submit_signed_funding_tx(params: JsValue) -> Result<JsValue, JsValue> {
+    fiber_wasm()?
+        .channel
+        .submit_signed_funding_tx(param(params)?)
+        .await
+        .map(result)
+        .map_err(error)
+}
+
 pub mod graph {
     use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 

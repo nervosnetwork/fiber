@@ -1,0 +1,54 @@
+meta {
+  name: list node1 channels before submit signed tx
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE3_PEERID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const channels = res.body.result.channels || [];
+  const channelId = bru.getVar("EXTERNAL_FUNDING_CHANNEL_ID");
+  const ch = channels.find((c) => c.channel_id === channelId);
+
+  if (!ch) {
+    console.log(
+      `[external-funding-open] node1 does not expose channel ${channelId} yet before submit_signed_funding_tx`,
+    );
+    return;
+  }
+
+  const stateName = ch.state && ch.state.state_name;
+  if (stateName !== "AWAITING_EXTERNAL_FUNDING") {
+    throw new Error(
+      `Assertion failed: expected node1 channel ${channelId} to be AWAITING_EXTERNAL_FUNDING before submit, got ${String(stateName)}`,
+    );
+  }
+}
