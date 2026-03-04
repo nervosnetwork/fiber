@@ -1,12 +1,8 @@
-use super::KeyValue;
-use super::StoreKeyValue;
+use super::{KeyValue, StoreKeyValue};
 pub use fiber_store::DbDirection;
 pub use fiber_store::IteratorMode;
 use std::fmt::Debug;
 use std::path::Path;
-
-unsafe impl Send for Store {}
-unsafe impl Sync for Store {}
 
 #[derive(Clone)]
 pub struct Store {
@@ -15,22 +11,24 @@ pub struct Store {
 
 impl Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-        write!(f, "BrowserStore")?;
+        write!(f, "BrowserTestStore")?;
         Ok(())
     }
 }
 
+unsafe impl Send for Store {}
+unsafe impl Sync for Store {}
+
 impl Store {
     /// Open a store, with migration check
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let store = Self::open_db(path.as_ref())?;
-        let store = super::check_migrate(path, store)?;
-        Ok(store)
+    pub fn new<P: AsRef<Path>>(_path: P) -> Result<Self, String> {
+        Ok(Self {
+            inner: fiber_store::Store::open_db(std::path::Path::new(""))?,
+        })
     }
     /// Open a store, without migration check
     pub fn open_db(path: &Path) -> Result<Self, String> {
-        let inner = fiber_store::Store::open_db(path)?;
-        Ok(Self { inner })
+        Self::new(path)
     }
 
     pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
@@ -67,10 +65,6 @@ impl Store {
         prefix: &'a [u8],
     ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
         self.inner.prefix_iterator(prefix)
-    }
-
-    pub fn shutdown(self) {
-        self.inner.shutdown()
     }
 }
 
