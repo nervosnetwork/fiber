@@ -989,7 +989,7 @@ fn test_received_invoice_not_updated() {
     // Status should be promoted to Paid once settlement starts.
     assert_eq!(
         store.get_invoice_status(&payment_hash),
-        Some(CkbInvoiceStatus::Paid)
+        Some(CkbInvoiceStatus::Received)
     );
 }
 

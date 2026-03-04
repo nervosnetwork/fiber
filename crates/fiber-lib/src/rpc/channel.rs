@@ -31,8 +31,9 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
+use serde_with::{serde_as, DisplayFromStr};
 use std::cmp::Reverse;
+use tentacle::secio::PeerId;
 
 /// A wrapper type for `CellDep` that supports both `dep_group` and `depGroup` formats.
 /// This handles compatibility with JS libraries like Lumos that use camelCase.

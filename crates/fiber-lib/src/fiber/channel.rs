@@ -92,6 +92,7 @@ use std::{
     sync::Arc,
 };
 use strum::AsRefStr;
+use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, trace, warn};
@@ -535,7 +536,9 @@ where
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::ChannelAcceptedForExternalFunding {
-                                peer_id: state.get_remote_peer_id(),
+                                peer_id: PeerId::from_public_key(
+                                    &tentacle::secio::PublicKey::from(state.get_remote_pubkey()),
+                                ),
                                 new_channel_id: state.get_id(),
                                 old_channel_id: old_id,
                                 funding_amount: state.to_local_amount,
@@ -664,8 +667,8 @@ where
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     self.network
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                state.get_remote_peer_id(),
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                state.get_remote_pubkey(),
                                 FiberMessage::tx_signatures(TxSignatures {
                                     channel_id: state.get_id(),
                                     witnesses: new_witnesses
@@ -2689,8 +2692,8 @@ where
         self.install_external_funding_signed_tx(state, signed_tx.clone(), true);
         self.network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    state.get_remote_peer_id(),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    state.get_remote_pubkey(),
                     FiberMessage::tx_update(TxUpdate {
                         channel_id: state.get_id(),
                         tx: signed_tx,
@@ -3104,9 +3107,10 @@ where
                 // so we wait for them to sign and submit the funding transaction.
                 if open_channel.is_external_funding() {
                     state.ephemeral_config.external_funding.enabled = true;
+                    let remote_pubkey = self.get_remote_pubkey();
                     debug!(
                         "Channel {:?} accepted with external funding from peer {:?}",
-                        channel_id, peer_id
+                        channel_id, &remote_pubkey
                     );
                 }
 
@@ -3333,7 +3337,9 @@ where
                 },
             ) => {
                 let public = public_channel_info.is_some();
-                let peer_id = self.get_remote_peer_id();
+                let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(
+                    self.get_remote_pubkey(),
+                ));
                 info!(
                     "Trying to open a channel with external funding to {:?}",
                     &peer_id
@@ -3443,8 +3449,8 @@ where
                 );
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                            peer_id: peer_id.clone(),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                            target: self.get_remote_pubkey(),
                             message,
                         }),
                     ))
@@ -7410,8 +7416,8 @@ impl ChannelActorState {
                 .collect::<Vec<_>>();
             self.network()
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        self.get_remote_peer_id(),
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                        self.get_remote_pubkey(),
                         FiberMessage::tx_signatures(TxSignatures {
                             channel_id: self.get_id(),
                             witnesses,

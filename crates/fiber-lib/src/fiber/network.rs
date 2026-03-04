@@ -847,15 +847,22 @@ where
                 // is not dropped. This can happen when the peer sends a message before we have
                 // completed the reestablish handshake.
                 if !found {
-                    if let Some(session) = state.get_peer_session(&peer_id) {
+                    if let Some(session) = state
+                        .peer_session_map
+                        .get(&peer_pubkey)
+                        .map(|p| p.session_id)
+                    {
                         if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id)
                         {
+                            let _peer_id = PeerId::from_public_key(
+                                &tentacle::secio::PublicKey::from(peer_pubkey),
+                            );
                             if !actor_state.is_closed()
-                                && actor_state.get_remote_peer_id() == peer_id
+                                && actor_state.get_remote_pubkey() == peer_pubkey
                             {
                                 let channel_ready = state.channels.contains_key(&channel_id)
                                     || state
-                                        .reestablish_channel(&peer_id, channel_id)
+                                        .reestablish_channel(peer_pubkey, channel_id)
                                         .await
                                         .is_ok();
                                 if channel_ready {
@@ -1199,7 +1206,10 @@ where
                 );
 
                 // Update channel mapping
-                if let Some(session) = state.get_peer_session(&peer_id) {
+                let peer_pubkey = state.get_connected_peer_pubkey(&peer_id);
+                if let Some(session) = peer_pubkey
+                    .and_then(|pubkey| state.peer_session_map.get(&pubkey).map(|p| p.session_id))
+                {
                     if let Some(channel) = state.channels.remove(&old_channel_id) {
                         debug!(
                             "Channel accepted for external funding: {:?} -> {:?}",
@@ -3742,14 +3752,14 @@ where
             max_tlc_number_in_flight,
         } = command;
 
-        self.check_feature_compatibility(&peer_id)?;
+        let remote_pubkey = self.get_connected_peer_pubkey(&peer_id).ok_or(
+            ProcessingChannelError::InvalidParameter(format!(
+                "Peer {:?} pubkey not found",
+                &peer_id
+            )),
+        )?;
 
-        let remote_pubkey =
-            self.get_peer_pubkey(&peer_id)
-                .ok_or(ProcessingChannelError::InvalidParameter(format!(
-                    "Peer {:?} pubkey not found",
-                    &peer_id
-                )))?;
+        self.check_feature_compatibility(&remote_pubkey)?;
 
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
@@ -3777,7 +3787,10 @@ where
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
-            Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
+            Some(generate_channel_actor_name(
+                &self.get_public_key(),
+                &remote_pubkey,
+            )),
             ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
@@ -3814,7 +3827,7 @@ where
         .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let temp_channel_id = rx.await.expect("msg received");
-        self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
+        self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
         Ok((channel, temp_channel_id))
     }
 

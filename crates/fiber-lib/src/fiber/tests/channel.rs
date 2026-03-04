@@ -11,8 +11,7 @@ use crate::fiber::config::{
 use crate::fiber::features::FeatureVector;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{
-    DebugEvent, FiberMessageWithPeerId, FiberMessageWithTarget,
-    OpenChannelWithExternalFundingCommand, PeerDisconnectReason,
+    DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerDisconnectReason,
 };
 use crate::fiber::payment::{PaymentStatus, SendPaymentCommand};
 use crate::fiber::types::{
@@ -51,6 +50,7 @@ use ractor::call;
 use secp256k1::SECP256K1;
 use std::collections::HashSet;
 use std::time::Duration;
+use tentacle::secio::PeerId;
 use tracing::{debug, error};
 
 #[tokio::test]
@@ -6527,7 +6527,7 @@ async fn open_external_funding_channel(
     node_b: &NetworkNode,
     funding_amount: u128,
 ) -> (Hash256, Transaction) {
-    let peer_id = node_b.peer_id.clone();
+    let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(node_b.pubkey));
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
@@ -6768,7 +6768,7 @@ async fn test_submit_signed_funding_tx_wrong_state() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -6959,7 +6959,7 @@ async fn test_external_funding_invalid_tlc_expiry_delta() {
     let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     // Use a TLC expiry delta that is too small
-    let peer_id = node_b.peer_id.clone();
+    let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(node_b.pubkey));
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
@@ -7004,7 +7004,7 @@ async fn test_external_funding_invalid_commitment_delay() {
 
     // Use a commitment delay epoch that is too small (0)
     let too_small_epoch = EpochNumberWithFraction::new(0, 0, 1);
-    let peer_id = node_b.peer_id.clone();
+    let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(node_b.pubkey));
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
@@ -7047,7 +7047,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
     init_tracing();
 
     let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
-    let peer_id = node_b.peer_id.clone();
+    let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(node_b.pubkey));
     let node_a_actor = node_a.network_actor.clone();
 
     let open_task = tokio::spawn(async move {
