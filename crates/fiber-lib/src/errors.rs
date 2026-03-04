@@ -1,4 +1,5 @@
 use ckb_sdk::RpcError;
+use fiber_store::StoreError;
 use ractor::{MessagingErr, SpawnErr};
 use tentacle::error::SendErrorKind;
 use thiserror::Error;
@@ -66,3 +67,11 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<StoreError> for Error {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::DBInternalError(msg) => Error::DBInternalError(msg),
+        }
+    }
+}

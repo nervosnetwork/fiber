@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::StoreError;
 #[cfg(not(target_arch = "wasm32"))]
 use console::Term;
 use indicatif::MultiProgress;
@@ -10,14 +10,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{error, info};
 
-use super::Store;
+use crate::Store;
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
 pub const INIT_DB_VERSION: &str = "20241116135521";
 include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
 
-fn internal_error(reason: String) -> Error {
-    Error::DBInternalError(reason)
+fn internal_error(reason: String) -> StoreError {
+    StoreError::DBInternalError(reason)
 }
 
 #[derive(Default)]
@@ -65,7 +65,7 @@ impl Migrations {
         &self,
         mut db: &'a Store,
         current_version: &str,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a Store, StoreError> {
         let mpb = Arc::new(MultiProgress::new());
 
         // make sure the latest migration is the last one
@@ -112,7 +112,7 @@ impl Migrations {
         Ok(db)
     }
 
-    fn get_migration_version(&self, db: &Store) -> Result<Option<String>, Error> {
+    fn get_migration_version(&self, db: &Store) -> Result<Option<String>, StoreError> {
         let raw = db.get(MIGRATION_VERSION_KEY);
 
         Ok(raw.map(|version_bytes| {
@@ -121,7 +121,7 @@ impl Migrations {
     }
 
     /// Initial db version
-    pub fn init_db_version(&self, db: &Store) -> Result<(), Error> {
+    pub fn init_db_version(&self, db: &Store) -> Result<(), StoreError> {
         if self.need_init(db) {
             info!("Init database version {}", LATEST_DB_VERSION);
             db.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
@@ -151,7 +151,7 @@ impl Migrations {
         migrations.values().any(|m| m.is_break_change())
     }
 
-    pub fn migrate<'a>(&self, db: &'a Store) -> Result<&'a Store, Error> {
+    pub fn migrate<'a>(&self, db: &'a Store) -> Result<&'a Store, StoreError> {
         let db_version = self.get_migration_version(db)?;
         match db_version {
             Some(ref v) => {
@@ -164,7 +164,7 @@ impl Migrations {
         }
     }
 
-    fn check_valid_to_migrate(&self, cur_version: &str, db: &Store) -> Result<(), Error> {
+    fn check_valid_to_migrate(&self, cur_version: &str, db: &Store) -> Result<(), StoreError> {
         if let Some(m) = self.migrations.values().last() {
             if m.version() < cur_version {
                 error!(
@@ -191,7 +191,7 @@ pub trait Migration: Send + Sync {
         &self,
         _db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error>;
+    ) -> Result<&'a Store, StoreError>;
 
     /// returns migration version, use `date +'%Y%m%d%H%M%S'` timestamp format
     fn version(&self) -> &str;
@@ -225,7 +225,7 @@ impl Migration for DefaultMigration {
         &self,
         db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a Store, StoreError> {
         Ok(db)
     }
 

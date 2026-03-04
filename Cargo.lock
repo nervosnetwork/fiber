@@ -2219,6 +2219,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-store"
+version = "0.7.1"
+dependencies = [
+ "anyhow",
+ "ckb-rocksdb",
+ "console",
+ "console_error_panic_hook",
+ "fiber-wasm-db-common",
+ "indicatif",
+ "thiserror 1.0.69",
+ "tracing",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "fiber-types"
 version = "0.7.1"
 dependencies = [
@@ -2350,19 +2366,16 @@ dependencies = [
  "ciborium",
  "ckb-hash",
  "ckb-jsonrpc-types",
- "ckb-rocksdb",
  "ckb-sdk",
  "ckb-testtool",
  "ckb-types",
  "clap",
  "clap-serde-derive",
- "console",
- "console_error_panic_hook",
  "criterion",
  "either",
  "fiber-sphinx",
+ "fiber-store",
  "fiber-types",
- "fiber-wasm-db-common",
  "futures",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -2404,9 +2417,7 @@ dependencies = [
  "tower-http 0.6.8",
  "tracing",
  "tracing-subscriber",
- "wasm-bindgen",
  "wasm-bindgen-test",
- "web-sys",
  "web-time",
 ]
 

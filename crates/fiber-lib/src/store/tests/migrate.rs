@@ -1,11 +1,8 @@
-use crate::store::db_migrate::DbMigrate;
-use crate::store::migration::DefaultMigration;
-use crate::store::migration::Migration;
-use crate::store::migration::Migrations;
-use crate::store::migration::LATEST_DB_VERSION;
-use crate::store::migration::MIGRATION_VERSION_KEY;
-use crate::store::Store;
-use crate::Error;
+use fiber_store::db_migrate::DbMigrate;
+use fiber_store::migration::{
+    DefaultMigration, Migration, Migrations, LATEST_DB_VERSION, MIGRATION_VERSION_KEY,
+};
+use fiber_store::StoreError;
 use indicatif::ProgressBar;
 use ouroboros::self_referencing;
 use std::cmp::Ordering;
@@ -21,7 +18,7 @@ fn gen_path() -> std::path::PathBuf {
 }
 #[self_referencing]
 struct StoreAndMigrate {
-    store: Store,
+    store: fiber_store::Store,
     #[borrows(store)]
     #[covariant]
     migrate: DbMigrate<'this>,
@@ -30,8 +27,8 @@ struct StoreAndMigrate {
 impl StoreAndMigrate {
     fn new_with_path(path: impl AsRef<Path>) -> Self {
         StoreAndMigrateBuilder {
-            store: Store::open_db(path.as_ref()).unwrap(),
-            migrate_builder: |store: &Store| DbMigrate::new(store),
+            store: fiber_store::Store::open_db(path.as_ref()).unwrap(),
+            migrate_builder: |store: &fiber_store::Store| DbMigrate::new(store),
         }
         .build()
     }
@@ -69,9 +66,9 @@ impl DummyMigration {
 impl Migration for DummyMigration {
     fn migrate<'a>(
         &self,
-        db: &'a Store,
+        db: &'a fiber_store::Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a fiber_store::Store, StoreError> {
         eprintln!("DummyMigration::migrate {} ... ", self.version);
         let mut count = self.run_count.write().unwrap();
         *count += 1;
@@ -98,9 +95,9 @@ impl BreakChangeMigration {
 impl Migration for BreakChangeMigration {
     fn migrate<'a>(
         &self,
-        db: &'a Store,
+        db: &'a fiber_store::Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a fiber_store::Store, StoreError> {
         eprintln!("BreakChangeMigration::migrate {} ... ", self.version);
         Ok(db)
     }
