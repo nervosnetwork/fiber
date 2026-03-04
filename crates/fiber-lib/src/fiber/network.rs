@@ -1134,7 +1134,10 @@ where
             }
             NetworkActorCommand::DisconnectPeer(pubkey, reason) => {
                 let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(pubkey));
-                let session = state.peer_session_map.get(&pubkey).map(|peer| peer.session_id);
+                let session = state
+                    .peer_session_map
+                    .get(&pubkey)
+                    .map(|peer| peer.session_id);
                 if matches!(reason, PeerDisconnectReason::Requested) {
                     state.peer_reconnect_backoff_attempts.remove(&peer_id);
                     if session.is_some() {
@@ -3729,7 +3732,12 @@ where
 
     fn has_direct_active_channel(&self, peer_id: &PeerId) -> bool {
         self.resolve_peer_pubkey(peer_id)
-            .map(|pubkey| !self.store.get_active_channel_ids_by_pubkey(&pubkey).is_empty())
+            .map(|pubkey| {
+                !self
+                    .store
+                    .get_active_channel_ids_by_pubkey(&pubkey)
+                    .is_empty()
+            })
             .unwrap_or(false)
     }
 
@@ -3769,7 +3777,8 @@ where
             return;
         }
 
-        self.peer_reconnect_backoff_attempts.insert(peer_id.clone(), 0);
+        self.peer_reconnect_backoff_attempts
+            .insert(peer_id.clone(), 0);
         match trigger {
             PeerReconnectTrigger::Disconnected => {
                 debug_event!(self.network, "PeerReconnectBackoffSeededByDisconnect");
@@ -5102,10 +5111,12 @@ impl ServiceHandle for NetworkServiceHandle {
                 );
                 try_send_actor_message(
                     &self.actor,
-                    NetworkActorMessage::new_command(NetworkActorCommand::SeedPeerReconnectBackoff(
-                        peer_id,
-                        PeerReconnectTrigger::DialError,
-                    )),
+                    NetworkActorMessage::new_command(
+                        NetworkActorCommand::SeedPeerReconnectBackoff(
+                            peer_id,
+                            PeerReconnectTrigger::DialError,
+                        ),
+                    ),
                 );
             } else {
                 debug!(

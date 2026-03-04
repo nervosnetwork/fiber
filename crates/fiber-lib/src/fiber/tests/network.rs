@@ -758,7 +758,7 @@ async fn test_peer_disconnect_without_active_channel_skips_backoff_reconnect() {
         .await;
     node1
         .expect_event(|event| {
-            matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node2.peer_id)
+            matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node2.pubkey)
         })
         .await;
 }

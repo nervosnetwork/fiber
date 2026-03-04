@@ -26,6 +26,7 @@ use crate::{
         },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         network::{AcceptChannelCommand, OpenChannelCommand},
+        types::{Privkey, RemoveTlcFulfill, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage,
     },
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
@@ -4444,7 +4445,7 @@ async fn test_peer_disconnect_with_active_channel_enters_backoff_reconnect() {
         .await;
     node_a
         .expect_event(|event| {
-            matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.peer_id)
+            matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey)
         })
         .await;
 }
