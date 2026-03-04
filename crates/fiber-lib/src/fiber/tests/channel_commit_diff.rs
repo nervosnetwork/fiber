@@ -7,11 +7,9 @@ use crate::fiber::channel::{
     validate_commit_diff_for_replay_inputs, CommitDiff, CommitmentSignedTemplate,
     ProcessingChannelError, ReplayOrderHint, TlcReplayUpdate,
 };
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{
-    AddTlc, Hash256, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
-};
+use crate::fiber::types::{AddTlc, Hash256, ReestablishChannel, RemoveTlc, RemoveTlcReason};
 use crate::now_timestamp_as_millis_u64;
+use fiber_types::{HashAlgorithm, RemoveTlcFulfill};
 
 #[test]
 fn test_commit_diff_roundtrip_v2() {

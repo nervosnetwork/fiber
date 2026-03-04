@@ -300,6 +300,7 @@ fn create_test_channel_state_with_tlc(
             last_revoke_ack_msg: None,
             created_at: SystemTime::now(),
         },
+        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
