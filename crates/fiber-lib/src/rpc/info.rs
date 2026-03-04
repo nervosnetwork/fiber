@@ -19,8 +19,6 @@ use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use ractor::{call, ActorRef};
-#[cfg(not(target_arch = "wasm32"))]
-use rocksdb::checkpoint::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tentacle::multiaddr::MultiAddr;
@@ -232,7 +230,7 @@ impl<S: StoreInfo> InfoRpcServerImpl<S> {
         tracing::info!("Starting node backup to: {:?}", target_dir);
 
         let db_backup_path = target_dir.join("db");
-        let checkpoint = match Checkpoint::new(self.store.inner_db()) {
+        let checkpoint = match self.store.inner_db().get_checkpoint() {
             Ok(c) => c,
             Err(e) => return log_and_error!(path, format!("RocksDB checkpoint init error: {}", e)),
         };

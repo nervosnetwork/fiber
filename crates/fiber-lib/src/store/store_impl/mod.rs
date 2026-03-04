@@ -17,7 +17,6 @@ pub use browser_test::{Batch, DbDirection, IteratorMode, Store};
 
 use std::path::Path;
 
-use super::db_migrate::DbMigrate;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
@@ -35,6 +34,7 @@ use crate::{
 };
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
+use fiber_store::db_migrate::DbMigrate;
 use fiber_types::schema::*;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::CchOrder;
@@ -72,13 +72,13 @@ where
 
 #[cfg(not(target_arch = "wasm32"))]
 pub trait KVStore {
-    fn inner_db(&self) -> &std::sync::Arc<rocksdb::DB>;
+    fn inner_db(&self) -> &fiber_store::Store;
 }
 
 impl Store {
     /// Open or create a rocksdb
     fn check_migrate<P: AsRef<Path>>(path: P, db: &Self) -> Result<(), String> {
-        let migrate = DbMigrate::new(db);
+        let migrate = DbMigrate::new(&db.inner);
         migrate.init_or_check(path)?;
         Ok(())
     }
@@ -1513,7 +1513,7 @@ fn update_channel_timestamp(
 
 /// Check if the database needs to be migrated
 pub fn check_migrate<P: AsRef<Path>>(path: P, db: Store) -> Result<Store, String> {
-    let migrate = DbMigrate::new(&db);
+    let migrate = DbMigrate::new(&db.inner);
     migrate.init_or_check(path)?;
     Ok(db)
 }
