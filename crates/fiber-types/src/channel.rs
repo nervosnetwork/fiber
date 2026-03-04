@@ -503,6 +503,7 @@ pub struct TlcInfo {
 }
 
 use std::fmt;
+use std::time::Duration;
 
 impl fmt::Debug for TlcInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1119,10 +1120,6 @@ pub trait ChannelOpenRecordStore {
     fn delete_channel_open_record(&self, channel_id: &Hash256);
 }
 
-// ============================================================
-// PendingNotifySettleTlc
-// ============================================================
-
 /// A TLC that is pending notification for settlement.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PendingNotifySettleTlc {
@@ -1130,6 +1127,25 @@ pub struct PendingNotifySettleTlc {
     pub tlc_id: u64,
     /// The expire time if the TLC should be held.
     pub hold_expire_at: Option<u64>,
+}
+
+impl PendingNotifySettleTlc {
+    /// Check if a PendingNotifySettleTlc should be held.
+    pub fn pending_notify_should_hold(&self) -> bool {
+        self.hold_expire_at.is_some()
+    }
+
+    /// Get the remaining hold expiry duration for a PendingNotifySettleTlc.
+    pub fn pending_notify_hold_expiry_duration(
+        &self,
+        now_millis_since_unix_epoch: u64,
+    ) -> Duration {
+        Duration::from_millis(
+            self.hold_expire_at
+                .unwrap_or_default()
+                .saturating_sub(now_millis_since_unix_epoch),
+        )
+    }
 }
 
 // ============================================================

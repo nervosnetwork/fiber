@@ -2812,11 +2812,9 @@ where
         // try to settle down tlc set
         for pending_notify_tlc in pending_notify_tlcs {
             // Hold the tlc
-            if pending_notify_should_hold(&pending_notify_tlc) {
-                let expiry_duration = pending_notify_hold_expiry_duration(
-                    &pending_notify_tlc,
-                    now_timestamp_as_millis_u64(),
-                );
+            if pending_notify_tlc.pending_notify_should_hold() {
+                let expiry_duration = pending_notify_tlc
+                    .pending_notify_hold_expiry_duration(now_timestamp_as_millis_u64());
                 self.store.insert_payment_hold_tlc(
                     pending_notify_tlc.payment_hash,
                     HoldTlc {
@@ -3012,23 +3010,6 @@ pub fn settlement_tlc_local_pubkey_hash(tlc: &SettlementTlc) -> [u8; 20] {
 
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
-
-/// Check if a PendingNotifySettleTlc should be held.
-fn pending_notify_should_hold(tlc: &PendingNotifySettleTlc) -> bool {
-    tlc.hold_expire_at.is_some()
-}
-
-/// Get the remaining hold expiry duration for a PendingNotifySettleTlc.
-fn pending_notify_hold_expiry_duration(
-    tlc: &PendingNotifySettleTlc,
-    now_millis_since_unix_epoch: u64,
-) -> Duration {
-    Duration::from_millis(
-        tlc.hold_expire_at
-            .unwrap_or_default()
-            .saturating_sub(now_millis_since_unix_epoch),
-    )
-}
 
 /// Wrapper around [`ChannelActorData`] that adds runtime-only fields.
 ///
