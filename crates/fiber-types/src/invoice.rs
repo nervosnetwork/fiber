@@ -6,7 +6,6 @@ use crate::gen::invoice as gen_invoice;
 use arcode::bitbit::{BitReader, BitWriter, MSB};
 use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
-use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
 use ckb_hash::blake2b_256;
 use ckb_types::packed::Script as PackedScript;
 use ckb_types::prelude::{Pack, Unpack};
@@ -25,6 +24,7 @@ use nom::{
 use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::io::{Cursor, Result as IoResult};
@@ -357,7 +357,9 @@ impl HashAlgorithm {
 
 /// SHA-256 hash helper function.
 pub fn sha256<T: AsRef<[u8]>>(s: T) -> [u8; 32] {
-    Sha256::hash(s.as_ref()).to_byte_array()
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_ref());
+    hasher.finalize().into()
 }
 
 impl TryFrom<Byte> for HashAlgorithm {
@@ -691,9 +693,7 @@ impl CkbInvoice {
         let hrp = self.hrp_part();
         let data = self.data_part();
         let preimage = construct_invoice_preimage(hrp.as_bytes(), &data);
-        let mut hash: [u8; 32] = Default::default();
-        hash.copy_from_slice(&Sha256::hash(&preimage).to_byte_array());
-        hash
+        sha256(&preimage)
     }
 
     /// Recovers the public key used for signing the invoice from the recoverable signature.

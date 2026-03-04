@@ -5,7 +5,6 @@ use crate::gen::gossip as molecule_gossip;
 use crate::protocol::{EcdsaSignature, SchnorrSignature};
 use crate::serde_utils::{SliceBase58, SliceHex, SliceHexNoPrefix};
 use anyhow::anyhow;
-use bitcoin::hashes::Hash as _;
 use ckb_gen_types::packed::Byte32 as MByte32;
 use ckb_types::H256;
 use molecule::prelude::{Builder, Byte, Entity};
@@ -320,14 +319,18 @@ impl From<H256> for Hash256 {
     }
 }
 
+#[cfg(feature = "cch")]
 impl From<lightning_invoice::Sha256> for Hash256 {
     fn from(value: lightning_invoice::Sha256) -> Self {
+        use bitcoin::hashes::Hash as _;
         Hash256(*value.0.as_byte_array())
     }
 }
 
+#[cfg(feature = "cch")]
 impl From<bitcoin::hashes::sha256::Hash> for Hash256 {
     fn from(value: bitcoin::hashes::sha256::Hash) -> Self {
+        use bitcoin::hashes::Hash as _;
         Hash256(value.to_byte_array())
     }
 }

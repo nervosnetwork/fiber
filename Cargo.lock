@@ -2246,6 +2246,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sha2 0.10.9",
  "strum 0.26.3",
  "tentacle-multiaddr",
  "thiserror 1.0.69",
