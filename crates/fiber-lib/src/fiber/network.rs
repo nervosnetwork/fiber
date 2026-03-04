@@ -17,7 +17,6 @@ use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::borrow::Cow;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::str::FromStr;
@@ -53,53 +52,39 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelOpenRecord, ChannelOpenRecordStore,
-    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, OpenChannelParameter,
-    PrevTlcInfo, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
-    RemoveTlcCommand, RevocationData, SettlementData, StopReason, TLCId,
+    ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
+    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
-use super::config::AnnouncedNodeName;
-use super::features::FeatureVector;
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
-use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent, RouterHop};
-use super::key::blake2b_hash_with_salt;
+use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
 use super::types::{
-    BroadcastMessageWithTimestamp, EcdsaSignature, FiberMessage, ForwardTlcResult, GossipMessage,
-    Hash256, Init, NodeAnnouncement, OpenChannel, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, TlcErr, TlcErrorCode,
+    BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::client::CkbChainClient;
-use crate::ckb::config::UdtCfgInfos;
+use crate::ckb::config::UdtCfgInfosExt;
 use crate::ckb::contracts::{
     check_udt_script, get_udt_info, get_udt_whitelist, is_udt_type_auto_accept,
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    tlc_expiry_delay, AddTlcCommand, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, RetryableTlcOperation, ShutdownCommand, TxCollaborationCommand,
-    TxUpdateCommand,
-};
-use crate::fiber::channel::{
-    AwaitingTxSignaturesFlags, ShuttingDownFlags, MAX_TLC_NUMBER_IN_FLIGHT,
+    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-#[cfg(any(debug_assertions, test, feature = "bench"))]
-use crate::fiber::payment::SessionRoute;
 use crate::fiber::payment::{
-    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentCustomRecords, PaymentStatus,
-    SendPaymentCommand, SendPaymentDataBuilder, SendPaymentWithRouterCommand, TrampolineContext,
+    PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
+    SendPaymentDataBuilder, SendPaymentWithRouterCommand,
 };
-use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
-    FiberChannelMessage, PeeledPaymentOnionPacket, TlcErrPacket, TrampolineHopPayload,
-    TrampolineOnionPacket, TxAbort, TxSignatures,
+    FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort, TxSignatures,
 };
 use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
@@ -107,6 +92,18 @@ use crate::invoice::{
 };
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
+use fiber_types::protocol::AnnouncedNodeName;
+#[cfg(any(debug_assertions, test, feature = "bench"))]
+use fiber_types::SessionRoute;
+use fiber_types::{
+    blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
+    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
+    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
+    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
+    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
+    TrampolineContext, UdtCfgInfos,
+};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -118,7 +115,6 @@ pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 
 pub const DEFAULT_PAYMENT_TRY_LIMIT: u32 = 5;
-pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
@@ -1357,28 +1353,38 @@ where
                                 with_channel_down_peers.insert(pubkey);
                             }
 
-                            for tlc in actor_state.tlc_state.get_committed_received_tlcs() {
+                            // Collect TLC data before async operations to avoid holding iterator across await
+                            let committed_tlcs: Vec<_> = actor_state
+                                .tlc_state
+                                .get_committed_received_tlcs()
+                                .map(|tlc| (tlc.tlc_id, tlc.id(), tlc.payment_hash))
+                                .collect();
+
+                            for (tlc_id, id, payment_hash) in committed_tlcs {
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
-                                if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-                                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                                if let Some(invoice) = self.store.get_invoice(&payment_hash) {
+                                    // Re-fetch tlc for is_invoice_fulfilled check
+                                    if let Some(tlc) = actor_state.tlc_state.get(&tlc_id) {
+                                        if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                                            continue;
+                                        }
+                                    } else {
                                         continue;
                                     }
                                 }
 
-                                let Some(payment_preimage) =
-                                    self.store.get_preimage(&tlc.payment_hash)
+                                let Some(payment_preimage) = self.store.get_preimage(&payment_hash)
                                 else {
                                     continue;
                                 };
                                 debug!(
                                     "Found payment preimage for channel {:?} tlc {:?}",
-                                    channel_id,
-                                    tlc.id()
+                                    channel_id, id
                                 );
                                 if self
                                     .store
-                                    .get_invoice_status(&tlc.payment_hash)
+                                    .get_invoice_status(&payment_hash)
                                     .is_some_and(|s| {
                                         !matches!(
                                             s,
@@ -1397,7 +1403,7 @@ where
                                         channel_id,
                                         ChannelCommand::RemoveTlc(
                                             RemoveTlcCommand {
-                                                id: tlc.id(),
+                                                id,
                                                 reason: RemoveTlcReason::RemoveTlcFulfill(
                                                     RemoveTlcFulfill { payment_preimage },
                                                 ),
@@ -1409,7 +1415,7 @@ where
                                 {
                                     error!(
                                         "Failed to remove tlc {:?} with preimage for channel {:?}: {}",
-                                        tlc.id(),
+                                        id,
                                         channel_id,
                                         err
                                     );
@@ -1519,41 +1525,57 @@ where
                             );
                             let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
                             let expect_expiry = now + epoch_delay_milliseconds;
-                            for tlc in actor_state
+                            // Collect TLC data before async operations to avoid holding iterator across await
+                            let expired_tlcs: Vec<_> = actor_state
                                 .tlc_state
                                 .get_expired_offered_tlcs(expect_expiry)
-                            {
-                                if let Some((forwarding_channel_id, forwarding_tlc_id)) =
-                                    tlc.forwarding_tlc
-                                {
-                                    if self.store.is_tlc_settled(&channel_id, &tlc.payment_hash) {
-                                        let (send, _recv) = oneshot::channel();
-                                        let rpc_reply = RpcReplyPort::from(send);
-                                        if let Err(err) = state
-                                            .send_command_to_channel(
+                                .filter_map(|tlc| {
+                                    tlc.forwarding_tlc.map(
+                                        |(forwarding_channel_id, forwarding_tlc_id)| {
+                                            (
                                                 forwarding_channel_id,
-                                                ChannelCommand::RemoveTlc(
-                                                    RemoveTlcCommand {
-                                                        id: forwarding_tlc_id,
-                                                        reason: RemoveTlcReason::RemoveTlcFail(
-                                                            TlcErrPacket::new(
-                                                                TlcErr::new(
-                                                                    TlcErrorCode::ExpiryTooSoon,
-                                                                ),
-                                                                &tlc.shared_secret,
-                                                            ),
-                                                        ),
-                                                    },
-                                                    rpc_reply,
-                                                ),
+                                                forwarding_tlc_id,
+                                                tlc.payment_hash,
+                                                tlc.shared_secret,
                                             )
-                                            .await
-                                        {
-                                            error!(
-                                                "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                                                forwarding_tlc_id, forwarding_channel_id, err
-                                            );
-                                        }
+                                        },
+                                    )
+                                })
+                                .collect();
+                            for (
+                                forwarding_channel_id,
+                                forwarding_tlc_id,
+                                payment_hash,
+                                shared_secret,
+                            ) in expired_tlcs
+                            {
+                                if self.store.is_tlc_settled(&channel_id, &payment_hash) {
+                                    let (send, _recv) = oneshot::channel();
+                                    let rpc_reply = RpcReplyPort::from(send);
+                                    if let Err(err) = state
+                                        .send_command_to_channel(
+                                            forwarding_channel_id,
+                                            ChannelCommand::RemoveTlc(
+                                                RemoveTlcCommand {
+                                                    id: forwarding_tlc_id,
+                                                    reason: RemoveTlcReason::RemoveTlcFail(
+                                                        TlcErrPacket::new(
+                                                            TlcErr::new(
+                                                                TlcErrorCode::ExpiryTooSoon,
+                                                            ),
+                                                            &shared_secret,
+                                                        ),
+                                                    ),
+                                                },
+                                                rpc_reply,
+                                            ),
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            "Failed to remove settled tlc {:?} for channel {:?}: {}",
+                                            forwarding_tlc_id, forwarding_channel_id, err
+                                        );
                                     }
                                 }
                             }
@@ -2932,59 +2954,6 @@ pub struct ConnectedPeer {
     pub features: Option<FeatureVector>,
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct PersistentNetworkActorState {
-    // These addresses are saved by the user (e.g. the user sends a ConnectPeer rpc to the node),
-    // we will then save these addresses to the peer store.
-    saved_peer_addresses: HashMap<Pubkey, Vec<Multiaddr>>,
-}
-
-impl PersistentNetworkActorState {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    fn get_peer_addresses(&self, pubkey: &Pubkey) -> Vec<Multiaddr> {
-        self.saved_peer_addresses
-            .get(pubkey)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Save a single peer address to the peer store. If this address for the peer does not exist,
-    /// then return false, otherwise return true.
-    fn save_peer_address(&mut self, pubkey: Pubkey, addr: Multiaddr) -> bool {
-        match self.saved_peer_addresses.entry(pubkey) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().contains(&addr) {
-                    false
-                } else {
-                    entry.get_mut().push(addr);
-                    true
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(vec![addr]);
-                true
-            }
-        }
-    }
-
-    fn num_of_saved_nodes(&self) -> usize {
-        self.saved_peer_addresses.len()
-    }
-
-    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<Pubkey, Vec<Multiaddr>> {
-        // TODO: we may need to shuffle the nodes before selecting the first n nodes,
-        // to avoid some malicious nodes from being always selected.
-        self.saved_peer_addresses
-            .iter()
-            .take(n)
-            .map(|(k, v)| (*k, v.clone()))
-            .collect()
-    }
-}
-
 pub trait NetworkActorStateStore {
     fn get_network_actor_state(&self, id: &Pubkey) -> Option<PersistentNetworkActorState>;
     fn insert_network_actor_state(&self, id: &Pubkey, state: PersistentNetworkActorState);
@@ -3031,13 +3000,16 @@ where
             _ => {
                 let node_name = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
-                let announcement = NodeAnnouncement::new(
+                let announcement = NodeAnnouncement::new_signed(
                     node_name,
                     self.features.clone(),
                     addresses,
                     &self.private_key,
+                    get_chain_hash(),
                     now,
                     self.open_channel_auto_accept_min_ckb_funding_amount,
+                    get_udt_whitelist(),
+                    env!("CARGO_PKG_VERSION").to_string(),
                 );
                 debug!(
                     "Created new node announcement message: {:?}, previous {:?}",
@@ -3343,6 +3315,7 @@ where
                         tlc_expiry_delta,
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
+                        now_timestamp_as_millis_u64(),
                     ),
                     public_channel_info: public.then_some(PublicChannelInfo::new()),
                     is_one_way: one_way,
@@ -3430,6 +3403,7 @@ where
                         tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
+                        now_timestamp_as_millis_u64(),
                     ),
                     public_channel_info: open_channel
                         .is_public()
@@ -3632,7 +3606,7 @@ where
 
     fn get_connected_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
         self.peer_session_map.iter().find_map(|(pubkey, _)| {
-            let peer_pubkey: tentacle::secio::PublicKey = (*pubkey).into();
+            let peer_pubkey = super::types::pubkey_to_tentacle(*pubkey);
             (PeerId::from_public_key(&peer_pubkey) == *peer_id).then_some(*pubkey)
         })
     }
@@ -3879,7 +3853,7 @@ where
             },
         );
         let remote_peer_id =
-            PeerId::from_public_key(&tentacle::secio::PublicKey::from(remote_pubkey));
+            PeerId::from_public_key(&super::types::pubkey_to_tentacle(remote_pubkey));
         if let Some(addresses) = self.pending_save_peer_addresses.remove(&remote_peer_id) {
             let mut changed = false;
             for address in addresses {
@@ -4886,7 +4860,7 @@ impl ServiceProtocol for FiberProtocolHandle {
             try_send_actor_message(
                 &self.actor,
                 NetworkActorMessage::new_event(NetworkActorEvent::PeerConnected(
-                    remote_pubkey.into(),
+                    super::types::pubkey_from_tentacle(remote_pubkey),
                     context.session.clone(),
                 )),
             );
@@ -4901,7 +4875,7 @@ impl ServiceProtocol for FiberProtocolHandle {
                 try_send_actor_message(
                     &self.actor,
                     NetworkActorMessage::new_event(NetworkActorEvent::PeerDisconnected(
-                        pubkey.clone().into(),
+                        super::types::pubkey_from_tentacle(pubkey.clone()),
                         context.session.clone(),
                     )),
                 );
@@ -4919,7 +4893,7 @@ impl ServiceProtocol for FiberProtocolHandle {
                 try_send_actor_message(
                     &self.actor,
                     NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
-                        pubkey.clone().into(),
+                        super::types::pubkey_from_tentacle(pubkey.clone()),
                         msg,
                     )),
                 );

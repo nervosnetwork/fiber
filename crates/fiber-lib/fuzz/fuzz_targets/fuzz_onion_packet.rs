@@ -2,7 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use fnn::fiber::types::{PaymentHopData, TrampolineHopPayload};
+use fnn::fiber::types::TrampolineHopPayload;
+use fnn::fiber::PaymentHopData;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz the onion packet hop data deserialization.

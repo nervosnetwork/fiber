@@ -1,3 +1,5 @@
+//! Serde utilities for hex and base58 serialization of types used in the Fiber Network.
+
 use molecule::prelude::Entity;
 use musig2::{
     BinaryEncoding, CompactSignature, PartialSignature, PubNonce, SCHNORR_SIGNATURE_SIZE,
@@ -158,76 +160,6 @@ uint_as_hex!(U64Hex, u64);
 uint_as_hex!(U32Hex, u32);
 uint_as_hex!(U16Hex, u16);
 
-pub struct CompactSignatureAsBytes;
-
-impl SerializeAs<CompactSignature> for CompactSignatureAsBytes {
-    fn serialize_as<S>(signature: &CompactSignature, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(&signature.to_bytes())
-    }
-}
-
-impl<'de> DeserializeAs<'de, CompactSignature> for CompactSignatureAsBytes {
-    fn deserialize_as<D>(deserializer: D) -> Result<CompactSignature, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
-        if bytes.len() != SCHNORR_SIGNATURE_SIZE {
-            return Err(serde::de::Error::custom("expected 64 bytes"));
-        }
-        CompactSignature::from_bytes(&bytes).map_err(serde::de::Error::custom)
-    }
-}
-
-pub struct PubNonceAsBytes;
-
-impl SerializeAs<PubNonce> for PubNonceAsBytes {
-    fn serialize_as<S>(nonce: &PubNonce, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(&nonce.to_bytes())
-    }
-}
-
-impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
-    fn deserialize_as<D>(deserializer: D) -> Result<PubNonce, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
-        if bytes.len() != 66 {
-            return Err(serde::de::Error::custom("expected 66 bytes"));
-        }
-        PubNonce::from_bytes(&bytes).map_err(serde::de::Error::custom)
-    }
-}
-
-pub struct PartialSignatureAsBytes;
-
-impl SerializeAs<PartialSignature> for PartialSignatureAsBytes {
-    fn serialize_as<S>(signature: &PartialSignature, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let bytes: [u8; 32] = signature.serialize();
-        serde::Serialize::serialize(&bytes, serializer)
-    }
-}
-
-impl<'de> DeserializeAs<'de, PartialSignature> for PartialSignatureAsBytes {
-    fn deserialize_as<D>(deserializer: D) -> Result<PartialSignature, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let bytes = <[u8; 32]>::deserialize(deserializer)?;
-        PartialSignature::from_slice(&bytes).map_err(serde::de::Error::custom)
-    }
-}
-
 /// Module for hex serialization of Duration
 pub mod duration_hex {
     use core::time::Duration;
@@ -291,5 +223,78 @@ where
                     Error::custom(format!("failed to convert vector into type: {:?}", err))
                 })
             })
+    }
+}
+
+/// Serde helper for serializing `CompactSignature` as raw bytes.
+pub struct CompactSignatureAsBytes;
+
+impl SerializeAs<CompactSignature> for CompactSignatureAsBytes {
+    fn serialize_as<S>(signature: &CompactSignature, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&signature.to_bytes())
+    }
+}
+
+impl<'de> DeserializeAs<'de, CompactSignature> for CompactSignatureAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<CompactSignature, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != SCHNORR_SIGNATURE_SIZE {
+            return Err(Error::custom("expected 64 bytes"));
+        }
+        CompactSignature::from_bytes(&bytes).map_err(Error::custom)
+    }
+}
+
+/// Serde helper for serializing `PubNonce` as raw bytes.
+pub struct PubNonceAsBytes;
+
+impl SerializeAs<PubNonce> for PubNonceAsBytes {
+    fn serialize_as<S>(nonce: &PubNonce, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&nonce.to_bytes())
+    }
+}
+
+impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<PubNonce, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != 66 {
+            return Err(Error::custom("expected 66 bytes"));
+        }
+        PubNonce::from_bytes(&bytes).map_err(Error::custom)
+    }
+}
+
+/// Serde helper for serializing `PartialSignature` as raw bytes.
+pub struct PartialSignatureAsBytes;
+
+impl SerializeAs<PartialSignature> for PartialSignatureAsBytes {
+    fn serialize_as<S>(signature: &PartialSignature, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes: [u8; 32] = signature.serialize();
+        serde::Serialize::serialize(&bytes, serializer)
+    }
+}
+
+impl<'de> DeserializeAs<'de, PartialSignature> for PartialSignatureAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<PartialSignature, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <[u8; 32]>::deserialize(deserializer)?;
+        PartialSignature::from_slice(&bytes).map_err(Error::custom)
     }
 }

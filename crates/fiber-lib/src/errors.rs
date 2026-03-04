@@ -8,10 +8,10 @@ use crate::{
     fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
         graph::PathFindError,
-        types::{Hash256, Pubkey},
         InFlightCkbTxActorMessage, NetworkActorMessage,
     },
 };
+use fiber_types::{Hash256, Pubkey};
 
 use crate::invoice::InvoiceError;
 

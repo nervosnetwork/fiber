@@ -1,4 +1,4 @@
-use crate::fiber::types::NodeId;
+use fiber_types::NodeId;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 

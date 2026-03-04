@@ -1,6 +1,6 @@
-use crate::fiber::serde_utils::{EntityHex, SliceHex, U128Hex, U16Hex, U32Hex, U64Hex};
 use ckb_types::packed::Script;
 use ckb_types::prelude::*;
+use fiber_types::serde_utils::*;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 

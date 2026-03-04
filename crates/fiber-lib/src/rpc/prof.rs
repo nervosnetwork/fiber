@@ -1,12 +1,14 @@
-use serde::{Deserialize, Serialize};
-
+use fiber_types::U64Hex;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PprofParams {
     /// Duration to profile in seconds. Defaults 10s.
-    #[serde(default)]
+    #[serde_as(as = "Option<U64Hex>")]
     pub duration_secs: Option<u64>,
 }
 
