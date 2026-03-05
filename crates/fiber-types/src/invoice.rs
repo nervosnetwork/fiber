@@ -365,7 +365,7 @@ pub struct CkbScript(
 #[derive(Clone, Debug, Eq, PartialEq, JsonSchema)]
 pub struct InvoiceSignature(
     #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_no_prefix")]
-    pub RecoverableSignature,
+    pub  RecoverableSignature,
 );
 
 impl PartialOrd for InvoiceSignature {
