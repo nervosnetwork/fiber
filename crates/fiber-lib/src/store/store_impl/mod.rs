@@ -17,7 +17,6 @@ pub use browser_test::{Batch, DbDirection, IteratorMode, Store};
 
 use std::path::Path;
 
-use super::db_migrate::DbMigrate;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
@@ -26,7 +25,7 @@ use crate::fiber::types::HoldTlc;
 use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore},
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff},
         graph::NetworkGraphStateStore,
         network::NetworkActorStateStore,
         payment::PaymentSessionExt,
@@ -35,6 +34,7 @@ use crate::{
 };
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
+use fiber_store::db_migrate::DbMigrate;
 use fiber_types::schema::*;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::CchOrder;
@@ -73,7 +73,7 @@ where
 impl Store {
     /// Open or create a rocksdb
     fn check_migrate<P: AsRef<Path>>(path: P, db: &Self) -> Result<(), String> {
-        let migrate = DbMigrate::new(db);
+        let migrate = DbMigrate::new(&db.inner);
         migrate.init_or_check(path)?;
         Ok(())
     }
@@ -584,6 +584,22 @@ impl ChannelActorStateStore for Store {
         ]
         .concat();
         self.get(key).is_some()
+    }
+
+    fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff) {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        let value = serialize_to_vec(diff, "CommitDiff");
+        self.put(key, value);
+    }
+
+    fn get_pending_commit_diff(&self, channel_id: &Hash256) -> Option<CommitDiff> {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        self.get(&key).map(|v| deserialize_from(&v, "CommitDiff"))
+    }
+
+    fn delete_pending_commit_diff(&self, channel_id: &Hash256) {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        self.delete(&key);
     }
 }
 
@@ -1508,7 +1524,7 @@ fn update_channel_timestamp(
 
 /// Check if the database needs to be migrated
 pub fn check_migrate<P: AsRef<Path>>(path: P, db: Store) -> Result<Store, String> {
-    let migrate = DbMigrate::new(&db);
+    let migrate = DbMigrate::new(&db.inner);
     migrate.init_or_check(path)?;
     Ok(db)
 }

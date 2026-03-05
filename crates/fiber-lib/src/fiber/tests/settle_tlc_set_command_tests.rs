@@ -1,6 +1,6 @@
 //! Tests for SettleTlcSetCommand
 
-use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore, CommitDiff};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
 use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
@@ -190,6 +190,18 @@ impl ChannelActorStateStore for MockStore {
     fn is_tlc_settled(&self, _channel_id: &Hash256, _payment_hash: &Hash256) -> bool {
         false
     }
+
+    fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {
+        // No-op for tests
+    }
+
+    fn get_pending_commit_diff(&self, _channel_id: &Hash256) -> Option<CommitDiff> {
+        None
+    }
+
+    fn delete_pending_commit_diff(&self, _channel_id: &Hash256) {
+        // No-op for tests
+    }
 }
 
 fn create_test_invoice(payment_hash: Hash256, amount: Option<u128>, allow_mpp: bool) -> CkbInvoice {
@@ -288,10 +300,14 @@ fn create_test_channel_state_with_tlc(
             last_revoke_ack_msg: None,
             created_at: SystemTime::now(),
         },
+        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        defer_peer_tlc_updates: false,
+        deferred_peer_tlc_updates: std::collections::VecDeque::new(),
+        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     }

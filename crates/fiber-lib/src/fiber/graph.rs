@@ -27,7 +27,6 @@ use rand::{thread_rng, Rng};
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-// Re-export ChannelUpdateInfo so internal modules can still use `graph::ChannelUpdateInfo`.
 pub use fiber_types::ChannelUpdateInfo;
 use std::collections::{HashMap, HashSet};
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -1,6 +1,6 @@
-use super::migration::{DefaultMigration, Migration, Migrations};
-use super::Store;
-use crate::Error;
+use crate::migration::{DefaultMigration, Migration, Migrations};
+use crate::Store;
+use crate::StoreError;
 use std::{cmp::Ordering, path::Path, sync::Arc};
 use tracing::warn;
 use tracing::{error, info};
@@ -36,7 +36,7 @@ impl<'a> DbMigrate<'a> {
     }
 
     /// Perform migrate.
-    pub fn migrate(&self) -> Result<&Store, Error> {
+    pub fn migrate(&self) -> Result<&Store, StoreError> {
         self.migrations.migrate(self.db)
     }
 
@@ -45,7 +45,7 @@ impl<'a> DbMigrate<'a> {
     }
 
     /// Perform init_db_version.
-    pub fn init_db_version(&self) -> Result<(), Error> {
+    pub fn init_db_version(&self) -> Result<(), StoreError> {
         self.migrations.init_db_version(self.db)
     }
 
