@@ -47,13 +47,16 @@ use super::{
     config::DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
     network::{check_chain_hash, get_chain_hash, GossipMessageWithTarget, GOSSIP_PROTOCOL_ID},
     types::{
-        BroadcastMessage, BroadcastMessageID, BroadcastMessageQuery, BroadcastMessageQueryFlags,
-        BroadcastMessageWithTimestamp, BroadcastMessagesFilter, BroadcastMessagesFilterResult,
-        ChannelAnnouncement, ChannelOnchainInfo, ChannelUpdate, Cursor, GetBroadcastMessages,
-        GetBroadcastMessagesResult, GossipMessage, Hash256, NodeAnnouncement, Pubkey,
-        QueryBroadcastMessages, QueryBroadcastMessagesResult,
+        BroadcastMessageQuery, BroadcastMessageQueryFlags, BroadcastMessageWithTimestamp,
+        BroadcastMessagesFilter, BroadcastMessagesFilterResult, ChannelOnchainInfo,
+        GetBroadcastMessages, GetBroadcastMessagesResult, GossipMessage, QueryBroadcastMessages,
+        QueryBroadcastMessagesResult,
     },
     FiberConfig,
+};
+use fiber_types::{
+    BroadcastMessage, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, Hash256,
+    NodeAnnouncement, Pubkey,
 };
 
 // The maximum duration drift between the broadcast message timestamp and latest cursor in store.
@@ -2872,7 +2875,7 @@ impl ServiceProtocol for GossipProtocolHandle {
 
         if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
             let _ = self.actor.send_message(GossipActorMessage::PeerConnected(
-                remote_pubkey.into(),
+                super::types::pubkey_from_tentacle(remote_pubkey),
                 context.session.clone(),
             ));
         } else {
@@ -2894,7 +2897,7 @@ impl ServiceProtocol for GossipProtocolHandle {
                 let _ = self
                     .actor
                     .send_message(GossipActorMessage::PeerDisconnected(
-                        remote_pubkey.clone().into(),
+                        super::types::pubkey_from_tentacle(remote_pubkey.clone()),
                         context.session.clone(),
                     ));
             }
@@ -2912,7 +2915,7 @@ impl ServiceProtocol for GossipProtocolHandle {
                     .actor
                     .send_message(GossipActorMessage::GossipMessageReceived(
                         GossipMessageWithTarget {
-                            target: pubkey.clone().into(),
+                            target: super::types::pubkey_from_tentacle(pubkey.clone()),
                             message,
                         },
                     ));

@@ -1,11 +1,5 @@
-use crate::{
-    cch::{CchInvoice, CchMessage, CchOrder, CchOrderStatus},
-    fiber::{
-        serde_utils::{U128Hex, U64Hex},
-        types::Hash256,
-    },
-    invoice::Currency,
-};
+use crate::{cch::CchMessage, invoice::Currency};
+use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, Hash256, U128Hex, U64Hex};
 use jsonrpsee::{
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},

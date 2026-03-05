@@ -7,6 +7,7 @@ use std::{
 use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
+use fnn::fiber::network::init_chain_hash;
 use fnn::{
     Config, NetworkServiceEvent,
     actors::RootActor,
@@ -15,7 +16,7 @@ use fnn::{
         client::CkbRpcClient,
         contracts::{TypeIDResolver, try_init_contracts_context},
     },
-    fiber::{KeyPair, graph::NetworkGraph, network::init_chain_hash},
+    fiber::{KeyPair, graph::NetworkGraph},
     rpc::{
         channel::ChannelRpcServerImpl,
         graph::GraphRpcServerImpl,
@@ -196,7 +197,7 @@ pub async fn fiber(
 
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
-                node_public_key.clone().into(),
+                fnn::fiber::types::pubkey_from_tentacle(node_public_key.clone()),
                 fiber_config.announce_private_addr(),
             )));
 

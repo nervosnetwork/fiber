@@ -1,4 +1,5 @@
 use ckb_sdk::RpcError;
+use fiber_store::StoreError;
 use ractor::{MessagingErr, SpawnErr};
 use tentacle::error::SendErrorKind;
 use thiserror::Error;
@@ -8,10 +9,10 @@ use crate::{
     fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
         graph::PathFindError,
-        types::{Hash256, Pubkey},
         InFlightCkbTxActorMessage, NetworkActorMessage,
     },
 };
+use fiber_types::{Hash256, Pubkey};
 
 use crate::invoice::InvoiceError;
 
@@ -66,3 +67,11 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<StoreError> for Error {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::DBInternalError(msg) => Error::DBInternalError(msg),
+        }
+    }
+}

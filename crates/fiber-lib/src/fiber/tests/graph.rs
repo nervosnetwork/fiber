@@ -1,22 +1,18 @@
 #![allow(clippy::needless_range_loop)]
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
-use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::graph::NetworkGraph;
 use crate::fiber::graph::PathFindError;
-use crate::fiber::payment::SessionRoute;
-use crate::fiber::payment::{SendPaymentData, SendPaymentDataBuilder};
-use crate::fiber::types::{
-    ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Pubkey, TrampolineOnionPacket,
+use crate::fiber::graph::SendPaymentState;
+use crate::fiber::network::get_chain_hash;
+use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataBuilder, SendPaymentDataExt};
+use crate::fiber::types::new_channel_update_unsigned;
+use crate::fiber::types::TrampolineOnionPacket;
+use crate::fiber::{
+    ChannelAnnouncement, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, FeatureVector,
+    Hash256, NodeAnnouncement, Privkey, Pubkey, RouterHop, SendPaymentData, SessionRoute,
 };
-use crate::{
-    fiber::{
-        graph::{NetworkGraph, RouterHop},
-        network::get_chain_hash,
-        payment::SendPaymentCommand,
-        types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
-    },
-    store::Store,
-};
+use crate::store::Store;
 use ckb_types::{
     packed::{OutPoint, Script},
     prelude::Entity,
@@ -56,23 +52,29 @@ impl MockNetworkGraph {
         let (store, _dir) = generate_store();
         let keypairs = generate_key_pairs(node_num + 1);
         let (secret_key1, public_key1) = keypairs[0];
-        store.save_node_announcement(NodeAnnouncement::new(
+        store.save_node_announcement(NodeAnnouncement::new_signed(
             "node0".into(),
             FeatureVector::default(),
             vec![],
             &secret_key1.into(),
+            get_chain_hash(),
             now_timestamp_as_millis_u64(),
             0,
+            Default::default(),
+            env!("CARGO_PKG_VERSION").to_string(),
         ));
         for (i, keypair) in keypairs.iter().enumerate().skip(1) {
             let (sk, _pk) = keypair;
-            store.save_node_announcement(NodeAnnouncement::new(
+            store.save_node_announcement(NodeAnnouncement::new_signed(
                 format!("node{i}").as_str().into(),
                 FeatureVector::default(),
                 vec![],
                 &(*sk).into(),
+                get_chain_hash(),
                 now_timestamp_as_millis_u64(),
                 0,
+                Default::default(),
+                env!("CARGO_PKG_VERSION").to_string(),
             ));
         }
         let mut graph = NetworkGraph::new(store.clone(), public_key1.into(), true);
@@ -150,7 +152,7 @@ impl MockNetworkGraph {
                 features: 0,
             },
         );
-        self.store.save_channel_update(ChannelUpdate::new_unsigned(
+        self.store.save_channel_update(new_channel_update_unsigned(
             channel_outpoint.clone(),
             now_timestamp_as_millis_u64(),
             if node_a_is_node1 {
@@ -164,7 +166,7 @@ impl MockNetworkGraph {
             fee_rate.unwrap_or(0),
         ));
         if let Some(fee_rate) = other_fee_rate {
-            self.store.save_channel_update(ChannelUpdate::new_unsigned(
+            self.store.save_channel_update(new_channel_update_unsigned(
                 channel_outpoint.clone(),
                 now_timestamp_as_millis_u64(),
                 if node_a_is_node1 {
@@ -271,10 +273,10 @@ impl MockNetworkGraph {
         )
     }
 
-    pub fn build_route_with_expect(&self, payment_data: &SendPaymentData, expect: Vec<usize>) {
+    pub fn build_route_with_expect(&self, payment_state: &SendPaymentState, expect: Vec<usize>) {
         let route = self
             .graph
-            .build_route(payment_data.amount, None, None, payment_data);
+            .build_route(payment_state.amount, None, None, payment_state);
         assert!(route.is_ok());
         let route = route.unwrap();
         let nodes = route.iter().filter_map(|x| x.next_hop).collect::<Vec<_>>();
@@ -287,12 +289,12 @@ impl MockNetworkGraph {
 
     pub fn build_route_with_possible_expects(
         &self,
-        payment_data: &SendPaymentData,
+        payment_state: &SendPaymentState,
         expects: &[Vec<usize>],
     ) {
         let route = self
             .graph
-            .build_route(payment_data.amount, None, None, payment_data);
+            .build_route(payment_state.amount, None, None, payment_state);
         assert!(route.is_ok());
         let route = route.unwrap();
         let nodes = route.iter().filter_map(|x| x.next_hop).collect::<Vec<_>>();
@@ -578,13 +580,15 @@ fn test_graph_build_route_insufficient_outbound_liquidity_non_mpp() {
     network.set_source(source);
 
     // Trying to pay 500 should fail early because max outbound from source is 100.
-    let payment_data = SendPaymentDataBuilder::new(target.into(), 500, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .max_fee_amount(Some(10))
-        .build()
-        .expect("valid payment_data");
-    let result = network.graph.build_route(500, None, None, &payment_data);
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(target.into(), 500, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .max_fee_amount(Some(10))
+            .build()
+            .expect("valid payment_data")
+            .into();
+    let result = network.graph.build_route(500, None, None, &payment_state);
     assert!(
         matches!(result, Err(PathFindError::InsufficientBalance(_))),
         "expected InsufficientBalance, got {:?}",
@@ -599,7 +603,7 @@ fn test_graph_build_route_insufficient_outbound_liquidity_non_mpp() {
     // Adding a channel from source with sufficient capacity makes the payment possible.
     network.add_edge(1, 4, Some(1000), Some(1));
     network.add_edge(4, 2, Some(1000), Some(1));
-    let result = network.graph.build_route(500, None, None, &payment_data);
+    let result = network.graph.build_route(500, None, None, &payment_state);
     assert!(result.is_ok(), "expected Ok, got {:?}", result);
 }
 
@@ -622,7 +626,7 @@ fn test_graph_build_route_insufficient_outbound_liquidity_mpp() {
     network.set_source(source);
 
     // Build MPP-enabled payment data (allow_mpp=true, max_parts=4).
-    let mpp_payment = |amount: u128| {
+    let mpp_payment = |amount: u128| -> SendPaymentState {
         SendPaymentDataBuilder::new(target.into(), amount, Hash256::default())
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
@@ -631,15 +635,18 @@ fn test_graph_build_route_insufficient_outbound_liquidity_mpp() {
             .max_fee_amount(Some(100))
             .build()
             .expect("valid payment_data")
+            .into()
     };
 
     // Paying 700 (> single channel 300 but <= total 2×300=600) should fail early for non-MPP…
-    let non_mpp = SendPaymentDataBuilder::new(target.into(), 700, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .max_fee_amount(Some(100))
-        .build()
-        .expect("valid payment_data");
+    let non_mpp: SendPaymentState =
+        SendPaymentDataBuilder::new(target.into(), 700, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .max_fee_amount(Some(100))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let result = network.graph.build_route(700, None, None, &non_mpp);
     assert!(
         matches!(result, Err(PathFindError::InsufficientBalance(_))),
@@ -650,8 +657,8 @@ fn test_graph_build_route_insufficient_outbound_liquidity_mpp() {
     // …but should be allowed to proceed with MPP (total 600 >= 500).
     // The early-fail check should NOT return InsufficientBalance here (it may
     // return NoPathFound for other reasons unrelated to the early-fail check).
-    let pd = mpp_payment(500);
-    let result = network.graph.build_route(500, Some(1), None, &pd);
+    let ps = mpp_payment(500);
+    let result = network.graph.build_route(500, Some(1), None, &ps);
     assert!(
         !matches!(result, Err(PathFindError::InsufficientBalance(_))),
         "MPP 500 must not be rejected by early-fail when total outbound (600) >= amount (500), got {:?}",
@@ -659,8 +666,8 @@ fn test_graph_build_route_insufficient_outbound_liquidity_mpp() {
     );
 
     // Paying 700 total with MPP also fails: total outbound is only 600.
-    let pd = mpp_payment(700);
-    let result = network.graph.build_route(700, Some(1), None, &pd);
+    let ps = mpp_payment(700);
+    let result = network.graph.build_route(700, Some(1), None, &ps);
     assert!(
         matches!(result, Err(PathFindError::InsufficientBalance(_))),
         "MPP 700 expected InsufficientBalance, got {:?}",
@@ -726,15 +733,17 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
     network.set_source(source);
     let node5 = network.keys[5];
 
-    let payment_data = SendPaymentDataBuilder::new(node5.into(), 1000, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node5.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -770,21 +779,23 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
             .expect("valid payment_data");
 
     // Without trampoline: no route to final recipient.
+    let payment_state: SendPaymentState = payment_data.clone().into();
     assert!(network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data)
+        .build_route(payment_state.amount, None, None, &payment_state,)
         .is_err());
 
     // With trampoline: should succeed by routing to C only.
     payment_data.trampoline_hops = Some(vec![trampoline.into()]);
+    let payment_state: SendPaymentState = payment_data.clone().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data)
+        .build_route(payment_state.amount, None, None, &payment_state)
         .expect("trampoline route should be built");
 
     assert_eq!(route.len(), 2);
     assert_eq!(route[0].next_hop, Some(trampoline.into()));
-    assert!(route[0].amount >= payment_data.amount);
+    assert!(route[0].amount >= payment_state.amount);
 
     let last = route.last().expect("last hop");
     assert!(last.next_hop.is_none());
@@ -823,16 +834,18 @@ fn test_graph_build_router_fee_rate_optimize() {
     network.set_source(source);
     let node5 = network.keys[5];
 
-    let payment_data = SendPaymentDataBuilder::new(node5.into(), 1000, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node5.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
 
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -875,15 +888,16 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("valid payment_data");
 
     let before = now_timestamp_as_millis_u64();
+    let payment_state: SendPaymentState = payment_data.clone().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data)
+        .build_route(payment_state.amount, None, None, &payment_state)
         .expect("trampoline route should be built");
     let after = now_timestamp_as_millis_u64();
 
     // The expiry to the first trampoline must include slack for each trampoline hop.
     let expected_delta = FINAL_TLC_EXPIRY_DELTA_IN_TESTS
-        + (payment_data
+        + (payment_state
             .trampoline_hops
             .as_ref()
             .expect("trampoline_hops")
@@ -908,56 +922,40 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
 
     // Peel inner trampoline onion hop-by-hop and validate the chain.
     let peeled1 = TrampolineOnionPacket::new(trampoline_bytes)
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[2]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[2]), assoc, SECP256K1)
         .expect("peel t1");
     assert!(matches!(
         peeled1.current,
         crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, tlc_expiry_limit, .. }
-            if next_node_id == t2.into() && tlc_expiry_limit == payment_data.tlc_expiry_limit
+            if next_node_id == t2.into() && tlc_expiry_limit == payment_state.tlc_expiry_limit
     ));
 
     let peeled2 = peeled1
         .next
         .expect("next packet to t2")
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[3]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[3]), assoc, SECP256K1)
         .expect("peel t2");
     assert!(matches!(
         peeled2.current,
         crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, tlc_expiry_limit, .. }
-            if next_node_id == t3.into() && tlc_expiry_limit == payment_data.tlc_expiry_limit
+            if next_node_id == t3.into() && tlc_expiry_limit == payment_state.tlc_expiry_limit
     ));
 
     let peeled3 = peeled2
         .next
         .expect("next packet to t3")
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[4]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[4]), assoc, SECP256K1)
         .expect("peel t3");
     assert!(matches!(
         peeled3.current,
         crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, tlc_expiry_limit, .. }
-            if next_node_id == final_recipient.into() && tlc_expiry_limit == payment_data.tlc_expiry_limit
+            if next_node_id == final_recipient.into() && tlc_expiry_limit == payment_state.tlc_expiry_limit
     ));
 
     let peeled_final = peeled3
         .next
         .expect("next packet to final")
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[5]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[5]), assoc, SECP256K1)
         .expect("peel final");
     assert!(matches!(
         peeled_final.current,
@@ -967,22 +965,19 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
 
     // sanity: shortening trampoline_hops should shorten the chain (t1->final).
     payment_data.trampoline_hops = Some(vec![t1.into()]);
+    let payment_state: SendPaymentState = payment_data.clone().into();
     let route_short = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data)
+        .build_route(payment_state.amount, None, None, &payment_state)
         .expect("trampoline route should be built");
     let trampoline_short = route_short.last().unwrap().trampoline_onion().unwrap();
     let peeled_short_1 = TrampolineOnionPacket::new(trampoline_short)
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[2]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[2]), assoc, SECP256K1)
         .expect("peel short t1");
     assert!(matches!(
         peeled_short_1.current,
         crate::fiber::types::TrampolineHopPayload::Forward { next_node_id, tlc_expiry_limit, .. }
-            if next_node_id == final_recipient.into() && tlc_expiry_limit == payment_data.tlc_expiry_limit
+            if next_node_id == final_recipient.into() && tlc_expiry_limit == payment_state.tlc_expiry_limit
     ));
 }
 
@@ -1011,18 +1006,19 @@ fn test_graph_trampoline_routing_tlc_expiry_limit_too_small_fails() {
     // Set a limit that is smaller than that.
     let too_small_limit = FINAL_TLC_EXPIRY_DELTA_IN_TESTS + 2 * DEFAULT_TLC_EXPIRY_DELTA;
 
-    let payment_data =
+    let payment_state: SendPaymentState =
         SendPaymentDataBuilder::new(final_recipient.into(), 1000, Hash256::default())
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(too_small_limit)
             .max_fee_amount(Some(500))
             .trampoline_hops(Some(vec![t1.into(), t2.into(), t3.into()]))
             .build()
-            .expect("valid payment_data");
+            .expect("valid payment_data")
+            .into();
 
     let err = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data)
+        .build_route(payment_state.amount, None, None, &payment_state)
         .expect_err("should fail due to tlc_expiry_limit too small for trampoline slack");
     let msg = err.to_string();
     assert!(
@@ -1051,18 +1047,19 @@ fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
 
     let hop: Pubkey = t1.into();
 
-    let payment_data =
+    let payment_state: SendPaymentState =
         SendPaymentDataBuilder::new(final_recipient.into(), 1000, Hash256::default())
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(0))
             .trampoline_hops(Some(vec![hop]))
             .build()
-            .expect("valid payment_data");
+            .expect("valid payment_data")
+            .into();
 
     let err = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data)
+        .build_route(payment_state.amount, None, None, &payment_state)
         .expect_err("should fail due to insufficient max_fee_amount for service fees");
     let msg = err.to_string();
     assert!(
@@ -1088,18 +1085,19 @@ fn test_graph_trampoline_routing_fee_rate_explicit_zero_allows_zero_fee_budget()
 
     network.add_edge(1, 2, Some(10_000), Some(0));
 
-    let payment_data =
+    let payment_state: SendPaymentState =
         SendPaymentDataBuilder::new(final_recipient.into(), 1000, Hash256::default())
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(0))
             .trampoline_hops(Some(vec![t1.into()]))
             .build()
-            .expect("valid payment_data");
+            .expect("valid payment_data")
+            .into();
 
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     let err = route.unwrap_err().to_string();
     debug!("route err: {}", err);
     assert!(err.contains("max_fee_amount is too low for trampoline routing"));
@@ -1138,18 +1136,19 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let h2: Pubkey = t2.into();
     let h3: Pubkey = t3.into();
 
-    let payment_data =
+    let payment_state: SendPaymentState =
         SendPaymentDataBuilder::new(final_recipient.into(), final_amount, payment_hash)
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
             .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
             .max_fee_amount(Some(max_fee_amount))
             .trampoline_hops(Some(vec![h1, h2, h3]))
             .build()
-            .expect("valid payment_data");
+            .expect("valid payment_data")
+            .into();
 
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data)
+        .build_route(payment_state.amount, None, None, &payment_state)
         .expect("trampoline route should be built");
     assert_eq!(route.len(), 2);
     assert_eq!(route[0].next_hop, Some(t1.into()));
@@ -1180,11 +1179,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let trampoline_bytes = route.last().unwrap().trampoline_onion().unwrap();
 
     let peeled1 = TrampolineOnionPacket::new(trampoline_bytes)
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[2]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[2]), assoc, SECP256K1)
         .expect("peel t1");
     match peeled1.current {
         crate::fiber::types::TrampolineHopPayload::Forward {
@@ -1203,11 +1198,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let peeled2 = peeled1
         .next
         .unwrap()
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[3]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[3]), assoc, SECP256K1)
         .expect("peel t2");
     match peeled2.current {
         crate::fiber::types::TrampolineHopPayload::Forward {
@@ -1226,11 +1217,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     let peeled3 = peeled2
         .next
         .unwrap()
-        .peel(
-            &crate::fiber::types::Privkey(network.secret_keys[4]),
-            assoc,
-            SECP256K1,
-        )
+        .peel(&Privkey(network.secret_keys[4]), assoc, SECP256K1)
         .expect("peel t3");
     match peeled3.current {
         crate::fiber::types::TrampolineHopPayload::Forward {
@@ -1258,15 +1245,17 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
     let source = network.keys[1];
     network.set_source(source);
     let node5 = network.keys[5];
-    let payment_data = SendPaymentDataBuilder::new(node5.into(), 1000, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node5.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -1395,16 +1384,18 @@ fn test_graph_build_route_three_nodes_amount() {
     let node2 = network.keys[2];
     let node3 = network.keys[3];
     // Test build route from node1 to node3
-    let payment_data = SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
@@ -1440,16 +1431,18 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
     // Send a payment from the first node to the last node
 
     network.graph.set_add_rand_expiry_delta(false);
-    let payment_data = SendPaymentDataBuilder::new(last_node.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(last_node.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     let timestamp_after_building_route = now_timestamp_as_millis_u64();
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -1516,16 +1509,18 @@ fn test_graph_build_route_below_min_tlc_value() {
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount below min_tlc_value
-    let payment_data = SendPaymentDataBuilder::new(node3.into(), 10, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node3.into(), 10, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_err());
 }
 
@@ -1539,16 +1534,18 @@ fn test_graph_build_route_select_edge_with_latest_timestamp() {
     network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None, None);
     let node2 = network.keys[2];
 
-    let payment_data = SendPaymentDataBuilder::new(node2.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node2.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     eprintln!("got route {:?}", route);
     let route = route.unwrap();
@@ -1570,16 +1567,18 @@ fn test_graph_build_route_select_edge_with_large_capacity() {
     network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None, None);
     let node2 = network.keys[2];
 
-    let payment_data = SendPaymentDataBuilder::new(node2.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node2.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 2);
@@ -1620,32 +1619,36 @@ fn test_graph_mark_failed_channel() {
 
     network.mark_channel_failed(2, 3);
     // Test build route from node1 to node3
-    let payment_data = SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_err());
 
     network.add_edge(0, 5, Some(500), Some(2));
     network.add_edge(5, 3, Some(500), Some(2));
 
     // Test build route from node1 to node3
-    let payment_data = SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
 }
 
@@ -1663,16 +1666,18 @@ fn test_graph_session_router() {
     let node4 = network.keys[4];
 
     // Test build route from node1 to node4 should be Ok
-    let payment_data = SendPaymentDataBuilder::new(node4.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node4.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
 
     let route = route.unwrap();
@@ -1703,57 +1708,65 @@ fn test_graph_mark_failed_node() {
     let node4 = network.keys[4];
 
     // Test build route from node1 to node3
-    let payment_data = SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
 
     // Test build route from node1 to node4 should be Ok
-    let payment_data = SendPaymentDataBuilder::new(node4.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node4.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
 
     network.mark_node_failed(2);
 
     // Test build route from node1 to node3
-    let payment_data = SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node3.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_err());
 
     // Test build route from node1 to node4
-    let payment_data = SendPaymentDataBuilder::new(node4.into(), 100, Hash256::default())
-        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
-        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
-        .timeout(Some(10))
-        .max_fee_amount(Some(1000))
-        .build()
-        .expect("valid payment_data");
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node4.into(), 100, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment_data")
+            .into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_err());
 }
 
@@ -1780,10 +1793,10 @@ fn test_graph_payment_self_default_is_false() {
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
 
-    let payment_data = payment_data.unwrap();
+    let payment_state: SendPaymentState = payment_data.unwrap().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_err());
     let message = route.unwrap_err().to_string();
     assert!(message.contains("allow_self_payment is not enabled, can not pay to self"));
@@ -1812,10 +1825,10 @@ fn test_graph_payment_pay_single_path() {
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
-    let payment_data = payment_data.unwrap();
+    let payment_state: SendPaymentState = payment_data.unwrap().into();
 
     network.add_edge(4, 0, Some(1000), Some(2));
-    network.build_route_with_expect(&payment_data, vec![2, 4, 5, 6]);
+    network.build_route_with_expect(&payment_state, vec![2, 4, 5, 6]);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -1840,11 +1853,11 @@ fn test_graph_payment_pay_self_with_one_node() {
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
-    let payment_data = payment_data.unwrap();
+    let payment_state: SendPaymentState = payment_data.unwrap().into();
 
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route[1].next_hop, Some(node0.into()));
@@ -1872,11 +1885,11 @@ fn test_graph_payment_pay_self_with_one_node_fee_rate() {
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
-    let payment_data = payment_data.unwrap();
+    let payment_state: SendPaymentState = payment_data.unwrap().into();
 
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
@@ -1925,10 +1938,10 @@ fn test_graph_build_route_with_double_edge_node() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command).unwrap();
+    let payment_state: SendPaymentState = SendPaymentData::new(command).unwrap().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
 }
 
@@ -1976,10 +1989,10 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command).unwrap();
+    let payment_state: SendPaymentState = SendPaymentData::new(command).unwrap().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route[0].next_hop, Some(node1.into()));
@@ -2009,11 +2022,11 @@ fn test_graph_payment_pay_self_will_ok() {
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
-    let payment_data = payment_data.unwrap();
+    let payment_state: SendPaymentState = payment_data.unwrap().into();
 
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     // since we don't have a route to node0, it will fail
     assert!(route.is_err());
 
@@ -2021,17 +2034,17 @@ fn test_graph_payment_pay_self_will_ok() {
     let mut possible_expects = vec![];
     network.add_edge(6, 0, Some(500), Some(2));
     possible_expects.push(vec![2, 4, 5, 6, 0]);
-    network.build_route_with_possible_expects(&payment_data, &possible_expects);
+    network.build_route_with_possible_expects(&payment_state, &possible_expects);
 
     // now add another shorter path
     network.add_edge(4, 0, Some(1000), Some(2));
     possible_expects.push(vec![2, 4, 0]);
-    network.build_route_with_possible_expects(&payment_data, &possible_expects);
+    network.build_route_with_possible_expects(&payment_state, &possible_expects);
 
     // now add another shorter path
     network.add_edge(2, 0, Some(1000), Some(2));
     possible_expects.push(vec![2, 0]);
-    network.build_route_with_possible_expects(&payment_data, &possible_expects);
+    network.build_route_with_possible_expects(&payment_state, &possible_expects);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -2067,10 +2080,10 @@ fn test_graph_build_route_with_path_limits() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command).unwrap();
+    let payment_state: SendPaymentState = SendPaymentData::new(command).unwrap().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 100);
@@ -2115,10 +2128,10 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command).unwrap();
+    let payment_state: SendPaymentState = SendPaymentData::new(command).unwrap().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_err());
 }
 
@@ -2145,10 +2158,10 @@ fn test_graph_payment_expiry_is_in_right_order() {
     assert!(payment_data.is_ok());
 
     let current_time = now_timestamp_as_millis_u64();
-    let payment_data = payment_data.unwrap();
+    let payment_state: SendPaymentState = payment_data.unwrap().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
@@ -2173,10 +2186,10 @@ fn test_graph_payment_expiry_is_in_right_order() {
     assert!(payment_data.is_ok());
 
     let current_time = now_timestamp_as_millis_u64();
-    let payment_data = payment_data.unwrap();
+    let payment_state: SendPaymentState = payment_data.unwrap().into();
     let route = network
         .graph
-        .build_route(payment_data.amount, None, None, &payment_data);
+        .build_route(payment_state.amount, None, None, &payment_state);
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();

@@ -1,5 +1,5 @@
-use crate::{cch::CchOrderStatus, fiber::types::Hash256, invoice::Currency, time::SystemTimeError};
-
+use crate::time::SystemTimeError;
+use fiber_types::{CchOrderStatus, Currency, Hash256};
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
@@ -45,8 +45,8 @@ pub enum CchError {
         expected: Currency,
         actual: Currency,
     },
-    #[error("ReceiveBTC order payment amount is too small")]
-    ReceiveBTCOrderAmountTooSmall,
+    #[error("SendBTC order payment amount is too large")]
+    SendBTCOrderAmountTooLarge,
     #[error("ReceiveBTC order payment amount is too large")]
     ReceiveBTCOrderAmountTooLarge,
     #[error("Wrapped BTC type script mismatch")]

@@ -12,8 +12,8 @@ metrics = ["fnn/metrics"]
 
 [dependencies]
 fnn = { path = "../fiber-lib" }
-ckb-chain-spec = "0.202.0"
-ckb-resource = "0.202.0"
+ckb-chain-spec = "1"
+ckb-resource = "1"
 ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
     "async-trait",
 ] }

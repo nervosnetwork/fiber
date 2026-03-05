@@ -17,40 +17,34 @@ pub use browser_test::{Batch, DbDirection, IteratorMode, Store};
 
 use std::path::Path;
 
-use super::db_migrate::DbMigrate;
-use super::schema::*;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::cch::{CchOrder, CchOrderStore, CchStoreError};
+use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::payment::{
-    Attempt, AttemptStatus, PaymentCustomRecords, PaymentSession, PaymentStatus,
-};
+use crate::fiber::types::HoldTlc;
 #[cfg(feature = "watchtower")]
-use crate::fiber::types::Privkey;
-use crate::fiber::types::{HoldTlc, Pubkey, CURSOR_SIZE};
+use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{
-            ChannelActorState, ChannelActorStateStore, ChannelOpenRecord, ChannelOpenRecordStore,
-            ChannelState,
-        },
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore},
         graph::NetworkGraphStateStore,
-        history::{Direction, TimedResult},
-        network::{NetworkActorStateStore, PersistentNetworkActorState},
-        types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
+        network::NetworkActorStateStore,
+        payment::PaymentSessionExt,
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
 };
-#[cfg(feature = "watchtower")]
-use crate::{
-    fiber::{
-        channel::{RevocationData, SettlementData},
-        types::NodeId,
-    },
-    watchtower::{ChannelData, WatchtowerStore},
-};
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
+use fiber_store::db_migrate::DbMigrate;
+use fiber_types::schema::*;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::CchOrder;
+use fiber_types::{
+    Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
+    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
+};
+#[cfg(feature = "watchtower")]
+use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -79,7 +73,7 @@ where
 impl Store {
     /// Open or create a rocksdb
     fn check_migrate<P: AsRef<Path>>(path: P, db: &Self) -> Result<(), String> {
-        let migrate = DbMigrate::new(db);
+        let migrate = DbMigrate::new(&db.inner);
         migrate.init_or_check(path)?;
         Ok(())
     }
@@ -710,6 +704,16 @@ impl NetworkGraphStateStore for Store {
             .map(|session: PaymentSession| session.init_attempts(self))
     }
 
+    fn get_all_payment_sessions(&self) -> Vec<PaymentSession> {
+        let prefix = [PAYMENT_SESSION_PREFIX];
+        self.prefix_iterator(&prefix)
+            .map(|(_key, value)| {
+                let session: PaymentSession = deserialize_from(value.as_ref(), "PaymentSession");
+                session.init_attempts(self)
+            })
+            .collect()
+    }
+
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
         self.prefix_iterator(&prefix)
@@ -722,6 +726,52 @@ impl NetworkGraphStateStore for Store {
                 }
             })
             .collect()
+    }
+
+    fn get_payment_sessions_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<PaymentStatus>,
+    ) -> Vec<PaymentSession> {
+        let prefix = [PAYMENT_SESSION_PREFIX];
+        match after {
+            Some(after_hash) => {
+                let start_key = [&[PAYMENT_SESSION_PREFIX], after_hash.as_ref()].concat();
+                // Start from the `after` key and skip it (exclusive cursor)
+                let after_hash_owned = after_hash;
+                self.prefix_iterator_with_skip_while_and_start(
+                    &prefix,
+                    IteratorMode::From(&start_key, DbDirection::Forward),
+                    Box::new(move |key| {
+                        // Skip the cursor key itself (keys are [prefix][hash])
+                        key.len() > 1 && key[1..] == *after_hash_owned.as_ref()
+                    }),
+                )
+                .filter_map(|(_key, value)| {
+                    let session: PaymentSession =
+                        deserialize_from(value.as_ref(), "PaymentSession");
+                    match status {
+                        Some(ref s) if session.status != *s => None,
+                        _ => Some(session.init_attempts(self)),
+                    }
+                })
+                .take(limit)
+                .collect()
+            }
+            None => self
+                .prefix_iterator(&prefix)
+                .filter_map(|(_key, value)| {
+                    let session: PaymentSession =
+                        deserialize_from(value.as_ref(), "PaymentSession");
+                    match status {
+                        Some(ref s) if session.status != *s => None,
+                        _ => Some(session.init_attempts(self)),
+                    }
+                })
+                .take(limit)
+                .collect(),
+        }
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
@@ -1458,7 +1508,7 @@ fn update_channel_timestamp(
 
 /// Check if the database needs to be migrated
 pub fn check_migrate<P: AsRef<Path>>(path: P, db: Store) -> Result<Store, String> {
-    let migrate = DbMigrate::new(&db);
+    let migrate = DbMigrate::new(&db.inner);
     migrate.init_or_check(path)?;
     Ok(db)
 }

@@ -5,12 +5,16 @@ use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::*;
 use crate::fiber::payment::*;
 use crate::fiber::types::*;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use crate::fiber::{
+    AddTlcCommand, ChannelState, CloseFlags, Hash256, PaymentHopData, PaymentStatus,
+    PeeledPaymentOnionPacket, SendPaymentData, ShuttingDownFlags, TLCId, TlcErrorCode,
+    NO_SHARED_SECRET,
+};
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
@@ -27,6 +31,10 @@ use crate::tests::test_utils::*;
 use crate::NetworkServiceEvent;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
+use fiber_types::HashAlgorithm;
+use fiber_types::HopHint;
+use fiber_types::RemoveTlcFulfill;
+use fiber_types::SessionRoute;
 use ractor::call;
 use secp256k1::SECP256K1;
 use std::collections::{HashMap, HashSet};
