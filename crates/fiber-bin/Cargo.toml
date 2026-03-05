@@ -12,8 +12,11 @@ metrics = ["fnn/metrics"]
 
 [dependencies]
 fnn = { path = "../fiber-lib" }
+fiber-json-types = { path = "../fiber-json-types", features = ["conversion"] }
 ckb-chain-spec = "1"
 ckb-resource = "1"
+hex = "0.4.3"
+serde_json = "1"
 ractor = { "git" = "https://github.com/officeyutong/ractor", branch = "use-non-send-future-in-wasm", features = [
     "async-trait",
 ] }

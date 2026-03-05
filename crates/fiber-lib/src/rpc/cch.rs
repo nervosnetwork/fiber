@@ -1,8 +1,7 @@
 use crate::cch::CchMessage;
-use jsonrpsee::{
-    proc_macros::rpc,
-    types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
-};
+use crate::rpc::utils::RpcResultExt;
+use fiber_types::{Currency, Hash256};
+use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned};
 use ractor::{call_t, ActorRef};
 
 pub use fiber_json_types::{CchOrderResponse, GetCchOrderParams, ReceiveBTCParams, SendBTCParams};
@@ -68,24 +67,21 @@ impl CchRpcServer for CchRpcServerImpl {
 // #[async_trait::async_trait(?Send)]
 impl CchRpcServerImpl {
     async fn send_btc(&self, params: SendBTCParams) -> Result<CchOrderResponse, ErrorObjectOwned> {
+        let currency = Currency::from(&params.currency);
         let result = call_t!(
             self.cch_actor,
             CchMessage::SendBTC,
             TIMEOUT,
             crate::cch::SendBTC {
                 btc_pay_req: params.btc_pay_req,
-                currency: params.currency,
+                currency,
             }
         )
-        .map_err(|ractor_error| {
-            ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                ractor_error.to_string(),
-                Option::<()>::None,
-            )
-        })?;
+        .rpc_err_no_data()?;
 
-        result.map(Into::into).map_err(Into::into)
+        result
+            .map(|order| CchOrderResponse::from(&order))
+            .map_err(Into::into)
     }
 
     async fn receive_btc(
@@ -100,35 +96,28 @@ impl CchRpcServerImpl {
                 fiber_pay_req: params.fiber_pay_req,
             }
         )
-        .map_err(|ractor_error| {
-            ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                ractor_error.to_string(),
-                Option::<()>::None,
-            )
-        })?;
+        .rpc_err_no_data()?;
 
-        result.map(Into::into).map_err(Into::into)
+        result
+            .map(|order| CchOrderResponse::from(&order))
+            .map_err(Into::into)
     }
 
     async fn get_cch_order(
         &self,
         params: GetCchOrderParams,
     ) -> Result<CchOrderResponse, ErrorObjectOwned> {
+        let payment_hash = Hash256::from(&params.payment_hash);
         let result = call_t!(
             self.cch_actor,
             CchMessage::GetCchOrder,
             TIMEOUT,
-            params.payment_hash
+            payment_hash
         )
-        .map_err(|ractor_error| {
-            ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                ractor_error.to_string(),
-                Option::<()>::None,
-            )
-        })?;
+        .rpc_err_no_data()?;
 
-        result.map(Into::into).map_err(Into::into)
+        result
+            .map(|order| CchOrderResponse::from(&order))
+            .map_err(Into::into)
     }
 }

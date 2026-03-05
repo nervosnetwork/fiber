@@ -1,5 +1,6 @@
+use crate::rpc::utils::rpc_error;
 use jsonrpsee::proc_macros::rpc;
-use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
+use jsonrpsee::types::ErrorObjectOwned;
 
 pub use fiber_json_types::{PprofParams, PprofResult};
 
@@ -36,11 +37,7 @@ impl ProfRpcServerImpl {
             Ok(path) => Ok(PprofResult {
                 path: path.to_string_lossy().into_owned(),
             }),
-            Err(err) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                err.to_string(),
-                Some(params),
-            )),
+            Err(err) => Err(rpc_error(err.to_string(), params)),
         }
     }
 }

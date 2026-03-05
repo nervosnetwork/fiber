@@ -81,21 +81,15 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `HopRequire`](#type-hoprequire)
     * [Type `Htlc`](#type-htlc)
     * [Type `InvoiceData`](#type-invoicedata)
-    * [Type `InvoiceSignature`](#type-invoicesignature)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentStatus`](#type-paymentstatus)
     * [Type `PeerInfo`](#type-peerinfo)
-    * [Type `Privkey`](#type-privkey)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
-    * [Type `RevocationData`](#type-revocationdata)
     * [Type `RouterHop`](#type-routerhop)
     * [Type `SessionRoute`](#type-sessionroute)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
-    * [Type `SettlementData`](#type-settlementdata)
-    * [Type `SettlementTlc`](#type-settlementtlc)
-    * [Type `TLCId`](#type-tlcid)
     * [Type `TlcStatus`](#type-tlcstatus)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
@@ -118,9 +112,6 @@ Creates a CCH order for a BTC Lightning payee.
 ##### Params
 
 * `btc_pay_req` - <em>`String`</em>, Payment request string for the BTC Lightning payee.
-
- The invoice should not be expired soon. The remaining expiry time should be greater than the CCH config
- `min_incoming_invoice_expiry_delta_seconds`.
 * `currency` - <em>[Currency](#type-currency)</em>, Request currency
 
 ##### Returns
@@ -147,9 +138,6 @@ Creates a CCH order for a CKB Fiber payee.
 ##### Params
 
 * `fiber_pay_req` - <em>`String`</em>, Payment request string for the CKB Fiber payee.
-
- The invoice should not be expired soon. The remaining expiry time should be greater than the CCH config
- `min_incoming_invoice_expiry_delta_seconds`.
 
 ##### Returns
 
@@ -522,10 +510,10 @@ Get the node information.
 
 * `version` - <em>`String`</em>, The version of the node software.
 * `commit_hash` - <em>`String`</em>, The commit hash of the node software.
-* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of this node (secp256k1 compressed, hex string).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of this node (secp256k1 compressed, hex without 0x prefix).
 * `features` - <em>`Vec<String>`</em>, The features supported by the node.
 * `node_name` - <em>`Option<String>`</em>, The optional name of the node.
-* `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the node.
+* `addresses` - <em>`Vec<String>`</em>, A list of multi-addresses associated with the node (as strings).
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the blockchain that the node is connected to.
 * `open_channel_auto_accept_min_ckb_funding_amount` - <em>`u64`</em>, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
 * `auto_accept_channel_ckb_funding_amount` - <em>`u64`</em>, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
@@ -681,7 +669,7 @@ Sends a payment to a peer.
 * `timeout` - <em>`Option<u64>`</em>, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
 * `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay.
  Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
-* `max_fee_rate` - <em>`Option<u64>`</em>, the maximum fee rate per thousand (‰), default is 5 (0.5%)
+* `max_fee_rate` - <em>`Option<u64>`</em>, the maximum fee rate per thousand, default is 5 (0.5%)
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
 * `trampoline_hops` - <em>Option<Vec<[Pubkey](#type-pubkey)>></em>, Optional explicit trampoline hops.
 
@@ -731,8 +719,7 @@ Sends a payment to a peer.
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
- The router is a list of nodes that the payment will go through.
- If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes.
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -761,8 +748,7 @@ Retrieves a payment.
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
- The router is a list of nodes that the payment will go through.
- If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes.
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -853,8 +839,7 @@ Sends a payment to a peer with specified router.
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
- The router is a list of nodes that the payment will go through.
- If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes.
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -895,7 +880,7 @@ Connect to a peer.
 
 ##### Params
 
-* `address` - <em>`Option<MultiAddr>`</em>, The address of the peer to connect to.
+* `address` - <em>`Option<String>`</em>, The address of the peer to connect to (as a multiaddr string).
  Either `address` or `pubkey` must be provided.
 * `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key of the peer to connect to.
  The node resolves the address from locally synced graph data.
@@ -979,11 +964,11 @@ Create a new watched channel
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, Funding UDT type script
-* `local_settlement_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to settle the commitment transaction
-* `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to settle the commitment transaction
-* `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key
-* `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key
-* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+* `local_settlement_key` - <em>`String`</em>, The local party's private key used to settle the commitment transaction (hex string)
+* `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to settle the commitment transaction (hex without 0x prefix)
+* `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
+* `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
+* `settlement_data` - <em>`serde_json::Value`</em>, Settlement data (serialized)
 
 ##### Returns
 
@@ -1018,8 +1003,8 @@ Update revocation
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
-* `revocation_data` - <em>[RevocationData](#type-revocationdata)</em>, Revocation data
-* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+* `revocation_data` - <em>`serde_json::Value`</em>, Revocation data (serialized)
+* `settlement_data` - <em>`serde_json::Value`</em>, Settlement data (serialized)
 
 ##### Returns
 
@@ -1037,7 +1022,7 @@ Update pending remote settlement
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
-* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+* `settlement_data` - <em>`serde_json::Value`</em>, Settlement data (serialized)
 
 ##### Returns
 
@@ -1055,7 +1040,7 @@ Update settlement
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
-* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+* `settlement_data` - <em>`serde_json::Value`</em>, Settlement data (serialized)
 
 ##### Returns
 
@@ -1117,11 +1102,11 @@ The attributes of the invoice.
 * `ExpiryTime` - <em>`std::time::Duration`</em>, The expiry time of the invoice, in seconds
 * `Description` - <em>`String`</em>, The description of the invoice
 * `FallbackAddr` - <em>`String`</em>, The fallback address of the invoice
-* `UdtScript` - <em>[CkbScript](#type-ckbscript)</em>, The udt type script of the invoice
-* `PayeePublicKey` - <em>`PublicKey`</em>, The payee public key of the invoice
+* `UdtScript` - <em>`String`</em>, The udt type script of the invoice (serialized as 0x-prefixed hex of molecule bytes)
+* `PayeePublicKey` - <em>[Pubkey](#type-pubkey)</em>, The payee public key of the invoice (validated compressed secp256k1 key, hex without 0x prefix)
 * `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
 * `Feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
-* `PaymentSecret` - <em>[Hash256](#type-hash256)</em>, The payment secret of the invoice
+* `PaymentSecret` - <em>`String`</em>, The payment secret of the invoice
 ---
 
 <a id="#type-cchinvoice"></a>
@@ -1138,8 +1123,8 @@ The generated proxy invoice for the incoming payment.
 
 #### Enum with values of
 
-* `Fiber` - <em>[CkbInvoice](#type-ckbinvoice)</em>, Fiber invoice that once paid, the hub will send the outgoing payment to Lightning
-* `Lightning` - <em>`Bolt11Invoice`</em>, Lightning invoice that once paid, the hub will send the outgoing payment to Fiber
+* `Fiber` - <em>`String`</em>, Fiber invoice string
+* `Lightning` - <em>`String`</em>, Lightning invoice string
 ---
 
 <a id="#type-cchorderstatus"></a>
@@ -1222,29 +1207,30 @@ The Channel information.
 
 The state of a channel.
 
+ Serialized with adjacently-tagged representation using PascalCase variant names.
+ This is different from the internal `ChannelState` in fiber-types which uses
+ default serde for bincode compatibility.
+
 
 #### Enum with values of
 
-* `NegotiatingFunding` - <em>`NegotiatingFundingFlags`</em>, We are negotiating the parameters required for the channel prior to funding it.
-* `CollaboratingFundingTx` - <em>`CollaboratingFundingTxFlags`</em>, We're collaborating with the other party on the funding transaction.
-* `SigningCommitment` - <em>`SigningCommitmentFlags`</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
-* `AwaitingTxSignatures` - <em>`AwaitingTxSignaturesFlags`</em>, We've received and sent `commitment_signed` and are now waiting for both
+* `NegotiatingFunding` - <em>[HexU32](#type-hexu32)</em>, We are negotiating the parameters required for the channel prior to funding it.
+* `CollaboratingFundingTx` - <em>[HexU32](#type-hexu32)</em>, We're collaborating with the other party on the funding transaction.
+* `SigningCommitment` - <em>[HexU32](#type-hexu32)</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
+* `AwaitingTxSignatures` - <em>[HexU32](#type-hexu32)</em>, We've received and sent `commitment_signed` and are now waiting for both
  party to collaborate on creating a valid funding transaction.
-* `AwaitingChannelReady` - <em>`AwaitingChannelReadyFlags`</em>, We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
+* `AwaitingChannelReady` - <em>[HexU32](#type-hexu32)</em>, We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
  funding transaction to confirm.
 * `ChannelReady` - Both we and our counterparty consider the funding transaction confirmed and the channel is
  now operational.
-* `ShuttingDown` - <em>`ShuttingDownFlags`</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-* `Closed` - <em>`CloseFlags`</em>, This channel is closed.
+* `ShuttingDown` - <em>[HexU32](#type-hexu32)</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
+* `Closed` - <em>[HexU32](#type-hexu32)</em>, This channel is closed.
 ---
 
 <a id="#type-channelupdateinfo"></a>
 ### Type `ChannelUpdateInfo`
 
 The channel update info with a single direction of channel.
-
- This is a pure data struct used by both the internal graph representation
- and the RPC JSON response types.
 
 
 #### Fields
@@ -1271,14 +1257,14 @@ Represents a syntactically and semantically correct lightning BOLT11 invoice.
 
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice
 * `amount` - <em>`Option<u128>`</em>, The amount of the invoice
-* `signature` - <em>Option<[InvoiceSignature](#type-invoicesignature)></em>, The signature of the invoice
+* `signature` - <em>`Option<String>`</em>, The signature of the invoice (hex encoded)
 * `data` - <em>[InvoiceData](#type-invoicedata)</em>, The invoice data, including the payment hash, timestamp and other attributes
 ---
 
 <a id="#type-ckbinvoicestatus"></a>
 ### Type `CkbInvoiceStatus`
 
-The currency of the invoice, can also used to represent the CKB network chain.
+The status of an invoice.
 
 
 #### Enum with values of
@@ -1321,8 +1307,7 @@ The result of a get_payment command, which includes the payment hash, status, ti
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
- The router is a list of nodes that the payment will go through.
- If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes.
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
@@ -1331,7 +1316,10 @@ The result of a get_payment command, which includes the payment hash, status, ti
 <a id="#type-hash256"></a>
 ### Type `Hash256`
 
-A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
+A 256-bit hash (32 bytes), serialized as `0x`-prefixed hex string.
+
+ On deserialization, both `0x`-prefixed and non-prefixed hex strings are accepted.
+ No domain-specific validation is performed — the only check is hex format and 32-byte length.
 
 
 
@@ -1407,15 +1395,6 @@ The metadata of the invoice.
 * `attrs` - <em>Vec<[Attribute](#type-attribute)></em>, The attributes of the invoice, e.g. description, expiry time, etc.
 ---
 
-<a id="#type-invoicesignature"></a>
-### Type `InvoiceSignature`
-
-Recoverable signature
-
-
-
----
-
 <a id="#type-nodeinfo"></a>
 ### Type `NodeInfo`
 
@@ -1426,7 +1405,7 @@ The Node information.
 
 * `node_name` - <em>`String`</em>, The name of the node.
 * `version` - <em>`String`</em>, The version of the node.
-* `addresses` - <em>`Vec<MultiAddr>`</em>, The addresses of the node.
+* `addresses` - <em>`Vec<String>`</em>, The addresses of the node (serialized as strings).
 * `features` - <em>`Vec<String>`</em>, The node features supported by the node.
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
 * `timestamp` - <em>`u64`</em>, The latest timestamp set by the owner for the node announcement.
@@ -1470,12 +1449,8 @@ The status of a payment, will update as the payment progresses.
 
 * `Created` - Initial status. A payment session is created, but no HTLC has been dispatched.
 * `Inflight` - The first hop AddTlc is sent successfully and waiting for the response.
-
- > **MPP Logic**: Status `Inflight` means at least one attempt is still not in `Success`, payment needs more retrying or waiting for HTLC settlement.
-* `Success` - The payment is finished. All related HTLCs are successfully settled,
- and the aggregate amount equals the total requested amount.
-* `Failed` - The payment session has terminated. HTLCs have failed and the target
- amount cannot be fulfilled after exhausting all retries.
+* `Success` - The payment is finished. All related HTLCs are successfully settled.
+* `Failed` - The payment session has terminated.
 ---
 
 <a id="#type-peerinfo"></a>
@@ -1487,26 +1462,19 @@ The information about a peer connected to the node.
 #### Fields
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer.
-* `address` - <em>`MultiAddr`</em>, The multi-address associated with the connecting peer.
+* `address` - <em>`String`</em>, The multi-address associated with the connecting peer (as a string).
  Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
  The `graph_nodes` in Graph rpc module will return all addresses of the peer.
----
-
-<a id="#type-privkey"></a>
-### Type `Privkey`
-
-A wrapper for secp256k1 secret key
-
-
-
 ---
 
 <a id="#type-pubkey"></a>
 ### Type `Pubkey`
 
-A compressed secp256k1 public key (33 bytes), used as the primary identity of a node.
- In the RPC interface this value is exposed as fields such as `pubkey`.
- It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
+A compressed public key (33 bytes), serialized as hex without `0x` prefix.
+
+ On deserialization, only hex format and 33-byte length are checked (no secp256k1 validation).
+ Both `0x`-prefixed and non-prefixed hex strings are accepted on input.
+ Cryptographic validation is left to the RPC layer's conversion to internal `Pubkey`.
 
 
 
@@ -1524,26 +1492,11 @@ The reason for removing a TLC.
 * `RemoveTlcFail` - The reason for removing the TLC is that it failed
 ---
 
-<a id="#type-revocationdata"></a>
-### Type `RevocationData`
-
-Data needed to revoke an outdated commitment transaction.
-
-
-#### Fields
-
-* `commitment_number` - <em>`u64`</em>, The commitment transaction version number that was revoked
-* `aggregated_signature` - <em>`CompactSignature`</em>, The aggregated signature from both parties that authorizes the revocation
-* `output` - <em>`CellOutput`</em>, The output cell from the revoked commitment transaction
-* `output_data` - <em>`Bytes`</em>, The associated data for the output cell (e.g., UDT amount for token transfers)
----
-
 <a id="#type-routerhop"></a>
 ### Type `RouterHop`
 
 A router hop information for a payment, a paymenter router is an array of RouterHop,
  a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
- Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
 
 
 #### Fields
@@ -1551,87 +1504,37 @@ A router hop information for a payment, a paymenter router is an array of Router
 * `target` - <em>[Pubkey](#type-pubkey)</em>, The node that is sending the TLC to the next node.
 * `channel_outpoint` - <em>`OutPoint`</em>, The channel of this hop used to receive TLC
 * `amount_received` - <em>`u128`</em>, The amount that the source node will transfer to the target node.
- We have already added up all the fees along the path, so this amount can be used directly for the TLC.
 * `incoming_tlc_expiry` - <em>`u64`</em>, The expiry for the TLC that the source node sends to the target node.
- We have already added up all the expiry deltas along the path,
- the only thing missing is current time. So the expiry is the current time plus the expiry delta.
 ---
 
 <a id="#type-sessionroute"></a>
 ### Type `SessionRoute`
 
 The router is a list of nodes that the payment will go through.
- We store in the payment session and then will use it to track the payment history.
- The router is a list of nodes that the payment will go through.
- For example:
-    `A(amount, channel) -> B -> C -> D`
- means A will send `amount` with `channel` to B.
 
 
 #### Fields
 
-* `nodes` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, the nodes in the route
+* `nodes` - <em>Vec<[SessionRouteNode](#type-sessionroutenode)></em>, The nodes in the route
 ---
 
 <a id="#type-sessionroutenode"></a>
 ### Type `SessionRouteNode`
 
-The node and channel information in a payment route hop
+The node and channel information in a payment route hop.
 
 
 #### Fields
 
-* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, the public key of the node
-* `amount` - <em>`u128`</em>, the amount for this hop
-* `channel_outpoint` - <em>`OutPoint`</em>, the channel outpoint for this hop
----
-
-<a id="#type-settlementdata"></a>
-### Type `SettlementData`
-
-Data needed to authorize and execute a settlement transaction.
-
-
-#### Fields
-
-* `local_amount` - <em>`u128`</em>, The total amount of CKB/UDT being settled for the local party
-* `remote_amount` - <em>`u128`</em>, The total amount of CKB/UDT being settled for the remote party
-* `tlcs` - <em>Vec<[SettlementTlc](#type-settlementtlc)></em>, The list of pending Time-Locked Contracts (TLCs) included in this settlement
----
-
-<a id="#type-settlementtlc"></a>
-### Type `SettlementTlc`
-
-Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
-
-
-#### Fields
-
-* `tlc_id` - <em>[TLCId](#type-tlcid)</em>, The ID of the TLC (either offered or received)
-* `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm used for the TLC
-* `payment_amount` - <em>`u128`</em>, The amount of CKB/UDT involved in the TLC
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the payment preimage
-* `expiry` - <em>`u64`</em>, The expiry time for the TLC in milliseconds
-* `local_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to sign the TLC
-* `remote_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to verify the TLC
----
-
-<a id="#type-tlcid"></a>
-### Type `TLCId`
-
-The id of a tlc, it can be either offered or received.
-
-
-#### Enum with values of
-
-* `Offered` - <em>`u64`</em>, Offered tlc id
-* `Received` - <em>`u64`</em>, Received tlc id
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the node
+* `amount` - <em>`u128`</em>, The amount for this hop
+* `channel_outpoint` - <em>`OutPoint`</em>, The channel outpoint for this hop
 ---
 
 <a id="#type-tlcstatus"></a>
 ### Type `TlcStatus`
 
-The status of a tlc
+The status of a tlc.
 
 
 #### Enum with values of

@@ -31,6 +31,10 @@ use crate::tests::test_utils::*;
 use crate::NetworkServiceEvent;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_json_types::serde_utils::Hash256 as JsonHash256;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::Hash256 as InternalHash256;
 use fiber_types::HashAlgorithm;
 use fiber_types::HopHint;
 use fiber_types::RemoveTlcFulfill;
@@ -7133,14 +7137,14 @@ async fn test_tlc_removed_while_waiting_for_forwarding_result() {
 
     let invoice_params = NewInvoiceParams {
         amount,
-        payment_preimage: Some(preimage),
+        payment_preimage: Some(JsonHash256::from(&preimage)),
         description: Some("Description".to_string()),
         ..Default::default()
     };
 
     let invoice_result = node_2.gen_invoice(invoice_params).await;
     let invoice = invoice_result.invoice;
-    let payment_hash = invoice.data.payment_hash;
+    let payment_hash = InternalHash256::from(&invoice.data.payment_hash);
     let invoice_address = invoice_result.invoice_address;
 
     let res = node_0
@@ -7187,7 +7191,7 @@ async fn test_tlc_removed_while_waiting_for_forwarding_result() {
     };
     let invoice_result2 = node_2.gen_invoice(invoice_params2).await;
     let invoice2 = invoice_result2.invoice;
-    let payment_hash2 = invoice2.data.payment_hash;
+    let payment_hash2 = InternalHash256::from(&invoice2.data.payment_hash);
     let invoice_address2 = invoice_result2.invoice_address;
 
     let res2 = node_0

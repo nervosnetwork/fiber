@@ -6,23 +6,26 @@ use crate::fiber::{
     network::{AcceptChannelCommand, OpenChannelCommand, PendingAcceptChannel},
     NetworkActorCommand, NetworkActorMessage,
 };
+use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{handle_actor_call, log_and_error};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
     prelude::{IntoTransactionView, Unpack},
 };
+use fiber_json_types::serde_utils::{Hash256 as JsonHash256, Pubkey as JsonPubkey};
 use fiber_types::{ChannelOpeningStatus, CloseFlags, NegotiatingFundingFlags, TLCId};
+use fiber_types::{Hash256, Pubkey};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 
-use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
+use jsonrpsee::types::ErrorObjectOwned;
 use ractor::{call, ActorRef};
 use std::cmp::Reverse;
 
 pub use fiber_json_types::{
     AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelState, Htlc,
     ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
-    ShutdownChannelParams, UpdateChannelParams,
+    ShutdownChannelParams, TlcStatus as JsonTlcStatus, UpdateChannelParams,
 };
 
 /// RPC module for channel management.
@@ -72,16 +75,16 @@ trait ChannelRpc {
 /// They have no `ChannelActorState` yet since `create_inbound_channel` has not been called.
 fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
     Channel {
-        channel_id: pending.channel_id,
+        channel_id: JsonHash256::from(&pending.channel_id),
         // The accepting node is the non-initiator, so is_acceptor = true
         is_acceptor: true,
         is_public: false,
         is_one_way: false,
         channel_outpoint: None,
-        pubkey: pending.pubkey,
+        pubkey: JsonPubkey::from(&pending.pubkey),
         funding_udt_type_script: pending.udt_type_script.map(Into::into),
         // Report as NegotiatingFunding since we're still awaiting local acceptance
-        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
+        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty().bits().into()),
         // The remote peer's funding amount is what they're contributing
         local_balance: 0,
         remote_balance: pending.funding_amount,
@@ -165,10 +168,11 @@ where
         &self,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
+        let pubkey = Pubkey::try_from(&params.pubkey).rpc_err(&params)?;
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
-                    pubkey: params.pubkey,
+                    pubkey,
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(true),
                     one_way: params.one_way.unwrap_or(false),
@@ -192,7 +196,7 @@ where
             ))
         };
         handle_actor_call!(self.actor, message, params).map(|response| OpenChannelResult {
-            temporary_channel_id: response.channel_id,
+            temporary_channel_id: JsonHash256::from(&response.channel_id),
         })
     }
 
@@ -200,10 +204,11 @@ where
         &self,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
+        let temp_channel_id = Hash256::from(&params.temporary_channel_id);
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
-                    temp_channel_id: params.temporary_channel_id,
+                    temp_channel_id,
                     funding_amount: params.funding_amount,
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     max_tlc_number_in_flight: params.max_tlc_number_in_flight,
@@ -217,7 +222,7 @@ where
         };
 
         handle_actor_call!(self.actor, message, params).map(|response| AcceptChannelResult {
-            channel_id: response.new_channel_id,
+            channel_id: JsonHash256::from(&response.new_channel_id),
         })
     }
 
@@ -225,11 +230,9 @@ where
         &self,
         params: AbandonChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
+        let channel_id = Hash256::from(&params.channel_id);
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(
-                params.channel_id,
-                rpc_reply,
-            ))
+            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id, rpc_reply))
         };
         handle_actor_call!(self.actor, message, params)
     }
@@ -240,17 +243,23 @@ where
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
         let only_pending = params.only_pending.unwrap_or_default();
         let include_closed = params.include_closed.unwrap_or_default();
-        let filter_pubkey = params.pubkey;
+
+        // Convert the optional String pubkey filter to internal Pubkey
+        let filter_pubkey = params
+            .pubkey
+            .as_ref()
+            .map(Pubkey::try_from)
+            .transpose()
+            .rpc_err(&params)?;
 
         // The two filter options are mutually exclusive: `only_pending` narrows to channels
         // that are still opening (or failed to open), while `include_closed` broadens to
         // all channels including successfully closed ones. Allowing both simultaneously
         // would produce confusing results.
         if only_pending && include_closed {
-            return Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
+            return Err(rpc_error(
                 "only_pending and include_closed are mutually exclusive",
-                Some(params),
+                params,
             ));
         }
 
@@ -269,7 +278,7 @@ where
                 self.store
                     .get_channel_actor_state(&channel_id)
                     .and_then(|state| {
-                        let rpc_state: ChannelState = state.state.into();
+                        let rpc_state = ChannelState::from(state.state);
                         // When only_pending is set, skip channels that are not in a pending state
                         if only_pending && !rpc_state.is_pending() {
                             return None;
@@ -280,12 +289,12 @@ where
                             .get_channel_open_record(&channel_id)
                             .and_then(|r| r.failure_detail);
                         Some(Channel {
-                            channel_id,
+                            channel_id: JsonHash256::from(&channel_id),
                             is_public: state.is_public(),
                             is_acceptor: state.is_acceptor,
                             is_one_way: state.is_one_way,
                             channel_outpoint: state.get_funding_transaction_outpoint(),
-                            pubkey: state.remote_pubkey,
+                            pubkey: JsonPubkey::from(&state.remote_pubkey),
                             funding_udt_type_script: state
                                 .funding_udt_type_script
                                 .clone()
@@ -307,12 +316,12 @@ where
                                         id,
                                         amount: tlc.amount,
                                         expiry: tlc.expiry,
-                                        payment_hash: tlc.payment_hash,
+                                        payment_hash: JsonHash256::from(&tlc.payment_hash),
                                         forwarding_channel_id: tlc
                                             .forwarding_tlc
-                                            .map(|(channel_id, _)| channel_id),
+                                            .map(|(channel_id, _)| JsonHash256::from(&channel_id)),
                                         forwarding_tlc_id: tlc.forwarding_tlc.map(|(_, id)| id),
-                                        status: tlc.status.clone(),
+                                        status: JsonTlcStatus::from(&tlc.status),
                                     }
                                 })
                                 .collect(),
@@ -365,19 +374,21 @@ where
                     continue;
                 }
                 // Apply pubkey filter if provided
-                if let Some(filter_pubkey) = filter_pubkey.as_ref() {
-                    if filter_pubkey != &record.pubkey {
+                if let Some(ref filter_pk) = filter_pubkey {
+                    if filter_pk != &record.pubkey {
                         continue;
                     }
                 }
                 // Map the ChannelOpenRecord status to the closest ChannelState representation.
                 let synthetic_state = match record.status {
                     ChannelOpeningStatus::Failed => {
-                        ChannelState::Closed(CloseFlags::FUNDING_ABORTED)
+                        ChannelState::Closed(CloseFlags::FUNDING_ABORTED.bits().into())
                     }
                     // Any other in-progress status: show as NegotiatingFunding since we lack
                     // the exact channel sub-state when the actor hasn't yet stored its state.
-                    _ => ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT),
+                    _ => ChannelState::NegotiatingFunding(
+                        NegotiatingFundingFlags::OUR_INIT_SENT.bits().into(),
+                    ),
                 };
                 // For outbound channels the local node contributes funding_amount.
                 // For inbound channels (post-failure) funding_amount was the remote peer's share.
@@ -387,12 +398,12 @@ where
                     (record.funding_amount, 0u128)
                 };
                 channels.push(Channel {
-                    channel_id: record.channel_id,
+                    channel_id: JsonHash256::from(&record.channel_id),
                     is_public: false,
                     is_acceptor: record.is_acceptor,
                     is_one_way: false,
                     channel_outpoint: None,
-                    pubkey: record.pubkey,
+                    pubkey: JsonPubkey::from(&record.pubkey),
                     funding_udt_type_script: None,
                     state: synthetic_state,
                     local_balance,
@@ -423,8 +434,8 @@ where
             };
             for pending in pending_accept {
                 // Apply pubkey filter if provided
-                if let Some(filter_pubkey) = filter_pubkey.as_ref() {
-                    if filter_pubkey != &pending.pubkey {
+                if let Some(ref filter_pk) = filter_pubkey {
+                    if filter_pk != &pending.pubkey {
                         continue;
                     }
                 }
@@ -452,20 +463,20 @@ where
         if params.force.unwrap_or_default()
             && (params.close_script.is_some() || params.fee_rate.is_some())
         {
-            return Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
+            return Err(rpc_error(
                 "close_script and fee_rate should not be set when force is true",
-                Some(params),
+                params,
             ));
         }
 
+        let channel_id = Hash256::from(&params.channel_id);
         let close_script = params.close_script.clone().map(|s| s.into());
         let fee_rate = params.fee_rate.map(FeeRate::from_u64);
 
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
-                    channel_id: params.channel_id,
+                    channel_id,
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
                             close_script,
@@ -484,10 +495,11 @@ where
         &self,
         params: UpdateChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
+        let channel_id = Hash256::from(&params.channel_id);
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
-                    channel_id: params.channel_id,
+                    channel_id,
                     command: ChannelCommand::Update(
                         UpdateCommand {
                             enabled: params.enabled,

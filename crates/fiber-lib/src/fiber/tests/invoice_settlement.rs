@@ -8,6 +8,7 @@ use crate::tests::test_utils::{
     create_n_nodes_network, create_n_nodes_network_with_params, gen_rpc_config, init_tracing,
     ChannelParameters, NetworkNode, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
 };
+use fiber_json_types::serde_utils::Hash256 as JsonHash256;
 use fiber_types::Hash256;
 use fiber_types::HashAlgorithm;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -207,14 +208,14 @@ async fn test_send_payment_with_hold_invoice_workflow() {
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let payment_preimage = gen_rand_sha256_hash();
-    let payment_hash = HashAlgorithm::CkbHash
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash
         .hash(payment_preimage.as_ref())
         .into();
     let invoice = node_1
         .gen_invoice(NewInvoiceParams {
             amount: 1000,
             description: Some("test invoice".to_string()),
-            payment_hash: Some(payment_hash),
+            payment_hash: Some(JsonHash256::from(&payment_hash)),
             ..Default::default()
         })
         .await;
@@ -277,7 +278,7 @@ async fn test_cancel_hold_invoice_fails_pending_tlcs() {
         .gen_invoice(NewInvoiceParams {
             amount: 1000,
             description: Some("hold invoice to cancel".to_string()),
-            payment_hash: Some(payment_hash),
+            payment_hash: Some(JsonHash256::from(&payment_hash)),
             ..Default::default()
         })
         .await;

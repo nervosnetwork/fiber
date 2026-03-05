@@ -1,5 +1,6 @@
 // #[cfg(not(target_arch = "wasm32"))]
 // use crate::watchtower::WatchtowerStore;
+use crate::rpc::utils::rpc_error;
 use crate::{
     fiber::{
         channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
@@ -8,12 +9,15 @@ use crate::{
     handle_actor_cast,
 };
 use ckb_types::core::TransactionView;
+use ckb_types::prelude::Entity;
+use fiber_json_types::serde_utils::Hash256 as JsonHash256;
 use fiber_types::{
-    AddTlcCommand, Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+    AddTlcCommand, Hash256, HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode,
+    NO_SHARED_SECRET,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
-use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
+use jsonrpsee::types::ErrorObjectOwned;
 
 use ractor::call;
 use std::str::FromStr;
@@ -129,9 +133,10 @@ impl DevRpcServerImpl {
         &self,
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned> {
+        let channel_id = Hash256::from(&params.channel_id);
         let message = NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
-                channel_id: params.channel_id,
+                channel_id,
                 command: ChannelCommand::CommitmentSigned(),
             },
         ));
@@ -139,17 +144,25 @@ impl DevRpcServerImpl {
     }
 
     pub async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
+        let channel_id = Hash256::from(&params.channel_id);
+        let payment_hash = Hash256::from(&params.payment_hash);
+        let hash_algorithm = params
+            .hash_algorithm
+            .as_ref()
+            .map(HashAlgorithm::from)
+            .unwrap_or_default();
+
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
-                    channel_id: params.channel_id,
+                    channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
                             amount: params.amount,
-                            payment_hash: params.payment_hash,
+                            payment_hash,
                             attempt_id: None,
                             expiry: params.expiry,
-                            hash_algorithm: params.hash_algorithm.unwrap_or_default(),
+                            hash_algorithm,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
                             is_trampoline_hop: false,
@@ -166,6 +179,7 @@ impl DevRpcServerImpl {
     }
 
     pub async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
+        let channel_id = Hash256::from(&params.channel_id);
         let err_code = match &params.reason {
             RemoveTlcReason::RemoveTlcFail { error_code } => {
                 let Ok(err) = TlcErrorCode::from_str(error_code) else {
@@ -175,33 +189,31 @@ impl DevRpcServerImpl {
             }
             _ => None,
         };
+        let reason = match &params.reason {
+            RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
+                let preimage = Hash256::from(payment_preimage);
+                crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                    payment_preimage: preimage,
+                })
+            }
+            RemoveTlcReason::RemoveTlcFail { .. } => {
+                // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
+                crate::fiber::types::RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(err_code.expect("expect error code")),
+                    // Do not encrypt the error message when removing the TLC via RPC.
+                    // TODO: use tlc id to look up the shared secret in the store
+                    &NO_SHARED_SECRET,
+                ))
+            }
+        };
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
-                    channel_id: params.channel_id,
+                    channel_id,
                     command: ChannelCommand::RemoveTlc(
                         RemoveTlcCommand {
                             id: params.tlc_id,
-                            reason: match &params.reason {
-                                RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
-                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(
-                                        RemoveTlcFulfill {
-                                            payment_preimage: *payment_preimage,
-                                        },
-                                    )
-                                }
-                                RemoveTlcReason::RemoveTlcFail { .. } => {
-                                    // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
-                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
-                                        TlcErrPacket::new(
-                                            TlcErr::new(err_code.expect("expect error code")),
-                                            // Do not encrypt the error message when removing the TLC via RPC.
-                                            // TODO: use tlc id to look up the shared secret in the store
-                                            &NO_SHARED_SECRET,
-                                        ),
-                                    )
-                                }
-                            },
+                            reason,
                         },
                         rpc_reply,
                     ),
@@ -216,11 +228,12 @@ impl DevRpcServerImpl {
         &self,
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned> {
+        let channel_id = Hash256::from(&params.channel_id);
         if let Some(tx) = self
             .commitment_txs
             .read()
             .await
-            .get(&(params.channel_id, params.commitment_number))
+            .get(&(channel_id, params.commitment_number))
         {
             if let Err(err) = call_t!(
                 &self.ckb_chain_actor,
@@ -230,21 +243,18 @@ impl DevRpcServerImpl {
             )
             .unwrap()
             {
-                Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    err.to_string(),
-                    Some(params),
-                ))
+                Err(rpc_error(err.to_string(), params))
             } else {
                 Ok(SubmitCommitmentTransactionResult {
-                    tx_hash: tx.hash().into(),
+                    tx_hash: JsonHash256(
+                        tx.hash().as_slice().try_into().expect("Byte32 is 32 bytes"),
+                    ),
                 })
             }
         } else {
-            Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
+            Err(rpc_error(
                 "Commitment transaction not found".to_string(),
-                Some(params),
+                params,
             ))
         }
     }
@@ -253,9 +263,9 @@ impl DevRpcServerImpl {
         &self,
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(
-            params.channel_id,
-        ));
+        let channel_id = Hash256::from(&params.channel_id);
+        let message =
+            NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(channel_id));
 
         handle_actor_cast!(self.network_actor, message, params)
     }

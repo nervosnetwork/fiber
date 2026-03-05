@@ -8,23 +8,24 @@ description = "RPC JSON request/response types for the Fiber Network"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_with = { version = "3.7", features = ["macros"] }
-
-# Core domain types
-fiber-types = { path = "../fiber-types", features = ["watchtower"] }
+serde_json = "1.0"
+hex = "0.4"
 
 # CKB types
 ckb-jsonrpc-types = "1"
 ckb-types = "1"
 
-# Cryptography (for PublicKey in invoice Attribute)
-secp256k1 = { version = "0.30.0", features = ["serde"] }
+# Molecule (for EntityHex serialization of OutPoint)
+molecule = "0.8"
 
-# Network (for MultiAddr in peer/graph types)
-tentacle-multiaddr = "0.3"
+# Optional: conversion feature deps
+fiber-types = { path = "../fiber-types", optional = true }
 
 [features]
 default = []
-cch = ["fiber-types/cch"]
+cch = []
+conversion = ["fiber-types"]
+all = ["conversion", "cch", "fiber-types/cch"]
 
 [lints.clippy]
 expect-fun-call = "allow"

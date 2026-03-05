@@ -5,10 +5,15 @@ use crate::fiber::{
     channel::ChannelActorStateStore, payment::SendPaymentCommand, NetworkActorCommand,
     NetworkActorMessage,
 };
+use crate::rpc::utils::RpcResultExt;
 use crate::{handle_actor_call, log_and_error};
+use fiber_json_types::serde_utils::Hash256 as JsonHash256;
+use fiber_json_types::{
+    PaymentCustomRecords as JsonPaymentCustomRecords, PaymentStatus as JsonPaymentStatus,
+    RouterHop as JsonRouterHop, SessionRoute as JsonSessionRoute,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
-use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use ractor::{call, ActorRef};
@@ -130,6 +135,30 @@ where
     }
 }
 
+/// Helper to convert an internal SendPaymentResponse to the JSON result type.
+fn send_payment_response_to_json(
+    response: &crate::fiber::network::SendPaymentResponse,
+) -> GetPaymentCommandResult {
+    GetPaymentCommandResult {
+        payment_hash: JsonHash256::from(&response.payment_hash),
+        status: JsonPaymentStatus::from(&response.status),
+        created_at: response.created_at,
+        last_updated_at: response.last_updated_at,
+        failed_error: response.failed_error.clone(),
+        fee: response.fee,
+        custom_records: response
+            .custom_records
+            .as_ref()
+            .map(JsonPaymentCustomRecords::from),
+        #[cfg(debug_assertions)]
+        routers: response
+            .routers
+            .iter()
+            .map(JsonSessionRoute::from)
+            .collect(),
+    }
+}
+
 impl<S> PaymentRpcServerImpl<S>
 where
     S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
@@ -138,12 +167,45 @@ where
         &self,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let target_pubkey = params
+            .target_pubkey
+            .as_ref()
+            .map(fiber_types::Pubkey::try_from)
+            .transpose()
+            .rpc_err(&params)?;
+        let payment_hash = params.payment_hash.as_ref().map(fiber_types::Hash256::from);
+        let trampoline_hops = params
+            .trampoline_hops
+            .as_ref()
+            .map(|hops| {
+                hops.iter()
+                    .map(fiber_types::Pubkey::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .rpc_err(&params)?;
+        let custom_records = params
+            .custom_records
+            .as_ref()
+            .map(fiber_types::PaymentCustomRecords::from);
+        let hop_hints = params
+            .hop_hints
+            .as_ref()
+            .map(|hints| {
+                hints
+                    .iter()
+                    .map(fiber_types::HopHint::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .rpc_err(&params)?;
+
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
                 SendPaymentCommand {
-                    target_pubkey: params.target_pubkey,
+                    target_pubkey,
                     amount: params.amount,
-                    payment_hash: params.payment_hash,
+                    payment_hash,
                     final_tlc_expiry_delta: params.final_tlc_expiry_delta,
                     tlc_expiry_limit: params.tlc_expiry_limit,
                     invoice: params.invoice.clone(),
@@ -151,69 +213,49 @@ where
                     max_fee_amount: params.max_fee_amount,
                     max_fee_rate: params.max_fee_rate,
                     max_parts: params.max_parts,
-                    trampoline_hops: params.trampoline_hops.clone(),
+                    trampoline_hops,
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
-                    custom_records: params.custom_records.clone().map(|records| records.into()),
-                    hop_hints: params
-                        .hop_hints
-                        .clone()
-                        .map(|hints| hints.into_iter().map(|hint| hint.into()).collect()),
+                    custom_records,
+                    hop_hints,
                     dry_run: params.dry_run.unwrap_or(false),
                 },
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
-            payment_hash: response.payment_hash,
-            status: response.status,
-            created_at: response.created_at,
-            last_updated_at: response.last_updated_at,
-            failed_error: response.failed_error,
-            fee: response.fee,
-            custom_records: response
-                .custom_records
-                .map(|records| PaymentCustomRecords { data: records.data }),
-            #[cfg(debug_assertions)]
-            routers: response.routers.clone(),
-        })
+        handle_actor_call!(self.actor, message, params)
+            .map(|response| send_payment_response_to_json(&response))
     }
 
     pub async fn get_payment(
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let payment_hash = fiber_types::Hash256::from(&params.payment_hash);
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(
-                params.payment_hash,
-                rpc_reply,
-            ))
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
         };
-        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
-            payment_hash: response.payment_hash,
-            status: response.status,
-            last_updated_at: response.last_updated_at,
-            created_at: response.created_at,
-            failed_error: response.failed_error,
-            fee: response.fee,
-            custom_records: response
-                .custom_records
-                .map(|records| PaymentCustomRecords { data: records.data }),
-            #[cfg(debug_assertions)]
-            routers: response.routers.clone(),
-        })
+        handle_actor_call!(self.actor, message, params)
+            .map(|response| send_payment_response_to_json(&response))
     }
 
     pub async fn build_router(
         &self,
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
+        let hops_info: Vec<_> = params
+            .hops_info
+            .iter()
+            .map(fiber_types::HopRequire::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .rpc_err(&params)?;
+
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
                 BuildRouterCommand {
                     amount: params.amount,
-                    hops_info: params.hops_info.clone(),
+                    hops_info,
                     udt_type_script: params.udt_type_script.clone().map(|x| x.into()),
                     final_tlc_expiry_delta: params.final_tlc_expiry_delta,
                 },
@@ -222,7 +264,11 @@ where
         };
 
         handle_actor_call!(self.actor, message, params).map(|response| BuildPaymentRouterResult {
-            router_hops: response.router_hops,
+            router_hops: response
+                .router_hops
+                .iter()
+                .map(JsonRouterHop::from)
+                .collect(),
         })
     }
 
@@ -230,33 +276,34 @@ where
         &self,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let payment_hash = params.payment_hash.as_ref().map(fiber_types::Hash256::from);
+        let router: Vec<_> = params
+            .router
+            .iter()
+            .map(fiber_types::RouterHop::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .rpc_err(&params)?;
+        let custom_records = params
+            .custom_records
+            .as_ref()
+            .map(fiber_types::PaymentCustomRecords::from);
+
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPaymentWithRouter(
                 SendPaymentWithRouterCommand {
-                    payment_hash: params.payment_hash,
-                    router: params.router.clone(),
+                    payment_hash,
+                    router,
                     invoice: params.invoice.clone(),
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
-                    custom_records: params.custom_records.clone().map(|records| records.into()),
+                    custom_records,
                     dry_run: params.dry_run.unwrap_or(false),
                 },
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
-            payment_hash: response.payment_hash,
-            status: response.status,
-            created_at: response.created_at,
-            last_updated_at: response.last_updated_at,
-            failed_error: response.failed_error,
-            fee: response.fee,
-            custom_records: response
-                .custom_records
-                .map(|records| PaymentCustomRecords { data: records.data }),
-            #[cfg(debug_assertions)]
-            routers: response.routers.clone(),
-        })
+        handle_actor_call!(self.actor, message, params)
+            .map(|response| send_payment_response_to_json(&response))
     }
 
     pub async fn list_payments(
@@ -266,27 +313,18 @@ where
         let default_limit: u64 = 15;
         let limit = params.limit.unwrap_or(default_limit) as usize;
 
-        let sessions =
-            self.store
-                .get_payment_sessions_with_limit(limit, params.after, params.status);
+        let after = params.after.as_ref().map(fiber_types::Hash256::from);
+        let status = params.status.as_ref().map(fiber_types::PaymentStatus::from);
+
+        let sessions = self
+            .store
+            .get_payment_sessions_with_limit(limit, after, status);
 
         let payments: Vec<GetPaymentCommandResult> = sessions
             .into_iter()
             .map(|session| {
                 let response: crate::fiber::network::SendPaymentResponse = session.into();
-                GetPaymentCommandResult {
-                    payment_hash: response.payment_hash,
-                    status: response.status,
-                    created_at: response.created_at,
-                    last_updated_at: response.last_updated_at,
-                    failed_error: response.failed_error,
-                    fee: response.fee,
-                    custom_records: response
-                        .custom_records
-                        .map(|records| PaymentCustomRecords { data: records.data }),
-                    #[cfg(debug_assertions)]
-                    routers: response.routers.clone(),
-                }
+                send_payment_response_to_json(&response)
             })
             .collect();
 

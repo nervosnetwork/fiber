@@ -3,6 +3,10 @@ use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::network::get_chain_hash;
 use ckb_jsonrpc_types::JsonBytes;
+use fiber_json_types::serde_utils::{Hash256 as JsonHash256, Pubkey};
+use fiber_json_types::{
+    ChannelUpdateInfo as JsonChannelUpdateInfo, UdtCfgInfos as JsonUdtCfgInfos,
+};
 use fiber_types::Cursor;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
@@ -16,35 +20,37 @@ pub use fiber_json_types::{
     NodeInfo, UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript,
 };
 
-impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
-    fn from(value: super::super::fiber::graph::NodeInfo) -> Self {
-        NodeInfo {
-            node_name: value.node_name.to_string(),
-            version: value.version,
-            addresses: value.addresses,
-            pubkey: value.node_id,
-            timestamp: value.timestamp,
-            features: value.features.enabled_features_names(),
-            chain_hash: get_chain_hash(),
-            auto_accept_min_ckb_funding_amount: value.auto_accept_min_ckb_funding_amount,
-            udt_cfg_infos: value.udt_cfg_infos.clone().into(),
-        }
+fn internal_node_info_to_json(value: crate::fiber::graph::NodeInfo) -> NodeInfo {
+    NodeInfo {
+        node_name: value.node_name.to_string(),
+        version: value.version,
+        addresses: value.addresses.iter().map(|a| a.to_string()).collect(),
+        pubkey: Pubkey::from(&value.node_id),
+        timestamp: value.timestamp,
+        features: value.features.enabled_features_names(),
+        chain_hash: JsonHash256::from(&get_chain_hash()),
+        auto_accept_min_ckb_funding_amount: value.auto_accept_min_ckb_funding_amount,
+        udt_cfg_infos: JsonUdtCfgInfos::from(&value.udt_cfg_infos),
     }
 }
 
-impl From<super::super::fiber::graph::ChannelInfo> for ChannelInfo {
-    fn from(channel_info: super::super::fiber::graph::ChannelInfo) -> Self {
-        ChannelInfo {
-            channel_outpoint: channel_info.out_point().clone(),
-            node1: channel_info.node1(),
-            node2: channel_info.node2(),
-            created_timestamp: channel_info.timestamp,
-            update_info_of_node1: channel_info.update_of_node1,
-            update_info_of_node2: channel_info.update_of_node2,
-            capacity: channel_info.capacity(),
-            chain_hash: get_chain_hash(),
-            udt_type_script: channel_info.udt_type_script().clone().map(|s| s.into()),
-        }
+fn internal_channel_info_to_json(channel_info: crate::fiber::graph::ChannelInfo) -> ChannelInfo {
+    ChannelInfo {
+        channel_outpoint: channel_info.out_point().clone(),
+        node1: Pubkey::from(&channel_info.node1()),
+        node2: Pubkey::from(&channel_info.node2()),
+        created_timestamp: channel_info.timestamp,
+        update_info_of_node1: channel_info
+            .update_of_node1
+            .as_ref()
+            .map(JsonChannelUpdateInfo::from),
+        update_info_of_node2: channel_info
+            .update_of_node2
+            .as_ref()
+            .map(JsonChannelUpdateInfo::from),
+        capacity: channel_info.capacity(),
+        chain_hash: JsonHash256::from(&get_chain_hash()),
+        udt_type_script: channel_info.udt_type_script().clone().map(|s| s.into()),
     }
 }
 
@@ -144,7 +150,7 @@ where
             .last()
             .map(|node| JsonBytes::from_vec(node.cursor().to_bytes().into()))
             .unwrap_or_default();
-        let nodes = nodes.into_iter().map(Into::into).collect();
+        let nodes = nodes.into_iter().map(internal_node_info_to_json).collect();
 
         Ok(GraphNodesResult { nodes, last_cursor })
     }
@@ -171,7 +177,10 @@ where
             .map(|node| JsonBytes::from_vec(node.cursor().to_bytes().into()))
             .unwrap_or_default();
 
-        let channels = channels.into_iter().map(Into::into).collect();
+        let channels = channels
+            .into_iter()
+            .map(internal_channel_info_to_json)
+            .collect();
         Ok(GraphChannelsResult {
             channels,
             last_cursor,
