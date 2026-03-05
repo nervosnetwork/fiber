@@ -1,3 +1,5 @@
+use crate::rpc::schema_as_uint_hex;
+
 use crate::{cch::CchMessage, invoice::Currency};
 use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, Hash256, U128Hex, U64Hex};
 use jsonrpsee::{
@@ -25,11 +27,11 @@ pub struct SendBTCParams {
 pub struct CchOrderResponse {
     /// Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub timestamp: u64,
     /// Relative expiry time in seconds from `created_at` that the order expires
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub expiry_delta_seconds: u64,
 
     /// Wrapped BTC type script
@@ -43,11 +45,11 @@ pub struct CchOrderResponse {
     pub payment_hash: Hash256,
     /// Amount required to pay in Satoshis, including fee
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub amount_sats: u128,
     /// Fee in Satoshis
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub fee_sats: u128,
     /// Order status
     pub status: CchOrderStatus,

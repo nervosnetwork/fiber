@@ -3,6 +3,8 @@
 //! We define CkbInvoice and its related types here only for the RPC interface.
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
+use crate::rpc::{schema_as_hex_no_prefix, schema_as_uint_hex, schema_as_uint_hex_optional};
+
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
@@ -31,15 +33,15 @@ use tentacle::secio::SecioKeyPair;
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     /// This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
     FinalHtlcTimeout(u64),
     #[serde(with = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     /// The expiry time of the invoice, in seconds
     ExpiryTime(Duration),
     /// The description of the invoice
@@ -49,7 +51,7 @@ pub enum Attribute {
     /// The udt type script of the invoice
     UdtScript(CkbScript),
     /// The payee public key of the invoice
-    PayeePublicKey(#[schemars(schema_with = "crate::rpc::schema_as_hex_no_prefix")] PublicKey),
+    PayeePublicKey(#[schemars(schema_with = "schema_as_hex_no_prefix")] PublicKey),
     /// The hash algorithm of the invoice
     HashAlgorithm(HashAlgorithm),
     /// The feature flags of the invoice
@@ -64,7 +66,7 @@ pub enum Attribute {
 pub struct InvoiceData {
     /// The timestamp of the invoice
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub timestamp: u128,
     /// The payment hash of the invoice
     pub payment_hash: Hash256,
@@ -84,7 +86,7 @@ pub struct CkbInvoice {
     /// The currency of the invoice
     pub currency: Currency,
     #[serde_as(as = "Option<U128Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     /// The amount of the invoice
     pub amount: Option<u128>,
     /// The signature of the invoice
@@ -141,7 +143,7 @@ impl From<InternalCkbInvoice> for CkbInvoice {
 pub struct NewInvoiceParams {
     /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub amount: u128,
     /// The description of the invoice.
     pub description: Option<String>,
@@ -153,14 +155,14 @@ pub struct NewInvoiceParams {
     pub payment_hash: Option<Hash256>,
     /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub expiry: Option<u64>,
     /// The fallback address of the invoice.
     pub fallback_address: Option<String>,
     /// The final HTLC timeout of the invoice, in milliseconds.
     /// Minimal value is 16 hours, and maximal value is 14 days.
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub final_expiry_delta: Option<u64>,
     /// The UDT type script of the invoice.
     pub udt_type_script: Option<Script>,

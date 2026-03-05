@@ -1,3 +1,5 @@
+use crate::rpc::{schema_as_hex_bytes, schema_as_uint_hex, schema_as_uint_hex_optional};
+
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::network::HopRequire;
@@ -52,18 +54,18 @@ pub struct GetPaymentCommandResult {
     /// The status of the payment
     pub status: PaymentStatus,
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     /// The time the payment was created at, in milliseconds from UNIX epoch
     created_at: u64,
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     /// The time the payment was last updated at, in milliseconds from UNIX epoch
     pub last_updated_at: u64,
     /// The error message if the payment failed
     pub failed_error: Option<String>,
     /// fee paid for the payment
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub fee: u128,
 
     /// The custom records to be included in the payment.
@@ -87,7 +89,7 @@ pub struct ListPaymentsParams {
     pub status: Option<PaymentStatus>,
     /// The maximum number of payments to return. Default is 15.
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub limit: Option<u64>,
     /// The payment hash to start returning payments after (exclusive cursor for pagination).
     pub after: Option<Hash256>,
@@ -183,7 +185,7 @@ pub struct SendPaymentCommandParams {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     /// If not set and there is a invoice, the amount will be set to the invoice amount
     #[serde_as(as = "Option<U128Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub amount: Option<u128>,
 
     /// the hash to use within the payment's HTLC.
@@ -194,14 +196,14 @@ pub struct SendPaymentCommandParams {
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub final_tlc_expiry_delta: Option<u64>,
 
     /// the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
     /// suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
     /// this is also the default value for the payment if this parameter is not provided
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub tlc_expiry_limit: Option<u64>,
 
     /// the encoded invoice to send to the recipient
@@ -209,23 +211,23 @@ pub struct SendPaymentCommandParams {
 
     /// the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub timeout: Option<u64>,
 
     /// the maximum fee amounts in shannons that the sender is willing to pay.
     /// Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
     #[serde_as(as = "Option<U128Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_fee_amount: Option<u128>,
 
     /// the maximum fee rate per thousand (‰), default is 5 (0.5%)
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_fee_rate: Option<u64>,
 
     /// max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_parts: Option<u64>,
 
     /// Optional explicit trampoline hops.
@@ -287,16 +289,16 @@ pub struct HopHint {
     pub pubkey: Pubkey,
     /// The outpoint of the channel
     #[serde_as(as = "EntityHex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
 
     /// The fee rate to use this hop to forward the payment.
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub(crate) fee_rate: u64,
     /// The TLC expiry delta to use this hop to forward the payment.
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub(crate) tlc_expiry_delta: u64,
 }
 
@@ -317,7 +319,7 @@ pub struct BuildRouterParams {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     /// If not set, the minimum routable amount `1` is used
     #[serde_as(as = "Option<U128Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub amount: Option<u128>,
 
     /// udt type script for the payment router
@@ -334,7 +336,7 @@ pub struct BuildRouterParams {
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub final_tlc_expiry_delta: Option<u64>,
 }
 

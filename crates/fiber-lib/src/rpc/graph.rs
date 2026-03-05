@@ -1,3 +1,7 @@
+use crate::rpc::{
+    schema_as_hex_bytes, schema_as_string_array, schema_as_uint_hex, schema_as_uint_hex_optional,
+};
+
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{ChannelUpdateInfo, NetworkGraph, NetworkGraphStateStore};
@@ -25,7 +29,7 @@ use tokio::sync::RwLock;
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct GraphNodesParams {
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     /// The maximum number of nodes to return.
     pub limit: Option<u64>,
     /// The cursor to start returning nodes from.
@@ -36,7 +40,7 @@ pub struct GraphNodesParams {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct UdtScript {
     /// The code hash of the script.
-    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
     pub code_hash: H256,
     /// The hash type of the script.
     pub hash_type: ScriptHashType,
@@ -100,7 +104,7 @@ pub struct UdtArgInfo {
     /// The script of the UDT.
     pub script: UdtScript,
     #[serde_as(as = "Option<U128Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     /// The minimum amount of the UDT that can be automatically accepted.
     pub auto_accept_amount: Option<u128>,
     /// The cell deps of the UDT.
@@ -144,7 +148,7 @@ pub struct NodeInfo {
     /// The version of the node.
     pub version: String,
     /// The addresses of the node.
-    #[schemars(schema_with = "crate::rpc::schema_as_string_array")]
+    #[schemars(schema_with = "schema_as_string_array")]
     pub addresses: Vec<MultiAddr>,
     /// The node features supported by the node.
     pub features: Vec<String>,
@@ -153,13 +157,13 @@ pub struct NodeInfo {
     #[serde_as(as = "U64Hex")]
     /// The latest timestamp set by the owner for the node announcement.
     /// When a Node is online this timestamp will be updated to the latest value.
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub timestamp: u64,
     /// The chain hash of the node.
     pub chain_hash: Hash256,
     #[serde_as(as = "U64Hex")]
     /// The minimum CKB funding amount for automatically accepting open channel requests.
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub auto_accept_min_ckb_funding_amount: u64,
     /// The UDT configuration infos of the node.
     pub udt_cfg_infos: UdtCfgInfos,
@@ -194,7 +198,7 @@ pub struct GraphNodesResult {
 pub struct GraphChannelsParams {
     /// The maximum number of channels to return.
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub limit: Option<u64>,
     /// The cursor to start returning channels from.
     pub after: Option<JsonBytes>,
@@ -206,7 +210,7 @@ pub struct GraphChannelsParams {
 pub struct ChannelInfo {
     /// The outpoint of the channel.
     #[serde_as(as = "EntityHex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
     /// The identity public key of the first node (secp256k1 compressed, hex string).
     pub node1: Pubkey,
@@ -215,7 +219,7 @@ pub struct ChannelInfo {
     /// The created timestamp of the channel, which is the block header timestamp of the block
     /// that contains the channel funding transaction.
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub created_timestamp: u64,
 
     /// The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
@@ -226,7 +230,7 @@ pub struct ChannelInfo {
 
     /// The capacity of the channel.
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub capacity: u128,
     /// The chain hash of the channel.
     pub chain_hash: Hash256,

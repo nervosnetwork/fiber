@@ -1,3 +1,5 @@
+use crate::rpc::schema_as_uint_hex;
+
 // #[cfg(not(target_arch = "wasm32"))]
 // use crate::watchtower::WatchtowerStore;
 use crate::{
@@ -45,13 +47,13 @@ pub struct AddTlcParams {
     pub channel_id: Hash256,
     /// The amount of the TLC
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub amount: u128,
     /// The payment hash of the TLC
     pub payment_hash: Hash256,
     /// The expiry of the TLC
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub expiry: u64,
     /// The hash algorithm of the TLC
     pub hash_algorithm: Option<HashAlgorithm>,
@@ -62,7 +64,7 @@ pub struct AddTlcParams {
 pub struct AddTlcResult {
     /// The ID of the TLC
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub tlc_id: u64,
 }
 
@@ -73,7 +75,7 @@ pub struct RemoveTlcParams {
     pub channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
     /// The ID of the TLC to remove
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub tlc_id: u64,
     /// The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
     pub reason: RemoveTlcReason,
@@ -97,7 +99,7 @@ pub struct SubmitCommitmentTransactionParams {
     pub channel_id: Hash256,
     /// Commitment number
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub commitment_number: u64,
 }
 

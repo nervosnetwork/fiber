@@ -1,3 +1,5 @@
+use crate::rpc::{schema_as_string, schema_as_string_optional};
+
 use crate::fiber::network::PeerDisconnectReason;
 use crate::fiber::types::Pubkey;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
@@ -18,7 +20,7 @@ pub use tentacle::multiaddr::MultiAddr;
 pub struct ConnectPeerParams {
     /// The address of the peer to connect to.
     /// Either `address` or `pubkey` must be provided.
-    #[schemars(schema_with = "crate::rpc::schema_as_string_optional")]
+    #[schemars(schema_with = "schema_as_string_optional")]
     pub address: Option<MultiAddr>,
     /// The public key of the peer to connect to.
     /// The node resolves the address from locally synced graph data.
@@ -43,7 +45,7 @@ pub struct PeerInfo {
     /// The multi-address associated with the connecting peer.
     /// Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
     /// The `graph_nodes` in Graph rpc module will return all addresses of the peer.
-    #[schemars(schema_with = "crate::rpc::schema_as_string")]
+    #[schemars(schema_with = "schema_as_string")]
     pub address: MultiAddr,
 }
 

@@ -1,3 +1,5 @@
+use crate::rpc::{schema_as_hex_bytes_optional, schema_as_string};
+
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::core::tx_pool::TxStatus;
@@ -262,7 +264,7 @@ pub struct PeerInfo {
     /// The multi-address associated with the connecting peer.
     /// Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
     /// The `graph_nodes` in Graph rpc module will return all addresses of the peer.
-    #[schemars(schema_with = "crate::rpc::schema_as_string")]
+    #[schemars(schema_with = "schema_as_string")]
     pub address: MultiAddr,
 }
 
@@ -420,7 +422,7 @@ pub struct HopRequire {
     pub(crate) pubkey: Pubkey,
     /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
     #[serde_as(as = "Option<EntityHex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes_optional")]
+    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
     pub(crate) channel_outpoint: Option<OutPoint>,
 }
 
@@ -430,7 +432,7 @@ pub struct BuildRouterCommand {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     pub amount: Option<u128>,
     #[serde_as(as = "Option<EntityHex>")]
-    #[schemars(schema_with = "crate::rpc::schema_as_hex_bytes_optional")]
+    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
     pub udt_type_script: Option<Script>,
     pub hops_info: Vec<HopRequire>,
     pub final_tlc_expiry_delta: Option<u64>,
