@@ -3732,7 +3732,6 @@ version = "0.1.0"
 dependencies = [
  "ckb-gen-types",
  "ckb-types",
- "ckb_schemars",
  "fnn",
  "openrpsee",
  "phf 0.13.1",
