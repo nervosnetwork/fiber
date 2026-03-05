@@ -39,7 +39,6 @@ pub use fiber_types::SendPaymentData;
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
 use rand::Rng;
-use schemars::JsonSchema;
 use secp256k1::Secp256k1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;

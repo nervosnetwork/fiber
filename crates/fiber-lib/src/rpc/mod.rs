@@ -415,12 +415,6 @@ pub(crate) fn schema_as_hex_no_prefix(generator: &mut SchemaGenerator) -> Schema
     schema.into()
 }
 
-pub(crate) fn schema_as_any(generator: &mut SchemaGenerator) -> Schema {
-    let mut schema: SchemaObject = String::json_schema(generator).into();
-    schema.format = Some(String::from("any"));
-    schema.into()
-}
-
 pub(crate) fn schema_as_string_array(generator: &mut SchemaGenerator) -> Schema {
     use schemars::schema::*;
 
@@ -461,31 +455,6 @@ pub(crate) fn schema_as_integer(_generator: &mut SchemaGenerator) -> Schema {
 
     let schema = SchemaObject {
         instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Integer))),
-        ..Default::default()
-    };
-
-    schema.into()
-}
-
-pub(crate) fn schema_as_byte_array(_generator: &mut SchemaGenerator) -> Schema {
-    use schemars::schema::*;
-
-    let item_schema = SchemaObject {
-        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Integer))),
-        number: Some(Box::new(NumberValidation {
-            minimum: Some(0.0),
-            maximum: Some(255.0),
-            ..Default::default()
-        })),
-        ..Default::default()
-    };
-
-    let schema = SchemaObject {
-        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Array))),
-        array: Some(Box::new(ArrayValidation {
-            items: Some(SingleOrVec::Single(Box::new(item_schema.into()))),
-            ..Default::default()
-        })),
         ..Default::default()
     };
 

@@ -6,6 +6,7 @@ use crate::{EntityHex, Pubkey, SliceHex};
 use ckb_types::prelude::{Pack, Unpack};
 use molecule::prelude::{Builder, Byte, Entity};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use strum::{AsRefStr, EnumString};
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 ///
 /// **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum PaymentStatus {
     /// Initial status. A payment session is created, but no HTLC has been dispatched.
     Created,
@@ -444,15 +445,17 @@ use crate::U128Hex;
 
 /// The node and channel information in a payment route hop
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SessionRouteNode {
     /// the public key of the node
     pub pubkey: Pubkey,
     /// the amount for this hop
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_uint_hex")]
     pub amount: u128,
     /// the channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
 }
 
@@ -462,33 +465,37 @@ use crate::U64Hex;
 /// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
 /// Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
 #[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RouterHop {
     /// The node that is sending the TLC to the next node.
     pub target: Pubkey,
     /// The channel of this hop used to receive TLC
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
     /// The amount that the source node will transfer to the target node.
     /// We have already added up all the fees along the path, so this amount can be used directly for the TLC.
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_uint_hex")]
     pub amount_received: u128,
     /// The expiry for the TLC that the source node sends to the target node.
     /// We have already added up all the expiry deltas along the path,
     /// the only thing missing is current time. So the expiry is the current time plus the expiry delta.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_uint_hex")]
     pub incoming_tlc_expiry: u64,
 }
 
 /// A hop hint is a hint for a node to use a specific channel,
 /// usually used for the last hop to the target node.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct HopHint {
     /// The public key of the node.
     pub pubkey: Pubkey,
     /// The outpoint for the channel.
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
     /// The fee rate to use this hop to forward the payment.
     pub fee_rate: u64,
@@ -502,7 +509,7 @@ pub struct HopHint {
 /// For example:
 ///    `A(amount, channel) -> B -> C -> D`
 /// means A will send `amount` with `channel` to B.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
 pub struct SessionRoute {
     /// the nodes in the route
     pub nodes: Vec<SessionRouteNode>,

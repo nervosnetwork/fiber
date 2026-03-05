@@ -78,7 +78,6 @@ use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort,
 };
-use schemars::JsonSchema;
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

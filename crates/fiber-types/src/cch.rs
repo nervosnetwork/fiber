@@ -5,11 +5,12 @@ use crate::payment::PaymentStatus;
 use crate::serde_utils::{U128Hex, U64Hex};
 use crate::Hash256;
 use lightning_invoice::Bolt11Invoice;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
 /// The status of a cross-chain hub order, will update as the order progresses.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CchOrderStatus {
     /// Order is created and waiting for the incoming invoice to collect enough TLCs.
@@ -57,12 +58,20 @@ impl From<PaymentStatus> for CchOrderStatus {
 /// { "Fiber": String } | { "Lightning": String }
 /// ```
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum CchInvoice {
     /// Fiber invoice that once paid, the hub will send the outgoing payment to Lightning
-    Fiber(#[serde_as(as = "DisplayFromStr")] CkbInvoice),
+    Fiber(
+        #[serde_as(as = "DisplayFromStr")]
+        #[schemars(schema_with = "crate::schema_helpers::schema_as_string")]
+        CkbInvoice,
+    ),
     /// Lightning invoice that once paid, the hub will send the outgoing payment to Fiber
-    Lightning(#[serde_as(as = "DisplayFromStr")] Bolt11Invoice),
+    Lightning(
+        #[serde_as(as = "DisplayFromStr")]
+        #[schemars(schema_with = "crate::schema_helpers::schema_as_string")]
+        Bolt11Invoice,
+    ),
 }
 
 /// A cross-chain hub order.

@@ -2249,6 +2249,7 @@ dependencies = [
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-types",
+ "ckb_schemars",
  "fiber-sphinx",
  "getrandom 0.2.17",
  "hex",

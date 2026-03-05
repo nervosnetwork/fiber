@@ -45,7 +45,7 @@ pub struct GetPaymentCommandParams {
 /// The result of a get_payment command, which includes the payment hash, status, timestamps,
 /// error message if failed, fee paid, and custom records.
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
@@ -81,18 +81,19 @@ pub struct GetPaymentCommandResult {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
 pub struct ListPaymentsParams {
     /// Filter payments by status. If not set, all payments are returned.
     pub status: Option<PaymentStatus>,
     /// The maximum number of payments to return. Default is 15.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "crate::rpc::schema_as_uint_hex_optional")]
     pub limit: Option<u64>,
     /// The payment hash to start returning payments after (exclusive cursor for pagination).
     pub after: Option<Hash256>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct ListPaymentsResult {
     /// The list of payments.
     pub payments: Vec<GetPaymentCommandResult>,

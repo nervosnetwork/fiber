@@ -1,4 +1,5 @@
 use fiber_types::NodeId;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 

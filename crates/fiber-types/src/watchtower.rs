@@ -9,28 +9,32 @@ use crate::serde_utils::{CompactSignatureAsBytes, EntityHex};
 use crate::{Hash256, Privkey, Pubkey};
 use ckb_types::packed::{Bytes, CellOutput, Script};
 use musig2::CompactSignature;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 /// Data needed to revoke an outdated commitment transaction.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct RevocationData {
     /// The commitment transaction version number that was revoked
     pub commitment_number: u64,
     /// The aggregated signature from both parties that authorizes the revocation
     #[serde_as(as = "CompactSignatureAsBytes")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_byte_array")]
     pub aggregated_signature: CompactSignature,
     /// The output cell from the revoked commitment transaction
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_bytes")]
     pub output: CellOutput,
     /// The associated data for the output cell (e.g., UDT amount for token transfers)
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_bytes")]
     pub output_data: Bytes,
 }
 
 /// Data needed to authorize and execute a settlement transaction.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SettlementData {
     /// The total amount of CKB/UDT being settled for the local party
     pub local_amount: u128,
@@ -41,7 +45,7 @@ pub struct SettlementData {
 }
 
 /// Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SettlementTlc {
     /// The ID of the TLC (either offered or received)
     pub tlc_id: TLCId,

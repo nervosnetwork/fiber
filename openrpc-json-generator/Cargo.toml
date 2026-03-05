@@ -9,6 +9,10 @@ openrpsee = {git = "https://github.com/Officeyutong/openrpsee"}
 phf = {version = "0.13.1", features = ["macros"]}
 ckb_schemars = "0.8"
 serde_json = "1"
+# Pin ckb crates to 1.0.x to keep molecule 0.8.0 compatibility with fiber-types
+ckb-types = ">=1.0.0, <1.1.0"
+ckb-gen-types = ">=1.0.0, <1.1.0"
+
 [build-dependencies]
 openrpsee = {git = "https://github.com/Officeyutong/openrpsee"}
 

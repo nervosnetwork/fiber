@@ -26,6 +26,7 @@ pub mod payment;
 pub mod primitives;
 pub mod protocol;
 pub mod schema;
+pub mod schema_helpers;
 pub mod serde_utils;
 
 #[cfg(feature = "cch")]
