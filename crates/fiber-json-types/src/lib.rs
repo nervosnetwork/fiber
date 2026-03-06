@@ -40,7 +40,6 @@ pub mod peer;
 pub mod prof;
 pub mod watchtower;
 
-// Re-export all types for convenience
 pub use cch::*;
 pub use channel::*;
 pub use context::*;

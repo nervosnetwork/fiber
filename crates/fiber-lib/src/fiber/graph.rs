@@ -17,6 +17,7 @@ use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::ChannelUpdateInfo;
 use fiber_types::{
     Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, FeatureVector,
     Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus, Privkey,
@@ -27,7 +28,6 @@ use rand::{thread_rng, Rng};
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-pub use fiber_types::ChannelUpdateInfo;
 use std::collections::{HashMap, HashSet};
 #[cfg(all(test, not(target_arch = "wasm32")))]
 use std::sync::atomic::{AtomicU64, Ordering};

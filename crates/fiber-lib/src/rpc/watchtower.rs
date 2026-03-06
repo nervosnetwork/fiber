@@ -165,8 +165,8 @@ where
             Pubkey::try_from(&params.local_funding_pubkey).rpc_err(&params)?;
         let remote_funding_pubkey =
             Pubkey::try_from(&params.remote_funding_pubkey).rpc_err(&params)?;
-        let settlement_data: fiber_types::SettlementData =
-            serde_json::from_value(params.settlement_data.clone()).rpc_err(&params)?;
+        let settlement_data =
+            fiber_types::SettlementData::try_from(&params.settlement_data).rpc_err(&params)?;
         self.store.insert_watch_channel(
             node_id,
             channel_id,
@@ -198,10 +198,10 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
         let channel_id = Hash256::from(&params.channel_id);
-        let revocation_data: fiber_types::RevocationData =
-            serde_json::from_value(params.revocation_data.clone()).rpc_err(&params)?;
-        let settlement_data: fiber_types::SettlementData =
-            serde_json::from_value(params.settlement_data.clone()).rpc_err(&params)?;
+        let revocation_data =
+            fiber_types::RevocationData::try_from(&params.revocation_data).rpc_err(&params)?;
+        let settlement_data =
+            fiber_types::SettlementData::try_from(&params.settlement_data).rpc_err(&params)?;
         self.store
             .update_revocation(node_id, channel_id, revocation_data, settlement_data);
         Ok(())
@@ -214,8 +214,8 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
         let channel_id = Hash256::from(&params.channel_id);
-        let settlement_data: fiber_types::SettlementData =
-            serde_json::from_value(params.settlement_data.clone()).rpc_err(&params)?;
+        let settlement_data =
+            fiber_types::SettlementData::try_from(&params.settlement_data).rpc_err(&params)?;
         self.store
             .update_pending_remote_settlement(node_id, channel_id, settlement_data);
         Ok(())
@@ -228,8 +228,8 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
         let channel_id = Hash256::from(&params.channel_id);
-        let settlement_data: fiber_types::SettlementData =
-            serde_json::from_value(params.settlement_data.clone()).rpc_err(&params)?;
+        let settlement_data =
+            fiber_types::SettlementData::try_from(&params.settlement_data).rpc_err(&params)?;
         self.store
             .update_local_settlement(node_id, channel_id, settlement_data);
         Ok(())

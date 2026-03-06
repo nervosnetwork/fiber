@@ -20,12 +20,14 @@ molecule = "0.8"
 
 # Optional: conversion feature deps
 fiber-types = { path = "../fiber-types", optional = true }
+musig2 = { version = "0.2.4", features = ["secp256k1"], optional = true }
 
 [features]
 default = []
 cch = []
 conversion = ["fiber-types"]
-all = ["conversion", "cch", "fiber-types/cch"]
+watchtower = ["fiber-types/watchtower", "musig2"]
+all = ["conversion", "cch", "watchtower", "fiber-types/cch"]
 
 [lints.clippy]
 expect-fun-call = "allow"

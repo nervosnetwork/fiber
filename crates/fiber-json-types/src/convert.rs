@@ -529,3 +529,132 @@ impl From<&fiber_types::Attribute> for crate::invoice::Attribute {
         }
     }
 }
+
+// ─── Watchtower Conversions ─────────────────────────────────────────────────
+
+#[cfg(feature = "watchtower")]
+mod watchtower_convert {
+    use super::*;
+    use crate::watchtower::{
+        RevocationData as JsonRevocationData, SettlementData as JsonSettlementData,
+        SettlementTlc as JsonSettlementTlc, TLCId as JsonTLCId,
+    };
+    use fiber_types::channel::TLCId as InternalTLCId;
+    use fiber_types::watchtower::{
+        RevocationData as InternalRevocationData, SettlementData as InternalSettlementData,
+        SettlementTlc as InternalSettlementTlc,
+    };
+
+    // TLCId conversions
+
+    impl From<&InternalTLCId> for JsonTLCId {
+        fn from(id: &InternalTLCId) -> Self {
+            match id {
+                InternalTLCId::Offered(v) => JsonTLCId::Offered(*v),
+                InternalTLCId::Received(v) => JsonTLCId::Received(*v),
+            }
+        }
+    }
+
+    impl From<&JsonTLCId> for InternalTLCId {
+        fn from(id: &JsonTLCId) -> Self {
+            match id {
+                JsonTLCId::Offered(v) => InternalTLCId::Offered(*v),
+                JsonTLCId::Received(v) => InternalTLCId::Received(*v),
+            }
+        }
+    }
+
+    // SettlementTlc conversions
+
+    impl From<&InternalSettlementTlc> for JsonSettlementTlc {
+        fn from(tlc: &InternalSettlementTlc) -> Self {
+            JsonSettlementTlc {
+                tlc_id: JsonTLCId::from(&tlc.tlc_id),
+                hash_algorithm: JsonHashAlgorithm::from(&tlc.hash_algorithm),
+                payment_amount: tlc.payment_amount,
+                payment_hash: JsonHash256::from(&tlc.payment_hash),
+                expiry: tlc.expiry,
+                local_key: hex::encode(tlc.local_key.0.secret_bytes()),
+                remote_key: JsonPubkey::from(&tlc.remote_key),
+            }
+        }
+    }
+
+    impl TryFrom<&JsonSettlementTlc> for InternalSettlementTlc {
+        type Error = String;
+        fn try_from(tlc: &JsonSettlementTlc) -> Result<Self, Self::Error> {
+            let local_key_bytes =
+                hex::decode(&tlc.local_key).map_err(|e| format!("invalid local_key hex: {e}"))?;
+            let local_key_arr: [u8; 32] = local_key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "invalid local_key length, expected 32 bytes".to_string())?;
+            Ok(InternalSettlementTlc {
+                tlc_id: InternalTLCId::from(&tlc.tlc_id),
+                hash_algorithm: fiber_types::HashAlgorithm::from(&tlc.hash_algorithm),
+                payment_amount: tlc.payment_amount,
+                payment_hash: Hash256::from(&tlc.payment_hash),
+                expiry: tlc.expiry,
+                local_key: local_key_arr.into(),
+                remote_key: Pubkey::try_from(&tlc.remote_key)
+                    .map_err(|e| format!("invalid remote_key: {e}"))?,
+            })
+        }
+    }
+
+    // SettlementData conversions
+
+    impl From<&InternalSettlementData> for JsonSettlementData {
+        fn from(data: &InternalSettlementData) -> Self {
+            JsonSettlementData {
+                local_amount: data.local_amount,
+                remote_amount: data.remote_amount,
+                tlcs: data.tlcs.iter().map(JsonSettlementTlc::from).collect(),
+            }
+        }
+    }
+
+    impl TryFrom<&JsonSettlementData> for InternalSettlementData {
+        type Error = String;
+        fn try_from(data: &JsonSettlementData) -> Result<Self, Self::Error> {
+            let tlcs = data
+                .tlcs
+                .iter()
+                .map(InternalSettlementTlc::try_from)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(InternalSettlementData {
+                local_amount: data.local_amount,
+                remote_amount: data.remote_amount,
+                tlcs,
+            })
+        }
+    }
+
+    // RevocationData conversions
+
+    impl From<&InternalRevocationData> for JsonRevocationData {
+        fn from(data: &InternalRevocationData) -> Self {
+            JsonRevocationData {
+                commitment_number: data.commitment_number,
+                aggregated_signature: data.aggregated_signature.serialize().to_vec(),
+                output: data.output.clone(),
+                output_data: data.output_data.clone(),
+            }
+        }
+    }
+
+    impl TryFrom<&JsonRevocationData> for InternalRevocationData {
+        type Error = String;
+        fn try_from(data: &JsonRevocationData) -> Result<Self, Self::Error> {
+            let sig = musig2::CompactSignature::from_bytes(&data.aggregated_signature)
+                .map_err(|e| format!("invalid aggregated_signature: {e}"))?;
+            Ok(InternalRevocationData {
+                commitment_number: data.commitment_number,
+                aggregated_signature: sig,
+                output: data.output.clone(),
+                output_data: data.output_data.clone(),
+            })
+        }
+    }
+}

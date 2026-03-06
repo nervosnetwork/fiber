@@ -263,7 +263,7 @@ impl core::str::FromStr for Pubkey {
 pub struct Hash256(#[serde_as(as = "SliceHex")] pub [u8; 32]);
 
 impl Hash256 {
-    /// Create a `JsonHash256` from a 32-byte slice.
+    /// Create a `Hash256` from a 32-byte slice.
     pub fn from_slice(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() != 32 {
             return Err(format!(
@@ -284,7 +284,7 @@ impl Hash256 {
 
 impl core::fmt::Debug for Hash256 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "JsonHash256(0x{})", hex::encode(self.0))
+        write!(f, "Hash256(0x{})", hex::encode(self.0))
     }
 }
 
