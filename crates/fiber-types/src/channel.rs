@@ -992,6 +992,63 @@ pub enum TlcReplayUpdate {
     Remove(RemoveTlc),
 }
 
+/// Version for `CommitDiff` serialization compatibility.
+pub const CURRENT_COMMIT_DIFF_VERSION: u8 = 2;
+
+fn default_commit_diff_version() -> u8 {
+    CURRENT_COMMIT_DIFF_VERSION
+}
+
+/// Optional template fields for `CommitmentSigned` replay.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitmentSignedTemplate {
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub next_commitment_nonce: PubNonce,
+    #[serde(default)]
+    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
+    pub funding_tx_partial_signature: Option<PartialSignature>,
+}
+
+/// Replay ordering hint when both revoke+commit are owed.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ReplayOrderHint {
+    RevokeThenCommit,
+    CommitThenRevoke,
+}
+
+/// Everything needed to resend a pending `CommitmentSigned` after reconnect.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitDiff {
+    /// Structure version for backward/forward compatibility.
+    #[serde(default = "default_commit_diff_version")]
+    pub version: u8,
+    /// Channel that owns this diff.
+    #[serde(default)]
+    pub channel_id: Hash256,
+    /// Local/remote commitment numbers when this commitment was sent.
+    #[serde(default)]
+    pub local_commitment_number_at_send: u64,
+    #[serde(default)]
+    pub remote_commitment_number_at_send: u64,
+    /// The commitment transaction (used for resign, not rebuilt).
+    #[serde_as(as = "EntityHex")]
+    pub commit_tx: Transaction,
+    /// TLC updates included in this commitment (for resending).
+    #[serde(default, alias = "tlc_updates")]
+    pub replay_updates: Vec<TlcReplayUpdate>,
+    /// Optional template fields for `CommitmentSigned` replay.
+    #[serde(default)]
+    pub commitment_signed_template: Option<CommitmentSignedTemplate>,
+    /// Optional replay ordering hint when both revoke+commit are owed.
+    #[serde(default)]
+    pub replay_order_hint: Option<ReplayOrderHint>,
+    /// Creation timestamp.
+    #[serde(default, alias = "created_at")]
+    pub created_at_ms: u64,
+}
+
 /// Information about a channel shutdown.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]

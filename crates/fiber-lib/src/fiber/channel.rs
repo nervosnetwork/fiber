@@ -50,20 +50,22 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
     H256,
 };
-pub use fiber_types::TlcReplayUpdate;
 use fiber_types::{
     blake2b_hash_with_salt, derive_tlc_pubkey, AddTlcCommand, AppliedFlags,
     AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData, ChannelActorData,
     ChannelAnnouncement, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
     ChannelOpenRecord, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
     ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
-    EcdsaSignature, EntityHex, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
-    NegotiatingFundingFlags, OutboundTlcStatus, PartialSignatureAsBytes, PaymentCustomRecords,
-    PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey, PubNonceAsBytes,
-    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
+    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
+    PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
+    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr,
+    TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+};
+pub use fiber_types::{
+    CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
+    CURRENT_COMMIT_DIFF_VERSION,
 };
 use molecule::prelude::{Builder, Entity};
 #[cfg(test)]
@@ -82,7 +84,6 @@ use ractor::{
 };
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 #[cfg(test)]
@@ -1593,7 +1594,7 @@ where
 
         // Store CommitDiff for potential reestablishment
         let commit_diff = CommitDiff {
-            version: default_commit_diff_version(),
+            version: CURRENT_COMMIT_DIFF_VERSION,
             channel_id: state.get_id(),
             local_commitment_number_at_send: state.get_local_commitment_number(),
             remote_commitment_number_at_send: state.get_remote_commitment_number(),
@@ -3129,68 +3130,6 @@ pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u
 /// Free function replacement for `SettlementTlc::local_pubkey_hash()`.
 pub fn settlement_tlc_local_pubkey_hash(tlc: &SettlementTlc) -> [u8; 20] {
     blake160(&tlc.local_key.pubkey().serialize()).0
-}
-
-/// CommitDiff stores everything needed to resend a pending CommitmentSigned
-/// during channel reestablishment without rebuilding the transaction.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitDiff {
-    /// Structure version for backward/forward compatibility.
-    #[serde(default = "default_commit_diff_version")]
-    pub version: u8,
-
-    /// Channel that owns this diff.
-    #[serde(default)]
-    pub channel_id: Hash256,
-
-    /// Local/remote commitment numbers when this commitment was sent.
-    #[serde(default)]
-    pub local_commitment_number_at_send: u64,
-    #[serde(default)]
-    pub remote_commitment_number_at_send: u64,
-
-    /// The commitment transaction (used for resign, not rebuilt)
-    #[serde_as(as = "EntityHex")]
-    pub commit_tx: Transaction,
-
-    /// TLC updates included in this commitment (for resending).
-    #[serde(default, alias = "tlc_updates")]
-    pub replay_updates: Vec<TlcReplayUpdate>,
-
-    /// Optional template fields for CommitmentSigned replay.
-    #[serde(default)]
-    pub commitment_signed_template: Option<CommitmentSignedTemplate>,
-
-    /// Optional replay ordering hint when both revoke+commit are owed.
-    #[serde(default)]
-    pub replay_order_hint: Option<ReplayOrderHint>,
-
-    /// Creation timestamp
-    #[serde(default, alias = "created_at")]
-    pub created_at_ms: u64,
-}
-
-const CURRENT_COMMIT_DIFF_VERSION: u8 = 2;
-
-fn default_commit_diff_version() -> u8 {
-    CURRENT_COMMIT_DIFF_VERSION
-}
-
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitmentSignedTemplate {
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_commitment_nonce: PubNonce,
-    #[serde(default)]
-    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
-    pub funding_tx_partial_signature: Option<PartialSignature>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ReplayOrderHint {
-    RevokeThenCommit,
-    CommitThenRevoke,
 }
 
 pub(crate) fn validate_commit_diff_for_replay_inputs(
