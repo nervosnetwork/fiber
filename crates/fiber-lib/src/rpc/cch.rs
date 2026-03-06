@@ -1,6 +1,5 @@
 use crate::cch::CchMessage;
 use crate::rpc::utils::RpcResultExt;
-use fiber_types::{Currency, Hash256};
 use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned};
 use ractor::{call_t, ActorRef};
 
@@ -67,7 +66,7 @@ impl CchRpcServer for CchRpcServerImpl {
 // #[async_trait::async_trait(?Send)]
 impl CchRpcServerImpl {
     async fn send_btc(&self, params: SendBTCParams) -> Result<CchOrderResponse, ErrorObjectOwned> {
-        let currency = Currency::from(&params.currency);
+        let currency = params.currency.into();
         let result = call_t!(
             self.cch_actor,
             CchMessage::SendBTC,
@@ -79,9 +78,7 @@ impl CchRpcServerImpl {
         )
         .rpc_err_no_data()?;
 
-        result
-            .map(|order| CchOrderResponse::from(&order))
-            .map_err(Into::into)
+        result.map(CchOrderResponse::from).map_err(Into::into)
     }
 
     async fn receive_btc(
@@ -98,16 +95,14 @@ impl CchRpcServerImpl {
         )
         .rpc_err_no_data()?;
 
-        result
-            .map(|order| CchOrderResponse::from(&order))
-            .map_err(Into::into)
+        result.map(CchOrderResponse::from).map_err(Into::into)
     }
 
     async fn get_cch_order(
         &self,
         params: GetCchOrderParams,
     ) -> Result<CchOrderResponse, ErrorObjectOwned> {
-        let payment_hash = Hash256::from(&params.payment_hash);
+        let payment_hash = params.payment_hash.into();
         let result = call_t!(
             self.cch_actor,
             CchMessage::GetCchOrder,
@@ -116,8 +111,6 @@ impl CchRpcServerImpl {
         )
         .rpc_err_no_data()?;
 
-        result
-            .map(|order| CchOrderResponse::from(&order))
-            .map_err(Into::into)
+        result.map(CchOrderResponse::from).map_err(Into::into)
     }
 }

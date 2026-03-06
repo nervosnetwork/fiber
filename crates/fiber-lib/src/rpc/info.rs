@@ -2,8 +2,6 @@ use crate::ckb::CkbConfig;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
-use fiber_json_types::serde_utils::{Hash256 as JsonHash256, Pubkey};
-use fiber_json_types::UdtCfgInfos as JsonUdtCfgInfos;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
@@ -66,10 +64,10 @@ impl InfoRpcServerImpl {
             version,
             commit_hash,
             features: response.features.enabled_features_names(),
-            pubkey: Pubkey::from(&response.node_id),
+            pubkey: response.node_id.into(),
             node_name: response.node_name.map(|name| name.to_string()),
             addresses: response.addresses.iter().map(|a| a.to_string()).collect(),
-            chain_hash: JsonHash256::from(&response.chain_hash),
+            chain_hash: response.chain_hash.into(),
             open_channel_auto_accept_min_ckb_funding_amount: response
                 .open_channel_auto_accept_min_ckb_funding_amount,
             auto_accept_channel_ckb_funding_amount: response.auto_accept_channel_ckb_funding_amount,
@@ -80,7 +78,7 @@ impl InfoRpcServerImpl {
             channel_count: response.channel_count,
             pending_channel_count: response.pending_channel_count,
             peers_count: response.peers_count,
-            udt_cfg_infos: JsonUdtCfgInfos::from(&response.udt_cfg_infos),
+            udt_cfg_infos: response.udt_cfg_infos.into(),
         })
     }
 }

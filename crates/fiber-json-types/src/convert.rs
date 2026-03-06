@@ -15,13 +15,13 @@
 //! use fiber_json_types::convert; // brings From/TryFrom impls into scope
 //!
 //! // Infallible: Hash256 -> JsonHash256
-//! let json_hash: fiber_json_types::Hash256 = (&internal_hash).into();
+//! let json_hash: fiber_json_types::Hash256 = internal_hash.into();
 //!
 //! // Infallible: JsonHash256 -> Hash256
-//! let internal_hash: fiber_types::Hash256 = (&json_hash).into();
+//! let internal_hash: fiber_types::Hash256 = json_hash.into();
 //!
 //! // Fallible: json::Pubkey -> fiber_types Pubkey
-//! let pubkey: fiber_types::Pubkey = (&json_pubkey).try_into()?;
+//! let pubkey: fiber_types::Pubkey = json_pubkey.try_into()?;
 //! ```
 
 use crate::channel::{
@@ -54,8 +54,8 @@ use fiber_types::{
 
 // Hash256 <-> JsonHash256
 
-impl From<&Hash256> for JsonHash256 {
-    fn from(hash: &Hash256) -> Self {
+impl From<Hash256> for JsonHash256 {
+    fn from(hash: Hash256) -> Self {
         JsonHash256(
             hash.as_ref()
                 .try_into()
@@ -64,24 +64,24 @@ impl From<&Hash256> for JsonHash256 {
     }
 }
 
-impl From<&JsonHash256> for Hash256 {
-    fn from(jh: &JsonHash256) -> Self {
+impl From<JsonHash256> for Hash256 {
+    fn from(jh: JsonHash256) -> Self {
         Hash256::from(jh.0)
     }
 }
 
 // Pubkey <-> JsonPubkey
 
-impl From<&Pubkey> for JsonPubkey {
-    fn from(pubkey: &Pubkey) -> Self {
+impl From<Pubkey> for JsonPubkey {
+    fn from(pubkey: Pubkey) -> Self {
         JsonPubkey(pubkey.serialize())
     }
 }
 
-impl TryFrom<&JsonPubkey> for Pubkey {
+impl TryFrom<JsonPubkey> for Pubkey {
     type Error = String;
 
-    fn try_from(jp: &JsonPubkey) -> Result<Self, Self::Error> {
+    fn try_from(jp: JsonPubkey) -> Result<Self, Self::Error> {
         Pubkey::from_slice(&jp.0).map_err(|e| format!("invalid pubkey '{}': {}", jp, e))
     }
 }
@@ -136,8 +136,8 @@ impl JsonChannelState {
 
 // ─── TlcStatus Conversions ──────────────────────────────────────────────────
 
-impl From<&InternalTlcStatus> for JsonTlcStatus {
-    fn from(status: &InternalTlcStatus) -> Self {
+impl From<InternalTlcStatus> for JsonTlcStatus {
+    fn from(status: InternalTlcStatus) -> Self {
         match status {
             InternalTlcStatus::Outbound(s) => JsonTlcStatus::Outbound(s.into()),
             InternalTlcStatus::Inbound(s) => JsonTlcStatus::Inbound(s.into()),
@@ -145,8 +145,8 @@ impl From<&InternalTlcStatus> for JsonTlcStatus {
     }
 }
 
-impl From<&InternalOutboundTlcStatus> for JsonOutboundTlcStatus {
-    fn from(status: &InternalOutboundTlcStatus) -> Self {
+impl From<InternalOutboundTlcStatus> for JsonOutboundTlcStatus {
+    fn from(status: InternalOutboundTlcStatus) -> Self {
         match status {
             InternalOutboundTlcStatus::LocalAnnounced => JsonOutboundTlcStatus::LocalAnnounced,
             InternalOutboundTlcStatus::Committed => JsonOutboundTlcStatus::Committed,
@@ -162,8 +162,8 @@ impl From<&InternalOutboundTlcStatus> for JsonOutboundTlcStatus {
     }
 }
 
-impl From<&InternalInboundTlcStatus> for JsonInboundTlcStatus {
-    fn from(status: &InternalInboundTlcStatus) -> Self {
+impl From<InternalInboundTlcStatus> for JsonInboundTlcStatus {
+    fn from(status: InternalInboundTlcStatus) -> Self {
         match status {
             InternalInboundTlcStatus::RemoteAnnounced => JsonInboundTlcStatus::RemoteAnnounced,
             InternalInboundTlcStatus::AnnounceWaitPrevAck => {
@@ -181,8 +181,8 @@ impl From<&InternalInboundTlcStatus> for JsonInboundTlcStatus {
 
 // ─── PaymentStatus Conversions ──────────────────────────────────────────────
 
-impl From<&fiber_types::PaymentStatus> for JsonPaymentStatus {
-    fn from(status: &fiber_types::PaymentStatus) -> Self {
+impl From<fiber_types::PaymentStatus> for JsonPaymentStatus {
+    fn from(status: fiber_types::PaymentStatus) -> Self {
         match status {
             fiber_types::PaymentStatus::Created => JsonPaymentStatus::Created,
             fiber_types::PaymentStatus::Inflight => JsonPaymentStatus::Inflight,
@@ -192,8 +192,8 @@ impl From<&fiber_types::PaymentStatus> for JsonPaymentStatus {
     }
 }
 
-impl From<&JsonPaymentStatus> for fiber_types::PaymentStatus {
-    fn from(status: &JsonPaymentStatus) -> Self {
+impl From<JsonPaymentStatus> for fiber_types::PaymentStatus {
+    fn from(status: JsonPaymentStatus) -> Self {
         match status {
             JsonPaymentStatus::Created => fiber_types::PaymentStatus::Created,
             JsonPaymentStatus::Inflight => fiber_types::PaymentStatus::Inflight,
@@ -205,8 +205,8 @@ impl From<&JsonPaymentStatus> for fiber_types::PaymentStatus {
 
 // ─── Currency Conversions ───────────────────────────────────────────────────
 
-impl From<&fiber_types::Currency> for JsonCurrency {
-    fn from(currency: &fiber_types::Currency) -> Self {
+impl From<fiber_types::Currency> for JsonCurrency {
+    fn from(currency: fiber_types::Currency) -> Self {
         match currency {
             fiber_types::Currency::Fibb => JsonCurrency::Fibb,
             fiber_types::Currency::Fibt => JsonCurrency::Fibt,
@@ -215,8 +215,8 @@ impl From<&fiber_types::Currency> for JsonCurrency {
     }
 }
 
-impl From<&JsonCurrency> for fiber_types::Currency {
-    fn from(currency: &JsonCurrency) -> Self {
+impl From<JsonCurrency> for fiber_types::Currency {
+    fn from(currency: JsonCurrency) -> Self {
         match currency {
             JsonCurrency::Fibb => fiber_types::Currency::Fibb,
             JsonCurrency::Fibt => fiber_types::Currency::Fibt,
@@ -227,8 +227,8 @@ impl From<&JsonCurrency> for fiber_types::Currency {
 
 // ─── HashAlgorithm Conversions ──────────────────────────────────────────────
 
-impl From<&fiber_types::HashAlgorithm> for JsonHashAlgorithm {
-    fn from(algo: &fiber_types::HashAlgorithm) -> Self {
+impl From<fiber_types::HashAlgorithm> for JsonHashAlgorithm {
+    fn from(algo: fiber_types::HashAlgorithm) -> Self {
         match algo {
             fiber_types::HashAlgorithm::CkbHash => JsonHashAlgorithm::CkbHash,
             fiber_types::HashAlgorithm::Sha256 => JsonHashAlgorithm::Sha256,
@@ -236,8 +236,8 @@ impl From<&fiber_types::HashAlgorithm> for JsonHashAlgorithm {
     }
 }
 
-impl From<&JsonHashAlgorithm> for fiber_types::HashAlgorithm {
-    fn from(algo: &JsonHashAlgorithm) -> Self {
+impl From<JsonHashAlgorithm> for fiber_types::HashAlgorithm {
+    fn from(algo: JsonHashAlgorithm) -> Self {
         match algo {
             JsonHashAlgorithm::CkbHash => fiber_types::HashAlgorithm::CkbHash,
             JsonHashAlgorithm::Sha256 => fiber_types::HashAlgorithm::Sha256,
@@ -247,8 +247,8 @@ impl From<&JsonHashAlgorithm> for fiber_types::HashAlgorithm {
 
 // ─── CkbInvoiceStatus Conversions ───────────────────────────────────────────
 
-impl From<&fiber_types::CkbInvoiceStatus> for JsonCkbInvoiceStatus {
-    fn from(status: &fiber_types::CkbInvoiceStatus) -> Self {
+impl From<fiber_types::CkbInvoiceStatus> for JsonCkbInvoiceStatus {
+    fn from(status: fiber_types::CkbInvoiceStatus) -> Self {
         match status {
             fiber_types::CkbInvoiceStatus::Open => JsonCkbInvoiceStatus::Open,
             fiber_types::CkbInvoiceStatus::Cancelled => JsonCkbInvoiceStatus::Cancelled,
@@ -263,11 +263,10 @@ impl From<&fiber_types::CkbInvoiceStatus> for JsonCkbInvoiceStatus {
 
 #[cfg(feature = "cch")]
 mod cch_conversions {
-    use super::JsonHash256;
     use crate::cch::{CchInvoice as JsonCchInvoice, CchOrderStatus as JsonCchOrderStatus};
 
-    impl From<&fiber_types::CchOrderStatus> for JsonCchOrderStatus {
-        fn from(status: &fiber_types::CchOrderStatus) -> Self {
+    impl From<fiber_types::CchOrderStatus> for JsonCchOrderStatus {
+        fn from(status: fiber_types::CchOrderStatus) -> Self {
             match status {
                 fiber_types::CchOrderStatus::Pending => JsonCchOrderStatus::Pending,
                 fiber_types::CchOrderStatus::IncomingAccepted => {
@@ -287,24 +286,24 @@ mod cch_conversions {
 
     // ─── CchOrder → CchOrderResponse Conversion ────────────────────────────
 
-    impl From<&fiber_types::CchOrder> for crate::cch::CchOrderResponse {
-        fn from(order: &fiber_types::CchOrder) -> Self {
+    impl From<fiber_types::CchOrder> for crate::cch::CchOrderResponse {
+        fn from(order: fiber_types::CchOrder) -> Self {
             crate::cch::CchOrderResponse {
                 timestamp: order.created_at,
                 expiry_delta_seconds: order.expiry_delta_seconds,
-                wrapped_btc_type_script: order.wrapped_btc_type_script.clone(),
-                incoming_invoice: JsonCchInvoice::from(&order.incoming_invoice),
-                outgoing_pay_req: order.outgoing_pay_req.clone(),
-                payment_hash: JsonHash256::from(&order.payment_hash),
+                wrapped_btc_type_script: order.wrapped_btc_type_script,
+                incoming_invoice: JsonCchInvoice::from(order.incoming_invoice),
+                outgoing_pay_req: order.outgoing_pay_req,
+                payment_hash: order.payment_hash.into(),
                 amount_sats: order.amount_sats,
                 fee_sats: order.fee_sats,
-                status: JsonCchOrderStatus::from(&order.status),
+                status: order.status.into(),
             }
         }
     }
 
-    impl From<&fiber_types::CchInvoice> for JsonCchInvoice {
-        fn from(invoice: &fiber_types::CchInvoice) -> Self {
+    impl From<fiber_types::CchInvoice> for JsonCchInvoice {
+        fn from(invoice: fiber_types::CchInvoice) -> Self {
             match invoice {
                 fiber_types::CchInvoice::Fiber(inv) => JsonCchInvoice::Fiber(inv.to_string()),
                 fiber_types::CchInvoice::Lightning(inv) => {
@@ -315,46 +314,46 @@ mod cch_conversions {
     }
 }
 
-impl From<&fiber_types::UdtCfgInfos> for JsonUdtCfgInfos {
-    fn from(infos: &fiber_types::UdtCfgInfos) -> Self {
-        JsonUdtCfgInfos(infos.0.iter().map(JsonUdtArgInfo::from).collect())
+impl From<fiber_types::UdtCfgInfos> for JsonUdtCfgInfos {
+    fn from(infos: fiber_types::UdtCfgInfos) -> Self {
+        JsonUdtCfgInfos(infos.0.into_iter().map(JsonUdtArgInfo::from).collect())
     }
 }
 
-impl From<&fiber_types::UdtArgInfo> for JsonUdtArgInfo {
-    fn from(info: &fiber_types::UdtArgInfo) -> Self {
+impl From<fiber_types::UdtArgInfo> for JsonUdtArgInfo {
+    fn from(info: fiber_types::UdtArgInfo) -> Self {
         JsonUdtArgInfo {
-            name: info.name.clone(),
-            script: JsonUdtScript::from(&info.script),
+            name: info.name,
+            script: JsonUdtScript::from(info.script),
             auto_accept_amount: info.auto_accept_amount,
-            cell_deps: info.cell_deps.iter().map(JsonUdtDep::from).collect(),
+            cell_deps: info.cell_deps.into_iter().map(JsonUdtDep::from).collect(),
         }
     }
 }
 
-impl From<&fiber_types::UdtScript> for JsonUdtScript {
-    fn from(script: &fiber_types::UdtScript) -> Self {
+impl From<fiber_types::UdtScript> for JsonUdtScript {
+    fn from(script: fiber_types::UdtScript) -> Self {
         JsonUdtScript {
-            code_hash: script.code_hash.clone(),
+            code_hash: script.code_hash,
             hash_type: script.hash_type.into(),
-            args: script.args.clone(),
+            args: script.args,
         }
     }
 }
 
-impl From<&fiber_types::UdtDep> for JsonUdtDep {
-    fn from(dep: &fiber_types::UdtDep) -> Self {
+impl From<fiber_types::UdtDep> for JsonUdtDep {
+    fn from(dep: fiber_types::UdtDep) -> Self {
         JsonUdtDep {
-            cell_dep: dep.cell_dep.as_ref().map(JsonUdtCellDep::from),
-            type_id: dep.type_id.clone(),
+            cell_dep: dep.cell_dep.map(JsonUdtCellDep::from),
+            type_id: dep.type_id,
         }
     }
 }
 
-impl From<&fiber_types::UdtCellDep> for JsonUdtCellDep {
-    fn from(cell_dep: &fiber_types::UdtCellDep) -> Self {
+impl From<fiber_types::UdtCellDep> for JsonUdtCellDep {
+    fn from(cell_dep: fiber_types::UdtCellDep) -> Self {
         JsonUdtCellDep {
-            out_point: cell_dep.out_point.clone(),
+            out_point: cell_dep.out_point,
             dep_type: cell_dep.dep_type.into(),
         }
     }
@@ -362,8 +361,8 @@ impl From<&fiber_types::UdtCellDep> for JsonUdtCellDep {
 
 // ─── ChannelUpdateInfo Conversions ──────────────────────────────────────────
 
-impl From<&fiber_types::ChannelUpdateInfo> for JsonChannelUpdateInfo {
-    fn from(info: &fiber_types::ChannelUpdateInfo) -> Self {
+impl From<fiber_types::ChannelUpdateInfo> for JsonChannelUpdateInfo {
+    fn from(info: fiber_types::ChannelUpdateInfo) -> Self {
         JsonChannelUpdateInfo {
             timestamp: info.timestamp,
             enabled: info.enabled,
@@ -377,16 +376,16 @@ impl From<&fiber_types::ChannelUpdateInfo> for JsonChannelUpdateInfo {
 
 // ─── SessionRoute Conversions ───────────────────────────────────────────────
 
-impl From<&fiber_types::SessionRoute> for JsonSessionRoute {
-    fn from(route: &fiber_types::SessionRoute) -> Self {
+impl From<fiber_types::SessionRoute> for JsonSessionRoute {
+    fn from(route: fiber_types::SessionRoute) -> Self {
         JsonSessionRoute {
             nodes: route
                 .nodes
-                .iter()
+                .into_iter()
                 .map(|node| JsonSessionRouteNode {
-                    pubkey: JsonPubkey::from(&node.pubkey),
+                    pubkey: node.pubkey.into(),
                     amount: node.amount,
-                    channel_outpoint: node.channel_outpoint.clone(),
+                    channel_outpoint: node.channel_outpoint,
                 })
                 .collect(),
         }
@@ -395,24 +394,24 @@ impl From<&fiber_types::SessionRoute> for JsonSessionRoute {
 
 // ─── RouterHop Conversions ──────────────────────────────────────────────────
 
-impl From<&fiber_types::RouterHop> for crate::payment::RouterHop {
-    fn from(hop: &fiber_types::RouterHop) -> Self {
+impl From<fiber_types::RouterHop> for crate::payment::RouterHop {
+    fn from(hop: fiber_types::RouterHop) -> Self {
         crate::payment::RouterHop {
-            target: JsonPubkey::from(&hop.target),
-            channel_outpoint: hop.channel_outpoint.clone(),
+            target: hop.target.into(),
+            channel_outpoint: hop.channel_outpoint,
             amount_received: hop.amount_received,
             incoming_tlc_expiry: hop.incoming_tlc_expiry,
         }
     }
 }
 
-impl TryFrom<&crate::payment::RouterHop> for fiber_types::RouterHop {
+impl TryFrom<crate::payment::RouterHop> for fiber_types::RouterHop {
     type Error = String;
 
-    fn try_from(hop: &crate::payment::RouterHop) -> Result<Self, Self::Error> {
+    fn try_from(hop: crate::payment::RouterHop) -> Result<Self, Self::Error> {
         Ok(fiber_types::RouterHop {
-            target: Pubkey::try_from(&hop.target)?,
-            channel_outpoint: hop.channel_outpoint.clone(),
+            target: Pubkey::try_from(hop.target)?,
+            channel_outpoint: hop.channel_outpoint,
             amount_received: hop.amount_received,
             incoming_tlc_expiry: hop.incoming_tlc_expiry,
         })
@@ -421,13 +420,13 @@ impl TryFrom<&crate::payment::RouterHop> for fiber_types::RouterHop {
 
 // ─── HopHint Conversions ────────────────────────────────────────────────────
 
-impl TryFrom<&crate::payment::HopHint> for fiber_types::HopHint {
+impl TryFrom<crate::payment::HopHint> for fiber_types::HopHint {
     type Error = String;
 
-    fn try_from(hint: &crate::payment::HopHint) -> Result<Self, Self::Error> {
+    fn try_from(hint: crate::payment::HopHint) -> Result<Self, Self::Error> {
         Ok(fiber_types::HopHint {
-            pubkey: Pubkey::try_from(&hint.pubkey)?,
-            channel_outpoint: hint.channel_outpoint.clone(),
+            pubkey: Pubkey::try_from(hint.pubkey)?,
+            channel_outpoint: hint.channel_outpoint,
             fee_rate: hint.fee_rate,
             tlc_expiry_delta: hint.tlc_expiry_delta,
         })
@@ -436,41 +435,37 @@ impl TryFrom<&crate::payment::HopHint> for fiber_types::HopHint {
 
 // ─── HopRequire Conversions ─────────────────────────────────────────────────
 
-impl TryFrom<&crate::payment::HopRequire> for fiber_types::HopRequire {
+impl TryFrom<crate::payment::HopRequire> for fiber_types::HopRequire {
     type Error = String;
 
-    fn try_from(hop: &crate::payment::HopRequire) -> Result<Self, Self::Error> {
+    fn try_from(hop: crate::payment::HopRequire) -> Result<Self, Self::Error> {
         Ok(fiber_types::HopRequire {
-            pubkey: Pubkey::try_from(&hop.pubkey)?,
-            channel_outpoint: hop.channel_outpoint.clone(),
+            pubkey: Pubkey::try_from(hop.pubkey)?,
+            channel_outpoint: hop.channel_outpoint,
         })
     }
 }
 
 // ─── PaymentCustomRecords Conversions ───────────────────────────────────────
 
-impl From<&crate::payment::PaymentCustomRecords> for fiber_types::PaymentCustomRecords {
-    fn from(records: &crate::payment::PaymentCustomRecords) -> Self {
-        fiber_types::PaymentCustomRecords {
-            data: records.data.clone(),
-        }
+impl From<crate::payment::PaymentCustomRecords> for fiber_types::PaymentCustomRecords {
+    fn from(records: crate::payment::PaymentCustomRecords) -> Self {
+        fiber_types::PaymentCustomRecords { data: records.data }
     }
 }
 
-impl From<&fiber_types::PaymentCustomRecords> for crate::payment::PaymentCustomRecords {
-    fn from(records: &fiber_types::PaymentCustomRecords) -> Self {
-        crate::payment::PaymentCustomRecords {
-            data: records.data.clone(),
-        }
+impl From<fiber_types::PaymentCustomRecords> for crate::payment::PaymentCustomRecords {
+    fn from(records: fiber_types::PaymentCustomRecords) -> Self {
+        crate::payment::PaymentCustomRecords { data: records.data }
     }
 }
 
 // ─── CkbInvoice Conversions ─────────────────────────────────────────────────
 
-impl From<&fiber_types::CkbInvoice> for crate::invoice::CkbInvoice {
-    fn from(invoice: &fiber_types::CkbInvoice) -> Self {
+impl From<fiber_types::CkbInvoice> for crate::invoice::CkbInvoice {
+    fn from(invoice: fiber_types::CkbInvoice) -> Self {
         crate::invoice::CkbInvoice {
-            currency: JsonCurrency::from(&invoice.currency),
+            currency: invoice.currency.into(),
             amount: invoice.amount,
             signature: invoice.signature.as_ref().map(|sig| {
                 // InvoiceSignature's Serialize impl produces a hex string
@@ -479,38 +474,38 @@ impl From<&fiber_types::CkbInvoice> for crate::invoice::CkbInvoice {
                     .and_then(|v| v.as_str().map(String::from))
                     .unwrap_or_default()
             }),
-            data: crate::invoice::InvoiceData::from(&invoice.data),
+            data: crate::invoice::InvoiceData::from(invoice.data),
         }
     }
 }
 
-impl From<&fiber_types::InvoiceData> for crate::invoice::InvoiceData {
-    fn from(data: &fiber_types::InvoiceData) -> Self {
+impl From<fiber_types::InvoiceData> for crate::invoice::InvoiceData {
+    fn from(data: fiber_types::InvoiceData) -> Self {
         crate::invoice::InvoiceData {
             timestamp: data.timestamp,
-            payment_hash: JsonHash256::from(&data.payment_hash),
+            payment_hash: data.payment_hash.into(),
             attrs: data
                 .attrs
-                .iter()
+                .into_iter()
                 .map(crate::invoice::Attribute::from)
                 .collect(),
         }
     }
 }
 
-impl From<&fiber_types::Attribute> for crate::invoice::Attribute {
-    fn from(attr: &fiber_types::Attribute) -> Self {
+impl From<fiber_types::Attribute> for crate::invoice::Attribute {
+    fn from(attr: fiber_types::Attribute) -> Self {
         use crate::invoice::Attribute as JsonAttr;
         use fiber_types::Attribute as InternalAttr;
 
         match attr {
-            InternalAttr::FinalHtlcTimeout(v) => JsonAttr::FinalHtlcTimeout(*v),
+            InternalAttr::FinalHtlcTimeout(v) => JsonAttr::FinalHtlcTimeout(v),
             InternalAttr::FinalHtlcMinimumExpiryDelta(v) => {
-                JsonAttr::FinalHtlcMinimumExpiryDelta(*v)
+                JsonAttr::FinalHtlcMinimumExpiryDelta(v)
             }
-            InternalAttr::ExpiryTime(d) => JsonAttr::ExpiryTime(*d),
-            InternalAttr::Description(s) => JsonAttr::Description(s.clone()),
-            InternalAttr::FallbackAddr(s) => JsonAttr::FallbackAddr(s.clone()),
+            InternalAttr::ExpiryTime(d) => JsonAttr::ExpiryTime(d),
+            InternalAttr::Description(s) => JsonAttr::Description(s),
+            InternalAttr::FallbackAddr(s) => JsonAttr::FallbackAddr(s),
             InternalAttr::UdtScript(script) => {
                 // CkbScript wraps PackedScript (molecule type); use as_slice() for bytes
                 let bytes = script.0.as_slice();
@@ -519,9 +514,7 @@ impl From<&fiber_types::Attribute> for crate::invoice::Attribute {
             InternalAttr::PayeePublicKey(pk) => {
                 JsonAttr::PayeePublicKey(JsonPubkey(pk.serialize()))
             }
-            InternalAttr::HashAlgorithm(algo) => {
-                JsonAttr::HashAlgorithm(JsonHashAlgorithm::from(algo))
-            }
+            InternalAttr::HashAlgorithm(algo) => JsonAttr::HashAlgorithm(algo.into()),
             InternalAttr::Feature(features) => JsonAttr::Feature(features.enabled_features_names()),
             InternalAttr::PaymentSecret(secret) => {
                 JsonAttr::PaymentSecret(JsonHash256::from(secret).to_string())
@@ -547,43 +540,43 @@ mod watchtower_convert {
 
     // TLCId conversions
 
-    impl From<&InternalTLCId> for JsonTLCId {
-        fn from(id: &InternalTLCId) -> Self {
+    impl From<InternalTLCId> for JsonTLCId {
+        fn from(id: InternalTLCId) -> Self {
             match id {
-                InternalTLCId::Offered(v) => JsonTLCId::Offered(*v),
-                InternalTLCId::Received(v) => JsonTLCId::Received(*v),
+                InternalTLCId::Offered(v) => JsonTLCId::Offered(v),
+                InternalTLCId::Received(v) => JsonTLCId::Received(v),
             }
         }
     }
 
-    impl From<&JsonTLCId> for InternalTLCId {
-        fn from(id: &JsonTLCId) -> Self {
+    impl From<JsonTLCId> for InternalTLCId {
+        fn from(id: JsonTLCId) -> Self {
             match id {
-                JsonTLCId::Offered(v) => InternalTLCId::Offered(*v),
-                JsonTLCId::Received(v) => InternalTLCId::Received(*v),
+                JsonTLCId::Offered(v) => InternalTLCId::Offered(v),
+                JsonTLCId::Received(v) => InternalTLCId::Received(v),
             }
         }
     }
 
     // SettlementTlc conversions
 
-    impl From<&InternalSettlementTlc> for JsonSettlementTlc {
-        fn from(tlc: &InternalSettlementTlc) -> Self {
+    impl From<InternalSettlementTlc> for JsonSettlementTlc {
+        fn from(tlc: InternalSettlementTlc) -> Self {
             JsonSettlementTlc {
-                tlc_id: JsonTLCId::from(&tlc.tlc_id),
-                hash_algorithm: JsonHashAlgorithm::from(&tlc.hash_algorithm),
+                tlc_id: tlc.tlc_id.into(),
+                hash_algorithm: tlc.hash_algorithm.into(),
                 payment_amount: tlc.payment_amount,
-                payment_hash: JsonHash256::from(&tlc.payment_hash),
+                payment_hash: tlc.payment_hash.into(),
                 expiry: tlc.expiry,
                 local_key: hex::encode(tlc.local_key.0.secret_bytes()),
-                remote_key: JsonPubkey::from(&tlc.remote_key),
+                remote_key: tlc.remote_key.into(),
             }
         }
     }
 
-    impl TryFrom<&JsonSettlementTlc> for InternalSettlementTlc {
+    impl TryFrom<JsonSettlementTlc> for InternalSettlementTlc {
         type Error = String;
-        fn try_from(tlc: &JsonSettlementTlc) -> Result<Self, Self::Error> {
+        fn try_from(tlc: JsonSettlementTlc) -> Result<Self, Self::Error> {
             let local_key_bytes =
                 hex::decode(&tlc.local_key).map_err(|e| format!("invalid local_key hex: {e}"))?;
             let local_key_arr: [u8; 32] = local_key_bytes
@@ -591,13 +584,13 @@ mod watchtower_convert {
                 .try_into()
                 .map_err(|_| "invalid local_key length, expected 32 bytes".to_string())?;
             Ok(InternalSettlementTlc {
-                tlc_id: InternalTLCId::from(&tlc.tlc_id),
-                hash_algorithm: fiber_types::HashAlgorithm::from(&tlc.hash_algorithm),
+                tlc_id: tlc.tlc_id.into(),
+                hash_algorithm: tlc.hash_algorithm.into(),
                 payment_amount: tlc.payment_amount,
-                payment_hash: Hash256::from(&tlc.payment_hash),
+                payment_hash: tlc.payment_hash.into(),
                 expiry: tlc.expiry,
                 local_key: local_key_arr.into(),
-                remote_key: Pubkey::try_from(&tlc.remote_key)
+                remote_key: Pubkey::try_from(tlc.remote_key)
                     .map_err(|e| format!("invalid remote_key: {e}"))?,
             })
         }
@@ -605,22 +598,22 @@ mod watchtower_convert {
 
     // SettlementData conversions
 
-    impl From<&InternalSettlementData> for JsonSettlementData {
-        fn from(data: &InternalSettlementData) -> Self {
+    impl From<InternalSettlementData> for JsonSettlementData {
+        fn from(data: InternalSettlementData) -> Self {
             JsonSettlementData {
                 local_amount: data.local_amount,
                 remote_amount: data.remote_amount,
-                tlcs: data.tlcs.iter().map(JsonSettlementTlc::from).collect(),
+                tlcs: data.tlcs.into_iter().map(JsonSettlementTlc::from).collect(),
             }
         }
     }
 
-    impl TryFrom<&JsonSettlementData> for InternalSettlementData {
+    impl TryFrom<JsonSettlementData> for InternalSettlementData {
         type Error = String;
-        fn try_from(data: &JsonSettlementData) -> Result<Self, Self::Error> {
+        fn try_from(data: JsonSettlementData) -> Result<Self, Self::Error> {
             let tlcs = data
                 .tlcs
-                .iter()
+                .into_iter()
                 .map(InternalSettlementTlc::try_from)
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(InternalSettlementData {
@@ -633,27 +626,27 @@ mod watchtower_convert {
 
     // RevocationData conversions
 
-    impl From<&InternalRevocationData> for JsonRevocationData {
-        fn from(data: &InternalRevocationData) -> Self {
+    impl From<InternalRevocationData> for JsonRevocationData {
+        fn from(data: InternalRevocationData) -> Self {
             JsonRevocationData {
                 commitment_number: data.commitment_number,
                 aggregated_signature: data.aggregated_signature.serialize().to_vec(),
-                output: data.output.clone(),
-                output_data: data.output_data.clone(),
+                output: data.output,
+                output_data: data.output_data,
             }
         }
     }
 
-    impl TryFrom<&JsonRevocationData> for InternalRevocationData {
+    impl TryFrom<JsonRevocationData> for InternalRevocationData {
         type Error = String;
-        fn try_from(data: &JsonRevocationData) -> Result<Self, Self::Error> {
+        fn try_from(data: JsonRevocationData) -> Result<Self, Self::Error> {
             let sig = musig2::CompactSignature::from_bytes(&data.aggregated_signature)
                 .map_err(|e| format!("invalid aggregated_signature: {e}"))?;
             Ok(InternalRevocationData {
                 commitment_number: data.commitment_number,
                 aggregated_signature: sig,
-                output: data.output.clone(),
-                output_data: data.output_data.clone(),
+                output: data.output,
+                output_data: data.output_data,
             })
         }
     }

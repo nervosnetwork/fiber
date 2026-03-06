@@ -133,7 +133,7 @@ impl DevRpcServerImpl {
         &self,
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let channel_id = Hash256::from(&params.channel_id);
+        let channel_id = params.channel_id.into();
         let message = NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
@@ -144,11 +144,10 @@ impl DevRpcServerImpl {
     }
 
     pub async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
-        let channel_id = Hash256::from(&params.channel_id);
-        let payment_hash = Hash256::from(&params.payment_hash);
+        let channel_id = params.channel_id.into();
+        let payment_hash = params.payment_hash.into();
         let hash_algorithm = params
             .hash_algorithm
-            .as_ref()
             .map(HashAlgorithm::from)
             .unwrap_or_default();
 
@@ -179,7 +178,7 @@ impl DevRpcServerImpl {
     }
 
     pub async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
-        let channel_id = Hash256::from(&params.channel_id);
+        let channel_id = params.channel_id.into();
         let err_code = match &params.reason {
             RemoveTlcReason::RemoveTlcFail { error_code } => {
                 let Ok(err) = TlcErrorCode::from_str(error_code) else {
@@ -191,7 +190,7 @@ impl DevRpcServerImpl {
         };
         let reason = match &params.reason {
             RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
-                let preimage = Hash256::from(payment_preimage);
+                let preimage = (*payment_preimage).into();
                 crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                     payment_preimage: preimage,
                 })
@@ -228,7 +227,7 @@ impl DevRpcServerImpl {
         &self,
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned> {
-        let channel_id = Hash256::from(&params.channel_id);
+        let channel_id = params.channel_id.into();
         if let Some(tx) = self
             .commitment_txs
             .read()
@@ -263,7 +262,7 @@ impl DevRpcServerImpl {
         &self,
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let channel_id = Hash256::from(&params.channel_id);
+        let channel_id = params.channel_id.into();
         let message =
             NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(channel_id));
 

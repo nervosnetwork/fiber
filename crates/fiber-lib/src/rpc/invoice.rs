@@ -10,7 +10,6 @@ use crate::invoice::{
 };
 use crate::rpc::utils::{rpc_error, rpc_error_no_data, RpcResultExt};
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
-use fiber_json_types::{CkbInvoice as JsonCkbInvoice, CkbInvoiceStatus as JsonCkbInvoiceStatus};
 use fiber_types::{FeatureVector, Privkey};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -172,8 +171,7 @@ where
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
         let error = |msg: &str| Err(rpc_error(msg.to_string(), params.clone()));
 
-        // Convert the JSON currency to internal currency for comparison & building
-        let params_currency = fiber_types::Currency::from(&params.currency);
+        let params_currency = params.currency.into();
 
         if let Some(currency) = self.currency {
             if currency != params_currency {
@@ -186,11 +184,8 @@ where
         let mut invoice_builder = InvoiceBuilder::new(params_currency).amount(Some(params.amount));
 
         // Convert payment_preimage and payment_hash from JSON types -> internal Hash256
-        let preimage_hash = params
-            .payment_preimage
-            .as_ref()
-            .map(fiber_types::Hash256::from);
-        let payment_hash = params.payment_hash.as_ref().map(fiber_types::Hash256::from);
+        let preimage_hash = params.payment_preimage.map(fiber_types::Hash256::from);
+        let payment_hash = params.payment_hash.map(fiber_types::Hash256::from);
 
         // If both preimage and hash are absent, a random preimage is generated.
         let preimage_opt = match (preimage_hash, payment_hash) {
@@ -261,9 +256,8 @@ where
         if let Some(udt_type_script) = &params.udt_type_script {
             invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());
         };
-        if let Some(hash_algorithm) = params.hash_algorithm.as_ref() {
-            invoice_builder =
-                invoice_builder.hash_algorithm(fiber_types::HashAlgorithm::from(hash_algorithm));
+        if let Some(hash_algorithm) = params.hash_algorithm {
+            invoice_builder = invoice_builder.hash_algorithm(hash_algorithm.into());
         };
 
         let invoice = if let Some((public_key, secret_key)) = &self.keypair {
@@ -282,7 +276,7 @@ where
                 match self.store.insert_invoice(invoice.clone(), preimage_opt) {
                     Ok(_) => Ok(InvoiceResult {
                         invoice_address: invoice.to_string(),
-                        invoice: JsonCkbInvoice::from(&invoice),
+                        invoice: invoice.clone().into(),
                     }),
                     Err(e) => error(&e.to_string()),
                 }
@@ -298,7 +292,7 @@ where
         let result: Result<InternalCkbInvoice, _> = params.invoice.parse();
         match result {
             Ok(invoice) => Ok(ParseInvoiceResult {
-                invoice: JsonCkbInvoice::from(&invoice),
+                invoice: invoice.into(),
             }),
             Err(e) => Err(rpc_error(e.to_string(), params)),
         }
@@ -308,7 +302,7 @@ where
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let payment_hash = fiber_types::Hash256::from(&params.payment_hash);
+        let payment_hash = params.payment_hash.into();
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
                 let status = match self
@@ -322,8 +316,8 @@ where
 
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
-                    invoice: JsonCkbInvoice::from(&invoice),
-                    status: JsonCkbInvoiceStatus::from(&status),
+                    invoice: invoice.into(),
+                    status: status.into(),
                 })
             }
             None => Err(rpc_error("invoice not found", params)),
@@ -334,7 +328,7 @@ where
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let payment_hash = fiber_types::Hash256::from(&params.payment_hash);
+        let payment_hash = params.payment_hash.into();
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
                 let status = match self
@@ -365,8 +359,8 @@ where
                 }
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
-                    invoice: JsonCkbInvoice::from(&invoice),
-                    status: JsonCkbInvoiceStatus::from(&new_status),
+                    invoice: invoice.into(),
+                    status: new_status.into(),
                 })
             }
             None => Err(rpc_error("invoice not found", params)),
@@ -382,8 +376,8 @@ where
             .as_ref()
             .ok_or_else(|| rpc_error_no_data("network actor not initialized"))?;
 
-        let payment_hash = fiber_types::Hash256::from(&params.payment_hash);
-        let payment_preimage = fiber_types::Hash256::from(&params.payment_preimage);
+        let payment_hash = params.payment_hash.into();
+        let payment_preimage = params.payment_preimage.into();
 
         let message = move |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(

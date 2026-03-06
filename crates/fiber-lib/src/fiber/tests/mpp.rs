@@ -27,7 +27,6 @@ use crate::{
     },
     NetworkServiceEvent, HUGE_CKB_AMOUNT,
 };
-use fiber_json_types::serde_utils::Hash256 as JsonHash256;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_send_mpp_basic_two_channels_one_time() {
@@ -2965,7 +2964,7 @@ async fn test_send_mpp_with_generated_invoice() {
     let too_large_amount_invoice = nodes[1]
         .gen_invoice(NewInvoiceParams {
             amount: 20000000001,
-            payment_preimage: Some(JsonHash256::from(&gen_rand_sha256_hash())),
+            payment_preimage: Some(gen_rand_sha256_hash().into()),
             final_expiry_delta: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             allow_mpp: Some(true),
             ..Default::default()
@@ -2986,7 +2985,7 @@ async fn test_send_mpp_with_generated_invoice() {
     let ok_invoice = nodes[1]
         .gen_invoice(NewInvoiceParams {
             amount: 20000000000,
-            payment_preimage: Some(JsonHash256::from(&gen_rand_sha256_hash())),
+            payment_preimage: Some(gen_rand_sha256_hash().into()),
             allow_mpp: Some(true),
             final_expiry_delta: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             ..Default::default()

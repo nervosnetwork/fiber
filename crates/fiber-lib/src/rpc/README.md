@@ -87,9 +87,13 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `PeerInfo`](#type-peerinfo)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
+    * [Type `RevocationData`](#type-revocationdata)
     * [Type `RouterHop`](#type-routerhop)
     * [Type `SessionRoute`](#type-sessionroute)
     * [Type `SessionRouteNode`](#type-sessionroutenode)
+    * [Type `SettlementData`](#type-settlementdata)
+    * [Type `SettlementTlc`](#type-settlementtlc)
+    * [Type `TLCId`](#type-tlcid)
     * [Type `TlcStatus`](#type-tlcstatus)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
@@ -968,7 +972,7 @@ Create a new watched channel
 * `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to settle the commitment transaction (hex without 0x prefix)
 * `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
-* `settlement_data` - <em>`serde_json::Value`</em>, Settlement data (serialized)
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 
 ##### Returns
 
@@ -1003,8 +1007,8 @@ Update revocation
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
-* `revocation_data` - <em>`serde_json::Value`</em>, Revocation data (serialized)
-* `settlement_data` - <em>`serde_json::Value`</em>, Settlement data (serialized)
+* `revocation_data` - <em>[RevocationData](#type-revocationdata)</em>, Revocation data
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 
 ##### Returns
 
@@ -1022,7 +1026,7 @@ Update pending remote settlement
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
-* `settlement_data` - <em>`serde_json::Value`</em>, Settlement data (serialized)
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 
 ##### Returns
 
@@ -1040,7 +1044,7 @@ Update settlement
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
-* `settlement_data` - <em>`serde_json::Value`</em>, Settlement data (serialized)
+* `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 
 ##### Returns
 
@@ -1492,6 +1496,20 @@ The reason for removing a TLC.
 * `RemoveTlcFail` - The reason for removing the TLC is that it failed
 ---
 
+<a id="#type-revocationdata"></a>
+### Type `RevocationData`
+
+Data needed to revoke an outdated commitment transaction.
+
+
+#### Fields
+
+* `commitment_number` - <em>`u64`</em>, The commitment transaction version number that was revoked
+* `aggregated_signature` - <em>`Vec<u8>`</em>, The aggregated signature from both parties that authorizes the revocation (hex string, 64 bytes)
+* `output` - <em>`CellOutput`</em>, The output cell from the revoked commitment transaction (hex-encoded molecule bytes)
+* `output_data` - <em>`Bytes`</em>, The associated data for the output cell (e.g., UDT amount for token transfers, hex-encoded molecule bytes)
+---
+
 <a id="#type-routerhop"></a>
 ### Type `RouterHop`
 
@@ -1529,6 +1547,48 @@ The node and channel information in a payment route hop.
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the node
 * `amount` - <em>`u128`</em>, The amount for this hop
 * `channel_outpoint` - <em>`OutPoint`</em>, The channel outpoint for this hop
+---
+
+<a id="#type-settlementdata"></a>
+### Type `SettlementData`
+
+Data needed to authorize and execute a settlement transaction.
+
+
+#### Fields
+
+* `local_amount` - <em>`u128`</em>, The total amount of CKB/UDT being settled for the local party
+* `remote_amount` - <em>`u128`</em>, The total amount of CKB/UDT being settled for the remote party
+* `tlcs` - <em>Vec<[SettlementTlc](#type-settlementtlc)></em>, The list of pending Time-Locked Contracts (TLCs) included in this settlement
+---
+
+<a id="#type-settlementtlc"></a>
+### Type `SettlementTlc`
+
+Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
+
+
+#### Fields
+
+* `tlc_id` - <em>[TLCId](#type-tlcid)</em>, The ID of the TLC (either offered or received)
+* `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm used for the TLC
+* `payment_amount` - <em>`u128`</em>, The amount of CKB/UDT involved in the TLC
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the payment preimage
+* `expiry` - <em>`u64`</em>, The expiry time for the TLC in milliseconds
+* `local_key` - <em>`String`</em>, The local party's private key used to sign the TLC (hex string)
+* `remote_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to verify the TLC (hex without 0x prefix)
+---
+
+<a id="#type-tlcid"></a>
+### Type `TLCId`
+
+The id of a TLC, it can be either offered or received.
+
+
+#### Enum with values of
+
+* `Offered` - <em>`u64`</em>, Offered TLC id
+* `Received` - <em>`u64`</em>, Received TLC id
 ---
 
 <a id="#type-tlcstatus"></a>

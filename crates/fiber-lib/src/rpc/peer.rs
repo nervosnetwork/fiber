@@ -2,7 +2,6 @@ use crate::fiber::network::PeerDisconnectReason;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::log_and_error;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
-use fiber_json_types::serde_utils::Pubkey as JsonPubkey;
 use fiber_types::{Multiaddr, Pubkey};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
@@ -69,7 +68,7 @@ impl PeerRpcServerImpl {
             return crate::handle_actor_cast!(self.actor, message, params);
         }
 
-        if let Some(pubkey_str) = params.pubkey.as_ref() {
+        if let Some(pubkey_str) = params.pubkey {
             let pubkey = Pubkey::try_from(pubkey_str).rpc_err(&params)?;
             let message = |rpc_reply| {
                 NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
@@ -89,7 +88,7 @@ impl PeerRpcServerImpl {
         &self,
         params: DisconnectPeerParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let pubkey = Pubkey::try_from(&params.pubkey).rpc_err(&params)?;
+        let pubkey = Pubkey::try_from(params.pubkey).rpc_err(&params)?;
         let message = NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
             pubkey,
             PeerDisconnectReason::Requested,
@@ -105,7 +104,7 @@ impl PeerRpcServerImpl {
             peers: response
                 .into_iter()
                 .map(|peer| PeerInfo {
-                    pubkey: JsonPubkey::from(&peer.pubkey),
+                    pubkey: peer.pubkey.into(),
                     address: peer.address.to_string(),
                 })
                 .collect(),

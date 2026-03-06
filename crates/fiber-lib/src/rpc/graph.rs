@@ -3,10 +3,7 @@ use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::network::get_chain_hash;
 use ckb_jsonrpc_types::JsonBytes;
-use fiber_json_types::serde_utils::{Hash256 as JsonHash256, Pubkey};
-use fiber_json_types::{
-    ChannelUpdateInfo as JsonChannelUpdateInfo, UdtCfgInfos as JsonUdtCfgInfos,
-};
+use fiber_json_types::ChannelUpdateInfo as JsonChannelUpdateInfo;
 use fiber_types::Cursor;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
@@ -25,31 +22,29 @@ fn internal_node_info_to_json(value: crate::fiber::graph::NodeInfo) -> NodeInfo 
         node_name: value.node_name.to_string(),
         version: value.version,
         addresses: value.addresses.iter().map(|a| a.to_string()).collect(),
-        pubkey: Pubkey::from(&value.node_id),
+        pubkey: value.node_id.into(),
         timestamp: value.timestamp,
         features: value.features.enabled_features_names(),
-        chain_hash: JsonHash256::from(&get_chain_hash()),
+        chain_hash: get_chain_hash().into(),
         auto_accept_min_ckb_funding_amount: value.auto_accept_min_ckb_funding_amount,
-        udt_cfg_infos: JsonUdtCfgInfos::from(&value.udt_cfg_infos),
+        udt_cfg_infos: value.udt_cfg_infos.into(),
     }
 }
 
 fn internal_channel_info_to_json(channel_info: crate::fiber::graph::ChannelInfo) -> ChannelInfo {
     ChannelInfo {
         channel_outpoint: channel_info.out_point().clone(),
-        node1: Pubkey::from(&channel_info.node1()),
-        node2: Pubkey::from(&channel_info.node2()),
+        node1: channel_info.node1().into(),
+        node2: channel_info.node2().into(),
         created_timestamp: channel_info.timestamp,
         update_info_of_node1: channel_info
             .update_of_node1
-            .as_ref()
             .map(JsonChannelUpdateInfo::from),
         update_info_of_node2: channel_info
             .update_of_node2
-            .as_ref()
             .map(JsonChannelUpdateInfo::from),
         capacity: channel_info.capacity(),
-        chain_hash: JsonHash256::from(&get_chain_hash()),
+        chain_hash: get_chain_hash().into(),
         udt_type_script: channel_info.udt_type_script().clone().map(|s| s.into()),
     }
 }

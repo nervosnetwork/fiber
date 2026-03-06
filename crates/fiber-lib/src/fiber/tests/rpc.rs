@@ -23,7 +23,6 @@ use crate::{
 use biscuit_auth::macros::biscuit;
 use biscuit_auth::{KeyPair, PrivateKey};
 use ckb_types::packed::Script;
-use fiber_json_types::serde_utils::{Hash256 as JsonHash256, Pubkey};
 use std::str::FromStr;
 
 fn rpc_config_with_auth() -> (RpcConfig, KeyPair) {
@@ -88,12 +87,12 @@ async fn test_rpc_basic() {
         .send_rpc_request(
             "get_payment",
             GetPaymentCommandParams {
-                payment_hash: JsonHash256::from(&payment_hash),
+                payment_hash: payment_hash.into(),
             },
         )
         .await
         .unwrap();
-    assert_eq!(payment.payment_hash, JsonHash256::from(&payment_hash));
+    assert_eq!(payment.payment_hash, payment_hash.into());
 
     let new_invoice_params = NewInvoiceParams {
         amount: 1000,
@@ -103,7 +102,7 @@ async fn test_rpc_basic() {
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: Some(JsonHash256::from(&Hash256::default())),
+        payment_preimage: Some(Hash256::default().into()),
         payment_hash: None,
         hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
@@ -163,7 +162,7 @@ async fn test_rpc_basic() {
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: Some(JsonHash256::from(&gen_rand_sha256_hash())),
+        payment_preimage: Some(gen_rand_sha256_hash().into()),
         payment_hash: None,
         hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
@@ -218,7 +217,7 @@ async fn test_rpc_list_peers() {
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
-    assert_eq!(list_peers.peers[0].pubkey, Pubkey::from(&node_1.pubkey));
+    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey.into());
     let node_1_pubkey = list_peers.peers[0].pubkey;
 
     let _res: () = node_0
@@ -251,7 +250,7 @@ async fn test_rpc_list_peers() {
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
-    assert_eq!(list_peers.peers[0].pubkey, Pubkey::from(&node_1.pubkey));
+    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey.into());
 
     let mut node_3 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
@@ -268,7 +267,7 @@ async fn test_rpc_list_peers() {
     node_0.connect_to(&mut node_3).await;
     let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
-    assert_eq!(list_peers.peers[0].pubkey, Pubkey::from(&node_0.pubkey));
+    assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey.into());
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 2);
@@ -276,11 +275,11 @@ async fn test_rpc_list_peers() {
     assert!(list_peers
         .peers
         .iter()
-        .any(|p| p.pubkey == Pubkey::from(&node_1.pubkey)));
+        .any(|p| p.pubkey == node_1.pubkey.into()));
     assert!(list_peers
         .peers
         .iter()
-        .any(|p| p.pubkey == Pubkey::from(&node_3.pubkey)));
+        .any(|p| p.pubkey == node_3.pubkey.into()));
 }
 
 #[tokio::test]
@@ -329,7 +328,7 @@ async fn test_rpc_graph() {
     assert!(graph_nodes
         .nodes
         .iter()
-        .any(|n| n.pubkey == Pubkey::from(&node_1.pubkey)));
+        .any(|n| n.pubkey == node_1.pubkey.into()));
     assert!(graph_nodes
         .nodes
         .iter()
@@ -534,7 +533,7 @@ async fn test_rpc_pubkey_and_payee_public_key_same_format() {
         fallback_address: None,
         final_expiry_delta: None,
         udt_type_script: None,
-        payment_preimage: Some(JsonHash256::from(&gen_rand_sha256_hash())),
+        payment_preimage: Some(gen_rand_sha256_hash().into()),
         payment_hash: None,
         hash_algorithm: None,
         allow_mpp: None,
@@ -654,12 +653,12 @@ async fn test_rpc_basic_with_auth() {
         .send_rpc_request(
             "get_payment",
             GetPaymentCommandParams {
-                payment_hash: JsonHash256::from(&payment_hash),
+                payment_hash: payment_hash.into(),
             },
         )
         .await
         .unwrap();
-    assert_eq!(payment.payment_hash, JsonHash256::from(&payment_hash));
+    assert_eq!(payment.payment_hash, payment_hash.into());
 
     // node0 generate a invoice
     let invoice_res: InvoiceResult = node_0
@@ -673,7 +672,7 @@ async fn test_rpc_basic_with_auth() {
                 fallback_address: None,
                 final_expiry_delta: Some(900000 + 1234),
                 udt_type_script: Some(Script::default().into()),
-                payment_preimage: Some(JsonHash256::from(&Hash256::default())),
+                payment_preimage: Some(Hash256::default().into()),
                 payment_hash: None,
                 hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
                 allow_mpp: None,
@@ -893,7 +892,7 @@ async fn test_rpc_shutdown_following_disconnect() {
                 "shutdown_channel",
                 ShutdownChannelParams {
                     close_script: Some(Script::default().into()),
-                    channel_id: JsonHash256::from(&channels[0]),
+                    channel_id: channels[0].into(),
                     fee_rate: Some(1000),
                     force: Some(false),
                 },
@@ -936,7 +935,7 @@ async fn test_rpc_feature_check() {
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: Some(JsonHash256::from(&Hash256::default())),
+        payment_preimage: Some(Hash256::default().into()),
         payment_hash: None,
         hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),

@@ -2297,6 +2297,7 @@ dependencies = [
  "console_error_panic_hook",
  "fiber-json-types",
  "fnn",
+ "hex",
  "jsonrpsee",
  "ractor",
  "secp256k1 0.30.0",
