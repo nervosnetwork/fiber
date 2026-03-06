@@ -2396,7 +2396,6 @@ dependencies = [
  "fiber-store",
  "fiber-types",
  "futures",
- "getrandom 0.2.17",
  "getrandom 0.3.4",
  "git-version",
  "hex",

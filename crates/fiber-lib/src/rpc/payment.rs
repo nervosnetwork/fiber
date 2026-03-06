@@ -7,10 +7,12 @@ use crate::fiber::{
 };
 use crate::rpc::utils::RpcResultExt;
 use crate::{handle_actor_call, log_and_error};
+#[cfg(debug_assertions)]
+use fiber_json_types::SessionRoute as JsonSessionRoute;
 use fiber_json_types::{
     PaymentCustomRecords as JsonPaymentCustomRecords, RouterHop as JsonRouterHop,
-    SessionRoute as JsonSessionRoute,
 };
+
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;

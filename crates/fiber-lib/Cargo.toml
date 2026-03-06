@@ -27,7 +27,7 @@ fiber-json-types = { path = "../fiber-json-types", features = ["all"] }
 fiber-store = { path = "../fiber-store" }
 fiber-types = { path = "../fiber-types", features = ["cch", "watchtower"] }
 futures = "0.3.30"
-getrandom = { version = "0.2", features = ["js"] }
+getrandom = "0.3"
 git-version = "0.3.9"
 bs58 = "0.5.1"
 hex = "0.4.3"

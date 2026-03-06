@@ -6,7 +6,7 @@ use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
-use getrandom::getrandom;
+use getrandom::fill;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
@@ -93,6 +93,7 @@ use crate::invoice::{
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
 use fiber_types::{
@@ -104,8 +105,6 @@ use fiber_types::{
     RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
     TrampolineContext, UdtCfgInfos,
 };
-// Re-export HopRequire so internal modules can still use `network::HopRequire`.
-pub use fiber_types::HopRequire;
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -4450,7 +4449,7 @@ where
             .expect("valid length for key")
             .into();
         let mut entropy_rand = [0u8; 32];
-        getrandom(&mut entropy_rand).expect("getrandom should not fail");
+        fill(&mut entropy_rand).expect("getrandom fill should not fail");
         let entropy = blake2b_hash_with_salt(
             [kp.as_ref(), entropy_rand.as_slice()].concat().as_slice(),
             b"FIBER_NETWORK_ENTROPY",
