@@ -1148,7 +1148,7 @@ where
                 }
                 if let Some(session) = session {
                     debug!(
-                        "Disconnecting peer {:?} session w {:?}ith reason {:?}",
+                        "Disconnecting peer {:?} session {:?} with reason {:?}",
                         &pubkey, &session, &reason
                     );
                     state.control.disconnect(session).await?;

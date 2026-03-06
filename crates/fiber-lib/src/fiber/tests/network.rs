@@ -9,7 +9,7 @@ use crate::{
     fiber::{
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
-        network::{AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand},
+        network::{AcceptChannelCommand, DebugEvent, NetworkActorStateStore, OpenChannelCommand},
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
             broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
@@ -750,15 +750,25 @@ async fn test_peer_disconnect_without_active_channel_skips_backoff_reconnect() {
     init_tracing();
 
     let [mut node1, mut node2] = NetworkNode::new_n_interconnected_nodes().await;
+    let saw_debug = std::cell::Cell::new(false);
+    let saw_disconnect = std::cell::Cell::new(false);
 
     node2.stop().await;
 
     node1
-        .expect_debug_event("PeerReconnectBackoffSkippedNoDirectChannel")
-        .await;
-    node1
-        .expect_event(|event| {
-            matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node2.pubkey)
+        .expect_to_process_event(|event| {
+            match event {
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffSkippedNoDirectChannel" =>
+                {
+                    saw_debug.set(true);
+                }
+                NetworkServiceEvent::PeerDisConnected(id, _) if id == &node2.pubkey => {
+                    saw_disconnect.set(true);
+                }
+                _ => {}
+            }
+            (saw_debug.get() && saw_disconnect.get()).then_some(())
         })
         .await;
 }

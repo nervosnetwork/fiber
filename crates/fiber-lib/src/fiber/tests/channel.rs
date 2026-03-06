@@ -4434,18 +4434,31 @@ async fn test_peer_disconnect_with_active_channel_enters_backoff_reconnect() {
 
     let (mut node_a, mut node_b, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let saw_seeded = std::cell::Cell::new(false);
+    let saw_scheduled = std::cell::Cell::new(false);
+    let saw_disconnect = std::cell::Cell::new(false);
 
     node_b.stop().await;
 
     node_a
-        .expect_debug_event("PeerReconnectBackoffSeededByDisconnect")
-        .await;
-    node_a
-        .expect_debug_event("PeerReconnectBackoffScheduled")
-        .await;
-    node_a
-        .expect_event(|event| {
-            matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey)
+        .expect_to_process_event(|event| {
+            match event {
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffSeededByDisconnect" =>
+                {
+                    saw_seeded.set(true);
+                }
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffScheduled" =>
+                {
+                    saw_scheduled.set(true);
+                }
+                NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey => {
+                    saw_disconnect.set(true);
+                }
+                _ => {}
+            }
+            (saw_seeded.get() && saw_scheduled.get() && saw_disconnect.get()).then_some(())
         })
         .await;
 }
