@@ -1,100 +1,219 @@
 //! Channel management types for the Fiber Network JSON-RPC API.
 
-use crate::serde_utils::{EntityHex, Hash256, HexU32, Pubkey, U128Hex, U64Hex};
+use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-// /// Close flags for a channel, serialized as PascalCase strings.
-// /// For single flag, returns the flag name (e.g., "Cooperative").
-// /// For multiple flags, returns comma-separated names (e.g., "Cooperative,Abandoned").
-// #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-// pub struct CloseFlags(pub u32);
+/// Convert SCREAMING_SNAKE_CASE to PascalCase.
+/// Example: "OUR_INIT_SENT" -> "OurInitSent"
+fn to_pascal_case(s: &str) -> String {
+    s.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+            }
+        })
+        .collect()
+}
 
-// impl CloseFlags {
-//     const COOPERATIVE: u32 = 1;
-//     const UNCOOPERATIVE_LOCAL: u32 = 1 << 1;
-//     const ABANDONED: u32 = 1 << 2;
-//     const FUNDING_ABORTED: u32 = 1 << 3;
-//     const UNCOOPERATIVE_REMOTE: u32 = 1 << 4;
-//     const WAITING_ONCHAIN_SETTLEMENT: u32 = 1 << 5;
+/// Convert PascalCase to SCREAMING_SNAKE_CASE.
+/// Example: "OurInitSent" -> "OUR_INIT_SENT"
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            result.push('_');
+        }
+        result.push(c.to_ascii_uppercase());
+    }
+    result
+}
 
-//     fn to_strings(&self) -> Vec<&'static str> {
-//         let mut names = Vec::new();
-//         if self.0 & Self::COOPERATIVE != 0 {
-//             names.push("Cooperative");
-//         }
-//         if self.0 & Self::UNCOOPERATIVE_LOCAL != 0 {
-//             names.push("UncooperativeLocal");
-//         }
-//         if self.0 & Self::ABANDONED != 0 {
-//             names.push("Abandoned");
-//         }
-//         if self.0 & Self::FUNDING_ABORTED != 0 {
-//             names.push("FundingAborted");
-//         }
-//         if self.0 & Self::UNCOOPERATIVE_REMOTE != 0 {
-//             names.push("UncooperativeRemote");
-//         }
-//         if self.0 & Self::WAITING_ONCHAIN_SETTLEMENT != 0 {
-//             names.push("WaitingOnchainSettlement");
-//         }
-//         names
-//     }
+/// Macro to define flags types that serialize to PascalCase strings.
+/// For single flag, returns the flag name in PascalCase (e.g., "OurInitSent").
+/// For multiple flags, returns comma-separated names (e.g., "OurInitSent,TheirInitSent").
+macro_rules! define_flags {
+    (
+        $(#[$struct_meta:meta])*
+        pub struct $name:ident($ty:ty) {
+            $($(#[$flag_meta:meta])* const $flag_name:ident = $flag_value:expr;)*
+        }
+    ) => {
+        $(#[$struct_meta])*
+        pub struct $name(pub $ty);
 
-//     fn from_string(s: &str) -> Option<Self> {
-//         let mut flags = 0u32;
-//         for name in s.split(',') {
-//             match name.trim() {
-//                 "Cooperative" => flags |= Self::COOPERATIVE,
-//                 "UncooperativeLocal" => flags |= Self::UNCOOPERATIVE_LOCAL,
-//                 "Abandoned" => flags |= Self::ABANDONED,
-//                 "FundingAborted" => flags |= Self::FUNDING_ABORTED,
-//                 "UncooperativeRemote" => flags |= Self::UNCOOPERATIVE_REMOTE,
-//                 "WaitingOnchainSettlement" => flags |= Self::WAITING_ONCHAIN_SETTLEMENT,
-//                 _ => return None,
-//             }
-//         }
-//         Some(CloseFlags(flags))
-//     }
-// }
+        impl $name {
+            $(pub const $flag_name: $ty = $flag_value;)*
 
-// impl Serialize for CloseFlags {
-//     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-//         let names = self.to_strings();
-//         if names.is_empty() {
-//             serializer.serialize_str("")
-//         } else {
-//             serializer.serialize_str(&names.join(","))
-//         }
-//     }
-// }
+            #[allow(clippy::wrong_self_convention)]
+            fn to_strings(self) -> Vec<String> {
+                let mut names = Vec::new();
+                $(
+                    if self.0 & Self::$flag_name != 0 {
+                        names.push(to_pascal_case(stringify!($flag_name)));
+                    }
+                )*
+                names
+            }
 
-// impl<'de> Deserialize<'de> for CloseFlags {
-//     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-//         let s = String::deserialize(deserializer)?;
-//         if s.is_empty() {
-//             Ok(CloseFlags(0))
-//         } else {
-//             CloseFlags::from_string(&s)
-//                 .ok_or_else(|| serde::de::Error::custom(format!("Invalid CloseFlags: {}", s)))
-//         }
-//     }
-// }
+            fn from_string(s: &str) -> Option<Self> {
+                let mut flags: $ty = 0;
+                for name in s.split(',') {
+                    let name = name.trim();
+                    let snake_name = to_snake_case(name);
+                    match snake_name.as_str() {
+                        $(stringify!($flag_name) => flags |= Self::$flag_name,)*
+                        _ => return None,
+                    }
+                }
+                Some($name(flags))
+            }
+        }
 
-// impl From<u32> for CloseFlags {
-//     fn from(v: u32) -> Self {
-//         CloseFlags(v)
-//     }
-// }
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let names = self.clone().to_strings();
+                if names.is_empty() {
+                    serializer.serialize_str("")
+                } else {
+                    serializer.serialize_str(&names.join(","))
+                }
+            }
+        }
 
-// impl From<CloseFlags> for u32 {
-//     fn from(v: CloseFlags) -> Self {
-//         v.0
-//     }
-// }
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let s = String::deserialize(deserializer)?;
+                if s.is_empty() {
+                    Ok($name(0))
+                } else {
+                    $name::from_string(&s)
+                        .ok_or_else(|| serde::de::Error::custom(format!("Invalid {}: {}", stringify!($name), s)))
+                }
+            }
+        }
+
+        impl From<$ty> for $name {
+            fn from(v: $ty) -> Self {
+                $name(v)
+            }
+        }
+
+        impl From<$name> for $ty {
+            fn from(v: $name) -> Self {
+                v.0
+            }
+        }
+    };
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct ChannelFlags(u8) {
+        const PUBLIC = 1;
+        const ONE_WAY = 1 << 1;
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    pub struct ChannelUpdateChannelFlags(u32) {
+        const DISABLED = 1;
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+    pub struct ChannelUpdateMessageFlags(u32) {
+        const UPDATE_OF_NODE1 = 0;
+        const UPDATE_OF_NODE2 = 1;
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct NegotiatingFundingFlags(u32) {
+        const OUR_INIT_SENT = 1;
+        const THEIR_INIT_SENT = 1 << 1;
+        const INIT_SENT = 1 | (1 << 1);
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct CollaboratingFundingTxFlags(u32) {
+        const AWAITING_REMOTE_TX_COLLABORATION_MSG = 1;
+        const PREPARING_LOCAL_TX_COLLABORATION_MSG = 1 << 1;
+        const OUR_TX_COMPLETE_SENT = 1 << 2;
+        const THEIR_TX_COMPLETE_SENT = 1 << 3;
+        const COLLABORATION_COMPLETED = (1 << 2) | (1 << 3);
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct SigningCommitmentFlags(u32) {
+        const OUR_COMMITMENT_SIGNED_SENT = 1;
+        const THEIR_COMMITMENT_SIGNED_SENT = 1 << 1;
+        const COMMITMENT_SIGNED_SENT = 1 | (1 << 1);
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct AwaitingTxSignaturesFlags(u32) {
+        const OUR_TX_SIGNATURES_SENT = 1;
+        const THEIR_TX_SIGNATURES_SENT = 1 << 1;
+        const TX_SIGNATURES_SENT = 1 | (1 << 1);
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct AwaitingChannelReadyFlags(u32) {
+        const OUR_CHANNEL_READY = 1;
+        const THEIR_CHANNEL_READY = 1 << 1;
+        const CHANNEL_READY = 1 | (1 << 1);
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct ShuttingDownFlags(u32) {
+        const OUR_SHUTDOWN_SENT = 1;
+        const THEIR_SHUTDOWN_SENT = 1 << 1;
+        const AWAITING_PENDING_TLCS = 1 | (1 << 1);
+        const DROPPING_PENDING = 1 << 2;
+        const WAITING_COMMITMENT_CONFIRMATION = 1 << 3;
+    }
+}
+
+define_flags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct CloseFlags(u32) {
+        const COOPERATIVE = 1;
+        const UNCOOPERATIVE_LOCAL = 1 << 1;
+        const ABANDONED = 1 << 2;
+        const FUNDING_ABORTED = 1 << 3;
+        const UNCOOPERATIVE_REMOTE = 1 << 4;
+        const WAITING_ONCHAIN_SETTLEMENT = 1 << 5;
+    }
+}
+
+define_flags! {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct AppliedFlags(u8) {
+        const ADD = 1;
+        const REMOVE = 1 << 1;
+    }
+}
 
 /// Parameters for opening a channel.
 #[serde_as]
@@ -260,31 +379,31 @@ pub struct ListChannelsResult {
 
 /// The state of a channel.
 ///
-/// Serialized with adjacently-tagged representation using PascalCase variant names.
+/// Serialized with adjacently-tagged representation using PascalCase variant names and flags.
 /// This is different from the internal `ChannelState` in fiber-types which uses
 /// default serde for bincode compatibility.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state_name", content = "state_flags")]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
-    NegotiatingFunding(HexU32),
+    NegotiatingFunding(NegotiatingFundingFlags),
     /// We're collaborating with the other party on the funding transaction.
-    CollaboratingFundingTx(HexU32),
+    CollaboratingFundingTx(CollaboratingFundingTxFlags),
     /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
-    SigningCommitment(HexU32),
+    SigningCommitment(SigningCommitmentFlags),
     /// We've received and sent `commitment_signed` and are now waiting for both
     /// party to collaborate on creating a valid funding transaction.
-    AwaitingTxSignatures(HexU32),
+    AwaitingTxSignatures(AwaitingTxSignaturesFlags),
     /// We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
     /// funding transaction to confirm.
-    AwaitingChannelReady(HexU32),
+    AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
     ChannelReady,
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-    ShuttingDown(HexU32),
+    ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
-    Closed(HexU32),
+    Closed(CloseFlags),
 }
 
 /// The channel data structure.

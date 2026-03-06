@@ -13,7 +13,7 @@ use ckb_types::{
     prelude::{IntoTransactionView, Unpack},
 };
 use fiber_types::Pubkey;
-use fiber_types::{ChannelOpeningStatus, CloseFlags, NegotiatingFundingFlags, TLCId};
+use fiber_types::{ChannelOpeningStatus, NegotiatingFundingFlags, TLCId};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 
@@ -380,12 +380,16 @@ where
                 // Map the ChannelOpenRecord status to the closest ChannelState representation.
                 let synthetic_state = match record.status {
                     ChannelOpeningStatus::Failed => {
-                        ChannelState::Closed(CloseFlags::FUNDING_ABORTED.bits().into())
+                        ChannelState::Closed(fiber_json_types::channel::CloseFlags(
+                            fiber_json_types::channel::CloseFlags::FUNDING_ABORTED,
+                        ))
                     }
                     // Any other in-progress status: show as NegotiatingFunding since we lack
                     // the exact channel sub-state when the actor hasn't yet stored its state.
                     _ => ChannelState::NegotiatingFunding(
-                        NegotiatingFundingFlags::OUR_INIT_SENT.bits().into(),
+                        fiber_json_types::channel::NegotiatingFundingFlags(
+                            fiber_json_types::channel::NegotiatingFundingFlags::OUR_INIT_SENT,
+                        ),
                     ),
                 };
                 // For outbound channels the local node contributes funding_amount.

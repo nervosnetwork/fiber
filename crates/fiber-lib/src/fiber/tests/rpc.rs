@@ -1145,36 +1145,52 @@ fn test_rpc_status_enum_naming_consistency() {
     );
 
     // Test all ChannelState variants use PascalCase
+    use fiber_json_types::channel::{
+        AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, CloseFlags,
+        CollaboratingFundingTxFlags, NegotiatingFundingFlags, ShuttingDownFlags,
+        SigningCommitmentFlags,
+    };
+
     let states = vec![
         (
-            ChannelState::NegotiatingFunding(0.into()),
+            ChannelState::NegotiatingFunding(NegotiatingFundingFlags(0)),
             "NegotiatingFunding",
+            "",
         ),
         (
-            ChannelState::CollaboratingFundingTx(0.into()),
+            ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags(0)),
             "CollaboratingFundingTx",
+            "",
         ),
         (
-            ChannelState::SigningCommitment(0.into()),
+            ChannelState::SigningCommitment(SigningCommitmentFlags(0)),
             "SigningCommitment",
+            "",
         ),
         (
-            ChannelState::AwaitingTxSignatures(0.into()),
+            ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags(0)),
             "AwaitingTxSignatures",
+            "",
         ),
         (
-            ChannelState::AwaitingChannelReady(0.into()),
+            ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags(0)),
             "AwaitingChannelReady",
+            "",
         ),
-        (ChannelState::ChannelReady, "ChannelReady"),
-        (ChannelState::ShuttingDown(0.into()), "ShuttingDown"),
+        (ChannelState::ChannelReady, "ChannelReady", ""),
         (
-            ChannelState::Closed(CloseFlags::COOPERATIVE.bits().into()),
+            ChannelState::ShuttingDown(ShuttingDownFlags(0)),
+            "ShuttingDown",
+            "",
+        ),
+        (
+            ChannelState::Closed(CloseFlags::COOPERATIVE.into()),
             "Closed",
+            "Cooperative",
         ),
     ];
 
-    for (state, expected_name) in states {
+    for (state, expected_name, expected_flags) in states {
         let json_str = serde_json::to_string(&state).unwrap();
         let json_value: Value = serde_json::from_str(&json_str).unwrap();
 
@@ -1190,32 +1206,50 @@ fn test_rpc_status_enum_naming_consistency() {
                 state_name
             );
         }
+
+        // Verify state_flags format
+        if let Some(state_flags) = json_value.get("state_flags").and_then(|v| v.as_str()) {
+            if !expected_flags.is_empty() {
+                assert_eq!(
+                    state_flags, expected_flags,
+                    "state_flags mismatch for {}: expected {}, got {}",
+                    expected_name, expected_flags, state_flags
+                );
+            }
+            // state_flags should be PascalCase (no underscores, not hex)
+            assert!(
+                !state_flags.starts_with("0x"),
+                "state_flags should not be hex for {}, got: {}",
+                expected_name,
+                state_flags
+            );
+        }
     }
 
-    // Test state_flags field format (should be hex string like "0x0", not PascalCase)
-    let state_with_flags = ChannelState::NegotiatingFunding(0x1234.into());
+    // Test state_flags field format for state with multiple flags
+    let state_with_flags = ChannelState::NegotiatingFunding(NegotiatingFundingFlags(
+        NegotiatingFundingFlags::OUR_INIT_SENT | NegotiatingFundingFlags::THEIR_INIT_SENT,
+    ));
     let json_str = serde_json::to_string(&state_with_flags).unwrap();
     let json_value: Value = serde_json::from_str(&json_str).unwrap();
 
     eprintln!("Serialized ChannelState with flags: {}", json_str);
-    // Verify state_flags field exists and is a hex string
+    // Verify state_flags field exists and is PascalCase
     if let Some(state_flags) = json_value.get("state_flags") {
         let flags_str = state_flags
             .as_str()
             .expect("state_flags should be a string");
         assert!(
-            flags_str.starts_with("0x"),
-            "state_flags should be a hex string starting with '0x', got: {}",
+            !flags_str.starts_with("0x"),
+            "state_flags should be PascalCase, not hex, got: {}",
             flags_str
         );
-        // Verify it's lowercase hex (not PascalCase)
-        assert_eq!(
-            flags_str,
-            flags_str.to_lowercase(),
-            "state_flags should be lowercase hex, got: {}",
+        // Should contain both flag names in PascalCase
+        assert!(
+            flags_str.contains("OurInitSent") || flags_str.contains("TheirInitSent"),
+            "state_flags should contain flag names in PascalCase, got: {}",
             flags_str
         );
-        assert_eq!(flags_str, "0x1234", "state_flags value mismatch");
     } else {
         panic!("state_flags field not found in JSON: {}", json_str);
     }

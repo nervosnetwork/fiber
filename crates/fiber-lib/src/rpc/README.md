@@ -1211,24 +1211,24 @@ The Channel information.
 
 The state of a channel.
 
- Serialized with adjacently-tagged representation using PascalCase variant names.
+ Serialized with adjacently-tagged representation using PascalCase variant names and flags.
  This is different from the internal `ChannelState` in fiber-types which uses
  default serde for bincode compatibility.
 
 
 #### Enum with values of
 
-* `NegotiatingFunding` - <em>[HexU32](#type-hexu32)</em>, We are negotiating the parameters required for the channel prior to funding it.
-* `CollaboratingFundingTx` - <em>[HexU32](#type-hexu32)</em>, We're collaborating with the other party on the funding transaction.
-* `SigningCommitment` - <em>[HexU32](#type-hexu32)</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
-* `AwaitingTxSignatures` - <em>[HexU32](#type-hexu32)</em>, We've received and sent `commitment_signed` and are now waiting for both
+* `NegotiatingFunding` - <em>`NegotiatingFundingFlags`</em>, We are negotiating the parameters required for the channel prior to funding it.
+* `CollaboratingFundingTx` - <em>`CollaboratingFundingTxFlags`</em>, We're collaborating with the other party on the funding transaction.
+* `SigningCommitment` - <em>`SigningCommitmentFlags`</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
+* `AwaitingTxSignatures` - <em>`AwaitingTxSignaturesFlags`</em>, We've received and sent `commitment_signed` and are now waiting for both
  party to collaborate on creating a valid funding transaction.
-* `AwaitingChannelReady` - <em>[HexU32](#type-hexu32)</em>, We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
+* `AwaitingChannelReady` - <em>`AwaitingChannelReadyFlags`</em>, We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
  funding transaction to confirm.
 * `ChannelReady` - Both we and our counterparty consider the funding transaction confirmed and the channel is
  now operational.
-* `ShuttingDown` - <em>[HexU32](#type-hexu32)</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
-* `Closed` - <em>[HexU32](#type-hexu32)</em>, This channel is closed.
+* `ShuttingDown` - <em>`ShuttingDownFlags`</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
+* `Closed` - <em>`CloseFlags`</em>, This channel is closed.
 ---
 
 <a id="#type-channelupdateinfo"></a>
