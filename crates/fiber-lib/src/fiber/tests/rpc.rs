@@ -1110,3 +1110,85 @@ async fn test_rpc_cors_disabled_by_default() {
         "Response should NOT contain Access-Control-Allow-Origin header when CORS is disabled"
     );
 }
+
+/// Test that RPC status enums use consistent naming conventions (PascalCase).
+/// This test verifies that ChannelState and other status enums in RPC responses
+/// use PascalCase naming (e.g., "ChannelReady") rather than snake_case or SCREAMING_SNAKE_CASE.
+#[test]
+fn test_rpc_status_enum_naming_consistency() {
+    use serde_json::Value;
+
+    // Test ChannelState uses PascalCase
+    let channel_state = ChannelState::ChannelReady;
+    let json_str = serde_json::to_string(&channel_state).unwrap();
+    let json_value: Value = serde_json::from_str(&json_str).unwrap();
+
+    // Verify the state_name field uses PascalCase
+    if let Some(state_name) = json_value.get("state_name").and_then(|v| v.as_str()) {
+        assert!(
+            !state_name.contains('_'),
+            "ChannelState variant should use PascalCase without underscores, got: {}",
+            state_name
+        );
+        assert_eq!(
+            state_name, "ChannelReady",
+            "ChannelState::ChannelReady should serialize to 'ChannelReady', got: {}",
+            state_name
+        );
+    }
+
+    // Verify no SCREAMING_SNAKE_CASE format
+    assert!(
+        !json_str.contains("CHANNEL_READY"),
+        "ChannelState should NOT use SCREAMING_SNAKE_CASE format, got: {}",
+        json_str
+    );
+
+    // Test all ChannelState variants use PascalCase
+    let states = vec![
+        (
+            ChannelState::NegotiatingFunding(0.into()),
+            "NegotiatingFunding",
+        ),
+        (
+            ChannelState::CollaboratingFundingTx(0.into()),
+            "CollaboratingFundingTx",
+        ),
+        (
+            ChannelState::SigningCommitment(0.into()),
+            "SigningCommitment",
+        ),
+        (
+            ChannelState::AwaitingTxSignatures(0.into()),
+            "AwaitingTxSignatures",
+        ),
+        (
+            ChannelState::AwaitingChannelReady(0.into()),
+            "AwaitingChannelReady",
+        ),
+        (ChannelState::ChannelReady, "ChannelReady"),
+        (ChannelState::ShuttingDown(0.into()), "ShuttingDown"),
+        (
+            ChannelState::Closed(CloseFlags::COOPERATIVE.bits().into()),
+            "Closed",
+        ),
+    ];
+
+    for (state, expected_name) in states {
+        let json_str = serde_json::to_string(&state).unwrap();
+        let json_value: Value = serde_json::from_str(&json_str).unwrap();
+
+        if let Some(state_name) = json_value.get("state_name").and_then(|v| v.as_str()) {
+            assert_eq!(
+                state_name, expected_name,
+                "ChannelState variant name mismatch: expected {}, got {}",
+                expected_name, state_name
+            );
+            assert!(
+                !state_name.contains('_'),
+                "ChannelState variant should use PascalCase without underscores, got: {}",
+                state_name
+            );
+        }
+    }
+}

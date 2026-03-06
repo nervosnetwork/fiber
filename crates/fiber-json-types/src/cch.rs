@@ -8,7 +8,6 @@ use serde_with::serde_as;
 
 /// The status of a cross-chain hub order, will update as the order progresses.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
 pub enum CchOrderStatus {
     /// Order is created and waiting for the incoming invoice to collect enough TLCs.
     Pending,
