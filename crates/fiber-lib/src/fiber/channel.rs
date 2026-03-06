@@ -50,6 +50,7 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
     H256,
 };
+pub use fiber_types::TlcReplayUpdate;
 use fiber_types::{
     blake2b_hash_with_salt, derive_tlc_pubkey, AddTlcCommand, AppliedFlags,
     AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData, ChannelActorData,
@@ -3186,13 +3187,6 @@ pub struct CommitmentSignedTemplate {
     pub funding_tx_partial_signature: Option<PartialSignature>,
 }
 
-/// TLC update message to resend during reestablishment
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum TlcReplayUpdate {
-    Add(AddTlc),
-    Remove(RemoveTlc),
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReplayOrderHint {
     RevokeThenCommit,
@@ -3308,29 +3302,21 @@ type ScheduledChannelUpdateHandle =
 
 /// Wrapper around [`ChannelActorData`] that adds runtime-only fields.
 ///
-/// All 42 persistable fields live in the embedded `core`.
+/// All persistable fields live in the embedded `core`.
 /// Thanks to `Deref<Target = ChannelActorData>` (and `DerefMut`),
 /// existing code that accesses `self.field` continues to work transparently.
 ///
-/// Serialization delegates entirely to `ChannelActorData`,
-/// preserving the exact same bincode wire format as before.
+/// Serialization delegates entirely to `ChannelActorData`.
 #[derive(Clone)]
 pub struct ChannelActorState {
     /// All persistable channel state fields.
     pub core: ChannelActorData,
 
     // --- Runtime-only fields (not serialized) ---
-    /// TLC updates sent to peer since the last local CommitmentSigned.
-    /// This preserves send order for reestablish replay.
-    pub pending_replay_updates: Vec<TlcReplayUpdate>,
-
     /// Temporarily defer peer TLC updates while replaying dual-owed state.
     pub defer_peer_tlc_updates: bool,
     /// Deferred peer TLC updates queued during replay.
     pub deferred_peer_tlc_updates: VecDeque<DeferredPeerTlcUpdate>,
-
-    /// Tracks whether the last outbound sync message was RevokeAndAck.
-    pub last_was_revoke: bool,
 
     // The time stamp we last sent a message to the peer, used to check if the peer is still alive.
     // We will disconnect the peer if we haven't sent any message to the peer for a long time.
@@ -3370,7 +3356,6 @@ impl std::ops::DerefMut for ChannelActorState {
 
 impl Serialize for ChannelActorState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Delegate to ChannelActorData — runtime-only fields are not serialized.
         self.core.serialize(serializer)
     }
 }
@@ -3380,14 +3365,12 @@ impl<'de> Deserialize<'de> for ChannelActorState {
         let core = ChannelActorData::deserialize(deserializer)?;
         Ok(Self {
             core,
-            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
-            last_was_revoke: false,
             ephemeral_config: Default::default(),
             private_key: None,
         })
@@ -4119,16 +4102,16 @@ impl ChannelActorState {
                 latest_commitment_transaction: None,
                 reestablishing: false,
                 last_revoke_ack_msg: None,
+                pending_replay_updates: vec![],
+                last_was_revoke: false,
                 created_at: SystemTime::now(),
             },
-            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
-            last_was_revoke: false,
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
         };
@@ -4209,16 +4192,16 @@ impl ChannelActorState {
                 latest_commitment_transaction: None,
                 reestablishing: false,
                 last_revoke_ack_msg: None,
+                pending_replay_updates: vec![],
+                last_was_revoke: false,
                 created_at: SystemTime::now(),
             },
-            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
-            last_was_revoke: false,
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
         };
