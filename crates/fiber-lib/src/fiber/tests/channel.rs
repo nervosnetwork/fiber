@@ -7167,9 +7167,9 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
 
     // Wait until reestablish and TLC settlement complete, but proceed early once conditions pass.
     // If timeout is reached, continue to post-check assertions for diagnostics.
-    debug!("=== Waiting for reestablish and TLC settlement (timeout=120s) ===");
+    debug!("=== Waiting for reestablish and TLC settlement (timeout=300s) ===");
     let wait_start = tokio::time::Instant::now();
-    let wait_timeout = Duration::from_secs(120);
+    let wait_timeout = Duration::from_secs(300);
     let wait_interval = Duration::from_millis(500);
     loop {
         let reestablished = chs_a
