@@ -10,7 +10,7 @@ use crate::fiber::config::{
 
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithTarget, PeerDisconnectReason};
-use crate::fiber::payment::{AttemptStatus, SendPaymentCommand};
+use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, TlcErr,
 };
@@ -26,7 +26,6 @@ use crate::{
         },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         network::{AcceptChannelCommand, OpenChannelCommand},
-        types::{Privkey, RemoveTlcFulfill, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage,
     },
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
@@ -39,9 +38,10 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
 use fiber_types::{
-    derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelState, HashAlgorithm,
-    InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
-    Privkey, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    derive_private_key, derive_tlc_pubkey, AddTlcCommand, AttemptStatus, ChannelState,
+    HashAlgorithm, InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData,
+    PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus,
+    NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;

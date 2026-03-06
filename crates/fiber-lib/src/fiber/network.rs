@@ -1133,7 +1133,7 @@ where
                 }
             }
             NetworkActorCommand::DisconnectPeer(pubkey, reason) => {
-                let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(pubkey));
+                let peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
                 let session = state
                     .peer_session_map
                     .get(&pubkey)
@@ -3720,7 +3720,7 @@ where
                 .get_channel_states(None)
                 .into_iter()
                 .find_map(|(pubkey, _, _)| {
-                    let id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(pubkey));
+                    let id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
                     (id == *peer_id).then_some(pubkey)
                 })
         })
@@ -4094,7 +4094,7 @@ where
             self.to_be_accepted_channels.remove(&channel_id);
         }
 
-        let peer_id = PeerId::from_public_key(&tentacle::secio::PublicKey::from(pubkey));
+        let peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
         if self.requested_disconnect_peers.remove(&peer_id) {
             debug_event!(self.network, "PeerReconnectBackoffSkippedRequested");
             return;
