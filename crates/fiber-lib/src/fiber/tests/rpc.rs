@@ -1191,4 +1191,32 @@ fn test_rpc_status_enum_naming_consistency() {
             );
         }
     }
+
+    // Test state_flags field format (should be hex string like "0x0", not PascalCase)
+    let state_with_flags = ChannelState::NegotiatingFunding(0x1234.into());
+    let json_str = serde_json::to_string(&state_with_flags).unwrap();
+    let json_value: Value = serde_json::from_str(&json_str).unwrap();
+
+    eprintln!("Serialized ChannelState with flags: {}", json_str);
+    // Verify state_flags field exists and is a hex string
+    if let Some(state_flags) = json_value.get("state_flags") {
+        let flags_str = state_flags
+            .as_str()
+            .expect("state_flags should be a string");
+        assert!(
+            flags_str.starts_with("0x"),
+            "state_flags should be a hex string starting with '0x', got: {}",
+            flags_str
+        );
+        // Verify it's lowercase hex (not PascalCase)
+        assert_eq!(
+            flags_str,
+            flags_str.to_lowercase(),
+            "state_flags should be lowercase hex, got: {}",
+            flags_str
+        );
+        assert_eq!(flags_str, "0x1234", "state_flags value mismatch");
+    } else {
+        panic!("state_flags field not found in JSON: {}", json_str);
+    }
 }

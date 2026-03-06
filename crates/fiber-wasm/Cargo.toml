@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 console_error_panic_hook = "0.1.7"
 fnn = { path = "../fiber-lib", default-features = false }
-fiber-json-types = { path = "../fiber-json-types", features = ["conversion", "watchtower"] }
 wasm-logger = "0.2.0"
 ckb-chain-spec = "1"
 ckb-resource = "1"

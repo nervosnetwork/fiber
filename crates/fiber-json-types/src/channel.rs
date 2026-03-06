@@ -7,6 +7,95 @@ use ckb_types::H256;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+// /// Close flags for a channel, serialized as PascalCase strings.
+// /// For single flag, returns the flag name (e.g., "Cooperative").
+// /// For multiple flags, returns comma-separated names (e.g., "Cooperative,Abandoned").
+// #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+// pub struct CloseFlags(pub u32);
+
+// impl CloseFlags {
+//     const COOPERATIVE: u32 = 1;
+//     const UNCOOPERATIVE_LOCAL: u32 = 1 << 1;
+//     const ABANDONED: u32 = 1 << 2;
+//     const FUNDING_ABORTED: u32 = 1 << 3;
+//     const UNCOOPERATIVE_REMOTE: u32 = 1 << 4;
+//     const WAITING_ONCHAIN_SETTLEMENT: u32 = 1 << 5;
+
+//     fn to_strings(&self) -> Vec<&'static str> {
+//         let mut names = Vec::new();
+//         if self.0 & Self::COOPERATIVE != 0 {
+//             names.push("Cooperative");
+//         }
+//         if self.0 & Self::UNCOOPERATIVE_LOCAL != 0 {
+//             names.push("UncooperativeLocal");
+//         }
+//         if self.0 & Self::ABANDONED != 0 {
+//             names.push("Abandoned");
+//         }
+//         if self.0 & Self::FUNDING_ABORTED != 0 {
+//             names.push("FundingAborted");
+//         }
+//         if self.0 & Self::UNCOOPERATIVE_REMOTE != 0 {
+//             names.push("UncooperativeRemote");
+//         }
+//         if self.0 & Self::WAITING_ONCHAIN_SETTLEMENT != 0 {
+//             names.push("WaitingOnchainSettlement");
+//         }
+//         names
+//     }
+
+//     fn from_string(s: &str) -> Option<Self> {
+//         let mut flags = 0u32;
+//         for name in s.split(',') {
+//             match name.trim() {
+//                 "Cooperative" => flags |= Self::COOPERATIVE,
+//                 "UncooperativeLocal" => flags |= Self::UNCOOPERATIVE_LOCAL,
+//                 "Abandoned" => flags |= Self::ABANDONED,
+//                 "FundingAborted" => flags |= Self::FUNDING_ABORTED,
+//                 "UncooperativeRemote" => flags |= Self::UNCOOPERATIVE_REMOTE,
+//                 "WaitingOnchainSettlement" => flags |= Self::WAITING_ONCHAIN_SETTLEMENT,
+//                 _ => return None,
+//             }
+//         }
+//         Some(CloseFlags(flags))
+//     }
+// }
+
+// impl Serialize for CloseFlags {
+//     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+//         let names = self.to_strings();
+//         if names.is_empty() {
+//             serializer.serialize_str("")
+//         } else {
+//             serializer.serialize_str(&names.join(","))
+//         }
+//     }
+// }
+
+// impl<'de> Deserialize<'de> for CloseFlags {
+//     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+//         let s = String::deserialize(deserializer)?;
+//         if s.is_empty() {
+//             Ok(CloseFlags(0))
+//         } else {
+//             CloseFlags::from_string(&s)
+//                 .ok_or_else(|| serde::de::Error::custom(format!("Invalid CloseFlags: {}", s)))
+//         }
+//     }
+// }
+
+// impl From<u32> for CloseFlags {
+//     fn from(v: u32) -> Self {
+//         CloseFlags(v)
+//     }
+// }
+
+// impl From<CloseFlags> for u32 {
+//     fn from(v: CloseFlags) -> Self {
+//         v.0
+//     }
+// }
+
 /// Parameters for opening a channel.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]

@@ -48,7 +48,7 @@ script:post-response {
   if (!channel || channel.channel_id != expect_channel_id) {
     throw new Error("channel not found");
   }
-  if (channel.state.state_name != "SHUTTING_DOWN" && channel.state.state_flags != "WAITING_COMMITMENT_CONFIRMATION") {
+  if (channel.state.state_name != "ShuttingDown" && channel.state.state_flags != "WAITING_COMMITMENT_CONFIRMATION") {
     throw new Error("channel state is not right");
   }
 }
