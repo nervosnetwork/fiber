@@ -3322,35 +3322,45 @@ pub struct ChannelActorState {
     // --- Runtime-only fields (not serialized) ---
     /// TLC updates sent to peer since the last local CommitmentSigned.
     /// This preserves send order for reestablish replay.
+    #[doc = "skip_store"]
     pub pending_replay_updates: Vec<TlcReplayUpdate>,
 
     /// Temporarily defer peer TLC updates while replaying dual-owed state.
+    #[doc = "skip_store"]
     pub defer_peer_tlc_updates: bool,
     /// Deferred peer TLC updates queued during replay.
+    #[doc = "skip_store"]
     pub deferred_peer_tlc_updates: VecDeque<DeferredPeerTlcUpdate>,
 
     /// Tracks whether the last outbound sync message was RevokeAndAck.
+    #[doc = "skip_store"]
     pub last_was_revoke: bool,
 
     // The time stamp we last sent a message to the peer, used to check if the peer is still alive.
     // We will disconnect the peer if we haven't sent any message to the peer for a long time.
     // Currently we only have set commitment_signed as the heartbeat message.
+    #[doc = "skip_store"]
     pub waiting_peer_response: Option<u64>,
 
+    #[doc = "skip_store"]
     pub network: Option<ActorRef<NetworkActorMessage>>,
 
     // The handle for scheduled channel update broadcasting.
     // We will use this handle to cancel the scheduled task when the channel is closed,
     // create a new handle when we broadcast a new channel update message.
     // The arc here is only used to implement the clone trait for the ChannelActorState.
+    #[doc = "skip_store"]
     pub scheduled_channel_update_handle: ScheduledChannelUpdateHandle,
 
     // The TLC set ready to be settled
+    #[doc = "skip_store"]
     pub pending_notify_settle_tlcs: Vec<PendingNotifySettleTlc>,
 
+    #[doc = "skip_store"]
     pub ephemeral_config: ChannelEphemeralConfig,
 
     // signing key
+    #[doc = "skip_store"]
     pub private_key: Option<Privkey>,
 }
 
