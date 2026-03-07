@@ -15,6 +15,7 @@ use fiber_types::{
     EntityHex, Hash256, HopHint as NetworkHopHint, PaymentStatus, Pubkey, RouterHop, SliceHex,
     U128Hex, U32Hex, U64Hex,
 };
+
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
