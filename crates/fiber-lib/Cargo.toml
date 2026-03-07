@@ -111,7 +111,7 @@ web-time = { version = "1.1.0", features = ["serde"] }
 bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
 portable = ["fiber-store/portable"]
-sample = []
+sample = ["fiber-types/sample"]
 watchtower = []
 metrics = ["dep:metrics", "ractor/metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter-prometheus"]
 pprof = ["dep:pprof"]
@@ -119,6 +119,7 @@ pprof = ["dep:pprof"]
 [dev-dependencies]
 ciborium = "0.2.2"
 ckb-testtool = "1"
+fiber-types = { path = "../fiber-types", features = ["sample"] }
 futures = "0.3.31"
 ouroboros = "0.18.5"
 tempfile = "3.10.1"
