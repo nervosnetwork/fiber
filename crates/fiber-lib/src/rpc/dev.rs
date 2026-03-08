@@ -2,15 +2,16 @@
 // use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
-        hash_algorithm::HashAlgorithm,
-        serde_utils::{U128Hex, U64Hex},
-        types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET},
+        channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
         NetworkActorCommand, NetworkActorMessage,
     },
     handle_actor_cast,
 };
 use ckb_types::core::TransactionView;
+use fiber_types::{
+    AddTlcCommand, Hash256, HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode,
+    U128Hex, U64Hex, NO_SHARED_SECRET,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
@@ -228,6 +229,7 @@ impl DevRpcServerImpl {
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
+                            is_trampoline_hop: false,
                             previous_tlc: None,
                         },
                         rpc_reply,

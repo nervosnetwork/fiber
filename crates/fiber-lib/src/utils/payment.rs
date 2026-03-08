@@ -1,4 +1,5 @@
-use crate::{fiber::channel::TlcInfo, invoice::CkbInvoice};
+use crate::invoice::CkbInvoice;
+use fiber_types::TlcInfo;
 use tracing::debug;
 
 /// Check if the invoice is fulfilled by the tlc set

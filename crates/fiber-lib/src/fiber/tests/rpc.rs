@@ -1,22 +1,24 @@
 #![allow(clippy::needless_range_loop)]
-use crate::fiber::channel::CloseFlags;
 use crate::fiber::network::PeerDisconnectReason;
+use crate::fiber::CloseFlags;
+use crate::fiber::FeatureVector;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
 use crate::rpc::config::RpcConfig;
 use crate::rpc::info::NodeInfoResult;
+use crate::rpc::invoice::Attribute;
 use crate::tests::*;
 use crate::{
-    fiber::types::Hash256,
+    fiber::Hash256,
     invoice::Currency,
     rpc::{
         channel::{ListChannelsParams, ListChannelsResult},
         graph::{GraphNodesParams, GraphNodesResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
-        peer::ListPeersResult,
+        peer::{ConnectPeerParams, ListPeersResult},
     },
 };
 use biscuit_auth::macros::biscuit;
@@ -64,8 +66,9 @@ async fn test_rpc_basic() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
+                only_pending: None,
             },
         )
         .await
@@ -97,8 +100,9 @@ async fn test_rpc_basic() {
         udt_type_script: Some(Script::default().into()),
         payment_preimage: Some(Hash256::default()),
         payment_hash: None,
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        hash_algorithm: Some(fiber_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
+        allow_trampoline_routing: Some(true),
     };
 
     // node0 generate a invoice
@@ -111,6 +115,13 @@ async fn test_rpc_basic() {
     let invoice_payment_hash = ckb_invoice.data.payment_hash;
     let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
     assert!(internal_ckb_invoice.payment_secret().is_some());
+    assert!(ckb_invoice.data.attrs.iter().any(|attr| {
+        if let Attribute::Feature(fv) = attr {
+            *fv == ["BASIC_MPP_OPTIONAL", "TRAMPOLINE_ROUTING_OPTIONAL"]
+        } else {
+            false
+        }
+    }));
 
     let get_invoice_res: InvoiceResult = node_0
         .send_rpc_request(
@@ -149,8 +160,9 @@ async fn test_rpc_basic() {
         udt_type_script: Some(Script::default().into()),
         payment_preimage: Some(gen_rand_sha256_hash()),
         payment_hash: None,
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        hash_algorithm: Some(fiber_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
+        allow_trampoline_routing: Some(false),
     };
 
     // node0 generate a invoice
@@ -161,6 +173,13 @@ async fn test_rpc_basic() {
 
     let internal_ckb_invoice: CkbInvoice = invoice_res.invoice_address.parse().unwrap();
     assert!(internal_ckb_invoice.payment_secret().is_none());
+    assert!(internal_ckb_invoice.data.attrs.iter().any(|attr| {
+        if let crate::invoice::Attribute::Feature(fv) = attr {
+            fv.is_empty()
+        } else {
+            false
+        }
+    }));
 }
 
 #[tokio::test]
@@ -190,18 +209,18 @@ async fn test_rpc_list_peers() {
         Some(gen_rpc_config()),
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
     assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey);
-    let node_1_peer_id = list_peers.peers[0].peer_id.clone();
+    let node_1_pubkey = list_peers.peers[0].pubkey;
 
     let _res: () = node_0
         .send_rpc_request(
             "disconnect_peer",
             crate::rpc::peer::DisconnectPeerParams {
-                peer_id: node_1_peer_id,
+                pubkey: node_1_pubkey,
             },
         )
         .await
@@ -211,6 +230,23 @@ async fn test_rpc_list_peers() {
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
+
+    let _res: () = node_0
+        .send_rpc_request(
+            "connect_peer",
+            ConnectPeerParams {
+                address: None,
+                pubkey: Some(node_1_pubkey),
+                save: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 1);
+    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey);
 
     let mut node_3 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
@@ -229,14 +265,11 @@ async fn test_rpc_list_peers() {
     assert_eq!(list_peers.peers.len(), 1);
     assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey);
 
-    node_0.connect_to(&mut node_1).await;
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 2);
     dbg!("list_peers: {:?}", &list_peers);
     assert!(list_peers.peers.iter().any(|p| p.pubkey == node_1.pubkey));
     assert!(list_peers.peers.iter().any(|p| p.pubkey == node_3.pubkey));
-    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_1.peer_id));
-    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_3.peer_id));
 }
 
 #[tokio::test]
@@ -282,7 +315,7 @@ async fn test_rpc_graph() {
     eprintln!("Graph nodes: {:#?}", graph_nodes);
 
     assert!(!graph_nodes.nodes.is_empty());
-    assert!(graph_nodes.nodes.iter().any(|n| n.node_id == node_1.pubkey));
+    assert!(graph_nodes.nodes.iter().any(|n| n.pubkey == node_1.pubkey));
     assert!(graph_nodes
         .nodes
         .iter()
@@ -323,8 +356,9 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
+                only_pending: None,
             },
         )
         .await
@@ -351,8 +385,9 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: Some(true),
+                only_pending: None,
             },
         )
         .await
@@ -392,8 +427,9 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: Some(true),
+                only_pending: None,
             },
         )
         .await
@@ -447,6 +483,84 @@ async fn test_rpc_node_info() {
     let version = env!("CARGO_PKG_VERSION").to_string();
     assert_eq!(node_info.version, version);
     assert_eq!(node_info.default_funding_lock_script, Default::default());
+}
+
+/// Test that pubkey in node_info RPC and payee_public_key in invoice RPC
+/// have the same JSON format (both without "0x" prefix).
+#[tokio::test]
+async fn test_rpc_pubkey_and_payee_public_key_same_format() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                node_b_funding_amount: MIN_RESERVED_CKB,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    // Get node_info raw response
+    let node_info_raw = node_0.send_rpc_request_raw("node_info", ()).await.unwrap();
+    let pubkey = node_info_raw["pubkey"]
+        .as_str()
+        .expect("pubkey should be a string");
+
+    // Create an invoice and get raw response
+    let new_invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: None,
+        udt_type_script: None,
+        payment_preimage: Some(gen_rand_sha256_hash()),
+        payment_hash: None,
+        hash_algorithm: None,
+        allow_mpp: None,
+        allow_trampoline_routing: None,
+    };
+
+    let invoice_raw = node_0
+        .send_rpc_request_raw("new_invoice", new_invoice_params)
+        .await
+        .unwrap();
+
+    // Find PayeePublicKey in attrs
+    let attrs = invoice_raw["invoice"]["data"]["attrs"]
+        .as_array()
+        .expect("attrs should be an array");
+    let payee_public_key = attrs
+        .iter()
+        .find_map(|attr| attr.get("payee_public_key").and_then(|v| v.as_str()))
+        .expect("payee_public_key should exist in attrs");
+
+    // Both should have the same format (without "0x" prefix)
+    assert_eq!(
+        pubkey, payee_public_key,
+        "pubkey and payee_public_key should have the same format.\n\
+         pubkey: {}\n\
+         payee_public_key: {}",
+        pubkey, payee_public_key
+    );
+
+    // Verify neither has "0x" prefix
+    assert!(
+        !pubkey.starts_with("0x"),
+        "pubkey should not have 0x prefix, got: {}",
+        pubkey
+    );
+    assert!(
+        !payee_public_key.starts_with("0x"),
+        "payee_public_key should not have 0x prefix, got: {}",
+        payee_public_key
+    );
 }
 
 #[tokio::test]
@@ -504,8 +618,9 @@ async fn test_rpc_basic_with_auth() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
+                only_pending: None,
             },
         )
         .await
@@ -541,8 +656,9 @@ async fn test_rpc_basic_with_auth() {
                 udt_type_script: Some(Script::default().into()),
                 payment_preimage: Some(Hash256::default()),
                 payment_hash: None,
-                hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+                hash_algorithm: Some(fiber_types::HashAlgorithm::CkbHash),
                 allow_mpp: None,
+                allow_trampoline_routing: None,
             },
         )
         .await
@@ -748,7 +864,7 @@ async fn test_rpc_shutdown_following_disconnect() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node_1.peer_id, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node_1.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
@@ -771,4 +887,208 @@ async fn test_rpc_shutdown_following_disconnect() {
             break;
         }
     }
+}
+
+#[tokio::test]
+async fn test_rpc_feature_check() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+
+    let invoice_params = NewInvoiceParams {
+        amount: 1000,
+        description: Some("test".to_string()),
+        currency: Currency::Fibd,
+        expiry: Some(322),
+        fallback_address: None,
+        final_expiry_delta: Some(900000 + 1234),
+        udt_type_script: Some(Script::default().into()),
+        payment_preimage: Some(Hash256::default()),
+        payment_hash: None,
+        hash_algorithm: Some(fiber_types::HashAlgorithm::CkbHash),
+        allow_mpp: Some(true),
+        allow_trampoline_routing: Some(true),
+    };
+    let invoice_res: Result<InvoiceResult, String> = node_0
+        .send_rpc_request("new_invoice", invoice_params.clone())
+        .await;
+
+    assert!(invoice_res.is_ok());
+
+    let mut node_feature = FeatureVector::default();
+    node_feature.unset_basic_mpp_optional();
+    node_0.update_node_features(node_feature.clone()).await;
+
+    let invoice_res: Result<InvoiceResult, String> = node_0
+        .send_rpc_request("new_invoice", invoice_params.clone())
+        .await;
+
+    assert!(invoice_res.is_err());
+
+    node_feature.set_basic_mpp_required();
+    node_feature.unset_trampoline_routing_optional();
+    node_0.update_node_features(node_feature).await;
+    let invoice_res: Result<InvoiceResult, String> =
+        node_0.send_rpc_request("new_invoice", invoice_params).await;
+    assert!(invoice_res.is_err());
+}
+
+#[tokio::test]
+async fn test_rpc_cors_headers() {
+    use hyper::Request;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    // Create a node with RPC and CORS enabled
+    let mut rpc_config = gen_rpc_config();
+    rpc_config.cors_enabled = true; // Enable CORS for this test
+
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-cors-test".to_string()))
+            .base_dir_prefix("test-fnn-node-cors-")
+            .rpc_config(Some(rpc_config))
+            .build(),
+    )
+    .await;
+
+    // Get the RPC server address
+    let rpc_addr = node
+        .rpc_server
+        .as_ref()
+        .map(|(_, addr)| addr)
+        .expect("RPC server should be running");
+
+    let client = Client::builder(TokioExecutor::new()).build_http();
+
+    // Test 1: Regular POST request should have CORS headers
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("http://{}", rpc_addr))
+        .header("Content-Type", "application/json")
+        .body(String::from(
+            r#"{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}"#,
+        ))
+        .expect("Failed to build request");
+
+    let response = client.request(req).await.expect("Failed to send request");
+
+    // Check CORS headers in response
+    assert!(
+        response
+            .headers()
+            .contains_key("access-control-allow-origin"),
+        "Response should contain Access-Control-Allow-Origin header"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
+        "*",
+        "Access-Control-Allow-Origin should be '*'"
+    );
+
+    // Test 2: OPTIONS preflight request should be handled
+    let preflight_req = Request::builder()
+        .method("OPTIONS")
+        .uri(format!("http://{}", rpc_addr))
+        .header("Origin", "http://example.com")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .body(String::new())
+        .expect("Failed to build preflight request");
+
+    let preflight_response = client
+        .request(preflight_req)
+        .await
+        .expect("Failed to send preflight request");
+
+    // Check preflight response headers
+    assert!(
+        preflight_response
+            .headers()
+            .contains_key("access-control-allow-origin"),
+        "Preflight response should contain Access-Control-Allow-Origin header"
+    );
+    assert_eq!(
+        preflight_response
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
+        "*",
+        "Preflight Access-Control-Allow-Origin should be '*'"
+    );
+    assert!(
+        preflight_response
+            .headers()
+            .contains_key("access-control-allow-methods"),
+        "Preflight response should contain Access-Control-Allow-Methods header"
+    );
+    assert!(
+        preflight_response
+            .headers()
+            .contains_key("access-control-allow-headers"),
+        "Preflight response should contain Access-Control-Allow-Headers header"
+    );
+}
+
+#[tokio::test]
+async fn test_rpc_cors_disabled_by_default() {
+    use hyper::Request;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    // Create a node with RPC enabled but CORS disabled (default)
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-cors-disabled-test".to_string()))
+            .base_dir_prefix("test-fnn-node-cors-disabled-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    // Get the RPC server address
+    let rpc_addr = node
+        .rpc_server
+        .as_ref()
+        .map(|(_, addr)| addr)
+        .expect("RPC server should be running");
+
+    let client = Client::builder(TokioExecutor::new()).build_http();
+
+    // Test: Regular POST request should NOT have CORS headers when disabled
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("http://{}", rpc_addr))
+        .header("Content-Type", "application/json")
+        .body(String::from(
+            r#"{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}"#,
+        ))
+        .expect("Failed to build request");
+
+    let response = client.request(req).await.expect("Failed to send request");
+
+    // CORS headers should NOT be present when CORS is disabled
+    assert!(
+        !response
+            .headers()
+            .contains_key("access-control-allow-origin"),
+        "Response should NOT contain Access-Control-Allow-Origin header when CORS is disabled"
+    );
 }

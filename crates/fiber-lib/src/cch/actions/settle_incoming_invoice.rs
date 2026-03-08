@@ -10,11 +10,12 @@ use crate::{
         },
         actor::CchState,
         trackers::{CchTrackingEvent, LndConnectionInfo},
-        CchMessage, CchOrder, CchOrderStatus, CchOrderStore,
+        CchMessage, CchOrderStore,
     },
-    fiber::{types::Hash256, NetworkActorCommand, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE},
+    fiber::{NetworkActorCommand, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE},
     invoice::{CkbInvoiceStatus, SettleInvoiceError},
 };
+use fiber_types::{CchOrder, CchOrderStatus, Hash256};
 
 pub struct SettleIncomingInvoiceDispatcher;
 
@@ -129,6 +130,7 @@ impl SettleIncomingInvoiceDispatcher {
         state: &CchState<S>,
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
+        _retry_count: u32,
     ) -> Option<Box<dyn ActionExecutor>> {
         if !Self::should_dispatch(order) {
             return None;

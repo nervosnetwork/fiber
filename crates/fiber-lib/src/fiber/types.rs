@@ -1,434 +1,47 @@
-use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
-use super::config::AnnouncedNodeName;
-use super::features::FeatureVector;
-use super::gen::fiber::{
-    self as molecule_fiber, ChannelUpdateOpt, CustomRecordsOpt, PaymentPreimageOpt,
-    PubNonce as Byte66, PubkeyOpt, TlcErrDataOpt, UdtCellDeps, Uint128Opt,
-};
-use super::gen::gossip::{self as molecule_gossip};
-use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
+use super::channel::ProcessingChannelError;
 use super::network::get_chain_hash;
-use super::r#gen::fiber::PubNonceOpt;
-use super::serde_utils::{EntityHex, PubNonceAsBytes, SliceBase58, SliceHex};
-use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
-use crate::ckb::contracts::get_udt_whitelist;
-use crate::fiber::payment::{PaymentCustomRecords, USER_CUSTOM_RECORDS_MAX_INDEX};
-
 use anyhow::anyhow;
-use bitcoin::hashes::Hash;
 use ckb_jsonrpc_types::CellOutput;
-use ckb_types::H256;
 use ckb_types::{
     core::FeeRate,
     packed::{Byte32 as MByte32, BytesVec, OutPoint, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use core::fmt::{self, Formatter};
-use fiber_sphinx::{OnionErrorPacket, SphinxError};
-use molecule::prelude::{Builder, Byte, Entity};
-use musig2::secp::{Point, Scalar};
-use musig2::{BinaryEncoding, PartialSignature, PubNonce};
-use num_enum::IntoPrimitive;
-use num_enum::TryFromPrimitive;
-use once_cell::sync::OnceCell;
-use ractor::concurrency::Duration;
-use secp256k1::{
-    ecdsa::Signature as Secp256k1Signature, schnorr::Signature as SchnorrSignature, All, PublicKey,
-    Secp256k1, SecretKey, Signing,
+use fiber_sphinx::SphinxError;
+use fiber_types::molecule_table_data_len;
+pub use fiber_types::{
+    gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt, PubNonceOpt},
+    gen::gossip::{self as molecule_gossip},
+    BasicMppPaymentData, BroadcastMessage, BroadcastMessageID, ChannelAnnouncement, ChannelFlags,
+    ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Cursor,
+    EcdsaSignature, FeatureVector, Hash256, HashAlgorithm, NodeAnnouncement, OnionPacketError,
+    PartialSignatureAsBytes, PaymentCustomRecords, PaymentOnionPacket, PeeledPaymentOnionPacket,
+    Privkey, PubNonceAsBytes, Pubkey, RemoveTlcReason, RevokeAndAck, TlcErr,
+    UnknownHashAlgorithmError, CURSOR_SIZE, ONION_PACKET_VERSION_V1,
 };
-use secp256k1::{Verification, XOnlyPublicKey};
+
+use molecule::prelude::{Builder, Byte, Entity};
+use musig2::{PartialSignature, PubNonce};
+use secp256k1::Verification;
+use secp256k1::{PublicKey, Secp256k1, Signing};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::cmp::Ordering;
 use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::fmt::Display;
-use std::str::FromStr;
-use strum::{AsRefStr, EnumString};
-use tentacle::multiaddr::MultiAddr;
-use tentacle::secio::PeerId;
 use thiserror::Error;
-use tracing::{error, trace};
 
-pub fn secp256k1_instance() -> &'static Secp256k1<All> {
-    static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
-    INSTANCE.get_or_init(Secp256k1::new)
+/// Convert a `tentacle::secio::PublicKey` to a `Pubkey`.
+pub fn pubkey_from_tentacle(pk: tentacle::secio::PublicKey) -> Pubkey {
+    secp256k1::PublicKey::from_slice(pk.inner_ref())
+        .expect("valid tentacle pubkey can be converted to secp pubkey")
+        .into()
 }
 
-bitflags::bitflags! {
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct ChannelUpdateChannelFlags: u32 {
-        const DISABLED = 1;
-    }
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct ChannelUpdateMessageFlags: u32 {
-        const UPDATE_OF_NODE1 = 0;
-        const UPDATE_OF_NODE2 = 1;
-    }
-}
-
-impl From<Byte66> for PubNonce {
-    fn from(value: Byte66) -> Self {
-        PubNonce::from_bytes(value.as_slice()).expect("PubNonce from Byte66")
-    }
-}
-
-impl From<PubNonce> for Byte66 {
-    fn from(value: PubNonce) -> Self {
-        Byte66::from_slice(&value.to_bytes()).expect("valid pubnonce serialized to 66 bytes")
-    }
-}
-
-/// A wrapper for secp256k1 secret key
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Privkey(pub SecretKey);
-
-impl From<Privkey> for Scalar {
-    fn from(pk: Privkey) -> Self {
-        pk.0.into()
-    }
-}
-
-impl From<&Privkey> for Scalar {
-    fn from(pk: &Privkey) -> Self {
-        pk.0.into()
-    }
-}
-
-impl From<[u8; 32]> for Privkey {
-    fn from(k: [u8; 32]) -> Self {
-        Privkey(SecretKey::from_slice(&k).expect("Invalid secret key"))
-    }
-}
-
-impl From<Scalar> for Privkey {
-    fn from(scalar: Scalar) -> Self {
-        scalar.serialize().into()
-    }
-}
-
-impl From<Hash256> for Privkey {
-    fn from(hash: Hash256) -> Self {
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(hash.as_ref());
-        Privkey::from_slice(&bytes)
-    }
-}
-
-impl From<Privkey> for SecretKey {
-    fn from(pk: Privkey) -> Self {
-        pk.0
-    }
-}
-
-impl From<SecretKey> for Privkey {
-    fn from(sk: SecretKey) -> Self {
-        Self(sk)
-    }
-}
-
-impl From<&[u8; 32]> for Privkey {
-    fn from(k: &[u8; 32]) -> Self {
-        Self::from_slice(k)
-    }
-}
-
-impl AsRef<[u8; 32]> for Privkey {
-    /// Gets a reference to the underlying array.
-    ///
-    /// # Side channel attacks
-    ///
-    /// Using ordering functions (`PartialOrd`/`Ord`) on a reference to secret keys leaks data
-    /// because the implementations are not constant time. Doing so will make your code vulnerable
-    /// to side channel attacks. [`SecretKey::eq`] is implemented using a constant time algorithm,
-    /// please consider using it to do comparisons of secret keys.
-    #[inline]
-    fn as_ref(&self) -> &[u8; 32] {
-        self.0.as_ref()
-    }
-}
-
-/// A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
-#[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
-pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
-
-impl From<[u8; 32]> for Hash256 {
-    fn from(value: [u8; 32]) -> Self {
-        Self(value)
-    }
-}
-
-impl AsRef<[u8]> for Hash256 {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<&Hash256> for MByte32 {
-    fn from(hash: &Hash256) -> Self {
-        MByte32::from_slice(hash.0.as_ref()).expect("Byte32 from Hash256")
-    }
-}
-
-impl From<Hash256> for MByte32 {
-    fn from(hash: Hash256) -> Self {
-        (&hash).into()
-    }
-}
-
-impl From<&MByte32> for Hash256 {
-    fn from(value: &MByte32) -> Self {
-        Hash256(value.as_slice().try_into().expect("Hash256 from Byte32"))
-    }
-}
-
-impl From<MByte32> for Hash256 {
-    fn from(value: MByte32) -> Self {
-        (&value).into()
-    }
-}
-
-impl From<Hash256> for H256 {
-    fn from(value: Hash256) -> Self {
-        H256(value.0)
-    }
-}
-
-impl From<H256> for Hash256 {
-    fn from(value: H256) -> Self {
-        Hash256(value.0)
-    }
-}
-
-impl From<lightning_invoice::Sha256> for Hash256 {
-    fn from(value: lightning_invoice::Sha256) -> Self {
-        Hash256(value.0.to_byte_array())
-    }
-}
-
-impl From<bitcoin::hashes::sha256::Hash> for Hash256 {
-    fn from(value: bitcoin::hashes::sha256::Hash) -> Self {
-        Hash256(value.to_byte_array())
-    }
-}
-
-impl TryFrom<&[u8]> for Hash256 {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != 32 {
-            return Err(anyhow!("Invalid hash length"));
-        }
-        let mut data = [0u8; 32];
-        data.copy_from_slice(value);
-        Ok(Hash256(data))
-    }
-}
-
-fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
-    MByte32::from_slice(value.as_slice()).expect("[u8; 32] to Byte32")
-}
-
-impl ::core::fmt::LowerHex for Hash256 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex::encode(self.0))
-    }
-}
-
-impl ::core::fmt::Debug for Hash256 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "Hash256({:#x})", self)
-    }
-}
-
-impl ::core::fmt::Display for Hash256 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        let raw_data = hex::encode(self.0);
-        write!(f, "Hash256(0x{})", raw_data)
-    }
-}
-
-impl FromStr for Hash256 {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.trim_start_matches("0x");
-        let bytes = hex::decode(s)?;
-        if bytes.len() != 32 {
-            return Err(anyhow!("Invalid hash length"));
-        }
-        let mut data = [0u8; 32];
-        data.copy_from_slice(&bytes);
-        Ok(Hash256(data))
-    }
-}
-
-impl From<Hash256> for Vec<u8> {
-    fn from(val: Hash256) -> Self {
-        val.0.to_vec()
-    }
-}
-
-impl Privkey {
-    pub fn from_slice(key: &[u8]) -> Self {
-        SecretKey::from_slice(key)
-            .expect("Invalid secret key")
-            .into()
-    }
-
-    pub fn pubkey(&self) -> Pubkey {
-        Pubkey::from(self.0.public_key(secp256k1_instance()))
-    }
-
-    pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
-        let scalar = scalar.into();
-        let scalar = Scalar::from_slice(&scalar)
-            .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
-        let sk = Scalar::from(self);
-        (scalar + sk)
-            .not_zero()
-            .expect("valid secp256k1 scalar addition")
-            .into()
-    }
-
-    pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
-        let message = secp256k1::Message::from_digest(message);
-        secp256k1_instance().sign_ecdsa(&message, &self.0).into()
-    }
-
-    pub fn x_only_pub_key(&self) -> XOnlyPublicKey {
-        let secp256k1_instance = secp256k1_instance();
-        let secret_key = self.0;
-        let keypair = secp256k1::Keypair::from_secret_key(secp256k1_instance, &secret_key);
-        XOnlyPublicKey::from_keypair(&keypair).0
-    }
-
-    pub fn sign_schnorr(&self, message: [u8; 32]) -> SchnorrSignature {
-        let secp256k1_instance = secp256k1_instance();
-        let secret_key = self.0;
-        let keypair = secp256k1::Keypair::from_secret_key(secp256k1_instance, &secret_key);
-        let message = secp256k1::Message::from_digest(message);
-        let sig = secp256k1_instance.sign_schnorr(&message, &keypair);
-        trace!(
-            "Schnorr signing message {:?} (pub key {:?}), Signature: {:?}",
-            message,
-            keypair.public_key(),
-            &sig
-        );
-        sig
-    }
-}
-
-/// The public key for a Node
-#[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Pubkey(pub PublicKey);
-
-impl From<Pubkey> for Point {
-    fn from(val: Pubkey) -> Self {
-        PublicKey::from(val).into()
-    }
-}
-
-impl From<&Pubkey> for Point {
-    fn from(val: &Pubkey) -> Self {
-        (*val).into()
-    }
-}
-
-impl From<&Pubkey> for PublicKey {
-    fn from(val: &Pubkey) -> Self {
-        val.0
-    }
-}
-
-impl From<Pubkey> for PublicKey {
-    fn from(pk: Pubkey) -> Self {
-        pk.0
-    }
-}
-
-impl From<PublicKey> for Pubkey {
-    fn from(pk: PublicKey) -> Pubkey {
-        Pubkey(pk)
-    }
-}
-
-impl From<Point> for Pubkey {
-    fn from(point: Point) -> Self {
-        PublicKey::from(point).into()
-    }
-}
-
-impl From<tentacle::secio::PublicKey> for Pubkey {
-    fn from(pk: tentacle::secio::PublicKey) -> Self {
-        secp256k1::PublicKey::from_slice(pk.inner_ref())
-            .expect("valid tentacle pubkey can be converted to secp pubkey")
-            .into()
-    }
-}
-
-impl From<Pubkey> for tentacle::secio::PublicKey {
-    fn from(pk: Pubkey) -> Self {
-        tentacle::secio::PublicKey::from_raw_key(pk.serialize().to_vec())
-    }
-}
-
-const PUBKEY_SIZE: usize = 33;
-impl Pubkey {
-    pub const fn serialization_len() -> usize {
-        PUBKEY_SIZE
-    }
-
-    pub fn serialize(&self) -> [u8; PUBKEY_SIZE] {
-        PublicKey::from(self).serialize()
-    }
-
-    pub fn from_slice(slice: &[u8]) -> Result<Self, secp256k1::Error> {
-        PublicKey::from_slice(slice).map(Into::into)
-    }
-
-    pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
-        let scalar = scalar.into();
-        let scalar = Scalar::from_slice(&scalar)
-            .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
-        let result = Point::from(self) + scalar.base_point_mul();
-        PublicKey::from(result.not_inf().expect("valid public key")).into()
-    }
-
-    pub fn tentacle_peer_id(&self) -> PeerId {
-        let pubkey = (*self).into();
-        PeerId::from_public_key(&pubkey)
-    }
-}
-
-#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
-pub struct EcdsaSignature(pub Secp256k1Signature);
-
-impl EcdsaSignature {
-    pub fn verify(&self, pubkey: &Pubkey, message: &[u8; 32]) -> bool {
-        let message = secp256k1::Message::from_digest(*message);
-        secp256k1_instance()
-            .verify_ecdsa(&message, &self.0, &pubkey.0)
-            .is_ok()
-    }
-}
-
-impl From<EcdsaSignature> for Secp256k1Signature {
-    fn from(sig: EcdsaSignature) -> Self {
-        sig.0
-    }
-}
-
-impl From<Secp256k1Signature> for EcdsaSignature {
-    fn from(sig: Secp256k1Signature) -> Self {
-        Self(sig)
-    }
+/// Convert a `Pubkey` to a `tentacle::secio::PublicKey`.
+pub fn pubkey_to_tentacle(pk: Pubkey) -> tentacle::secio::PublicKey {
+    tentacle::secio::PublicKey::from_raw_key(pk.serialize().to_vec())
 }
 
 /// The error type wrap various ser/de errors.
@@ -444,118 +57,20 @@ pub enum Error {
     #[error("Musig2 error: {0}")]
     Musig2(String),
     #[error("Invalid onion packet")]
-    OnionPacket(#[from] OnionPacketError),
+    OnionPacket(#[from] fiber_types::OnionPacketError),
     #[error("Error: {0}")]
     AnyHow(#[from] anyhow::Error),
 }
 
-#[derive(Error, Debug)]
-pub enum OnionPacketError {
-    #[error("Fail to deserialize the hop data")]
-    InvalidHopData,
-
-    #[error("Sphinx protocol error")]
-    Sphinx(#[from] SphinxError),
-}
-
-impl From<Pubkey> for molecule_fiber::Pubkey {
-    fn from(pk: Pubkey) -> molecule_fiber::Pubkey {
-        molecule_fiber::Pubkey::new_builder()
-            .set(
-                pk.0.serialize()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect::<Vec<Byte>>()
-                    .try_into()
-                    .expect("Public serialized to correct length"),
-            )
-            .build()
+impl From<musig2::errors::DecodeError<PubNonce>> for Error {
+    fn from(e: musig2::errors::DecodeError<PubNonce>) -> Self {
+        Error::Musig2(format!("{e}"))
     }
 }
 
-impl TryFrom<molecule_fiber::Pubkey> for Pubkey {
-    type Error = Error;
-
-    fn try_from(pubkey: molecule_fiber::Pubkey) -> Result<Self, Self::Error> {
-        let pubkey = pubkey.as_slice();
-        Ok(Self::from_slice(pubkey)?)
-    }
-}
-
-impl From<EcdsaSignature> for molecule_fiber::EcdsaSignature {
-    fn from(signature: EcdsaSignature) -> molecule_fiber::EcdsaSignature {
-        molecule_fiber::EcdsaSignature::new_builder()
-            .set(
-                signature
-                    .0
-                    .serialize_compact()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect::<Vec<Byte>>()
-                    .try_into()
-                    .expect("Signature serialized to correct length"),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::EcdsaSignature> for EcdsaSignature {
-    type Error = Error;
-
-    fn try_from(signature: molecule_fiber::EcdsaSignature) -> Result<Self, Self::Error> {
-        let signature = signature.raw_data();
-        Secp256k1Signature::from_compact(&signature)
-            .map(Into::into)
-            .map_err(Into::into)
-    }
-}
-
-impl From<XOnlyPublicKey> for molecule_gossip::SchnorrXOnlyPubkey {
-    fn from(pk: XOnlyPublicKey) -> molecule_gossip::SchnorrXOnlyPubkey {
-        molecule_gossip::SchnorrXOnlyPubkey::new_builder()
-            .set(
-                pk.serialize()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect::<Vec<Byte>>()
-                    .try_into()
-                    .expect("Public serialized to correct length"),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_gossip::SchnorrXOnlyPubkey> for XOnlyPublicKey {
-    type Error = Error;
-
-    fn try_from(pubkey: molecule_gossip::SchnorrXOnlyPubkey) -> Result<Self, Self::Error> {
-        let pubkey = pubkey.as_slice();
-        XOnlyPublicKey::from_slice(pubkey).map_err(Into::into)
-    }
-}
-
-impl From<SchnorrSignature> for molecule_gossip::SchnorrSignature {
-    fn from(signature: SchnorrSignature) -> molecule_gossip::SchnorrSignature {
-        molecule_gossip::SchnorrSignature::new_builder()
-            .set(
-                signature
-                    .serialize()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect::<Vec<Byte>>()
-                    .try_into()
-                    .expect("Signature serialized to correct length"),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_gossip::SchnorrSignature> for SchnorrSignature {
-    type Error = Error;
-
-    fn try_from(signature: molecule_gossip::SchnorrSignature) -> Result<Self, Self::Error> {
-        let signature = signature.as_slice();
-        SchnorrSignature::from_slice(signature).map_err(Into::into)
+impl From<std::convert::Infallible> for Error {
+    fn from(e: std::convert::Infallible) -> Self {
+        match e {}
     }
 }
 
@@ -620,6 +135,10 @@ impl OpenChannel {
         self.channel_flags.contains(ChannelFlags::PUBLIC)
     }
 
+    pub fn is_one_way(&self) -> bool {
+        self.channel_flags.contains(ChannelFlags::ONE_WAY)
+    }
+
     pub fn mem_size(&self) -> usize {
         let static_size = std::mem::size_of_val(self);
         let funding_udt_type_script_size = self
@@ -682,8 +201,8 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: open_channel.second_per_commitment_point().try_into()?,
-            next_commitment_nonce: open_channel.next_commitment_nonce().into(),
-            next_revocation_nonce: open_channel.next_revocation_nonce().into(),
+            next_commitment_nonce: open_channel.next_commitment_nonce().try_into()?,
+            next_revocation_nonce: open_channel.next_revocation_nonce().try_into()?,
             channel_announcement_nonce: open_channel
                 .channel_announcement_nonce()
                 .to_opt()
@@ -759,16 +278,19 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
                 .map(TryInto::try_into)
                 .transpose()
                 .map_err(|err| Error::Musig2(format!("{err}")))?,
-            next_commitment_nonce: accept_channel.next_commitment_nonce().into(),
-            next_revocation_nonce: accept_channel.next_revocation_nonce().into(),
+            next_commitment_nonce: accept_channel.next_commitment_nonce().try_into()?,
+            next_revocation_nonce: accept_channel.next_revocation_nonce().try_into()?,
         })
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitmentSigned {
     pub channel_id: Hash256,
+    #[serde_as(as = "PartialSignatureAsBytes")]
     pub funding_tx_partial_signature: PartialSignature,
+    #[serde_as(as = "PubNonceAsBytes")]
     pub next_commitment_nonce: PubNonce,
 }
 
@@ -798,7 +320,7 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
                 commitment_signed.funding_tx_partial_signature().as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
-            next_commitment_nonce: commitment_signed.next_commitment_nonce().into(),
+            next_commitment_nonce: commitment_signed.next_commitment_nonce().try_into()?,
         })
     }
 }
@@ -919,7 +441,7 @@ impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
     fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
         Ok(TxComplete {
             channel_id: tx_complete.channel_id().into(),
-            next_commitment_nonce: tx_complete.next_commitment_nonce().into(),
+            next_commitment_nonce: tx_complete.next_commitment_nonce().try_into()?,
         })
     }
 }
@@ -1179,492 +701,6 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevokeAndAck {
-    pub channel_id: Hash256,
-    pub revocation_partial_signature: PartialSignature,
-    pub next_per_commitment_point: Pubkey,
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_revocation_nonce: PubNonce,
-}
-
-impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
-    fn from(revoke_and_ack: RevokeAndAck) -> Self {
-        molecule_fiber::RevokeAndAck::new_builder()
-            .channel_id(revoke_and_ack.channel_id.into())
-            .revocation_partial_signature(partial_signature_to_molecule(
-                revoke_and_ack.revocation_partial_signature,
-            ))
-            .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
-            .next_revocation_nonce(revoke_and_ack.next_revocation_nonce.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
-    type Error = Error;
-
-    fn try_from(revoke_and_ack: molecule_fiber::RevokeAndAck) -> Result<Self, Self::Error> {
-        Ok(RevokeAndAck {
-            channel_id: revoke_and_ack.channel_id().into(),
-            revocation_partial_signature: PartialSignature::from_slice(
-                revoke_and_ack.revocation_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
-            next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,
-            next_revocation_nonce: revoke_and_ack.next_revocation_nonce().into(),
-        })
-    }
-}
-
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct RemoveTlcFulfill {
-    pub payment_preimage: Hash256,
-}
-
-impl From<RemoveTlcFulfill> for molecule_fiber::RemoveTlcFulfill {
-    fn from(remove_tlc_fulfill: RemoveTlcFulfill) -> Self {
-        molecule_fiber::RemoveTlcFulfill::new_builder()
-            .payment_preimage(remove_tlc_fulfill.payment_preimage.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
-    type Error = Error;
-
-    fn try_from(remove_tlc_fulfill: molecule_fiber::RemoveTlcFulfill) -> Result<Self, Self::Error> {
-        Ok(RemoveTlcFulfill {
-            payment_preimage: remove_tlc_fulfill.payment_preimage().into(),
-        })
-    }
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum TlcErrData {
-    ChannelFailed {
-        #[serde_as(as = "EntityHex")]
-        channel_outpoint: OutPoint,
-        channel_update: Option<ChannelUpdate>,
-        node_id: Pubkey,
-    },
-    NodeFailed {
-        node_id: Pubkey,
-    },
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TlcErr {
-    pub error_code: TlcErrorCode,
-    pub extra_data: Option<TlcErrData>,
-}
-
-impl Display for TlcErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error_code_as_str())
-    }
-}
-
-impl TlcErr {
-    pub fn new(error_code: TlcErrorCode) -> Self {
-        TlcErr {
-            error_code,
-            extra_data: None,
-        }
-    }
-
-    pub fn new_node_fail(error_code: TlcErrorCode, node_id: Pubkey) -> Self {
-        TlcErr {
-            error_code,
-            extra_data: Some(TlcErrData::NodeFailed { node_id }),
-        }
-    }
-
-    pub fn new_channel_fail(
-        error_code: TlcErrorCode,
-        node_id: Pubkey,
-        channel_outpoint: OutPoint,
-        channel_update: Option<ChannelUpdate>,
-    ) -> Self {
-        TlcErr {
-            error_code,
-            extra_data: Some(TlcErrData::ChannelFailed {
-                node_id,
-                channel_outpoint,
-                channel_update,
-            }),
-        }
-    }
-
-    pub fn error_node_id(&self) -> Option<Pubkey> {
-        match &self.extra_data {
-            Some(TlcErrData::NodeFailed { node_id }) => Some(*node_id),
-            Some(TlcErrData::ChannelFailed { node_id, .. }) => Some(*node_id),
-            _ => None,
-        }
-    }
-
-    pub fn error_channel_outpoint(&self) -> Option<OutPoint> {
-        match &self.extra_data {
-            Some(TlcErrData::ChannelFailed {
-                channel_outpoint, ..
-            }) => Some(channel_outpoint.clone()),
-            _ => None,
-        }
-    }
-
-    pub fn error_code(&self) -> TlcErrorCode {
-        self.error_code
-    }
-
-    pub fn error_code_as_str(&self) -> String {
-        let error_code: TlcErrorCode = self.error_code;
-        error_code.as_ref().to_string()
-    }
-
-    pub fn error_code_as_u16(&self) -> u16 {
-        self.error_code.into()
-    }
-
-    pub fn set_extra_data(&mut self, extra_data: TlcErrData) {
-        self.extra_data = Some(extra_data);
-    }
-
-    fn serialize(&self) -> Vec<u8> {
-        molecule_fiber::TlcErr::from(self.clone())
-            .as_slice()
-            .to_vec()
-    }
-
-    fn deserialize(data: &[u8]) -> Option<Self> {
-        molecule_fiber::TlcErr::from_slice(data)
-            .map(TlcErr::from)
-            .ok()
-    }
-}
-
-impl TryFrom<TlcErrData> for molecule_fiber::TlcErrData {
-    type Error = Error;
-
-    fn try_from(tlc_err_data: TlcErrData) -> Result<Self, Self::Error> {
-        match tlc_err_data {
-            TlcErrData::ChannelFailed {
-                channel_outpoint,
-                channel_update,
-                node_id,
-            } => Ok(molecule_fiber::ChannelFailed::new_builder()
-                .channel_outpoint(channel_outpoint)
-                .channel_update(
-                    ChannelUpdateOpt::new_builder()
-                        .set(channel_update.map(|x| x.into()))
-                        .build(),
-                )
-                .node_id(node_id.into())
-                .build()
-                .into()),
-            TlcErrData::NodeFailed { node_id } => Ok(molecule_fiber::NodeFailed::new_builder()
-                .node_id(node_id.into())
-                .build()
-                .into()),
-        }
-    }
-}
-
-impl TryFrom<molecule_fiber::TlcErrData> for TlcErrData {
-    type Error = Error;
-
-    fn try_from(tlc_err_data: molecule_fiber::TlcErrData) -> Result<Self, Self::Error> {
-        match tlc_err_data.to_enum() {
-            molecule_fiber::TlcErrDataUnion::ChannelFailed(channel_failed) => {
-                Ok(TlcErrData::ChannelFailed {
-                    channel_outpoint: channel_failed.channel_outpoint(),
-                    channel_update: channel_failed
-                        .channel_update()
-                        .to_opt()
-                        .map(|x| x.try_into().unwrap()),
-                    node_id: channel_failed.node_id().try_into()?,
-                })
-            }
-            molecule_fiber::TlcErrDataUnion::NodeFailed(node_failed) => {
-                Ok(TlcErrData::NodeFailed {
-                    node_id: node_failed.node_id().try_into()?,
-                })
-            }
-        }
-    }
-}
-
-impl From<TlcErr> for molecule_fiber::TlcErr {
-    fn from(tlc_err: TlcErr) -> Self {
-        molecule_fiber::TlcErr::new_builder()
-            .error_code(tlc_err.error_code_as_u16().into())
-            .extra_data(
-                TlcErrDataOpt::new_builder()
-                    .set(tlc_err.extra_data.map(|data| data.try_into().unwrap()))
-                    .build(),
-            )
-            .build()
-    }
-}
-
-impl From<molecule_fiber::TlcErr> for TlcErr {
-    fn from(tlc_err: molecule_fiber::TlcErr) -> Self {
-        TlcErr {
-            error_code: {
-                let code: u16 = tlc_err.error_code().into();
-                TlcErrorCode::try_from(code).expect("tlc_error_code failed")
-            },
-            extra_data: tlc_err
-                .extra_data()
-                .to_opt()
-                .map(|data| data.try_into().unwrap()),
-        }
-    }
-}
-
-// This is the onion packet we need to encode and send back to the sender,
-// currently it's the raw TlcErr serialized data from the TlcErr struct,
-// sender should decode it and then decide what to do with the error.
-// Note: this supposed to be only accessible by the sender, and it's not reliable since it
-//       is not placed on-chain due to the possibility of hop failure.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct TlcErrPacket {
-    // TODO: replace this with the real onion packet
-    pub onion_packet: Vec<u8>,
-}
-
-pub const NO_SHARED_SECRET: [u8; 32] = [0u8; 32];
-const NO_ERROR_PACKET_HMAC: [u8; 32] = [0u8; 32];
-
-/// Always decrypting 27 times so the erroring node cannot learn its relative position in the route
-/// by performing a timing analysis if the sender were to retry the same route multiple times.
-const ERROR_DECODING_PASSES: usize = 27;
-
-impl TlcErrPacket {
-    /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
-    /// Use all zeros for the origin node.
-    pub fn new(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
-        let payload = tlc_fail.serialize();
-
-        let onion_packet = if shared_secret != &NO_SHARED_SECRET {
-            OnionErrorPacket::create(shared_secret, payload)
-        } else {
-            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC, payload)
-        }
-        .into_bytes();
-        TlcErrPacket { onion_packet }
-    }
-
-    pub fn is_plaintext(&self) -> bool {
-        self.onion_packet.len() >= 32 && self.onion_packet[0..32] == NO_ERROR_PACKET_HMAC
-    }
-
-    /// Intermediate node backwards the error to the previous hop using the shared secret used in forwarding
-    /// the onion packet.
-    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
-        if !self.is_plaintext() {
-            let onion_packet = OnionErrorPacket::from_bytes(self.onion_packet)
-                .xor_cipher_stream(shared_secret)
-                .into_bytes();
-            TlcErrPacket { onion_packet }
-        } else {
-            // If it is not encrypted, just send back as it is.
-            self
-        }
-    }
-
-    pub fn decode(&self, session_key: &[u8; 32], hops_public_keys: Vec<Pubkey>) -> Option<TlcErr> {
-        if self.is_plaintext() {
-            let error = TlcErr::deserialize(&self.onion_packet[32..]);
-            if error.is_some() {
-                return error;
-            }
-        }
-
-        let hops_public_keys: Vec<PublicKey> = hops_public_keys.iter().map(|k| k.0).collect();
-        let session_key = SecretKey::from_slice(session_key).inspect_err(|err|
-            error!(target: "fnn::fiber::types::TlcErrPacket", "decode session_key error={} key={}", err, hex::encode(session_key))
-        ).ok()?;
-        OnionErrorPacket::from_bytes(self.onion_packet.clone())
-            .parse(hops_public_keys, session_key, TlcErr::deserialize)
-            .map(|(error, hop_index)| {
-                for _ in hop_index..ERROR_DECODING_PASSES {
-                    OnionErrorPacket::from_bytes(self.onion_packet.clone())
-                        .xor_cipher_stream(&NO_SHARED_SECRET);
-                }
-                error
-            })
-    }
-}
-
-impl From<TlcErrPacket> for molecule_fiber::TlcErrPacket {
-    fn from(remove_tlc_fail: TlcErrPacket) -> Self {
-        molecule_fiber::TlcErrPacket::new_builder()
-            .onion_packet(remove_tlc_fail.onion_packet.pack())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::TlcErrPacket> for TlcErrPacket {
-    type Error = Error;
-
-    fn try_from(remove_tlc_fail: molecule_fiber::TlcErrPacket) -> Result<Self, Self::Error> {
-        Ok(TlcErrPacket {
-            onion_packet: remove_tlc_fail.onion_packet().unpack(),
-        })
-    }
-}
-
-impl std::fmt::Display for TlcErrPacket {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "TlcErrPacket")
-    }
-}
-
-// The onion packet is invalid
-const BADONION: u16 = 0x8000;
-// Permanent errors (otherwise transient)
-const PERM: u16 = 0x4000;
-// Node related errors (otherwise channels)
-const NODE: u16 = 0x2000;
-// Channel forwarding parameter was violated
-const UPDATE: u16 = 0x1000;
-
-#[repr(u16)]
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    AsRefStr,
-    EnumString,
-    TryFromPrimitive,
-    IntoPrimitive,
-)]
-pub enum TlcErrorCode {
-    TemporaryNodeFailure = NODE | 2,
-    PermanentNodeFailure = PERM | NODE | 2,
-    // unused right now
-    RequiredNodeFeatureMissing = PERM | NODE | 3,
-    // unused right now, maybe need to add onion version in future?
-    InvalidOnionVersion = BADONION | PERM | 4,
-    InvalidOnionHmac = BADONION | PERM | 5,
-    InvalidOnionKey = BADONION | PERM | 6,
-    TemporaryChannelFailure = UPDATE | 7,
-    // used for shutting down the channel
-    PermanentChannelFailure = PERM | 8,
-    RequiredChannelFeatureMissing = PERM | 9,
-    UnknownNextPeer = PERM | 10,
-    AmountBelowMinimum = UPDATE | 11,
-    FeeInsufficient = UPDATE | 12,
-    IncorrectTlcExpiry = UPDATE | 13,
-    ExpiryTooSoon = PERM | 14,
-    IncorrectOrUnknownPaymentDetails = PERM | 15,
-    InvoiceExpired = PERM | 16,
-    InvoiceCancelled = PERM | 17,
-    FinalIncorrectExpiryDelta = 18,
-    FinalIncorrectTlcAmount = 19,
-    ChannelDisabled = UPDATE | 20,
-    ExpiryTooFar = PERM | 21,
-    InvalidOnionPayload = PERM | 22,
-    HoldTlcTimeout = PERM | 23,
-    InvalidOnionError = BADONION | PERM | 25,
-}
-
-impl TlcErrorCode {
-    pub fn is_node(&self) -> bool {
-        *self as u16 & NODE != 0
-    }
-
-    pub fn is_bad_onion(&self) -> bool {
-        *self as u16 & BADONION != 0
-    }
-
-    pub fn is_perm(&self) -> bool {
-        *self as u16 & PERM != 0
-    }
-
-    pub fn is_update(&self) -> bool {
-        *self as u16 & UPDATE != 0
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum RemoveTlcReason {
-    RemoveTlcFulfill(RemoveTlcFulfill),
-    RemoveTlcFail(TlcErrPacket),
-}
-
-impl Debug for RemoveTlcReason {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
-                write!(f, "RemoveTlcFulfill")
-            }
-            RemoveTlcReason::RemoveTlcFail(_fail) => {
-                write!(f, "RemoveTlcFail")
-            }
-        }
-    }
-}
-
-impl RemoveTlcReason {
-    /// Intermediate node backwards the error to the previous hop using the shared secret used in forwarding
-    /// the onion packet.
-    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
-        match self {
-            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
-                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill)
-            }
-            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.backward(shared_secret))
-            }
-        }
-    }
-}
-
-impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
-    fn from(remove_tlc_reason: RemoveTlcReason) -> Self {
-        match remove_tlc_reason {
-            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
-                molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill.into())
-            }
-            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail.into())
-            }
-        }
-    }
-}
-
-impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReason {
-    fn from(remove_tlc_reason: RemoveTlcReason) -> Self {
-        molecule_fiber::RemoveTlcReason::new_builder()
-            .set(remove_tlc_reason)
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
-    type Error = Error;
-
-    fn try_from(remove_tlc_reason: molecule_fiber::RemoveTlcReason) -> Result<Self, Self::Error> {
-        match remove_tlc_reason.to_enum() {
-            molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill) => Ok(
-                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill.try_into()?),
-            ),
-            molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail) => {
-                Ok(RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.try_into()?))
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlc {
     pub channel_id: Hash256,
@@ -1693,7 +729,7 @@ impl TryFrom<molecule_fiber::RemoveTlc> for RemoveTlc {
         Ok(RemoveTlc {
             channel_id: remove_tlc.channel_id().into(),
             tlc_id: remove_tlc.tlc_id().unpack(),
-            reason: remove_tlc.reason().try_into()?,
+            reason: remove_tlc.reason().into(),
         })
     }
 }
@@ -1776,584 +812,32 @@ pub struct ForwardTlcResult {
     pub add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
-pub struct NodeAnnouncement {
-    // Signature to this message, may be empty the message is not signed yet.
-    pub signature: Option<EcdsaSignature>,
-    // Features of the node, see `FeatureVector`.
-    pub features: FeatureVector,
-    // Timestamp for current NodeAnnouncement. Later updates should have larger timestamp.
-    pub timestamp: u64,
-    pub node_id: Pubkey,
-    pub version: String,
-    // Must be a valid utf-8 string of length maximal length 32 bytes.
-    // If the length is less than 32 bytes, it will be padded with 0.
-    // If the length is more than 32 bytes, it should be truncated.
-    pub node_name: AnnouncedNodeName,
-    // All the reachable addresses.
-    pub addresses: Vec<MultiAddr>,
-    // chain_hash
-    pub chain_hash: Hash256,
-    // If the other party funding more than this amount, we will automatically accept the channel.
-    pub auto_accept_min_ckb_funding_amount: u64,
-    // UDT config info
-    pub udt_cfg_infos: UdtCfgInfos,
-}
-
-impl NodeAnnouncement {
-    pub fn new_unsigned(
-        node_name: AnnouncedNodeName,
-        features: FeatureVector,
-        addresses: Vec<MultiAddr>,
-        node_id: Pubkey,
-        timestamp: u64,
-        auto_accept_min_ckb_funding_amount: u64,
-    ) -> Self {
-        Self {
-            signature: None,
-            features,
-            timestamp,
-            node_id,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            node_name,
-            chain_hash: get_chain_hash(),
-            addresses,
-            auto_accept_min_ckb_funding_amount,
-            udt_cfg_infos: get_udt_whitelist(),
-        }
-    }
-
-    pub fn new(
-        node_name: AnnouncedNodeName,
-        features: FeatureVector,
-        addresses: Vec<MultiAddr>,
-        private_key: &Privkey,
-        timestamp: u64,
-        auto_accept_min_ckb_funding_amount: u64,
-    ) -> NodeAnnouncement {
-        let mut unsigned = NodeAnnouncement::new_unsigned(
-            node_name,
-            features,
-            addresses,
-            private_key.pubkey(),
-            timestamp,
-            auto_accept_min_ckb_funding_amount,
-        );
-        unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
-        unsigned
-    }
-
-    pub fn message_to_sign(&self) -> [u8; 32] {
-        let unsigned_announcement = NodeAnnouncement {
-            signature: None,
-            features: self.features.clone(),
-            timestamp: self.timestamp,
-            node_id: self.node_id,
-            version: self.version.clone(),
-            node_name: self.node_name,
-            chain_hash: self.chain_hash,
-            addresses: self.addresses.clone(),
-            auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
-            udt_cfg_infos: self.udt_cfg_infos.clone(),
-        };
-        deterministically_hash(&molecule_gossip::NodeAnnouncement::from(
-            unsigned_announcement,
-        ))
-    }
-
-    pub fn peer_id(&self) -> PeerId {
-        PeerId::from_public_key(&self.node_id.into())
-    }
-
-    pub fn cursor(&self) -> Cursor {
-        Cursor::new(
-            self.timestamp,
-            BroadcastMessageID::NodeAnnouncement(self.node_id),
-        )
-    }
-
-    pub fn verify(&self) -> bool {
-        let message = self.message_to_sign();
-        match self.signature {
-            Some(ref signature) => signature.verify(&self.node_id, &message),
-            _ => false,
-        }
-    }
-}
-
-impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
-    fn from(udt_cell_dep: UdtCellDep) -> Self {
-        molecule_fiber::UdtCellDep::new_builder()
-            .dep_type(udt_cell_dep.dep_type.into())
-            .out_point(udt_cell_dep.out_point.into())
-            .build()
-    }
-}
-
-impl From<molecule_fiber::UdtCellDep> for UdtCellDep {
-    fn from(udt_cell_dep: molecule_fiber::UdtCellDep) -> Self {
-        UdtCellDep {
-            out_point: udt_cell_dep.out_point().into(),
-            dep_type: udt_cell_dep
-                .dep_type()
-                .try_into()
-                .expect("invalid dep type"),
-        }
-    }
-}
-
-impl From<UdtScript> for molecule_fiber::UdtScript {
-    fn from(udt_script: UdtScript) -> Self {
-        molecule_fiber::UdtScript::new_builder()
-            .code_hash(udt_script.code_hash.pack())
-            .hash_type(udt_script.hash_type.into())
-            .args(udt_script.args.pack())
-            .build()
-    }
-}
-
-impl From<molecule_fiber::UdtScript> for UdtScript {
-    fn from(udt_script: molecule_fiber::UdtScript) -> Self {
-        UdtScript {
-            code_hash: udt_script.code_hash().unpack(),
-            hash_type: udt_script
-                .hash_type()
-                .try_into()
-                .expect("invalid hash type"),
-            args: String::from_utf8(udt_script.args().unpack()).expect("invalid utf8"),
-        }
-    }
-}
-
-impl From<UdtDep> for molecule_fiber::UdtDep {
-    fn from(udt_dep: UdtDep) -> Self {
-        match udt_dep {
-            UdtDep {
-                cell_dep: Some(cell_dep),
-                type_id: None,
-            } => molecule_fiber::UdtDep::new_builder()
-                .set(molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep.into()))
-                .build(),
-            UdtDep {
-                cell_dep: None,
-                type_id: Some(type_id),
-            } => molecule_fiber::UdtDep::new_builder()
-                .set(molecule_fiber::UdtDepUnion::Script(type_id.into()))
-                .build(),
-            _ => panic!("invalid udt dep"),
-        }
-    }
-}
-
-impl From<molecule_fiber::UdtDep> for UdtDep {
-    fn from(udt_dep: molecule_fiber::UdtDep) -> Self {
-        match udt_dep.to_enum() {
-            molecule_fiber::UdtDepUnion::UdtCellDep(cell_dep) => UdtDep {
-                cell_dep: Some(cell_dep.into()),
-                type_id: None,
-            },
-            molecule_fiber::UdtDepUnion::Script(type_id) => UdtDep {
-                cell_dep: None,
-                type_id: Some(type_id.into()),
-            },
-        }
-    }
-}
-
-impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
-    fn from(udt_arg_info: UdtArgInfo) -> Self {
-        molecule_fiber::UdtArgInfo::new_builder()
-            .name(udt_arg_info.name.pack())
-            .script(udt_arg_info.script.into())
-            .auto_accept_amount(
-                Uint128Opt::new_builder()
-                    .set(udt_arg_info.auto_accept_amount.map(|x| x.pack()))
-                    .build(),
-            )
-            .cell_deps(
-                UdtCellDeps::new_builder()
-                    .set(
-                        udt_arg_info
-                            .cell_deps
-                            .into_iter()
-                            .map(Into::into)
-                            .collect::<Vec<_>>(),
-                    )
-                    .build(),
-            )
-            .build()
-    }
-}
-
-impl From<molecule_fiber::UdtArgInfo> for UdtArgInfo {
-    fn from(udt_arg_info: molecule_fiber::UdtArgInfo) -> Self {
-        UdtArgInfo {
-            name: String::from_utf8(udt_arg_info.name().unpack()).unwrap_or_default(),
-            script: udt_arg_info.script().into(),
-            auto_accept_amount: udt_arg_info
-                .auto_accept_amount()
-                .to_opt()
-                .map(|x| x.unpack()),
-            cell_deps: udt_arg_info
-                .cell_deps()
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        }
-    }
-}
-
-impl From<UdtCfgInfos> for molecule_fiber::UdtCfgInfos {
-    fn from(udt_arg_info: UdtCfgInfos) -> Self {
-        molecule_fiber::UdtCfgInfos::new_builder()
-            .set(
-                udt_arg_info
-                    .0
-                    .into_iter()
-                    .map(|udt_arg_info| udt_arg_info.into())
-                    .collect(),
-            )
-            .build()
-    }
-}
-
-impl From<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
-    fn from(udt_arg_infos: molecule_fiber::UdtCfgInfos) -> Self {
-        UdtCfgInfos(
-            udt_arg_infos
-                .into_iter()
-                .map(|udt_arg_info| udt_arg_info.into())
-                .collect(),
-        )
-    }
-}
-
-impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
-    fn from(node_announcement: NodeAnnouncement) -> Self {
-        let builder = molecule_gossip::NodeAnnouncement::new_builder()
-            .features(node_announcement.features.bytes().pack())
-            .timestamp(node_announcement.timestamp.pack())
-            .node_id(node_announcement.node_id.into())
-            .version(node_announcement.version.pack())
-            .node_name(u8_32_as_byte_32(&node_announcement.node_name.0))
-            .chain_hash(node_announcement.chain_hash.into())
-            .auto_accept_min_ckb_funding_amount(
-                node_announcement.auto_accept_min_ckb_funding_amount.pack(),
-            )
-            .udt_cfg_infos(node_announcement.udt_cfg_infos.into())
-            .address(
-                BytesVec::new_builder()
-                    .set(
-                        node_announcement
-                            .addresses
-                            .into_iter()
-                            .map(|address| address.to_vec().pack())
-                            .collect(),
-                    )
-                    .build(),
-            );
-
-        let builder = if let Some(signature) = node_announcement.signature {
-            builder.signature(signature.into())
-        } else {
-            builder
-        };
-
-        builder.build()
-    }
-}
-
-impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
-    type Error = Error;
-
-    fn try_from(node_announcement: molecule_gossip::NodeAnnouncement) -> Result<Self, Self::Error> {
-        Ok(NodeAnnouncement {
-            signature: Some(node_announcement.signature().try_into()?),
-            features: FeatureVector::from(node_announcement.features().unpack()),
-            timestamp: node_announcement.timestamp().unpack(),
-            node_id: node_announcement.node_id().try_into()?,
-            version: String::from_utf8(node_announcement.version().unpack()).unwrap_or_default(),
-            chain_hash: node_announcement.chain_hash().into(),
-            auto_accept_min_ckb_funding_amount: node_announcement
-                .auto_accept_min_ckb_funding_amount()
-                .unpack(),
-            node_name: AnnouncedNodeName::from_slice(node_announcement.node_name().as_slice())
-                .map_err(|e| Error::AnyHow(anyhow!("Invalid node_name: {}", e)))?,
-            udt_cfg_infos: node_announcement.udt_cfg_infos().into(),
-            addresses: node_announcement
-                .address()
-                .into_iter()
-                .map(|address| MultiAddr::try_from(address.raw_data()))
-                .collect::<Result<Vec<_>, _>>()?,
-        })
-    }
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Hash)]
-pub struct ChannelAnnouncement {
-    pub node1_signature: Option<EcdsaSignature>,
-    pub node2_signature: Option<EcdsaSignature>,
-    // Signature signed by the funding transaction output public key.
-    pub ckb_signature: Option<SchnorrSignature>,
-    // Tentatively using 64 bits for features. May change the type later while developing.
-    // rust-lightning uses a Vec<u8> here.
-    pub features: u64,
-    pub chain_hash: Hash256,
-    #[serde_as(as = "EntityHex")]
-    pub channel_outpoint: OutPoint,
-    pub node1_id: Pubkey,
-    pub node2_id: Pubkey,
-    // The aggregated public key of the funding transaction output.
-    pub ckb_key: XOnlyPublicKey,
-    // The total capacity of the channel.
-    pub capacity: u128,
-    // UDT script
-    #[serde_as(as = "Option<EntityHex>")]
-    pub udt_type_script: Option<Script>,
-}
-
-impl ChannelAnnouncement {
-    pub fn new_unsigned(
-        node1_pubkey: &Pubkey,
-        node2_pubkey: &Pubkey,
-        channel_outpoint: OutPoint,
-        ckb_pubkey: &XOnlyPublicKey,
-        capacity: u128,
-        udt_type_script: Option<Script>,
-    ) -> Self {
-        Self {
-            node1_signature: None,
-            node2_signature: None,
-            ckb_signature: None,
-            features: Default::default(),
-            chain_hash: get_chain_hash(),
-            channel_outpoint,
-            node1_id: *node1_pubkey,
-            node2_id: *node2_pubkey,
-            ckb_key: *ckb_pubkey,
-            capacity,
-            udt_type_script,
-        }
-    }
-
-    pub fn is_signed(&self) -> bool {
-        self.node1_signature.is_some()
-            && self.node2_signature.is_some()
-            && self.ckb_signature.is_some()
-    }
-
-    pub fn message_to_sign(&self) -> [u8; 32] {
-        let unsigned_announcement = Self {
-            node1_signature: None,
-            node2_signature: None,
-            ckb_signature: None,
-            features: self.features,
-            chain_hash: self.chain_hash,
-            channel_outpoint: self.channel_outpoint.clone(),
-            node1_id: self.node1_id,
-            node2_id: self.node2_id,
-            ckb_key: self.ckb_key,
-            capacity: self.capacity,
-            udt_type_script: self.udt_type_script.clone(),
-        };
-        deterministically_hash(&molecule_gossip::ChannelAnnouncement::from(
-            unsigned_announcement,
-        ))
-    }
-
-    pub fn out_point(&self) -> &OutPoint {
-        &self.channel_outpoint
-    }
-}
-
-impl From<ChannelAnnouncement> for molecule_gossip::ChannelAnnouncement {
-    fn from(channel_announcement: ChannelAnnouncement) -> Self {
-        let builder = molecule_gossip::ChannelAnnouncement::new_builder()
-            .features(channel_announcement.features.pack())
-            .chain_hash(channel_announcement.chain_hash.into())
-            .channel_outpoint(channel_announcement.channel_outpoint)
-            .node1_id(channel_announcement.node1_id.into())
-            .node2_id(channel_announcement.node2_id.into())
-            .capacity(channel_announcement.capacity.pack())
-            .udt_type_script(channel_announcement.udt_type_script.pack())
-            .ckb_key(channel_announcement.ckb_key.into());
-
-        let builder = if let Some(signature) = channel_announcement.node1_signature {
-            builder.node1_signature(signature.into())
-        } else {
-            builder
-        };
-
-        let builder = if let Some(signature) = channel_announcement.node2_signature {
-            builder.node2_signature(signature.into())
-        } else {
-            builder
-        };
-
-        let builder = if let Some(signature) = channel_announcement.ckb_signature {
-            builder.ckb_signature(signature.into())
-        } else {
-            builder
-        };
-
-        builder.build()
-    }
-}
-
-impl TryFrom<molecule_gossip::ChannelAnnouncement> for ChannelAnnouncement {
-    type Error = Error;
-
-    fn try_from(
-        channel_announcement: molecule_gossip::ChannelAnnouncement,
-    ) -> Result<Self, Self::Error> {
-        Ok(ChannelAnnouncement {
-            node1_signature: Some(channel_announcement.node1_signature().try_into()?),
-            node2_signature: Some(channel_announcement.node2_signature().try_into()?),
-            ckb_signature: Some(channel_announcement.ckb_signature().try_into()?),
-            features: channel_announcement.features().unpack(),
-            capacity: channel_announcement.capacity().unpack(),
-            chain_hash: channel_announcement.chain_hash().into(),
-            channel_outpoint: channel_announcement.channel_outpoint(),
-            udt_type_script: channel_announcement.udt_type_script().to_opt(),
-            node1_id: channel_announcement.node1_id().try_into()?,
-            node2_id: channel_announcement.node2_id().try_into()?,
-            ckb_key: channel_announcement.ckb_key().try_into()?,
-        })
-    }
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Hash)]
-pub struct ChannelUpdate {
-    // Signature of the node that wants to update the channel information.
-    pub signature: Option<EcdsaSignature>,
-    pub chain_hash: Hash256,
-    #[serde_as(as = "EntityHex")]
-    pub channel_outpoint: OutPoint,
-    pub timestamp: u64,
-    // Currently only the first bit is used to indicate the direction of the channel.
-    // If it is 0, it means this channel message is from node 1 (thus applies to tlcs
-    // sent from node 2 to node 1). Otherwise, it is from node 2.
-    pub message_flags: ChannelUpdateMessageFlags,
-    // Currently only the first bit is used to indicate if the channel is disabled.
-    // If the first bit is set, the channel is disabled.
-    pub channel_flags: ChannelUpdateChannelFlags,
-    pub tlc_expiry_delta: u64,
-    pub tlc_minimum_value: u128,
-    pub tlc_fee_proportional_millionths: u128,
-}
-
-impl ChannelUpdate {
-    pub fn new_unsigned(
-        channel_outpoint: OutPoint,
-        timestamp: u64,
-        message_flags: ChannelUpdateMessageFlags,
-        channel_flags: ChannelUpdateChannelFlags,
-        tlc_expiry_delta: u64,
-        tlc_minimum_value: u128,
-        tlc_fee_proportional_millionths: u128,
-    ) -> Self {
-        // To avoid having the same timestamp for both channel updates, we will use an even
-        // timestamp number for node1 and an odd timestamp number for node2.
-        let timestamp = if message_flags.contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2) {
-            timestamp | 1u64
-        } else {
-            timestamp & !1u64
-        };
-        Self {
-            signature: None,
-            chain_hash: get_chain_hash(),
-            channel_outpoint,
-            timestamp,
-            message_flags,
-            channel_flags,
-            tlc_expiry_delta,
-            tlc_minimum_value,
-            tlc_fee_proportional_millionths,
-        }
-    }
-
-    pub fn message_to_sign(&self) -> [u8; 32] {
-        let unsigned_update = ChannelUpdate {
-            signature: None,
-            chain_hash: self.chain_hash,
-            channel_outpoint: self.channel_outpoint.clone(),
-            timestamp: self.timestamp,
-            message_flags: self.message_flags,
-            channel_flags: self.channel_flags,
-            tlc_expiry_delta: self.tlc_expiry_delta,
-            tlc_minimum_value: self.tlc_minimum_value,
-            tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
-        };
-        deterministically_hash(&molecule_fiber::ChannelUpdate::from(unsigned_update))
-    }
-
-    pub fn is_update_of_node_1(&self) -> bool {
-        !self.is_update_of_node_2()
-    }
-
-    pub fn is_update_of_node_2(&self) -> bool {
-        self.message_flags
-            .contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2)
-    }
-
-    pub fn is_disabled(&self) -> bool {
-        self.channel_flags
-            .contains(ChannelUpdateChannelFlags::DISABLED)
-    }
-
-    pub fn cursor(&self) -> Cursor {
-        Cursor::new(
-            self.timestamp,
-            BroadcastMessageID::ChannelUpdate(self.channel_outpoint.clone()),
-        )
-    }
-}
-
-impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
-    fn from(channel_update: ChannelUpdate) -> Self {
-        let builder = molecule_fiber::ChannelUpdate::new_builder()
-            .chain_hash(channel_update.chain_hash.into())
-            .channel_outpoint(channel_update.channel_outpoint)
-            .timestamp(channel_update.timestamp.pack())
-            .message_flags(channel_update.message_flags.bits().pack())
-            .channel_flags(channel_update.channel_flags.bits().pack())
-            .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
-            .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
-            .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack());
-
-        let builder = if let Some(signature) = channel_update.signature {
-            builder.signature(signature.into())
-        } else {
-            builder
-        };
-
-        builder.build()
-    }
-}
-
-impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
-    type Error = Error;
-
-    fn try_from(channel_update: molecule_fiber::ChannelUpdate) -> Result<Self, Self::Error> {
-        Ok(ChannelUpdate {
-            signature: Some(channel_update.signature().try_into()?),
-            chain_hash: channel_update.chain_hash().into(),
-            channel_outpoint: channel_update.channel_outpoint(),
-            timestamp: channel_update.timestamp().unpack(),
-            message_flags: ChannelUpdateMessageFlags::from_bits_truncate(
-                channel_update.message_flags().unpack(),
-            ),
-            channel_flags: ChannelUpdateChannelFlags::from_bits_truncate(
-                channel_update.channel_flags().unpack(),
-            ),
-            tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
-            tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
-            tlc_fee_proportional_millionths: channel_update
-                .tlc_fee_proportional_millionths()
-                .unpack(),
-        })
+pub fn new_channel_update_unsigned(
+    channel_outpoint: OutPoint,
+    timestamp: u64,
+    message_flags: ChannelUpdateMessageFlags,
+    channel_flags: ChannelUpdateChannelFlags,
+    tlc_expiry_delta: u64,
+    tlc_minimum_value: u128,
+    tlc_fee_proportional_millionths: u128,
+) -> ChannelUpdate {
+    // To avoid having the same timestamp for both channel updates, we will use an even
+    // timestamp number for node1 and an odd timestamp number for node2.
+    let timestamp = if message_flags.contains(ChannelUpdateMessageFlags::UPDATE_OF_NODE2) {
+        timestamp | 1u64
+    } else {
+        timestamp & !1u64
+    };
+    ChannelUpdate {
+        signature: None,
+        chain_hash: get_chain_hash(),
+        channel_outpoint,
+        timestamp,
+        message_flags,
+        channel_flags,
+        tlc_expiry_delta,
+        tlc_minimum_value,
+        tlc_fee_proportional_millionths,
     }
 }
 
@@ -2638,55 +1122,10 @@ impl TryFrom<molecule_gossip::GossipMessage> for GossipMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
-pub enum BroadcastMessage {
-    NodeAnnouncement(NodeAnnouncement),
-    ChannelAnnouncement(ChannelAnnouncement),
-    ChannelUpdate(ChannelUpdate),
-}
-
-impl BroadcastMessage {
-    pub fn create_broadcast_messages_filter_result(&self) -> GossipMessage {
-        GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
-            messages: vec![self.clone()],
-        })
-    }
-
-    pub fn cursor(&self) -> Option<Cursor> {
-        match self {
-            BroadcastMessage::ChannelAnnouncement(_) => None,
-            BroadcastMessage::ChannelUpdate(channel_update) => Some(channel_update.cursor()),
-            BroadcastMessage::NodeAnnouncement(node_announcement) => {
-                Some(node_announcement.cursor())
-            }
-        }
-    }
-
-    pub(crate) fn message_id(&self) -> BroadcastMessageID {
-        match self {
-            BroadcastMessage::NodeAnnouncement(node_announcement) => {
-                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id)
-            }
-            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-                BroadcastMessageID::ChannelAnnouncement(
-                    channel_announcement.channel_outpoint.clone(),
-                )
-            }
-            BroadcastMessage::ChannelUpdate(channel_update) => {
-                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone())
-            }
-        }
-    }
-
-    pub(crate) fn timestamp(&self) -> Option<u64> {
-        match self {
-            BroadcastMessage::NodeAnnouncement(node_announcement) => {
-                Some(node_announcement.timestamp)
-            }
-            BroadcastMessage::ChannelAnnouncement(_) => None,
-            BroadcastMessage::ChannelUpdate(channel_update) => Some(channel_update.timestamp),
-        }
-    }
+pub fn broadcast_message_to_gossip(msg: &BroadcastMessage) -> GossipMessage {
+    GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
+        messages: vec![msg.clone()],
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2774,20 +1213,6 @@ impl BroadcastMessageWithTimestamp {
     }
 }
 
-impl Ord for BroadcastMessage {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.message_id()
-            .cmp(&other.message_id())
-            .then(self.timestamp().cmp(&other.timestamp()))
-    }
-}
-
-impl PartialOrd for BroadcastMessage {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl From<(BroadcastMessage, Option<ChannelOnchainInfo>)> for BroadcastMessageWithTimestamp {
     fn from(
         (broadcast_message, channel_onchain_info): (BroadcastMessage, Option<ChannelOnchainInfo>),
@@ -2840,64 +1265,6 @@ impl From<(BroadcastMessage, u64)> for BroadcastMessageWithTimestamp {
                 BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)
             }
         }
-    }
-}
-
-impl From<BroadcastMessage> for molecule_gossip::BroadcastMessageUnion {
-    fn from(fiber_broadcast_message: BroadcastMessage) -> Self {
-        match fiber_broadcast_message {
-            BroadcastMessage::NodeAnnouncement(node_announcement) => {
-                molecule_gossip::BroadcastMessageUnion::NodeAnnouncement(node_announcement.into())
-            }
-            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-                molecule_gossip::BroadcastMessageUnion::ChannelAnnouncement(
-                    channel_announcement.into(),
-                )
-            }
-            BroadcastMessage::ChannelUpdate(channel_update) => {
-                molecule_gossip::BroadcastMessageUnion::ChannelUpdate(channel_update.into())
-            }
-        }
-    }
-}
-
-impl TryFrom<molecule_gossip::BroadcastMessageUnion> for BroadcastMessage {
-    type Error = Error;
-
-    fn try_from(
-        fiber_broadcast_message: molecule_gossip::BroadcastMessageUnion,
-    ) -> Result<Self, Self::Error> {
-        match fiber_broadcast_message {
-            molecule_gossip::BroadcastMessageUnion::NodeAnnouncement(node_announcement) => Ok(
-                BroadcastMessage::NodeAnnouncement(node_announcement.try_into()?),
-            ),
-            molecule_gossip::BroadcastMessageUnion::ChannelAnnouncement(channel_announcement) => {
-                Ok(BroadcastMessage::ChannelAnnouncement(
-                    channel_announcement.try_into()?,
-                ))
-            }
-            molecule_gossip::BroadcastMessageUnion::ChannelUpdate(channel_update) => {
-                Ok(BroadcastMessage::ChannelUpdate(channel_update.try_into()?))
-            }
-        }
-    }
-}
-
-impl From<BroadcastMessage> for molecule_gossip::BroadcastMessage {
-    fn from(fiber_broadcast_message: BroadcastMessage) -> Self {
-        molecule_gossip::BroadcastMessage::new_builder()
-            .set(fiber_broadcast_message)
-            .build()
-    }
-}
-
-impl TryFrom<molecule_gossip::BroadcastMessage> for BroadcastMessage {
-    type Error = Error;
-
-    fn try_from(
-        fiber_broadcast_message: molecule_gossip::BroadcastMessage,
-    ) -> Result<Self, Self::Error> {
-        fiber_broadcast_message.to_enum().try_into()
     }
 }
 
@@ -2971,263 +1338,6 @@ impl TryFrom<molecule_gossip::BroadcastMessageQuery> for BroadcastMessageQuery {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub enum BroadcastMessageID {
-    ChannelAnnouncement(OutPoint),
-    ChannelUpdate(OutPoint),
-    NodeAnnouncement(Pubkey),
-}
-
-impl Default for BroadcastMessageID {
-    fn default() -> Self {
-        BroadcastMessageID::ChannelAnnouncement(OutPoint::default())
-    }
-}
-
-// We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
-// so that we can use it as the sorting key in fn prune_messages_to_be_saved to simplify the logic.
-impl Ord for BroadcastMessageID {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (
-                BroadcastMessageID::ChannelAnnouncement(outpoint1),
-                BroadcastMessageID::ChannelAnnouncement(outpoint2),
-            ) => outpoint1.cmp(outpoint2),
-            (
-                BroadcastMessageID::ChannelUpdate(outpoint1),
-                BroadcastMessageID::ChannelUpdate(outpoint2),
-            ) => outpoint1.cmp(outpoint2),
-            (
-                BroadcastMessageID::NodeAnnouncement(pubkey1),
-                BroadcastMessageID::NodeAnnouncement(pubkey2),
-            ) => pubkey1.cmp(pubkey2),
-            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Less,
-            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Greater,
-            (
-                BroadcastMessageID::ChannelAnnouncement(_),
-                BroadcastMessageID::NodeAnnouncement(_),
-            ) => Ordering::Greater,
-            (BroadcastMessageID::ChannelAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
-                Ordering::Less
-            }
-        }
-    }
-}
-
-impl PartialOrd for BroadcastMessageID {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-// 1 byte for message type, 36 bytes for message id
-const MESSAGE_ID_SIZE: usize = 1 + 36;
-// 8 bytes for timestamp, MESSAGE_ID_SIZE bytes for message id
-pub(crate) const CURSOR_SIZE: usize = 8 + MESSAGE_ID_SIZE;
-
-impl BroadcastMessageID {
-    pub(crate) fn to_bytes(&self) -> [u8; MESSAGE_ID_SIZE] {
-        let mut result = [0u8; MESSAGE_ID_SIZE];
-        match self {
-            BroadcastMessageID::ChannelAnnouncement(channel_outpoint) => {
-                result[0] = 0;
-                result[1..].copy_from_slice(&channel_outpoint.as_bytes());
-            }
-            BroadcastMessageID::ChannelUpdate(channel_outpoint) => {
-                result[0] = 1;
-                result[1..].copy_from_slice(&channel_outpoint.as_bytes());
-            }
-            BroadcastMessageID::NodeAnnouncement(node_id) => {
-                result[0] = 2;
-                let node_id = node_id.serialize();
-                result[1..1 + node_id.len()].copy_from_slice(&node_id);
-            }
-        };
-        result
-    }
-
-    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != MESSAGE_ID_SIZE {
-            return Err(Error::AnyHow(anyhow!(
-                "Invalid message id size: {}",
-                bytes.len()
-            )));
-        }
-        match bytes[0] {
-            0 => Ok(BroadcastMessageID::ChannelAnnouncement(
-                OutPoint::from_slice(&bytes[1..])?,
-            )),
-            1 => Ok(BroadcastMessageID::ChannelUpdate(OutPoint::from_slice(
-                &bytes[1..],
-            )?)),
-            2 => Ok(BroadcastMessageID::NodeAnnouncement(Pubkey::from_slice(
-                &bytes[1..1 + Pubkey::serialization_len()],
-            )?)),
-            _ => Err(Error::AnyHow(anyhow!(
-                "Invalid message id type: {}",
-                bytes[0]
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct Cursor {
-    pub(crate) timestamp: u64,
-    pub(crate) message_id: BroadcastMessageID,
-}
-
-impl Cursor {
-    pub fn new(timestamp: u64, message_id: BroadcastMessageID) -> Self {
-        Self {
-            timestamp,
-            message_id,
-        }
-    }
-
-    /// Create a new cursor which is the same as the current cursor but with a smaller timestamp.
-    /// This is useful when we want to query messages back from this cursor for a certain duration.
-    /// For example, sometimes we aren't particularly sure about whether we have already seen all messages before
-    /// the latest cursor in our broadcast message store, because it is possible that we that messages are not
-    /// saved in strictly increasing order of their timestamps. In this case, we can go back for some time
-    /// (e.g. one week) to make sure we don't miss any messages.
-    pub fn go_back_for_some_time(&self, duration: Duration) -> Self {
-        let current_timestamp = self.timestamp;
-        let duration_millis = duration.as_millis() as u64;
-        if current_timestamp > duration_millis {
-            Self {
-                timestamp: current_timestamp - duration_millis,
-                message_id: self.message_id.clone(),
-            }
-        } else {
-            Default::default()
-        }
-    }
-
-    pub fn to_bytes(&self) -> [u8; 45] {
-        self.timestamp
-            .to_be_bytes()
-            .into_iter()
-            .chain(self.message_id.to_bytes())
-            .collect::<Vec<_>>()
-            .try_into()
-            .expect("Must serialize cursor to 45 bytes")
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != CURSOR_SIZE {
-            return Err(Error::AnyHow(anyhow!(
-                "Invalid cursor size: {}, want {}",
-                bytes.len(),
-                CURSOR_SIZE
-            )));
-        }
-        let timestamp = u64::from_be_bytes(bytes[..8].try_into().expect("Cursor timestamp to u64"));
-        let message_id = BroadcastMessageID::from_bytes(&bytes[8..])?;
-        Ok(Cursor {
-            timestamp,
-            message_id,
-        })
-    }
-
-    // A dummy cursor with the maximum timestamp and a dummy message id. This is useful when
-    // we want to create a cursor after which none of the messages should be included.
-    pub fn max() -> Self {
-        Self {
-            timestamp: u64::MAX,
-            message_id: BroadcastMessageID::ChannelAnnouncement(OutPoint::default()),
-        }
-    }
-
-    pub fn is_max(&self) -> bool {
-        self.timestamp == u64::MAX
-    }
-}
-
-impl Ord for Cursor {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.to_bytes().cmp(&other.to_bytes())
-    }
-}
-
-impl PartialOrd for Cursor {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Default for Cursor {
-    fn default() -> Self {
-        molecule_gossip::Cursor::new_builder()
-            .set([Byte::new(0); CURSOR_SIZE])
-            .build()
-            .try_into()
-            .expect("Default cursor")
-    }
-}
-
-impl From<Cursor> for molecule_gossip::Cursor {
-    fn from(cursor: Cursor) -> Self {
-        let serialized = cursor
-            .timestamp
-            .to_be_bytes()
-            .into_iter()
-            .chain(cursor.message_id.to_bytes())
-            .map(Byte::new)
-            .collect::<Vec<_>>()
-            .try_into()
-            .expect("Must serialize cursor to 45 bytes");
-
-        molecule_gossip::Cursor::new_builder()
-            .set(serialized)
-            .build()
-    }
-}
-
-impl TryFrom<molecule_gossip::Cursor> for Cursor {
-    type Error = Error;
-
-    fn try_from(cursor: molecule_gossip::Cursor) -> Result<Self, Self::Error> {
-        let slice = cursor.as_slice();
-        if slice.len() != CURSOR_SIZE {
-            return Err(Error::AnyHow(anyhow!(
-                "Invalid cursor size: {}, want {}",
-                slice.len(),
-                CURSOR_SIZE
-            )));
-        }
-        let timestamp = u64::from_be_bytes(slice[..8].try_into().expect("Cursor timestamp to u64"));
-        let message_id = BroadcastMessageID::from_bytes(&slice[8..])?;
-        Ok(Cursor {
-            timestamp,
-            message_id,
-        })
-    }
-}
-
-impl From<u16> for molecule_fiber::Uint16 {
-    fn from(count: u16) -> Self {
-        let le_bytes = count.to_le_bytes();
-        Self::new_builder()
-            .set(
-                le_bytes
-                    .into_iter()
-                    .map(Byte::new)
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .expect("Uint16 from u16"),
-            )
-            .build()
-    }
-}
-
-impl From<molecule_fiber::Uint16> for u16 {
-    fn from(count: molecule_fiber::Uint16) -> Self {
-        let le_bytes = count.as_slice().try_into().expect("Uint16 to u16");
-        u16::from_le_bytes(le_bytes)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct BroadcastMessagesFilter {
     pub chain_hash: Hash256,
@@ -3295,7 +1405,7 @@ impl TryFrom<molecule_gossip::BroadcastMessagesFilterResult> for BroadcastMessag
             messages: broadcast_messages_filter_result
                 .messages()
                 .into_iter()
-                .map(|message| message.try_into())
+                .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
         })
     }
@@ -3371,7 +1481,7 @@ impl TryFrom<molecule_gossip::GetBroadcastMessagesResult> for GetBroadcastMessag
             messages: get_broadcast_messages_result
                 .messages()
                 .into_iter()
-                .map(|message| message.try_into())
+                .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
         })
     }
@@ -3466,7 +1576,7 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMe
             messages: query_broadcast_messages_result
                 .messages()
                 .into_iter()
-                .map(|message| message.try_into())
+                .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
             missing_queries: query_broadcast_messages_result
                 .missing_queries()
@@ -3679,239 +1789,320 @@ macro_rules! impl_traits {
 
 impl_traits!(FiberMessage);
 
-pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
-    ckb_hash::blake2b_256(v.as_slice())
-}
-
-#[derive(Eq, PartialEq, Debug)]
-/// Bolt04 basic MPP payment data record
-pub struct BasicMppPaymentData {
-    pub payment_secret: Hash256,
-    pub total_amount: u128,
-}
-
-impl BasicMppPaymentData {
-    // record type for payment data record in bolt04
-    // custom records key from 65536 is reserved for internal usage
-    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 1;
-
-    pub fn new(payment_secret: Hash256, total_amount: u128) -> Self {
-        Self {
-            payment_secret,
-            total_amount,
-        }
-    }
-
-    fn to_vec(&self) -> Vec<u8> {
-        let mut vec = Vec::new();
-        vec.extend_from_slice(self.payment_secret.as_ref());
-        vec.extend_from_slice(&self.total_amount.to_le_bytes());
-        vec
-    }
-
-    pub fn write(&self, custom_records: &mut PaymentCustomRecords) {
-        custom_records
-            .data
-            .insert(Self::CUSTOM_RECORD_KEY, self.to_vec());
-    }
-
-    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Self> {
-        custom_records
-            .data
-            .get(&Self::CUSTOM_RECORD_KEY)
-            .and_then(|data| {
-                if data.len() != 32 + 16 {
-                    return None;
-                }
-                let secret: [u8; 32] = data[..32].try_into().unwrap();
-                let payment_secret = Hash256::from(secret);
-                let total_amount = u128::from_le_bytes(data[32..].try_into().unwrap());
-                Some(Self::new(payment_secret, total_amount))
-            })
-    }
-}
-
-#[serde_as]
+/// Trampoline onion hop payload.
+///
+/// This is carried inside the *inner* trampoline onion packet (which is itself embedded in
+/// the `custom_records` of the *outer* payment onion hop payload via `TrampolineOnionData`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentHopData {
-    /// The amount of the tlc, <= total amount
-    pub amount: u128,
-    pub expiry: u64,
-    pub payment_preimage: Option<Hash256>,
-    pub hash_algorithm: HashAlgorithm,
-    pub funding_tx_hash: Hash256,
-    pub next_hop: Option<Pubkey>,
-    pub custom_records: Option<PaymentCustomRecords>,
+pub enum TrampolineHopPayload {
+    /// Payload for a trampoline node.
+    Forward {
+        /// Next node in the trampoline route (could be another trampoline or the final recipient).
+        next_node_id: Pubkey,
+        /// Amount that should be forwarded to `next_node_id` (excluding this node's fee).
+        amount_to_forward: u128,
+        /// Hash algorighmm used for the payment.
+        hash_algorithm: HashAlgorithm,
+        /// Fee budget used when building the *outer* route from this trampoline node to `next_node_id`.
+        ///
+        /// This is computed during the initial router build (trampoline onion construction), so
+        /// trampoline forwarding does not need to re-derive fee allocation.
+        build_max_fee_amount: u128,
+        /// TLC expiry delta required at `next_node_id` to complete the remaining payment.
+        ///
+        /// For the final recipient this is the invoice's `final_tlc_expiry_delta`. For trampoline
+        /// hops it also includes additional slack so the trampoline can forward further.
+        tlc_expiry_delta: u64,
+
+        /// Upper bound on the TLC expiry delta used when the next trampoline hop builds its outer
+        /// route.
+        ///
+        /// This allows propagating the payer's expiry budget constraints across trampoline hops.
+        tlc_expiry_limit: u64,
+
+        /// whether trampoline node should use MPP when forwarding to next hop
+        max_parts: Option<u64>,
+    },
+    /// Payload for the final recipient.
+    Final {
+        /// Amount that the final recipient should receive.
+        final_amount: u128,
+        /// Final hop expiry delta required by the invoice.
+        final_tlc_expiry_delta: u64,
+        /// Optional payment preimage (keysend).
+        payment_preimage: Option<Hash256>,
+        /// Custom records that must reach the final recipient (e.g. MPP records).
+        custom_records: Option<PaymentCustomRecords>,
+    },
 }
 
-const PACKET_DATA_LEN: usize = 6500;
-
-#[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CurrentPaymentHopData {
-    pub amount: u128,
-    pub expiry: u64,
-    pub payment_preimage: Option<Hash256>,
-    pub hash_algorithm: HashAlgorithm,
-    pub funding_tx_hash: Hash256,
-    pub custom_records: Option<PaymentCustomRecords>,
-}
-
-impl From<PaymentHopData> for CurrentPaymentHopData {
-    fn from(hop: PaymentHopData) -> Self {
-        CurrentPaymentHopData {
-            amount: hop.amount,
-            expiry: hop.expiry,
-            payment_preimage: hop.payment_preimage,
-            hash_algorithm: hop.hash_algorithm,
-            funding_tx_hash: hop.funding_tx_hash,
-            custom_records: hop.custom_records,
-        }
-    }
-}
-
-impl From<CurrentPaymentHopData> for PaymentHopData {
-    fn from(hop: CurrentPaymentHopData) -> Self {
-        PaymentHopData {
-            amount: hop.amount,
-            expiry: hop.expiry,
-            payment_preimage: hop.payment_preimage,
-            hash_algorithm: hop.hash_algorithm,
-            funding_tx_hash: hop.funding_tx_hash,
-            custom_records: hop.custom_records,
-            next_hop: None,
-        }
-    }
-}
-
-impl PaymentHopData {
-    pub fn next_hop(&self) -> Option<Pubkey> {
-        self.next_hop
-    }
-
+impl TrampolineHopPayload {
     pub fn serialize(&self) -> Vec<u8> {
-        molecule_fiber::PaymentHopData::from(self.clone())
+        molecule_fiber::TrampolineHopPayload::from(self.clone())
             .as_bytes()
             .to_vec()
     }
 
     pub fn deserialize(data: &[u8]) -> Option<Self> {
-        molecule_fiber::PaymentHopData::from_slice(data)
+        molecule_fiber::TrampolineHopPayload::from_slice(data)
             .ok()
-            .map(|x| x.into())
+            .and_then(|p| TrampolineHopPayload::try_from(p).ok())
     }
 }
 
-impl From<PaymentCustomRecords> for molecule_fiber::CustomRecords {
-    fn from(custom_records: PaymentCustomRecords) -> Self {
-        molecule_fiber::CustomRecords::new_builder()
-            .data(
-                custom_records
-                    .data
-                    .into_iter()
-                    .map(|(key, val)| {
-                        molecule_fiber::CustomRecordDataPairBuilder::default()
-                            .key(key.pack())
-                            .value(val.pack())
-                            .build()
-                    })
-                    .collect(),
-            )
-            .build()
-    }
-}
-
-impl From<molecule_fiber::CustomRecords> for PaymentCustomRecords {
-    fn from(custom_records: molecule_fiber::CustomRecords) -> Self {
-        PaymentCustomRecords {
-            data: custom_records
-                .data()
-                .into_iter()
-                .map(|pair| (pair.key().unpack(), pair.value().unpack()))
-                .collect(),
+impl From<TrampolineHopPayload> for molecule_fiber::TrampolineHopPayload {
+    fn from(payload: TrampolineHopPayload) -> Self {
+        match payload {
+            TrampolineHopPayload::Forward {
+                next_node_id,
+                amount_to_forward,
+                hash_algorithm,
+                build_max_fee_amount,
+                tlc_expiry_delta,
+                tlc_expiry_limit,
+                max_parts,
+            } => {
+                let forward = molecule_fiber::TrampolineForwardPayload::new_builder()
+                    .next_node_id(next_node_id.into())
+                    .amount_to_forward(amount_to_forward.pack())
+                    .hash_algorithm(Byte::new(hash_algorithm as u8))
+                    .build_max_fee_amount(build_max_fee_amount.pack())
+                    .tlc_expiry_delta(tlc_expiry_delta.pack())
+                    .tlc_expiry_limit(tlc_expiry_limit.pack())
+                    .max_parts(
+                        molecule_fiber::Uint64Opt::new_builder()
+                            .set(max_parts.map(|x| x.pack()))
+                            .build(),
+                    )
+                    .build();
+                molecule_fiber::TrampolineHopPayload::new_builder()
+                    .set(forward)
+                    .build()
+            }
+            TrampolineHopPayload::Final {
+                final_amount,
+                final_tlc_expiry_delta,
+                payment_preimage,
+                custom_records,
+            } => {
+                let final_payload = molecule_fiber::TrampolineFinalPayload::new_builder()
+                    .final_amount(final_amount.pack())
+                    .final_tlc_expiry_delta(final_tlc_expiry_delta.pack())
+                    .payment_preimage(
+                        PaymentPreimageOpt::new_builder()
+                            .set(payment_preimage.map(|x| x.into()))
+                            .build(),
+                    )
+                    .custom_records(
+                        CustomRecordsOpt::new_builder()
+                            .set(custom_records.map(|x| x.into()))
+                            .build(),
+                    )
+                    .build();
+                molecule_fiber::TrampolineHopPayload::new_builder()
+                    .set(final_payload)
+                    .build()
+            }
         }
     }
 }
 
-impl From<PaymentHopData> for molecule_fiber::PaymentHopData {
-    fn from(payment_hop_data: PaymentHopData) -> Self {
-        molecule_fiber::PaymentHopData::new_builder()
-            .amount(payment_hop_data.amount.pack())
-            .expiry(payment_hop_data.expiry.pack())
-            .payment_preimage(
-                PaymentPreimageOpt::new_builder()
-                    .set(payment_hop_data.payment_preimage.map(|x| x.into()))
-                    .build(),
-            )
-            .hash_algorithm(Byte::new(payment_hop_data.hash_algorithm as u8))
-            .funding_tx_hash(payment_hop_data.funding_tx_hash.into())
-            .next_hop(
-                PubkeyOpt::new_builder()
-                    .set(payment_hop_data.next_hop.map(|x| x.into()))
-                    .build(),
-            )
-            .custom_records(
-                CustomRecordsOpt::new_builder()
-                    .set(payment_hop_data.custom_records.map(|x| x.into()))
-                    .build(),
-            )
-            .build()
-    }
-}
+impl TryFrom<molecule_fiber::TrampolineHopPayload> for TrampolineHopPayload {
+    type Error = Error;
 
-impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
-    fn from(payment_hop_data: molecule_fiber::PaymentHopData) -> Self {
-        PaymentHopData {
-            amount: payment_hop_data.amount().unpack(),
-            expiry: payment_hop_data.expiry().unpack(),
-            payment_preimage: payment_hop_data
-                .payment_preimage()
-                .to_opt()
-                .map(|x| x.into()),
-            hash_algorithm: payment_hop_data
-                .hash_algorithm()
-                .try_into()
-                .unwrap_or_default(),
-            funding_tx_hash: payment_hop_data.funding_tx_hash().into(),
-            next_hop: payment_hop_data
-                .next_hop()
-                .to_opt()
-                .map(|x| x.try_into())
-                .and_then(Result::ok),
-            custom_records: payment_hop_data.custom_records().to_opt().map(|x| x.into()),
+    fn try_from(payload: molecule_fiber::TrampolineHopPayload) -> Result<Self, Self::Error> {
+        match payload.to_enum() {
+            molecule_fiber::TrampolineHopPayloadUnion::TrampolineForwardPayload(forward) => {
+                Ok(TrampolineHopPayload::Forward {
+                    next_node_id: forward.next_node_id().try_into()?,
+                    amount_to_forward: forward.amount_to_forward().unpack(),
+                    hash_algorithm: forward.hash_algorithm().try_into().unwrap_or_default(),
+                    build_max_fee_amount: forward.build_max_fee_amount().unpack(),
+                    tlc_expiry_delta: forward.tlc_expiry_delta().unpack(),
+                    tlc_expiry_limit: forward.tlc_expiry_limit().unpack(),
+                    max_parts: forward.max_parts().to_opt().map(|x| x.unpack()),
+                })
+            }
+            molecule_fiber::TrampolineHopPayloadUnion::TrampolineFinalPayload(final_payload) => {
+                Ok(TrampolineHopPayload::Final {
+                    final_amount: final_payload.final_amount().unpack(),
+                    final_tlc_expiry_delta: final_payload.final_tlc_expiry_delta().unpack(),
+                    payment_preimage: final_payload.payment_preimage().to_opt().map(|x| x.into()),
+                    custom_records: final_payload.custom_records().to_opt().map(|x| x.into()),
+                })
+            }
         }
     }
 }
 
+/// Inner trampoline onion packet bytes.
+///
+/// Uses the same Sphinx construction as the outer payment onion, but is intended to be smaller so
+/// it can be embedded inside the outer onion's hop payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PaymentOnionPacket {
-    // The encrypted packet
+pub struct TrampolineOnionPacket {
     data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PeeledPaymentOnionPacket {
-    // The decrypted hop data for the current hop
-    pub current: CurrentPaymentHopData,
-    // The shared secret for `current` used for returning error. Set to all zeros for the origin node
-    // who has no shared secret.
+pub struct PeeledTrampolineOnionPacket {
+    pub current: TrampolineHopPayload,
     pub shared_secret: [u8; 32],
-    // The packet for the next hop
-    pub next: Option<PaymentOnionPacket>,
+    pub next: Option<TrampolineOnionPacket>,
 }
 
-impl PeeledPaymentOnionPacket {
-    pub fn mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
-        self.current
-            .custom_records
-            .as_ref()
-            .and_then(BasicMppPaymentData::read)
+const TRAMPOLINE_PACKET_DATA_LEN: usize = 1300;
+
+trait SphinxOnionCodec {
+    type Decoded;
+    type Current;
+
+    const PACKET_DATA_LEN: usize;
+    /// The onion packet version used when creating new packets.
+    const CURRENT_VERSION: u8;
+
+    /// Packs the decoded data for transmission. Must use `CURRENT_VERSION` format.
+    fn pack(decoded: &Self::Decoded) -> Vec<u8>;
+    /// Unpacks data received from the network. Must handle all versions allowed by `is_version_allowed`.
+    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded>;
+    fn to_current(decoded: Self::Decoded) -> Self::Current;
+    /// Returns true if the given version is allowed for this codec.
+    fn is_version_allowed(version: u8) -> bool;
+    /// Returns the total length of hop data (including any headers) for the specified version.
+    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize>;
+}
+
+struct SphinxPeeled<Current> {
+    current: Current,
+    shared_secret: [u8; 32],
+    next: Option<Vec<u8>>,
+}
+
+fn peel_sphinx_onion<C: Verification, Codec: SphinxOnionCodec>(
+    packet_bytes: Vec<u8>,
+    peeler: &Privkey,
+    assoc_data: Option<&[u8]>,
+    secp_ctx: &Secp256k1<C>,
+) -> Result<SphinxPeeled<Codec::Current>, Error> {
+    let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(packet_bytes)
+        .map_err(|err| Error::OnionPacket(err.into()))?;
+    let version = sphinx_packet.version;
+    if !Codec::is_version_allowed(version) {
+        return Err(Error::OnionPacket(OnionPacketError::UnknownVersion(
+            version,
+        )));
+    }
+    let shared_secret = sphinx_packet.shared_secret(&peeler.0);
+
+    let (new_current, new_next) = sphinx_packet
+        .peel(&peeler.0, assoc_data, secp_ctx, |buf| {
+            Codec::hop_data_len(version, buf)
+        })
+        .map_err(|err| Error::OnionPacket(err.into()))?;
+
+    let decoded = Codec::unpack(version, &new_current)
+        .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
+    let current = Codec::to_current(decoded);
+
+    // All zeros hmac indicates the last hop.
+    let next = new_next
+        .hmac
+        .iter()
+        .any(|b| *b != 0)
+        .then(|| new_next.into_bytes());
+
+    Ok(SphinxPeeled {
+        current,
+        shared_secret,
+        next,
+    })
+}
+
+fn create_sphinx_onion<C: Signing, Codec: SphinxOnionCodec>(
+    session_key: Privkey,
+    hops_path: Vec<Pubkey>,
+    payloads: Vec<Codec::Decoded>,
+    assoc_data: Option<Vec<u8>>,
+    secp_ctx: &Secp256k1<C>,
+) -> Result<Vec<u8>, Error> {
+    if hops_path.is_empty() {
+        return Err(Error::OnionPacket(SphinxError::HopsIsEmpty.into()));
+    }
+    if hops_path.len() != payloads.len() {
+        return Err(Error::OnionPacket(OnionPacketError::InvalidHopData));
+    }
+
+    let hops_path: Vec<PublicKey> = hops_path.into_iter().map(Into::into).collect();
+    let hops_data = payloads.iter().map(Codec::pack).collect();
+
+    let mut sphinx_packet = fiber_sphinx::OnionPacket::create(
+        session_key.into(),
+        hops_path,
+        hops_data,
+        assoc_data,
+        Codec::PACKET_DATA_LEN,
+        secp_ctx,
+    )
+    .map_err(|err| Error::OnionPacket(err.into()))?;
+    // Set the version to indicate which hop data format is used
+    sphinx_packet.version = Codec::CURRENT_VERSION;
+    Ok(sphinx_packet.into_bytes())
+}
+
+struct TrampolineSphinxCodec;
+
+impl SphinxOnionCodec for TrampolineSphinxCodec {
+    type Decoded = TrampolineHopPayload;
+    type Current = TrampolineHopPayload;
+
+    const PACKET_DATA_LEN: usize = TRAMPOLINE_PACKET_DATA_LEN;
+    // Trampoline uses molecule enum serialization (v1 format without u64 length header)
+    const CURRENT_VERSION: u8 = ONION_PACKET_VERSION_V1;
+
+    fn pack(decoded: &Self::Decoded) -> Vec<u8> {
+        decoded.serialize()
+    }
+
+    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded> {
+        if !Self::is_version_allowed(version) {
+            return None;
+        }
+        let len = molecule_enum_of_tables_data_len(buf)?;
+        if buf.len() < len {
+            return None;
+        }
+        TrampolineHopPayload::deserialize(&buf[..len])
+    }
+
+    fn to_current(decoded: Self::Decoded) -> Self::Current {
+        decoded
+    }
+
+    fn is_version_allowed(version: u8) -> bool {
+        // Trampoline only supports v1 (molecule enum without u64 length header)
+        version == ONION_PACKET_VERSION_V1
+    }
+
+    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize> {
+        if !Self::is_version_allowed(version) {
+            return None;
+        }
+        // Trampoline uses molecule enum where all branches are tables
+        molecule_enum_of_tables_data_len(buf)
     }
 }
 
-impl PaymentOnionPacket {
+impl TrampolineOnionPacket {
     pub fn new(data: Vec<u8>) -> Self {
         Self { data }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
     }
 
     pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
@@ -3919,209 +2110,58 @@ impl PaymentOnionPacket {
             .map_err(|err| Error::OnionPacket(err.into()))
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.data
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.data
-    }
-}
-
-impl PaymentOnionPacket {
-    /// Peels the next layer of the onion packet using the privkey of the current node.
-    ///
-    /// Returns errors when:
-    /// - This is the packet for the last hop.
-    /// - Fail to peel the packet using the given private key.
     pub fn peel<C: Verification>(
         self,
         peeler: &Privkey,
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
-    ) -> Result<PeeledPaymentOnionPacket, Error> {
-        let sphinx_packet = self.into_sphinx_onion_packet()?;
-        let shared_secret = sphinx_packet.shared_secret(&peeler.0);
-
-        let (new_current, new_next) = sphinx_packet
-            .peel(&peeler.0, assoc_data, secp_ctx, get_hop_data_len)
-            .map_err(|err| Error::OnionPacket(err.into()))?;
-
-        let current: PaymentHopData = unpack_hop_data(&new_current)
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-        // All zeros hmac indicates the last hop
-        let next = new_next
-            .hmac
-            .iter()
-            .any(|b| *b != 0)
-            .then(|| PaymentOnionPacket::new(new_next.into_bytes()));
-
-        Ok(PeeledPaymentOnionPacket {
-            current: current.into(),
-            next,
-            shared_secret,
+    ) -> Result<PeeledTrampolineOnionPacket, Error> {
+        let peeled =
+            peel_sphinx_onion::<C, TrampolineSphinxCodec>(self.data, peeler, assoc_data, secp_ctx)?;
+        Ok(PeeledTrampolineOnionPacket {
+            current: peeled.current,
+            next: peeled.next.map(TrampolineOnionPacket::new),
+            shared_secret: peeled.shared_secret,
         })
     }
-}
 
-impl PeeledPaymentOnionPacket {
-    /// - `hops_info`: the first is the instruction for the origin node itself.
-    ///   Remaining elements are for each node to receive the packet.
+    /// Create a trampoline onion destined to `hops_path[0]`.
+    ///
+    /// `hops_path.len()` must equal `payloads.len()` and must not be empty.
     pub fn create<C: Signing>(
         session_key: Privkey,
-        mut hops_infos: Vec<PaymentHopData>,
+        hops_path: Vec<Pubkey>,
+        payloads: Vec<TrampolineHopPayload>,
         assoc_data: Option<Vec<u8>>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<Self, Error> {
-        if hops_infos.is_empty() {
-            return Err(Error::OnionPacket(SphinxError::HopsIsEmpty.into()));
-        }
-
-        let hops_path: Vec<PublicKey> = hops_infos
-            .iter()
-            .map(|h| h.next_hop())
-            .take_while(Option::is_some)
-            .map(|opt| opt.expect("must be some").into())
-            .collect();
-
-        // Add length as the header
-        let hops_data = hops_infos.iter().skip(1).map(pack_hop_data).collect();
-
-        let current = hops_infos.swap_remove(0);
-
-        let next = if !hops_path.is_empty() {
-            Some(PaymentOnionPacket::new(
-                fiber_sphinx::OnionPacket::create(
-                    session_key.into(),
-                    hops_path,
-                    hops_data,
-                    assoc_data,
-                    PACKET_DATA_LEN,
-                    secp_ctx,
-                )
-                .map_err(|err| Error::OnionPacket(err.into()))?
-                .into_bytes(),
-            ))
-        } else {
-            None
-        };
-
-        Ok(PeeledPaymentOnionPacket {
-            current: current.into(),
-            next,
-            // Use all zeros for the sender
-            shared_secret: NO_SHARED_SECRET,
-        })
-    }
-
-    /// Returns true if this is the peeled packet for the last destination.
-    pub fn is_last(&self) -> bool {
-        self.next.is_none()
-    }
-
-    pub fn serialize(&self) -> Vec<u8> {
-        let current = self.current.clone().into();
-        let mut res = pack_hop_data(&current);
-        res.extend(self.shared_secret);
-        if let Some(ref next) = self.next {
-            res.extend(&next.data[..]);
-        }
-        res
-    }
-
-    pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
-        let mut read_bytes = get_hop_data_len(data)
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-        let current = unpack_hop_data(data)
-            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-
-        // Ensure backward compatibility
-        let mut shared_secret = NO_SHARED_SECRET;
-        if data.len() >= read_bytes + 32 && data.len() != read_bytes + PACKET_DATA_LEN {
-            shared_secret.copy_from_slice(&data[read_bytes..read_bytes + 32]);
-            read_bytes += 32;
-        }
-
-        let next = if read_bytes < data.len() {
-            Some(PaymentOnionPacket::new(data[read_bytes..].to_vec()))
-        } else {
-            None
-        };
-        Ok(Self {
-            current: current.into(),
-            shared_secret,
-            next,
-        })
+        Ok(TrampolineOnionPacket::new(create_sphinx_onion::<
+            C,
+            TrampolineSphinxCodec,
+        >(
+            session_key,
+            hops_path,
+            payloads,
+            assoc_data,
+            secp_ctx,
+        )?))
     }
 }
 
-const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
-
-/// TODO: when JSON is replaced, this function may return `data` directly.
-pub(crate) fn pack_hop_data(hop_data: &PaymentHopData) -> Vec<u8> {
-    let mut serialized = hop_data.serialize();
-    // A temporary solution to prepend the length as the header
-    let mut packed = (serialized.len() as u64).to_be_bytes().to_vec();
-    packed.append(&mut serialized);
-    packed
+/// Helper free function to extract MPP custom records from a peeled payment onion packet.
+pub fn peeled_packet_mpp_custom_records(
+    peeled: &PeeledPaymentOnionPacket,
+) -> Option<BasicMppPaymentData> {
+    peeled.mpp_custom_records()
 }
 
-/// TODO: when JSON is replaced, this function may return `data` directly.
-pub(crate) fn unpack_hop_data(buf: &[u8]) -> Option<PaymentHopData> {
-    let len = get_hop_data_len(buf)?;
-    if buf.len() < len {
-        return None;
-    }
-    PaymentHopData::deserialize(&buf[HOP_DATA_HEAD_LEN..len])
-}
-
-/// TODO: when JSON is replaced, this function may return `data` directly.
-fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
-    if buf.len() < HOP_DATA_HEAD_LEN {
-        return None;
-    }
-    Some(
-        u64::from_be_bytes(
-            buf[0..HOP_DATA_HEAD_LEN]
-                .try_into()
-                .expect("u64 from slice"),
-        ) as usize
-            + HOP_DATA_HEAD_LEN,
-    )
-}
-
-/// Used as identifier of node.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, Hash, Eq, PartialEq)]
-pub struct NodeId(#[serde_as(as = "SliceBase58")] Vec<u8>);
-
-impl NodeId {
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-
-    // return a empty node_id represent local node
-    pub fn local() -> Self {
-        Self(Default::default())
-    }
-}
-
-impl AsRef<[u8]> for NodeId {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl ::std::str::FromStr for NodeId {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes = bs58::decode(s)
-            .into_vec()
-            .map_err(|_| anyhow!("can't parse node_id: {s}"))?;
-
-        Ok(Self::from_bytes(bytes))
-    }
+/// Returns the total length of a molecule enum where all branches are tables.
+/// Layout: [item_id: u32 LE][table_data]. The table's first u32 LE is its total length.
+/// Total length = 4 (item_id) + table_length.
+/// Used by trampoline hop data (v1 format).
+fn molecule_enum_of_tables_data_len(buf: &[u8]) -> Option<usize> {
+    let table_len = molecule_table_data_len(buf.get(molecule::NUMBER_SIZE..)?)?;
+    molecule::NUMBER_SIZE.checked_add(table_len)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

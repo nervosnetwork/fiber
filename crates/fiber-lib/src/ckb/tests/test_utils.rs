@@ -19,13 +19,13 @@ use tokio::sync::RwLock as TokioRwLock;
 
 use crate::{
     ckb::{
-        config::{UdtArgInfo, UdtCfgInfos, UdtScript},
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
         CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError, GetTxResponse,
     },
-    fiber::types::Hash256,
     now_timestamp_as_millis_u64,
 };
+use fiber_types::{Hash256, UdtCfgInfos};
+use fiber_types::{UdtArgInfo, UdtScript};
 
 use crate::ckb::CkbChainMessage;
 
@@ -152,7 +152,7 @@ impl MockContext {
             contract_default_scripts.insert(contract, script);
             let cell_dep = CellDep::new_builder()
                 .out_point(out_point)
-                .dep_type(DepType::Code.into())
+                .dep_type(DepType::Code)
                 .build();
 
             let cell_deps = if matches!(contract, Contract::FundingLock)
@@ -443,21 +443,13 @@ impl Actor for MockChainActor {
                             }
 
                             let mut outputs_builder = outputs.as_builder();
-                            outputs_builder.replace(
-                                0,
-                                output
-                                    .as_builder()
-                                    .capacity((capacity as u64).pack())
-                                    .build(),
-                            );
+                            outputs_builder
+                                .replace(0, output.as_builder().capacity(capacity as u64).build());
                             outputs_builder.build()
                         }
                     }
                     None => [CellOutput::new_builder()
-                        .capacity(
-                            (request.local_amount as u64 + request.local_reserved_ckb_amount)
-                                .pack(),
-                        )
+                        .capacity(request.local_amount as u64 + request.local_reserved_ckb_amount)
                         .lock(request.script.clone())
                         .build()]
                     .pack(),

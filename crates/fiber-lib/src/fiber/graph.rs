@@ -1,43 +1,56 @@
-use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
-use super::config::AnnouncedNodeName;
-use super::features::FeatureVector;
+use super::channel::{ChannelActorState, ChannelActorStateStore};
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, BuildRouterCommand};
 use super::path::NodeHeap;
-use super::payment::{HopHint, SendPaymentData};
-use super::types::{
-    BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
-    NodeAnnouncement,
-};
-use super::types::{Cursor, Pubkey, TlcErr};
-use crate::ckb::config::UdtCfgInfos;
+use super::payment::SendPaymentDataExt;
+use super::types::BroadcastMessageWithTimestamp;
+use crate::fiber::channel::DEFAULT_FEE_RATE;
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
 };
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
+use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
-use crate::fiber::payment::{Attempt, AttemptStatus, PaymentSession, PaymentStatus};
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::PaymentHopData;
-use crate::invoice::CkbInvoice;
+use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::{
+    Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelTlcInfo, ChannelUpdate, Cursor,
+    FeatureVector, Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession,
+    PaymentStatus, Privkey, Pubkey, RouterHop, SendPaymentData, TlcErr, U128Hex, U64Hex,
+    UdtCfgInfos,
+};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
+use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
-use tentacle::secio::PeerId;
 use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, trace, warn};
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+static FIND_PATH_CALL_COUNT_FOR_TESTS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn reset_find_path_call_count_for_tests() {
+    FIND_PATH_CALL_COUNT_FOR_TESTS.store(0, Ordering::SeqCst);
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn find_path_call_count_for_tests() -> u64 {
+    FIND_PATH_CALL_COUNT_FOR_TESTS.load(Ordering::SeqCst)
+}
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -125,14 +138,6 @@ impl ChannelInfo {
 
     pub fn node2(&self) -> Pubkey {
         self.node2
-    }
-
-    pub fn node1_peerid(&self) -> PeerId {
-        self.node1.tentacle_peer_id()
-    }
-
-    pub fn node2_peerid(&self) -> PeerId {
-        self.node2.tentacle_peer_id()
     }
 
     pub fn udt_type_script(&self) -> &Option<Script> {
@@ -434,6 +439,53 @@ impl GraphChannelStat {
     }
 }
 
+/// A wrapper that combines `SendPaymentData` (the user's payment request) with
+/// `GraphChannelStat` (runtime channel usage state for path-finding).
+///
+/// Graph methods accept `&SendPaymentState` instead of `&SendPaymentData`.
+/// Thanks to `Deref<Target = SendPaymentData>`, all payment data fields
+/// are accessible directly (e.g., `state.target_pubkey`), while the
+/// runtime-only `channel_stats` field lives on this wrapper.
+#[derive(Clone, Debug)]
+pub struct SendPaymentState {
+    /// The underlying payment request data.
+    pub request: SendPaymentData,
+    /// Runtime channel usage statistics for path-finding (overlay on global stats).
+    pub channel_stats: GraphChannelStat,
+}
+
+impl SendPaymentState {
+    /// Create a new `SendPaymentState` with default (empty) channel stats.
+    pub fn new(request: SendPaymentData) -> Self {
+        Self {
+            request,
+            channel_stats: Default::default(),
+        }
+    }
+
+    /// Create a new `SendPaymentState` with specific channel stats.
+    pub fn with_channel_stats(request: SendPaymentData, channel_stats: GraphChannelStat) -> Self {
+        Self {
+            request,
+            channel_stats,
+        }
+    }
+}
+
+impl std::ops::Deref for SendPaymentState {
+    type Target = SendPaymentData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+impl From<SendPaymentData> for SendPaymentState {
+    fn from(request: SendPaymentData) -> Self {
+        Self::new(request)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
     // Whether to always process gossip messages for our own channels.
@@ -498,26 +550,12 @@ pub enum PathFindError {
     Other(String),
 }
 
-/// A router hop information for a payment, a paymenter router is an array of RouterHop,
-/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
-/// Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
-#[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RouterHop {
-    /// The node that is sending the TLC to the next node.
-    pub(crate) target: Pubkey,
-    /// The channel of this hop used to receive TLC
-    #[serde_as(as = "EntityHex")]
-    pub(crate) channel_outpoint: OutPoint,
-    /// The amount that the source node will transfer to the target node.
-    /// We have already added up all the fees along the path, so this amount can be used directly for the TLC.
-    #[serde_as(as = "U128Hex")]
-    pub(crate) amount_received: u128,
-    /// The expiry for the TLC that the source node sends to the target node.
-    /// We have already added up all the expiry deltas along the path,
-    /// the only thing missing is current time. So the expiry is the current time plus the expiry delta.
-    #[serde_as(as = "U64Hex")]
-    pub(crate) incoming_tlc_expiry: u64,
+#[derive(Debug)]
+struct ResolvedRoute {
+    hops: Vec<RouterHop>,
+    amount: u128,
+    trampoline_onion: Option<Vec<u8>>,
+    final_hop_expiry_delta_override: Option<u64>,
 }
 
 impl<S> NetworkGraph<S>
@@ -894,14 +932,14 @@ where
         self.nodes.len()
     }
 
-    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<MultiAddr>> {
+    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<Pubkey, Vec<MultiAddr>> {
         // TODO: we may need to shuffle the nodes before selecting the first n nodes,
         // to avoid some malicious nodes from being always selected.
         self.nodes
             .iter()
             .filter(|(k, _)| **k != self.source)
             .take(n)
-            .map(|(k, v)| (k.tentacle_peer_id(), v.addresses.clone()))
+            .map(|(k, v)| (*k, v.addresses.clone()))
             .collect()
     }
 
@@ -948,7 +986,7 @@ where
         })
     }
 
-    fn get_outbound_channel_info_and_update(
+    pub(crate) fn get_outbound_channel_info_and_update(
         &self,
         outpoint: &OutPoint,
         from: Pubkey,
@@ -1218,11 +1256,11 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         info!(
-            "entered build_route: amount: {}, amount_low_bound: {:?}",
-            amount, amount_low_bound
+            "entered build_route: amount: {}, amount_low_bound: {:?}, max_fee_amount: {:?}",
+            amount, amount_low_bound, max_fee_amount
         );
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
@@ -1233,35 +1271,337 @@ where
             ));
         }
 
-        let (route_hops, route_amount) = if !payment_data.router.is_empty() {
+        // Early fail: verify the source node's outbound liquidity can cover the payment amount
+        // before spending time on path-finding. This check is skipped when an explicit router
+        // is provided (the caller is responsible).
+        if payment_data.router.is_empty() {
+            let outbound_liquidities: Vec<u128> = self
+                .get_node_outbounds(source)
+                .filter(|(_, channel_info, _)| {
+                    channel_info.udt_type_script() == &payment_data.udt_type_script
+                })
+                .map(|(_, channel_info, channel_update)| {
+                    channel_update
+                        .outbound_liquidity
+                        .unwrap_or_else(|| channel_info.capacity())
+                })
+                .collect();
+
+            if payment_data.allow_mpp() {
+                // For MPP the payment can be split across all channels, so the total is the bound.
+                let total: u128 = outbound_liquidities.iter().sum();
+                if total < amount {
+                    return Err(PathFindError::InsufficientBalance(format!(
+                        "total outbound liquidity {total} is insufficient, required amount: {amount}"
+                    )));
+                }
+            } else {
+                // For a single-path payment the entire amount must flow through one channel.
+                let max = outbound_liquidities.iter().copied().max().unwrap_or(0);
+                if max < amount {
+                    return Err(PathFindError::InsufficientBalance(format!(
+                        "max outbound liquidity {max} is insufficient, required amount: {amount}"
+                    )));
+                }
+            }
+        }
+
+        let path = self.resolve_route(
+            source,
+            amount,
+            amount_low_bound,
+            max_fee_amount,
+            payment_data,
+        )?;
+
+        Ok(self.build_router_from_path(
+            &path.hops,
+            path.amount,
+            payment_data,
+            path.trampoline_onion,
+            path.final_hop_expiry_delta_override,
+        ))
+    }
+
+    fn is_node_support_trampoline_routing(&self, node: &Pubkey) -> bool {
+        self.nodes
+            .get(node)
+            .map(|node_info| node_info.features.supports_trampoline_routing())
+            .unwrap_or(true)
+    }
+
+    fn resolve_route(
+        &self,
+        source: Pubkey,
+        amount: u128,
+        amount_low_bound: Option<u128>,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentState,
+    ) -> Result<ResolvedRoute, PathFindError> {
+        if !payment_data.router.is_empty() {
             // If a router is explicitly provided, use it.
             // Assume it's valid for the requested `amount`.
-            (payment_data.router.clone(), amount)
-        } else {
-            let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
-            match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
-                Ok(route) => (route, amount),
-                Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
-                    if payment_data.allow_mpp() && amount_low_bound < amount =>
-                {
-                    self.binary_find_path_in_range(
+            return Ok(ResolvedRoute {
+                hops: payment_data.router.clone(),
+                amount,
+                trampoline_onion: None,
+                final_hop_expiry_delta_override: None,
+            });
+        }
+
+        if payment_data.use_trampoline_routing() {
+            let res = self.find_trampoline_route(source, amount, max_fee_amount, payment_data)?;
+            debug!(
+                "found trampoline route: {:?}, amount_to_trampoline: {}",
+                res.hops, res.amount
+            );
+            return Ok(res);
+        }
+
+        let amount_low_bound = amount_low_bound.unwrap_or(u128::MAX);
+        match self.find_path_with_payment_data(source, amount, max_fee_amount, payment_data) {
+            Ok(route) => Ok(ResolvedRoute {
+                hops: route,
+                amount,
+                trampoline_onion: None,
+                final_hop_expiry_delta_override: None,
+            }),
+            Err(PathFindError::NoPathFound) | Err(PathFindError::TlcMinValue(_))
+                if payment_data.allow_mpp() && amount_low_bound < amount =>
+            {
+                let (hops, amount) = self
+                    .binary_find_path_in_range(
                         source,
                         amount.saturating_sub(1),
                         amount_low_bound,
                         max_fee_amount,
                         payment_data,
-                    )?
-                }
-                Err(err) => return Err(err),
+                    )
+                    .map_err(|_| PathFindError::NoPathFound)?;
+                Ok(ResolvedRoute {
+                    hops,
+                    amount,
+                    trampoline_onion: None,
+                    final_hop_expiry_delta_override: None,
+                })
             }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn find_trampoline_route(
+        &self,
+        source: Pubkey,
+        final_amount: u128,
+        max_fee_amount: Option<u128>,
+        payment_data: &SendPaymentState,
+    ) -> Result<ResolvedRoute, PathFindError> {
+        let target = payment_data.target_pubkey;
+        let max_fee_amount = max_fee_amount.or(payment_data.max_fee_amount);
+        let Some(hops) = payment_data.trampoline_hops().filter(|h| !h.is_empty()) else {
+            return Err(PathFindError::NoPathFound);
         };
 
-        debug_assert!(
-            !route_hops.is_empty(),
-            "Route hops should not be empty if Ok"
-        );
+        let first = hops[0];
+        if first == source || first == target {
+            return Err(PathFindError::FeatureNotEnabled(
+                "invalid trampoline_hops: first hop must not be source/target".to_string(),
+            ));
+        }
+        if !self.is_node_support_trampoline_routing(&first)
+            || hops
+                .iter()
+                .any(|n| !self.is_node_support_trampoline_routing(n))
+        {
+            return Err(PathFindError::FeatureNotEnabled(
+                "invalid trampoline_hops: a hop does not support trampoline routing".to_string(),
+            ));
+        }
 
-        Ok(self.build_router_from_path(&route_hops, route_amount, payment_data))
+        let low_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 1, hops)?;
+        let mut fees = vec![0u128; hops.len()];
+        let Some(max_fee_amount) = max_fee_amount else {
+            return Err(PathFindError::Other(
+                "max_fee_amount is required for trampoline routing".to_string(),
+            ));
+        };
+
+        if max_fee_amount < low_total_trampoline_fee {
+            let high_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 10, hops)?;
+            return Err(PathFindError::Other(format!(
+                    "max_fee_amount is too low for trampoline routing: recommend_minimal_fee={}, maximal_fee={} current_fee={}",
+                    low_total_trampoline_fee, high_total_trampoline_fee, max_fee_amount
+                )));
+        }
+
+        let mut route_to_trampoline = self.find_path(
+            source,
+            first,
+            Some(final_amount + max_fee_amount),
+            None,
+            payment_data.udt_type_script.clone(),
+            self.trampoline_forward_expiry_delta(
+                payment_data.final_tlc_expiry_delta,
+                hops,
+                payment_data.tlc_expiry_limit,
+            )?,
+            payment_data.tlc_expiry_limit,
+            payment_data.allow_self_payment,
+            &payment_data.hop_hints,
+            &payment_data.channel_stats,
+            false,
+        )?;
+
+        let first_hop_fee = final_amount
+            .saturating_sub(route_to_trampoline.last().map_or(0, |h| h.amount_received));
+
+        if first_hop_fee >= max_fee_amount {
+            return Err(PathFindError::Other(format!(
+                "max_fee_amount is too low for trampoline routing: first_hop_fee={} current_fee={}",
+                first_hop_fee, max_fee_amount
+            )));
+        } else {
+            // adjust the amount_received by removing the first hop fee
+            for r in route_to_trampoline.iter_mut() {
+                r.amount_received = r.amount_received.saturating_sub(first_hop_fee);
+            }
+        }
+
+        let remaining_fee = max_fee_amount.saturating_sub(first_hop_fee);
+        let slots = fees.len() as u128;
+        let base = remaining_fee / slots;
+        let remainder = (remaining_fee % slots) as usize;
+        fees.iter_mut().for_each(|b| *b = base);
+        for fee in fees.iter_mut().take(remainder) {
+            *fee = fee.saturating_add(1);
+        }
+
+        if fees.contains(&0) {
+            return Err(PathFindError::Other(
+                "max_fee_amount is too low for trampoline routing: fee for a trampoline hop is zero"
+                    .to_string(),
+            ));
+        }
+
+        let mut payloads: Vec<TrampolineHopPayload> = Vec::with_capacity(hops.len() + 1);
+        for (idx, _node) in hops.iter().enumerate() {
+            let is_last_trampoline = idx + 1 == hops.len();
+            let next_node_id = if is_last_trampoline {
+                target
+            } else {
+                hops[idx + 1]
+            };
+
+            let remaining_trampoline_hops = if is_last_trampoline {
+                &[][..]
+            } else {
+                &hops[(idx + 1)..]
+            };
+
+            payloads.push(TrampolineHopPayload::Forward {
+                next_node_id,
+                amount_to_forward: final_amount + (fees[idx + 1..].iter().sum::<u128>()),
+                build_max_fee_amount: fees[idx],
+                hash_algorithm: payment_data.hash_algorithm(),
+                tlc_expiry_limit: payment_data.tlc_expiry_limit,
+                tlc_expiry_delta: self.trampoline_forward_expiry_delta(
+                    payment_data.final_tlc_expiry_delta,
+                    remaining_trampoline_hops,
+                    payment_data.tlc_expiry_limit,
+                )?,
+                max_parts: if payment_data.allow_mpp() {
+                    Some(payment_data.max_parts() as u64)
+                } else {
+                    None
+                },
+            });
+        }
+
+        payloads.push(TrampolineHopPayload::Final {
+            final_amount,
+            final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
+            payment_preimage: payment_data.preimage,
+            custom_records: payment_data.custom_records.clone(),
+        });
+
+        let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
+        let mut trampoline_path: Vec<Pubkey> = hops.to_vec();
+
+        trampoline_path.push(target);
+        let trampoline_onion = TrampolineOnionPacket::create(
+            session_key,
+            trampoline_path,
+            payloads,
+            Some(payment_data.payment_hash.as_ref().to_vec()),
+            SECP256K1,
+        )
+        .map_err(|_| PathFindError::NoPathFound)?
+        .into_bytes();
+
+        return Ok(ResolvedRoute {
+            hops: route_to_trampoline,
+            amount: final_amount + remaining_fee,
+            trampoline_onion: Some(trampoline_onion),
+            final_hop_expiry_delta_override: Some(self.trampoline_forward_expiry_delta(
+                payment_data.final_tlc_expiry_delta,
+                hops,
+                payment_data.tlc_expiry_limit,
+            )?),
+        });
+    }
+
+    #[allow(unused)]
+    fn estimate_trampoline_fee(
+        &self,
+        final_amount: u128,
+        forward_hops_num: usize,
+        hops: &[Pubkey],
+    ) -> Result<u128, PathFindError> {
+        let mut forward_amounts = vec![0u128; hops.len()];
+        let mut next_amount_to_forward = final_amount;
+        for (idx, _hop) in hops.iter().enumerate().rev() {
+            forward_amounts[idx] = next_amount_to_forward;
+
+            let fee = calculate_tlc_forward_fee(next_amount_to_forward, DEFAULT_FEE_RATE as u128)
+                .map_err(|e| {
+                PathFindError::Other(format!("invalid trampoline_hops fee_rate: {e}"))
+            })? * forward_hops_num as u128;
+
+            next_amount_to_forward = next_amount_to_forward.saturating_add(fee);
+        }
+
+        let amount_to_first_trampoline = next_amount_to_forward;
+        let total_fee = amount_to_first_trampoline.saturating_sub(final_amount);
+        Ok(total_fee)
+    }
+
+    fn trampoline_forward_expiry_delta(
+        &self,
+        base_final: u64,
+        remaining_trampoline_hops: &[Pubkey],
+        tlc_expiry_limit: u64,
+    ) -> Result<u64, PathFindError> {
+        let slack = remaining_trampoline_hops
+            .iter()
+            .map(|_h| DEFAULT_TLC_EXPIRY_DELTA)
+            .try_fold(0u64, |acc, d| {
+                acc.checked_add(d).ok_or_else(|| {
+                    PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
+                })
+            })?;
+
+        let total = base_final.checked_add(slack).ok_or_else(|| {
+            PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
+        })?;
+
+        if total > tlc_expiry_limit {
+            return Err(PathFindError::Other(format!(
+                "trampoline tlc_expiry_delta exceeds tlc_expiry_limit: {} > {}",
+                total, tlc_expiry_limit
+            )));
+        }
+
+        Ok(total)
     }
 
     fn find_path_with_payment_data(
@@ -1269,7 +1609,7 @@ where
         source: Pubkey,
         amount: u128,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<Vec<RouterHop>, PathFindError> {
         #[cfg(any(feature = "metrics", test))]
         {
@@ -1294,7 +1634,7 @@ where
 
     pub fn find_path_max_capacity(
         &self,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<u128, PathFindError> {
         #[cfg(any(feature = "metrics", test))]
         {
@@ -1328,7 +1668,7 @@ where
         amount: u128,
         amount_low_bound: u128,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<(Vec<RouterHop>, u128), PathFindError> {
         debug!(
             "find_path_in_range (max capacity) for amount: {} low_bound: {} max_fee_amount: {:?}",
@@ -1412,7 +1752,7 @@ where
         source: Pubkey,
         lower_bound: u128,
         upper_bound: u128,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> (Vec<RouterHop>, u128) {
         if let Ok(res) = self.probe_max_capacity_for_route(source, upper_bound, route, payment_data)
         {
@@ -1443,7 +1783,7 @@ where
         source: Pubkey,
         amount: u128,
         route: &[RouterHop],
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<std::vec::Vec<RouterHop>, PathFindError> {
         self.inner_find_path(
             source,
@@ -1464,18 +1804,14 @@ where
     fn build_router_from_path(
         &self,
         route: &Vec<RouterHop>,
-        max_amount: u128,
-        payment_data: &SendPaymentData,
+        amount: u128,
+        payment_data: &SendPaymentState,
+        trampoline_payload: Option<Vec<u8>>,
+        final_hop_expiry_delta_override: Option<u64>,
     ) -> Vec<PaymentHopData> {
-        let invoice = payment_data
-            .invoice
-            .clone()
-            .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
-        let hash_algorithm = invoice
-            .as_ref()
-            .and_then(|x| x.hash_algorithm().copied())
-            .unwrap_or_default();
+        debug_assert!(!route.is_empty(), "Route hops should not be empty if Ok");
 
+        let hash_algorithm = payment_data.hash_algorithm();
         let route_len = route.len();
         let now = now_timestamp_as_millis_u64();
         let mut hops_data = Vec::with_capacity(route.len() + 1);
@@ -1488,20 +1824,36 @@ where
                 hash_algorithm,
                 expiry: now + r.incoming_tlc_expiry + rand_tlc_expiry_delta,
                 funding_tx_hash: r.channel_outpoint.tx_hash().into(),
-                payment_preimage: None,
-                custom_records: None,
+                ..Default::default()
             });
         }
 
-        hops_data.push(PaymentHopData {
-            amount: max_amount,
-            next_hop: None,
+        let (last_amount, payment_preimage, custom_records, trampoline_onion) =
+            match trampoline_payload {
+                Some(onion) => (amount, None, None, Some(onion)),
+                None => (
+                    amount,
+                    payment_data.preimage,
+                    payment_data.custom_records.clone(),
+                    None,
+                ),
+            };
+
+        let last_expiry_delta =
+            final_hop_expiry_delta_override.unwrap_or(payment_data.final_tlc_expiry_delta);
+
+        let mut last_hop = PaymentHopData {
+            amount: last_amount,
             hash_algorithm,
-            expiry: now + payment_data.final_tlc_expiry_delta + rand_tlc_expiry_delta,
-            funding_tx_hash: Default::default(),
-            payment_preimage: payment_data.preimage,
-            custom_records: payment_data.custom_records.clone(),
-        });
+            expiry: now + last_expiry_delta + rand_tlc_expiry_delta,
+            payment_preimage,
+            custom_records,
+            ..Default::default()
+        };
+        if let Some(onion) = trampoline_onion {
+            last_hop.set_trampoline_onion(onion);
+        }
+        hops_data.push(last_hop);
         // assert there is no duplicate node in the route
         assert_eq!(
             hops_data
@@ -1511,6 +1863,16 @@ where
                 .len(),
             route_len
         );
+        // if is trampoline payment
+        #[cfg(debug_assertions)]
+        {
+            if payment_data.use_trampoline_routing() {
+                assert!(hops_data.len() >= 2);
+                let len = hops_data.len();
+                assert_eq!(hops_data[len - 2].amount, hops_data[len - 1].amount);
+                assert!(hops_data.last().unwrap().trampoline_onion().is_some());
+            }
+        }
         hops_data
     }
 
@@ -1652,9 +2014,12 @@ where
         channel_stats: &GraphChannelStat,
         allow_mpp: bool,
     ) -> Result<Vec<RouterHop>, PathFindError> {
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        FIND_PATH_CALL_COUNT_FOR_TESTS.fetch_add(1, Ordering::SeqCst);
+
         debug!(
-            "begin find_path from {:?} to {:?} amount: {:?}",
-            source, target, amount
+            "begin find_path from {:?} to {:?} amount: {:?} allow_mpp: {}",
+            source, target, amount, allow_mpp
         );
 
         let route_to_self = source == target;
@@ -1813,8 +2178,8 @@ where
         route: Option<&[RouterHop]>,
     ) -> Result<Vec<RouterHop>, PathFindError> {
         debug!(
-            "begin inner_find_path from {:?} to {:?} amount: {:?}",
-            source, target, amount
+            "begin inner_find_path from {:?} to {:?} amount: {:?} max_fee: {:?}",
+            source, target, amount, max_fee_amount
         );
         let started_time = crate::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -2065,9 +2430,6 @@ where
         }
 
         if result.is_empty() || current != target {
-            // TODO check total outbound balance and return error if it's not enough
-            // this can help us early return if the payment is not possible to be sent
-            // otherwise when PathFind error is returned, we need to retry with half amount
             error!(
                 "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
                 source, target, amount, max_fee_amount
@@ -2368,7 +2730,19 @@ where
 
 pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
+    fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
+    /// Get payment sessions with pagination support.
+    /// `limit`: maximum number of results to return.
+    /// `after`: if provided, start after this payment_hash (exclusive cursor).
+    /// `status`: optional status filter.
+    /// Returns (sessions, has_more) where has_more indicates if there are more results.
+    fn get_payment_sessions_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<PaymentStatus>,
+    ) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
     fn insert_payment_history_result(
         &mut self,
@@ -2381,6 +2755,11 @@ pub trait NetworkGraphStateStore {
     fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
+    /// Deletes all attempts and their channel index entries for the given payment hash.
     fn delete_attempts(&self, payment_hash: Hash256);
-    fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt>;
+    /// Clears only the channel index entries for attempts, keeping the attempt records.
+    fn clear_attempts_channel_index(&self, payment_hash: Hash256);
+    /// Returns all pending attempts (Created/Retrying status) using this channel as first hop.
+    fn get_pending_attempts_by_channel_outpoint(&self, channel_outpoint: &OutPoint)
+        -> Vec<Attempt>;
 }

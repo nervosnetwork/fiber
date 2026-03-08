@@ -3,20 +3,19 @@ use std::path::{Path, PathBuf};
 
 use super::graph::UdtCfgInfos;
 use crate::ckb::CkbConfig;
-use crate::fiber::serde_utils::U32Hex;
-use crate::fiber::{
-    serde_utils::{U128Hex, U64Hex},
-    types::{Hash256, Pubkey},
-    FiberConfig, NetworkActorCommand, NetworkActorMessage,
-};
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::RpcServerStore;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::store_impl::KVStore;
+
+use crate::fiber::{FiberConfig, NetworkActorCommand, NetworkActorMessage};
+
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
+use fiber_types::{Hash256, Pubkey, U128Hex, U32Hex, U64Hex};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
@@ -38,8 +37,8 @@ pub struct NodeInfoResult {
     /// The commit hash of the node software.
     pub commit_hash: String,
 
-    /// The identity public key of the node.
-    pub node_id: Pubkey,
+    /// The identity public key of this node (secp256k1 compressed, hex string).
+    pub pubkey: Pubkey,
 
     /// The features supported by the node.
     pub features: Vec<String>,
@@ -203,7 +202,7 @@ impl<S: StoreInfo> InfoRpcServerImpl<S> {
             version,
             commit_hash,
             features: response.features.enabled_features_names(),
-            node_id: response.node_id,
+            pubkey: response.node_id,
             node_name: response.node_name.map(|name| name.to_string()),
             addresses: response.addresses,
             chain_hash: response.chain_hash,

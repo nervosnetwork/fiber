@@ -1,24 +1,22 @@
 use anyhow::{anyhow, Result};
 use futures::StreamExt as _;
 use lnd_grpc_tonic_client::routerrpc;
-use ractor::{call, ActorRef};
+use ractor::{forward, ActorRef};
 
 use crate::{
     cch::{
         actions::{
             backend_dispatchers::{dispatch_payment_handler, PaymentHandlerType},
-            ActionExecutor,
+            ActionExecutor, CchOrderAction,
         },
         actor::CchState,
         trackers::{map_lnd_payment_changed_event, CchTrackingEvent, LndConnectionInfo},
-        CchMessage, CchOrder, CchOrderStatus, CchOrderStore,
+        CchMessage, CchOrderStore,
     },
-    fiber::{
-        payment::{PaymentStatus, SendPaymentCommand},
-        types::Hash256,
-        NetworkActorCommand, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
-    },
+    fiber::{payment::SendPaymentCommand, NetworkActorCommand, NetworkActorMessage},
 };
+use fiber_types::{payment::PaymentStatus, CchOrder};
+use fiber_types::{CchOrderStatus, Hash256};
 
 const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 
@@ -29,13 +27,21 @@ pub struct SendFiberOutgoingPaymentExecutor {
     cch_actor_ref: ActorRef<CchMessage>,
     network_actor_ref: ActorRef<NetworkActorMessage>,
     outgoing_pay_req: String,
+    retry_count: u32,
 }
 
 #[async_trait::async_trait]
 impl ActionExecutor for SendFiberOutgoingPaymentExecutor {
     async fn execute(self: Box<Self>) -> Result<()> {
-        let outgoing_pay_req = self.outgoing_pay_req;
-        let message = |rpc_reply| -> NetworkActorMessage {
+        let Self {
+            payment_hash,
+            cch_actor_ref,
+            network_actor_ref,
+            outgoing_pay_req,
+            retry_count,
+        } = *self;
+
+        let message = move |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
                 SendPaymentCommand {
                     invoice: Some(outgoing_pay_req),
@@ -45,39 +51,45 @@ impl ActionExecutor for SendFiberOutgoingPaymentExecutor {
             ))
         };
 
-        let event = match call!(self.network_actor_ref, message).expect(ASSUME_NETWORK_ACTOR_ALIVE)
-        {
-            Ok(payment) => CchTrackingEvent::PaymentChanged {
-                payment_hash: payment.payment_hash,
-                payment_preimage: None,
-                status: payment.status,
-                failure_reason: None,
-            },
-            Err(err) if err.contains("Payment session already exists") => {
-                CchTrackingEvent::PaymentChanged {
-                    payment_hash: self.payment_hash,
+        forward!(network_actor_ref, message, cch_actor_ref, move |result| {
+            match result {
+                Ok(payment) => CchMessage::TrackingEvent(CchTrackingEvent::PaymentChanged {
+                    payment_hash: payment.payment_hash,
                     payment_preimage: None,
-                    status: PaymentStatus::Inflight,
+                    status: payment.status,
                     failure_reason: None,
-                }
-            }
-            Err(err) => {
-                let failure_reason = format!("SendFiberOutgoingPaymentExecutor failure: {:?}", err);
-                if Self::is_permanent_error(&err) {
-                    CchTrackingEvent::PaymentChanged {
-                        payment_hash: self.payment_hash,
+                }),
+                // TODO: replace string match with structured error type from NetworkActor.
+                Err(err) if err.contains("Payment session already exists") => {
+                    CchMessage::TrackingEvent(CchTrackingEvent::PaymentChanged {
+                        payment_hash,
                         payment_preimage: None,
-                        status: PaymentStatus::Failed,
-                        failure_reason: Some(failure_reason),
+                        status: PaymentStatus::Inflight,
+                        failure_reason: None,
+                    })
+                }
+                Err(err) => {
+                    let failure_reason =
+                        format!("SendFiberOutgoingPaymentExecutor failure: {:?}", err);
+                    if Self::is_permanent_error(&err) {
+                        CchMessage::TrackingEvent(CchTrackingEvent::PaymentChanged {
+                            payment_hash,
+                            payment_preimage: None,
+                            status: PaymentStatus::Failed,
+                            failure_reason: Some(failure_reason),
+                        })
+                    } else {
+                        CchMessage::ActionRetry {
+                            payment_hash,
+                            action: CchOrderAction::SendOutgoingPayment,
+                            retry_count,
+                            reason: failure_reason,
+                        }
                     }
-                } else {
-                    return Err(anyhow!(failure_reason));
                 }
             }
-        };
-
-        self.cch_actor_ref
-            .send_message(CchMessage::TrackingEvent(event))?;
+        })
+        .map_err(|err| anyhow!(err.to_string()))?;
 
         Ok(())
     }
@@ -85,7 +97,17 @@ impl ActionExecutor for SendFiberOutgoingPaymentExecutor {
 
 impl SendFiberOutgoingPaymentExecutor {
     fn is_permanent_error(err: &str) -> bool {
-        err.contains("InvalidParameter")
+        // InvalidParameter errors are permanent validation errors
+        if err.contains("InvalidParameter") {
+            return true;
+        }
+
+        // Additional permanent errors that won't be fixed by retrying
+        let err_lower = err.to_lowercase();
+        err_lower.contains("invalid payment request")
+            || err_lower.contains("invoice expired")
+            || err_lower.contains("payment hash mismatch")
+            || err_lower.contains("no path found")
     }
 }
 
@@ -128,7 +150,7 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
             Some(Err(err)) => {
                 let failure_reason =
                     format!("SendLightningOutgoingPaymentExecutor failure: {:?}", err);
-                if Self::is_permanent_error(err) {
+                if Self::is_permanent_error(&err) {
                     CchTrackingEvent::PaymentChanged {
                         payment_hash: self.payment_hash,
                         payment_preimage: None,
@@ -136,6 +158,10 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
                         failure_reason: Some(failure_reason),
                     }
                 } else {
+                    tracing::warn!(
+                        "SendLightningOutgoingPaymentExecutor transient error, will retry. code: {}, error: {}",
+                        err.code(), err.message()
+                    );
                     return Err(anyhow!(failure_reason));
                 }
             }
@@ -152,8 +178,27 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
 }
 
 impl SendLightningOutgoingPaymentExecutor {
-    fn is_permanent_error(status: tonic::Status) -> bool {
-        matches!(status.code(), tonic::Code::InvalidArgument)
+    fn is_permanent_error(status: &tonic::Status) -> bool {
+        // Check for explicit invalid argument errors
+        if matches!(status.code(), tonic::Code::InvalidArgument) {
+            return true;
+        }
+
+        // LND often returns Unknown status for validation errors that are permanent.
+        // Check the error message to identify these cases.
+        if matches!(status.code(), tonic::Code::Unknown) {
+            let msg = status.message().to_lowercase();
+            // These are validation/policy errors that won't be fixed by retrying
+            return msg.contains("self-payments not allowed")
+                || msg.contains("invoice is already paid")
+                || msg.contains("invoice expired")
+                || msg.contains("incorrect payment amount")
+                || msg.contains("payment hash mismatch")
+                || msg.contains("no route")
+                || msg.contains("unable to find a path to destination");
+        }
+
+        false
     }
 }
 
@@ -166,6 +211,7 @@ impl SendOutgoingPaymentDispatcher {
         state: &CchState<S>,
         cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
+        retry_count: u32,
     ) -> Option<Box<dyn ActionExecutor>> {
         if !Self::should_dispatch(order) {
             return None;
@@ -177,6 +223,7 @@ impl SendOutgoingPaymentDispatcher {
                 cch_actor_ref: cch_actor_ref.clone(),
                 network_actor_ref: state.network_actor.clone(),
                 outgoing_pay_req: order.outgoing_pay_req.clone(),
+                retry_count,
             })),
             PaymentHandlerType::Lightning => Some(Box::new(SendLightningOutgoingPaymentExecutor {
                 payment_hash: order.payment_hash,

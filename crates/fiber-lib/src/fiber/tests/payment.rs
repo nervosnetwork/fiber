@@ -5,17 +5,22 @@ use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::*;
 use crate::fiber::payment::*;
 use crate::fiber::types::*;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use crate::fiber::{
+    AddTlcCommand, ChannelState, CloseFlags, Hash256, PaymentHopData, PaymentStatus,
+    PeeledPaymentOnionPacket, SendPaymentData, ShuttingDownFlags, TLCId, TlcErrorCode,
+    NO_SHARED_SECRET,
+};
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::invoice::PreimageStore;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,8 +31,12 @@ use crate::tests::test_utils::*;
 use crate::NetworkServiceEvent;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
+use fiber_types::HashAlgorithm;
+use fiber_types::HopHint;
+use fiber_types::RemoveTlcFulfill;
+use fiber_types::SessionRoute;
 use ractor::call;
-use secp256k1::Secp256k1;
+use secp256k1::SECP256K1;
 use std::collections::{HashMap, HashSet};
 use std::panic;
 use std::time::{Duration, SystemTime};
@@ -219,6 +228,53 @@ async fn test_send_payment_prefer_newer_channels() {
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
     assert_eq!(source_node.get_inflight_payment_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_send_payment_keysend_without_max_fee() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_0, _node_1, node_2] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_2.pubkey;
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000000),
+            keysend: Some(true),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    eprintln!("res: {:?}", res);
+
+    assert_eq!(res.fee, 10000);
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey),
+            amount: Some(10000000),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let payment_hash = res.payment_hash;
+    source_node.wait_until_success(payment_hash).await;
+    let payment = source_node.get_payment_result(payment_hash).await;
+
+    eprintln!("payment info: {:?}", payment);
 }
 
 #[tokio::test]
@@ -839,6 +895,38 @@ async fn test_send_payment_with_private_channel_hints() {
 
     test(10000000000, true).await;
     test(30000000000, false).await;
+}
+
+#[test]
+fn test_send_payment_rejects_hop_hints_when_invoice_disallows() {
+    let payee_pubkey = gen_rand_fiber_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .payee_pub_key(payee_pubkey.into())
+        .allow_trampoline_routing(false)
+        .build()
+        .expect("build invoice");
+
+    let hop_hint = HopHint {
+        pubkey: gen_rand_fiber_public_key(),
+        channel_outpoint: OutPoint::default(),
+        fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
+        tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+    };
+
+    let err = SendPaymentData::new(SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        hop_hints: Some(vec![hop_hint]),
+        ..Default::default()
+    })
+    .unwrap_err();
+
+    assert!(
+        err.contains("invoice does not support hop hints"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -3971,7 +4059,7 @@ async fn test_send_payment_shutdown_with_force() {
             let _ = node_3.send_shutdown(channels[2], true).await;
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             node_3
-                .send_channel_shutdown_tx_confirmed_event(node_2.peer_id.clone(), channels[2], true)
+                .send_channel_shutdown_tx_confirmed_event(node_2.pubkey, channels[2], true)
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let channel_actor_state = node_3.get_channel_actor_state(channels[2]);
@@ -3993,7 +4081,10 @@ async fn test_send_payment_shutdown_with_force() {
         ) {
             break;
         } else {
-            assert_eq!(channel_state.state, ChannelState::ChannelReady);
+            assert!(matches!(
+                channel_state.state,
+                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+            ));
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
             wait_time += 1000;
         }
@@ -4020,11 +4111,7 @@ async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
         // send multiple shutdown transaction confirmed events
         for _k in 0..5 {
             nodes[i]
-                .send_channel_shutdown_tx_confirmed_event(
-                    nodes[i + 1].peer_id.clone(),
-                    channels[i],
-                    true,
-                )
+                .send_channel_shutdown_tx_confirmed_event(nodes[i + 1].pubkey, channels[i], true)
                 .await;
         }
         let channel_actor_state = nodes[i].get_channel_actor_state(channels[i]);
@@ -4445,6 +4532,7 @@ async fn test_shutdown_with_pending_tlc() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: None,
                         shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                         attempt_id: None,
                     },
@@ -4578,6 +4666,7 @@ async fn test_add_tlc_invoice_udt_type_script_mismatch_fails() {
                         shared_secret: NO_SHARED_SECRET,
                         previous_tlc: None,
                         attempt_id: None,
+                        is_trampoline_hop: false,
                     },
                     rpc_reply,
                 ),
@@ -4660,7 +4749,6 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
     let hash_algorithm = HashAlgorithm::CkbHash;
 
     // Build an onion packet for the receiver (last hop) carrying the payment hash.
-    let secp = Secp256k1::new();
     let hops_infos = vec![
         PaymentHopData {
             amount,
@@ -4685,7 +4773,7 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
         source_node.get_private_key().clone(),
         hops_infos,
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -4703,6 +4791,7 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
                         shared_secret: packet.shared_secret,
                         previous_tlc: None,
                         attempt_id: None,
+                        is_trampoline_hop: false,
                     },
                     rpc_reply,
                 ),
@@ -4953,19 +5042,18 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
         }
     }
 
-    let node1_id = node_1.peer_id.clone();
-    let node0_id = node_0.peer_id.clone();
+    let node1_pubkey = node_1.pubkey;
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node_1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node0_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_0.pubkey);
                 true
             }
             _ => false,
@@ -5003,19 +5091,19 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             .as_secs();
         if elapsed > 50 {
             let node0_state = node_0.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
+            eprintln!("peer {:?} node_0_state:", node_0.pubkey);
             node0_state.tlc_state.debug();
 
             let node1_state = node_1.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node1_left_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_left_actor_state:", node_1.pubkey);
             node1_state.tlc_state.debug();
 
             let node1_right_state = node_1.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node1_right_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_right_actor_state:", node_1.pubkey);
             node1_right_state.tlc_state.debug();
 
             let node2_state = node_2.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node_2_state:", node_2.get_peer_id());
+            eprintln!("peer {:?} node_2_state:", node_2.pubkey);
             node2_state.tlc_state.debug();
 
             panic!("timeout");
@@ -5052,19 +5140,18 @@ async fn test_send_payment_send_each_other_reestablishing() {
         }
     }
 
-    let node1_id = node_1.peer_id.clone();
-    let node0_id = node_0.peer_id.clone();
+    let node1_pubkey = node_1.pubkey;
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node_1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node0_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_0.pubkey);
                 true
             }
             _ => false,
@@ -5101,15 +5188,15 @@ async fn test_send_payment_send_each_other_reestablishing() {
             .as_secs();
         if elapsed > 50 {
             let node0_state = node_0.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
+            eprintln!("peer {:?} node_0_state:", node_0.pubkey);
             node0_state.tlc_state.debug();
 
             let node1_state = node_1.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node1_left_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_left_actor_state:", node_1.pubkey);
             node1_state.tlc_state.debug();
 
             let node1_right_state = node_1.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node1_right_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_right_actor_state:", node_1.pubkey);
             node1_right_state.tlc_state.debug();
 
             panic!("timeout");
@@ -5323,6 +5410,307 @@ async fn test_send_payment_with_mixed_channel_hops() {
 }
 
 #[tokio::test]
+async fn test_ckb_with_udt_mixed_routes_fail() {
+    init_tracing();
+
+    use ckb_types::prelude::*;
+
+    let udt1_script = Script::new_builder().args([1u8; 53].pack()).build();
+    let udt2_script = Script::new_builder().args([2u8; 53].pack()).build();
+
+    // A --(CKB)--> B --(CKB)--> C --(CKB)--> A
+    // A --(UDT1)--> B --(UDT1)--> C --(UDT1)--> A
+    // A --(UDT2)--> B --(UDT2)--> C --(UDT2)--> A
+    let channels_params = vec![
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (2, 0),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt1_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt1_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (2, 0),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt1_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt2_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (1, 2),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt2_script.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            (2, 0),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                funding_udt_type_script: Some(udt2_script.clone()),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let (nodes, channels) = create_n_nodes_network_with_params(&channels_params, 3, None).await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+
+    let small_ckb_router = node_a
+        .build_router(BuildRouterCommand {
+            amount: Some(1),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_b.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_c.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_a.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: small_ckb_router.router_hops.clone(),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await;
+
+    let error = res.unwrap_err();
+    assert!(error.contains("max_fee_amount is too low for selected route"));
+
+    let amount: u128 = 1000;
+
+    let ckb_router = node_a
+        .build_router(BuildRouterCommand {
+            amount: Some(amount),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_b.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_c.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_a.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    let udt1_router = node_a
+        .build_router(BuildRouterCommand {
+            amount: Some(amount),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_b.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_c.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_a.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: Some(udt1_script.clone()),
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    let udt2_router = node_a
+        .build_router(BuildRouterCommand {
+            amount: Some(amount),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_b.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_c.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_a.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: Some(udt2_script.clone()),
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap();
+
+    let udt2_channels = vec![channels[6], channels[7], channels[8]];
+    let before_udt2_balances = capture_balances(&[&node_a, &node_b, &node_c], &udt2_channels);
+
+    for _ in 0..3 {
+        let res = node_a
+            .send_payment_with_router(SendPaymentWithRouterCommand {
+                router: ckb_router.router_hops.clone(),
+                keysend: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        node_a.wait_until_success(res.payment_hash).await;
+
+        let res = node_a
+            .send_payment_with_router(SendPaymentWithRouterCommand {
+                router: udt1_router.router_hops.clone(),
+                keysend: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        node_a.wait_until_success(res.payment_hash).await;
+    }
+
+    let after_udt2_balances = capture_balances(&[&node_a, &node_b, &node_c], &udt2_channels);
+    assert_eq!(
+        before_udt2_balances, after_udt2_balances,
+        "UDT2 balances should remain unchanged"
+    );
+
+    let mixed_router = vec![
+        ckb_router.router_hops[0].clone(),
+        udt1_router.router_hops[1].clone(),
+        udt2_router.router_hops[2].clone(),
+    ];
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: mixed_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    node_a.wait_until_failed(res.payment_hash).await;
+
+    let mixed_router = vec![
+        udt1_router.router_hops[0].clone(),
+        udt1_router.router_hops[1].clone(),
+        udt2_router.router_hops[2].clone(),
+    ];
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: mixed_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    node_a.wait_until_failed(res.payment_hash).await;
+
+    let mixed_router = vec![
+        ckb_router.router_hops[0].clone(),
+        udt1_router.router_hops[1].clone(),
+        ckb_router.router_hops[2].clone(),
+    ];
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: mixed_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    node_a.wait_until_failed(res.payment_hash).await;
+
+    let mixed_router = vec![
+        udt1_router.router_hops[0].clone(),
+        udt2_router.router_hops[1].clone(),
+        udt1_router.router_hops[2].clone(),
+    ];
+    let res = node_a
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: mixed_router,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    node_a.wait_until_failed(res.payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_send_payment_with_first_channel_retry_will_be_ok() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
@@ -5387,22 +5775,18 @@ async fn test_send_payment_with_reconnect_two_times() {
         }
 
         // disconnect peer
-        let node1_id = node1.peer_id.clone();
-        let node0_id = node0.peer_id.clone();
+        let node1_pubkey = node1.pubkey;
         node0
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::DisconnectPeer(
-                    node1_id.clone(),
-                    PeerDisconnectReason::Requested,
-                ),
+                NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
             ))
             .expect("node_a alive");
 
         node1
             .expect_event(|event| match event {
-                NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                    assert_eq!(peer_id, &node0_id);
+                NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                    assert_eq!(pubkey, &node0.pubkey);
                     true
                 }
                 _ => false,
@@ -5785,7 +6169,6 @@ async fn test_payment_with_payment_data_record() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 10000000000);
     record.write(&mut custom_records);
@@ -5794,19 +6177,16 @@ async fn test_payment_with_payment_data_record() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -5814,7 +6194,7 @@ async fn test_payment_with_payment_data_record() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -5830,6 +6210,7 @@ async fn test_payment_with_payment_data_record() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                         attempt_id: None,
                     },
@@ -5886,7 +6267,6 @@ async fn test_payment_with_insufficient_total_amount() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     // set total amount to 20000000000, but pay only 10000000000
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
@@ -5896,19 +6276,16 @@ async fn test_payment_with_insufficient_total_amount() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -5916,7 +6293,7 @@ async fn test_payment_with_insufficient_total_amount() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -5932,6 +6309,7 @@ async fn test_payment_with_insufficient_total_amount() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                         attempt_id: None,
                     },
@@ -6013,7 +6391,6 @@ async fn test_payment_with_wrong_payment_secret() {
     let hash_algorithm = HashAlgorithm::CkbHash;
 
     let wrong_payment_secret = gen_rand_sha256_hash();
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(wrong_payment_secret, 10000000000);
     record.write(&mut custom_records);
@@ -6022,19 +6399,16 @@ async fn test_payment_with_wrong_payment_secret() {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 10000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -6042,7 +6416,7 @@ async fn test_payment_with_wrong_payment_secret() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -6058,6 +6432,7 @@ async fn test_payment_with_wrong_payment_secret() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                         attempt_id: None,
                     },
@@ -6126,7 +6501,6 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 9000000000);
     record.write(&mut custom_records);
@@ -6135,19 +6509,16 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
             amount: 9000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
         PaymentHopData {
             amount: 9000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
             custom_records: Some(custom_records.clone()),
+            ..Default::default()
         },
     ];
 
@@ -6155,7 +6526,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -6171,6 +6542,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                         attempt_id: None,
                     },
@@ -6239,25 +6611,19 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    let secp = Secp256k1::new();
     let hops_infos = vec![
         PaymentHopData {
             amount: 9000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
         PaymentHopData {
             amount: 9000000000,
             expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-            next_hop: None,
-            funding_tx_hash: Hash256::default(),
             hash_algorithm,
-            payment_preimage: None,
-            custom_records: None,
+            ..Default::default()
         },
     ];
 
@@ -6265,7 +6631,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
         source_node.get_private_key().clone(),
         hops_infos.clone(),
         Some(payment_hash.as_ref().to_vec()),
-        &secp,
+        SECP256K1,
     )
     .expect("create peeled packet");
 
@@ -6281,6 +6647,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
                         previous_tlc: None,
                         attempt_id: None,
                     },
@@ -6587,7 +6954,7 @@ async fn test_send_payment_direct_channel_error_from_node_stop() {
         })
         .await;
 
-    assert!(payment.unwrap_err().contains("no path found"));
+    assert!(payment.unwrap_err().contains("Insufficient balance"));
 }
 
 #[cfg(not(target_arch = "wasm32"))]

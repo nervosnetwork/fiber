@@ -12,7 +12,8 @@ use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::Network
 use fnn::rpc::server::start_rpc;
 use fnn::rpc::watchtower::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
-    UpdateLocalSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
+    UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
+    WatchtowerRpcClient,
 };
 use fnn::store::Store;
 use fnn::tasks::{
@@ -156,7 +157,7 @@ pub async fn main() -> Result<(), ExitMessage> {
 
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
-                node_public_key.clone().into(),
+                fnn::fiber::types::pubkey_from_tentacle(node_public_key.clone()),
                 fiber_config.announce_private_addr(),
             )));
 
@@ -319,17 +320,15 @@ pub async fn main() -> Result<(), ExitMessage> {
         (Some(cch_config), Some(network_actor)) => {
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;
-            let node_keypair = config
-                .fiber
-                .as_ref()
-                .ok_or_else(|| {
-                    ExitMessage(
-                        "failed to read secret key because fiber config is not available"
-                            .to_string(),
-                    )
-                })?
+            let fiber_config = config.fiber.as_ref().ok_or_else(|| {
+                ExitMessage(
+                    "failed to read secret key because fiber config is not available".to_string(),
+                )
+            })?;
+            let node_keypair = fiber_config
                 .read_or_generate_secret_key()
                 .map_err(|err| ExitMessage(format!("failed to read secret key: {}", err)))?;
+            let currency = fiber_config.currency();
             match Actor::spawn_linked(
                 Some("cch actor".to_string()),
                 CchActor::default(),
@@ -340,6 +339,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                     network_actor: network_actor.clone(),
                     node_keypair,
                     store: store.clone(),
+                    currency,
                 },
                 root_actor.get_cell(),
             )
@@ -553,6 +553,15 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         ) => {
             watchtower_client
                 .update_local_settlement(UpdateLocalSettlementParams {
+                    channel_id,
+                    settlement_data,
+                })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+        }
+        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
+            watchtower_client
+                .update_pending_remote_settlement(UpdatePendingRemoteSettlementParams {
                     channel_id,
                     settlement_data,
                 })

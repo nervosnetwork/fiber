@@ -1,4 +1,4 @@
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::now_timestamp_as_millis_u64;
 
@@ -48,13 +48,6 @@ impl Drop for ActorHandleLogGuard {
                 message = %self.message_name,
                 elapsed_ms = elapsed,
                 "Actor handle took too long"
-            );
-        } else {
-            debug!(
-                actor = self.actor,
-                message = %self.message_name,
-                elapsed_ms = elapsed,
-                "Actor handle completed"
             );
         }
     }

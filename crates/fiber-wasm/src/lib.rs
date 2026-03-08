@@ -7,6 +7,7 @@ use std::{
 use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
+use fnn::fiber::network::init_chain_hash;
 use fnn::{
     Config, NetworkServiceEvent,
     actors::RootActor,
@@ -15,7 +16,7 @@ use fnn::{
         client::CkbRpcClient,
         contracts::{TypeIDResolver, try_init_contracts_context},
     },
-    fiber::{KeyPair, graph::NetworkGraph, network::init_chain_hash},
+    fiber::{KeyPair, graph::NetworkGraph},
     rpc::{
         channel::ChannelRpcServerImpl,
         graph::GraphRpcServerImpl,
@@ -35,7 +36,7 @@ use fnn::{
 };
 use jsonrpsee::wasm_client::WasmClientBuilder;
 use ractor::{Actor, ActorRef};
-use secp256k1::{Secp256k1, SecretKey};
+use secp256k1::{SECP256K1, SecretKey};
 use std::fmt::Debug;
 use tokio::{
     select,
@@ -124,7 +125,7 @@ pub async fn fiber(
             None => {
                 tracing::warn!("Ckb SecretKey not provided, generating a random one..");
                 let mut rng = secp256k1::rand::thread_rng();
-                Secp256k1::new().generate_keypair(&mut rng).0
+                SECP256K1.generate_keypair(&mut rng).0
             }
         };
     if let Some(ref mut value) = config.ckb {
@@ -196,7 +197,7 @@ pub async fn fiber(
 
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
-                node_public_key.clone().into(),
+                fnn::fiber::types::pubkey_from_tentacle(node_public_key.clone()),
                 fiber_config.announce_private_addr(),
             )));
 

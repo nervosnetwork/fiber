@@ -48,6 +48,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `get_payment`](#payment-get_payment)
         * [Method `build_router`](#payment-build_router)
         * [Method `send_payment_with_router`](#payment-send_payment_with_router)
+        * [Method `list_payments`](#payment-list_payments)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -74,6 +75,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
     * [Type `Currency`](#type-currency)
+    * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
@@ -203,9 +205,11 @@ Attempts to open a channel with a peer.
 
 ##### Params
 
-* `peer_id` - <em>`PeerId`</em>, The peer ID to open a channel with, the peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the peer to open a channel with.
+ The peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
 * `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
 * `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+* `one_way` - <em>`Option<bool>`</em>, Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
 * `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
 * `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
@@ -296,8 +300,13 @@ Lists all channels.
 
 ##### Params
 
-* `peer_id` - <em>`Option<PeerId>`</em>, The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
+* `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key to list channels for.
+ An optional parameter, if not provided, all channels will be listed.
 * `include_closed` - <em>`Option<bool>`</em>, Whether to include closed channels in the list, an optional parameter, default value is false
+* `only_pending` - <em>`Option<bool>`</em>, When set to true, only return channels that are still being opened (non-final states:
+ negotiating, collaborating on funding tx, signing, awaiting tx signatures, awaiting channel
+ ready) as well as channels whose opening attempt failed. Default is false.
+ Mutually exclusive with `include_closed`.
 
 ##### Returns
 
@@ -509,7 +518,7 @@ Get the node information.
 
 * `version` - <em>`String`</em>, The version of the node software.
 * `commit_hash` - <em>`String`</em>, The commit hash of the node software.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of this node (secp256k1 compressed, hex string).
 * `features` - <em>`Vec<String>`</em>, The features supported by the node.
 * `node_name` - <em>`Option<String>`</em>, The optional name of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the node.
@@ -571,6 +580,7 @@ Generates a new invoice.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
+* `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
 
 ##### Returns
 
@@ -666,7 +676,8 @@ Sends a payment to a peer.
 
 ##### Params
 
-* `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, the identifier of the payment target
+* `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key (`Pubkey`) of the payment target node, serialized as a hex string.
+ You can obtain a node's pubkey via the `node_info` or `graph_nodes` RPC.
 * `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
  If not set and there is a invoice, the amount will be set to the invoice amount
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC.
@@ -679,13 +690,22 @@ Sends a payment to a peer.
  this is also the default value for the payment if this parameter is not provided
 * `invoice` - <em>`Option<String>`</em>, the encoded invoice to send to the recipient
 * `timeout` - <em>`Option<u64>`</em>, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
-* `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay,
- default is 0.5% * amount
+* `max_fee_amount` - <em>`Option<u128>`</em>, the maximum fee amounts in shannons that the sender is willing to pay.
+ Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
 * `max_fee_rate` - <em>`Option<u64>`</em>, the maximum fee rate per thousand (‰), default is 5 (0.5%)
 * `max_parts` - <em>`Option<u64>`</em>, max parts for the payment, only used for multi-part payments
+* `trampoline_hops` - <em>Option<Vec<[Pubkey](#type-pubkey)>></em>, Optional explicit trampoline hops.
+
+ When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
+ payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
 * `keysend` - <em>`Option<bool>`</em>, keysend payment
 * `udt_type_script` - <em>`Option<Script>`</em>, udt type script for the payment
-* `allow_self_payment` - <em>`Option<bool>`</em>, allow self payment, default is false
+* `allow_self_payment` - <em>`Option<bool>`</em>, Allow paying yourself through a circular route, default is false.
+ This is useful for **channel rebalancing**: the payment flows out of one channel and
+ back through another, shifting liquidity between your channels without changing your
+ total balance (only routing fees are deducted).
+ Set `target_pubkey` to your own node pubkey and `keysend` to `true` to perform a rebalance.
+ Note: `allow_self_payment` is not compatible with trampoline routing.
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, Some custom records for the payment which contains a map of u32 to Vec<u8>
  The key is the record type, and the value is the serialized data
  For example:
@@ -792,9 +812,19 @@ Builds a router with a list of pubkeys and required channels.
 <a id="payment-send_payment_with_router"></a>
 #### Method `send_payment_with_router`
 
-Sends a payment to a peer with specified router
+Sends a payment to a peer with specified router.
  This method differs from SendPayment in that it allows users to specify a full route manually.
- This can be used for things like rebalancing.
+
+ A typical use case is **channel rebalancing**: you can construct a circular route
+ (your node -> intermediate nodes -> your node) to shift liquidity between your channels.
+
+ To rebalance, follow these steps:
+
+ 1. Call `build_router` with `hops_info` defining the circular route you want,
+    e.g. your_node -> peer_A -> peer_B -> your_node.
+ 2. Call `send_payment_with_router` with the returned `router_hops` and `keysend: true`.
+
+ Only routing fees are deducted; your total balance across channels remains the same.
 
 ##### Params
 
@@ -844,6 +874,26 @@ Sends a payment to a peer with specified router
 
 
 
+<a id="payment-list_payments"></a>
+#### Method `list_payments`
+
+Lists all payments, optionally filtered by status.
+
+##### Params
+
+* `status` - <em>Option<[PaymentStatus](#type-paymentstatus)></em>, Filter payments by status. If not set, all payments are returned.
+* `limit` - <em>`Option<u64>`</em>, The maximum number of payments to return. Default is 15.
+* `after` - <em>Option<[Hash256](#type-hash256)></em>, The payment hash to start returning payments after (exclusive cursor for pagination).
+
+##### Returns
+
+* `payments` - <em>Vec<[GetPaymentCommandResult](#type-getpaymentcommandresult)></em>, The list of payments.
+* `last_cursor` - <em>Option<[Hash256](#type-hash256)></em>, The last cursor for pagination. Use this as `after` in the next request to get more results.
+
+---
+
+
+
 <a id="peer"></a>
 ### Module `Peer`
 RPC module for peer management.
@@ -856,7 +906,10 @@ Connect to a peer.
 
 ##### Params
 
-* `address` - <em>`MultiAddr`</em>, The address of the peer to connect to.
+* `address` - <em>`Option<MultiAddr>`</em>, The address of the peer to connect to.
+ Either `address` or `pubkey` must be provided.
+* `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key of the peer to connect to.
+ The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
 
 ##### Returns
@@ -874,7 +927,7 @@ Disconnect from a peer.
 
 ##### Params
 
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the peer to disconnect.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the peer to disconnect.
 
 ##### Returns
 
@@ -1126,8 +1179,12 @@ The channel data structure
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID
 * `is_public` - <em>`bool`</em>, Whether the channel is public
+* `is_acceptor` - <em>`bool`</em>, Is this channel initially inbound?
+ An inbound channel is one where the counterparty is the funder of the channel.
+* `is_one_way` - <em>`bool`</em>, Is this channel one-way?
+ Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
 * `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint of the channel
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the channel
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the channel counterparty.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel
 * `state` - <em>[ChannelState](#type-channelstate)</em>, The state of the channel
 * `local_balance` - <em>`u128`</em>, The local balance of the channel
@@ -1147,6 +1204,8 @@ The channel data structure
  if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
  the channel configuration of B and C, not A and B.
 * `shutdown_transaction_hash` - <em>`Option<H256>`</em>, The hash of the shutdown transaction
+* `failure_detail` - <em>`Option<String>`</em>, Human-readable reason why the channel opening failed.
+ Only present when the channel is in a failed state (e.g. abandoned or funding aborted).
 ---
 
 <a id="#type-channelinfo"></a>
@@ -1158,8 +1217,8 @@ The Channel information.
 #### Fields
 
 * `channel_outpoint` - <em>`OutPoint`</em>, The outpoint of the channel.
-* `node1` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the first node.
-* `node2` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the second node.
+* `node1` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the first node (secp256k1 compressed, hex string).
+* `node2` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the second node (secp256k1 compressed, hex string).
 * `created_timestamp` - <em>`u64`</em>, The created timestamp of the channel, which is the block header timestamp of the block
  that contains the channel funding transaction.
 * `update_info_of_node1` - <em>Option<[ChannelUpdateInfo](#type-channelupdateinfo)></em>, The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
@@ -1250,6 +1309,31 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Fibb` - The mainnet currency of CKB.
 * `Fibt` - The testnet currency of the CKB network.
 * `Fibd` - The devnet currency of the CKB network.
+---
+
+<a id="#type-getpaymentcommandresult"></a>
+### Type `GetPaymentCommandResult`
+
+The result of a get_payment command, which includes the payment hash, status, timestamps,
+ error message if failed, fee paid, and custom records.
+
+
+#### Fields
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
 ---
 
 <a id="#type-hash256"></a>
@@ -1352,7 +1436,7 @@ The Node information.
 * `version` - <em>`String`</em>, The version of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, The addresses of the node.
 * `features` - <em>`Vec<String>`</em>, The node features supported by the node.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
 * `timestamp` - <em>`u64`</em>, The latest timestamp set by the owner for the node announcement.
  When a Node is online this timestamp will be updated to the latest value.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the node.
@@ -1411,7 +1495,6 @@ The information about a peer connected to the node.
 #### Fields
 
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer.
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the peer
 * `address` - <em>`MultiAddr`</em>, The multi-address associated with the connecting peer.
  Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
  The `graph_nodes` in Graph rpc module will return all addresses of the peer.
@@ -1429,7 +1512,9 @@ A wrapper for secp256k1 secret key
 <a id="#type-pubkey"></a>
 ### Type `Pubkey`
 
-The public key for a Node
+A compressed secp256k1 public key (33 bytes), used as the primary identity of a node.
+ In the RPC interface this value is exposed as fields such as `pubkey`.
+ It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
 
 
 

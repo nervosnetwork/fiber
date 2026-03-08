@@ -96,6 +96,7 @@ fnn-migrate -p /folder-to/my-fnn/fiber/store
 ## Documentation
 
 * [Light Paper](./docs/light-paper.md)
+* [Glossary](./docs/glossary.md)
 * [RPC Documentation](./crates/fiber-lib/src/rpc/README.md)
 * [P2P Message Protocol](./docs/specs/p2p-message.md)
 * [Invoice Protocol](./docs/specs/payment-invoice.md)

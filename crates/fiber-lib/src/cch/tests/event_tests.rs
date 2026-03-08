@@ -5,11 +5,10 @@
 //! - CkbInvoiceStatus -> CchOrderStatus mappings
 //! - PaymentStatus -> CchOrderStatus mappings
 
-use crate::cch::order::{state_machine::CchOrderEvent, CchOrderStatus};
+use crate::cch::order::state_machine::CchOrderEvent;
 use crate::cch::trackers::CchTrackingEvent;
-use crate::fiber::payment::PaymentStatus;
-use crate::fiber::types::Hash256;
-use crate::invoice::CkbInvoiceStatus;
+use fiber_types::invoice::CkbInvoiceStatus;
+use fiber_types::{CchOrderStatus, Hash256, PaymentStatus};
 
 /// Helper function to create a test payment hash
 fn test_payment_hash(value: u8) -> Hash256 {

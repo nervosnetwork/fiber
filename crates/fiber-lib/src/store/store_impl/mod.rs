@@ -17,41 +17,37 @@ pub use browser_test::{Batch, DbDirection, IteratorMode, Store};
 
 use std::path::Path;
 
-use super::db_migrate::DbMigrate;
-use super::schema::*;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::cch::{CchOrder, CchOrderStore, CchStoreError};
+use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::payment::{
-    Attempt, AttemptStatus, PaymentCustomRecords, PaymentSession, PaymentStatus,
-};
-use crate::fiber::types::{HoldTlc, CURSOR_SIZE};
+use crate::fiber::types::HoldTlc;
 #[cfg(feature = "watchtower")]
-use crate::fiber::types::{Privkey, Pubkey};
+use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff},
         graph::NetworkGraphStateStore,
-        history::{Direction, TimedResult},
-        network::{NetworkActorStateStore, PersistentNetworkActorState},
-        types::{BroadcastMessage, BroadcastMessageID, Cursor, Hash256},
+        network::NetworkActorStateStore,
+        payment::PaymentSessionExt,
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
 };
-#[cfg(feature = "watchtower")]
-use crate::{
-    fiber::{
-        channel::{RevocationData, SettlementData},
-        types::NodeId,
-    },
-    watchtower::{ChannelData, WatchtowerStore},
-};
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
+use fiber_store::db_migrate::DbMigrate;
+use fiber_types::schema::*;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::CchOrder;
+use fiber_types::{
+    Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
+    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
+};
+#[cfg(feature = "watchtower")]
+use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use tentacle::secio::PeerId;
 use tracing::info;
 
 #[derive(Copy, Clone)]
@@ -82,7 +78,7 @@ pub trait KVStore {
 impl Store {
     /// Open or create a rocksdb
     fn check_migrate<P: AsRef<Path>>(path: P, db: &Self) -> Result<(), String> {
-        let migrate = DbMigrate::new(db);
+        let migrate = DbMigrate::new(&db.inner);
         migrate.init_or_check(path)?;
         Ok(())
     }
@@ -119,10 +115,10 @@ impl Store {
                         &mut errors,
                     );
                 }
-                PEER_ID_NETWORK_ACTOR_STATE_PREFIX => {
+                PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX => {
                     check_deserialization::<PersistentNetworkActorState>(
                         &value,
-                        "PEER_ID_NETWORK_ACTOR_STATE_PREFIX",
+                        "PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX",
                         &mut errors,
                     );
                 }
@@ -139,7 +135,7 @@ impl Store {
                         &mut errors,
                     );
                 }
-                PEER_ID_CHANNEL_ID_PREFIX => {}
+                PUBKEY_CHANNEL_ID_PREFIX => {}
                 CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX => {
                     check_deserialization::<Hash256>(
                         &value,
@@ -233,7 +229,7 @@ pub enum KeyValue {
     CkbInvoice(Hash256, CkbInvoice),
     Preimage(Hash256, Hash256),
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
-    PeerIdChannelId((PeerId, Hash256), ChannelState),
+    PubkeyChannelId((Pubkey, Hash256), ChannelState),
     OutPointChannelId(OutPoint, Hash256),
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
     BroadcastMessage(Cursor, BroadcastMessage),
@@ -248,11 +244,15 @@ pub enum KeyValue {
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
-    NetworkActorState(PeerId, PersistentNetworkActorState),
+    NetworkActorState(Pubkey, PersistentNetworkActorState),
     Attempt((Hash256, u64), Attempt),
+    // Index for attempts by first hop channel outpoint
+    // Key: (channel_outpoint, payment_hash, attempt_id), Value: ()
+    AttemptChannelIndex((OutPoint, Hash256, u64)),
     HoldTlc((Hash256, Hash256, u64), u64),
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
+    ChannelOpenRecord(Hash256, ChannelOpenRecord),
 }
 
 /// Recorded store changes.
@@ -291,12 +291,15 @@ impl StoreKeyValue for KeyValue {
             KeyValue::CkbInvoiceStatus(id, _) => {
                 [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat()
             }
-            KeyValue::PeerIdChannelId((peer_id, channel_id), _) => [
-                &[PEER_ID_CHANNEL_ID_PREFIX],
-                peer_id.as_bytes(),
-                channel_id.as_ref(),
-            ]
-            .concat(),
+            KeyValue::PubkeyChannelId((pubkey, channel_id), _) => {
+                let pubkey_bytes = pubkey.serialize();
+                [
+                    &[PUBKEY_CHANNEL_ID_PREFIX][..],
+                    &pubkey_bytes[..],
+                    channel_id.as_ref(),
+                ]
+                .concat()
+            }
             KeyValue::OutPointChannelId(outpoint, _) => {
                 [&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat()
             }
@@ -305,6 +308,13 @@ impl StoreKeyValue for KeyValue {
             }
             KeyValue::Attempt((payment_hash, attempt_id), _) => [
                 &[ATTEMPT_PREFIX],
+                payment_hash.as_ref(),
+                &attempt_id.to_le_bytes(),
+            ]
+            .concat(),
+            KeyValue::AttemptChannelIndex((channel_outpoint, payment_hash, attempt_id)) => [
+                &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                channel_outpoint.as_slice(),
                 payment_hash.as_ref(),
                 &attempt_id.to_le_bytes(),
             ]
@@ -331,8 +341,9 @@ impl StoreKeyValue for KeyValue {
                 payment_hash.as_ref(),
             ]
             .concat(),
-            KeyValue::NetworkActorState(peer_id, _) => {
-                [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], peer_id.as_bytes()].concat()
+            KeyValue::NetworkActorState(pubkey, _) => {
+                let pubkey_bytes = pubkey.serialize();
+                [&[PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX], &pubkey_bytes[..]].concat()
             }
             KeyValue::PaymentHistoryTimedResult((channel_outpoint, direction), _) => [
                 &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
@@ -362,6 +373,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::CchOrder(payment_hash, _data) => {
                 [&[CCH_ORDER_PREFIX], payment_hash.as_ref()].concat()
             }
+            KeyValue::ChannelOpenRecord(channel_id, _) => {
+                [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
+            }
         }
     }
 
@@ -371,12 +385,13 @@ impl StoreKeyValue for KeyValue {
             KeyValue::CkbInvoice(_, invoice) => serialize_to_vec(invoice, "CkbInvoice"),
             KeyValue::Preimage(_, preimage) => serialize_to_vec(preimage, "Hash256"),
             KeyValue::CkbInvoiceStatus(_, status) => serialize_to_vec(status, "CkbInvoiceStatus"),
-            KeyValue::PeerIdChannelId(_, state) => serialize_to_vec(state, "ChannelState"),
+            KeyValue::PubkeyChannelId(_, state) => serialize_to_vec(state, "ChannelState"),
             KeyValue::OutPointChannelId(_, channel_id) => serialize_to_vec(channel_id, "ChannelId"),
             KeyValue::PaymentSession(_, payment_session) => {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
             KeyValue::Attempt(_, attempt) => serialize_to_vec(attempt, "Attempt"),
+            KeyValue::AttemptChannelIndex(_) => vec![], // Index only, no value needed
             #[cfg(feature = "watchtower")]
             KeyValue::WatchtowerChannel(_, _, channel_data) => {
                 serialize_to_vec(channel_data, "ChannelData")
@@ -402,20 +417,25 @@ impl StoreKeyValue for KeyValue {
             KeyValue::HoldTlc(_, expired_at) => serialize_to_vec(expired_at, "HoldTlc"),
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
+            KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
         }
     }
 }
 
 impl NetworkActorStateStore for Store {
-    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
-        let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], id.as_bytes()].concat();
+    fn get_network_actor_state(&self, id: &Pubkey) -> Option<PersistentNetworkActorState> {
+        let key = [
+            &[PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX],
+            &id.serialize()[..],
+        ]
+        .concat();
         self.get(key)
             .map(|value| deserialize_from(value.as_ref(), "PersistentNetworkActorState"))
     }
 
-    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {
+    fn insert_network_actor_state(&self, id: &Pubkey, state: PersistentNetworkActorState) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::NetworkActorState(id.clone(), state));
+        batch.put_kv(KeyValue::NetworkActorState(*id, state));
         batch.commit();
     }
 }
@@ -430,8 +450,8 @@ impl ChannelActorStateStore for Store {
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
         let mut batch = self.batch();
 
-        batch.put_kv(KeyValue::PeerIdChannelId(
-            (state.get_remote_peer_id(), state.id),
+        batch.put_kv(KeyValue::PubkeyChannelId(
+            (state.get_remote_pubkey(), state.id),
             state.state,
         ));
         if let Some(outpoint) = state.get_funding_transaction_outpoint() {
@@ -445,10 +465,11 @@ impl ChannelActorStateStore for Store {
         if let Some(state) = self.get_channel_actor_state(id) {
             let mut batch = self.batch();
             batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat());
+            let remote_pubkey_bytes = state.get_remote_pubkey().serialize();
             batch.delete(
                 [
-                    &[PEER_ID_CHANNEL_ID_PREFIX],
-                    state.get_remote_peer_id().as_bytes(),
+                    &[PUBKEY_CHANNEL_ID_PREFIX][..],
+                    &remote_pubkey_bytes[..],
                     id.as_ref(),
                 ]
                 .concat(),
@@ -460,8 +481,9 @@ impl ChannelActorStateStore for Store {
         }
     }
 
-    fn get_channel_ids_by_peer(&self, peer_id: &tentacle::secio::PeerId) -> Vec<Hash256> {
-        let prefix = [&[PEER_ID_CHANNEL_ID_PREFIX], peer_id.as_bytes()].concat();
+    fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
+        let pubkey_bytes = pubkey.serialize();
+        let prefix = [&[PUBKEY_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..]].concat();
         let iter = self.prefix_iterator(&prefix);
         iter.map(|(key, _)| {
             let channel_id: [u8; 32] = key[prefix.len()..]
@@ -472,21 +494,24 @@ impl ChannelActorStateStore for Store {
         .collect()
     }
 
-    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
-        let prefix = match peer_id {
-            Some(peer_id) => [&[PEER_ID_CHANNEL_ID_PREFIX], peer_id.as_bytes()].concat(),
-            None => vec![PEER_ID_CHANNEL_ID_PREFIX],
+    fn get_channel_states(&self, pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)> {
+        let prefix = match pubkey {
+            Some(pubkey) => {
+                let pubkey_bytes = pubkey.serialize();
+                [&[PUBKEY_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..]].concat()
+            }
+            None => vec![PUBKEY_CHANNEL_ID_PREFIX],
         };
         self.prefix_iterator(&prefix)
             .map(|(key, value)| {
                 let key_len = key.len();
-                let peer_id = PeerId::from_bytes(key[1..key_len - 32].into())
-                    .expect("deserialize peer id should be OK");
+                let pubkey = Pubkey::from_slice(&key[1..key_len - 32])
+                    .expect("deserialize pubkey should be OK");
                 let channel_id: [u8; 32] = key[key_len - 32..]
                     .try_into()
                     .expect("channel id should be 32 bytes");
                 let state = deserialize_from(value.as_ref(), "ChannelState");
-                (peer_id, channel_id.into(), state)
+                (pubkey, channel_id.into(), state)
             })
             .collect()
     }
@@ -564,6 +589,48 @@ impl ChannelActorStateStore for Store {
         ]
         .concat();
         self.get(key).is_some()
+    }
+
+    fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff) {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        let value = serialize_to_vec(diff, "CommitDiff");
+        self.put(key, value);
+    }
+
+    fn get_pending_commit_diff(&self, channel_id: &Hash256) -> Option<CommitDiff> {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        self.get(&key).map(|v| deserialize_from(&v, "CommitDiff"))
+    }
+
+    fn delete_pending_commit_diff(&self, channel_id: &Hash256) {
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        self.delete(&key);
+    }
+}
+
+impl ChannelOpenRecordStore for Store {
+    fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord> {
+        let prefix = [CHANNEL_OPEN_RECORD_PREFIX];
+        self.prefix_iterator(&prefix)
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "ChannelOpenRecord"))
+            .collect()
+    }
+
+    fn get_channel_open_record(&self, channel_id: &Hash256) -> Option<ChannelOpenRecord> {
+        let key = [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "ChannelOpenRecord"))
+    }
+
+    fn insert_channel_open_record(&self, record: ChannelOpenRecord) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::ChannelOpenRecord(record.channel_id, record));
+        batch.commit();
+    }
+
+    fn delete_channel_open_record(&self, channel_id: &Hash256) {
+        let key = [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat();
+        self.delete(key);
     }
 }
 
@@ -658,6 +725,16 @@ impl NetworkGraphStateStore for Store {
             .map(|session: PaymentSession| session.init_attempts(self))
     }
 
+    fn get_all_payment_sessions(&self) -> Vec<PaymentSession> {
+        let prefix = [PAYMENT_SESSION_PREFIX];
+        self.prefix_iterator(&prefix)
+            .map(|(_key, value)| {
+                let session: PaymentSession = deserialize_from(value.as_ref(), "PaymentSession");
+                session.init_attempts(self)
+            })
+            .collect()
+    }
+
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
         self.prefix_iterator(&prefix)
@@ -670,6 +747,52 @@ impl NetworkGraphStateStore for Store {
                 }
             })
             .collect()
+    }
+
+    fn get_payment_sessions_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<PaymentStatus>,
+    ) -> Vec<PaymentSession> {
+        let prefix = [PAYMENT_SESSION_PREFIX];
+        match after {
+            Some(after_hash) => {
+                let start_key = [&[PAYMENT_SESSION_PREFIX], after_hash.as_ref()].concat();
+                // Start from the `after` key and skip it (exclusive cursor)
+                let after_hash_owned = after_hash;
+                self.prefix_iterator_with_skip_while_and_start(
+                    &prefix,
+                    IteratorMode::From(&start_key, DbDirection::Forward),
+                    Box::new(move |key| {
+                        // Skip the cursor key itself (keys are [prefix][hash])
+                        key.len() > 1 && key[1..] == *after_hash_owned.as_ref()
+                    }),
+                )
+                .filter_map(|(_key, value)| {
+                    let session: PaymentSession =
+                        deserialize_from(value.as_ref(), "PaymentSession");
+                    match status {
+                        Some(ref s) if session.status != *s => None,
+                        _ => Some(session.init_attempts(self)),
+                    }
+                })
+                .take(limit)
+                .collect()
+            }
+            None => self
+                .prefix_iterator(&prefix)
+                .filter_map(|(_key, value)| {
+                    let session: PaymentSession =
+                        deserialize_from(value.as_ref(), "PaymentSession");
+                    match status {
+                        Some(ref s) if session.status != *s => None,
+                        _ => Some(session.init_attempts(self)),
+                    }
+                })
+                .take(limit)
+                .collect(),
+        }
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
@@ -691,11 +814,29 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_attempt(&self, attempt: Attempt) {
         assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
+
+        let first_hop_outpoint = attempt.first_hop_channel_outpoint().cloned();
+        let is_new = self.get_attempt(attempt.payment_hash, attempt.id).is_none();
+
         let mut batch = self.batch();
+
+        // Update the main attempt record
         batch.put_kv(KeyValue::Attempt(
             (attempt.payment_hash, attempt.id),
-            attempt,
+            attempt.clone(),
         ));
+
+        // Add to channel index only for new attempts
+        if is_new {
+            if let Some(outpoint) = first_hop_outpoint {
+                batch.put_kv(KeyValue::AttemptChannelIndex((
+                    outpoint,
+                    attempt.payment_hash,
+                    attempt.id,
+                )));
+            }
+        }
+
         batch.commit();
     }
 
@@ -709,18 +850,96 @@ impl NetworkGraphStateStore for Store {
     fn delete_attempts(&self, payment_hash: Hash256) {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
-        for (key, _) in self.prefix_iterator(&prefix) {
+
+        // Get attempts to find their channel index entries
+        let attempts: Vec<_> = self
+            .prefix_iterator(&prefix)
+            .map(|(key, value)| (key, deserialize_from::<Attempt>(value.as_ref(), "Attempt")))
+            .collect();
+
+        // Delete both main records and channel index entries
+        for (key, attempt) in attempts {
             batch.delete(key);
+            if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
+                let index_key = [
+                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                    outpoint.as_slice(),
+                    attempt.payment_hash.as_ref(),
+                    &attempt.id.to_le_bytes(),
+                ]
+                .concat();
+                batch.delete(index_key);
+            }
         }
+
         batch.commit();
     }
 
-    fn get_attempts_with_statuses(&self, status: &[AttemptStatus]) -> Vec<Attempt> {
-        let prefix = [ATTEMPT_PREFIX];
+    fn clear_attempts_channel_index(&self, payment_hash: Hash256) {
+        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+
+        // Get attempts to find their channel index entries
+        let attempts: Vec<Attempt> = self
+            .prefix_iterator(&prefix)
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "Attempt"))
+            .collect();
+
+        // Only delete channel index entries, keep the attempts themselves
+        for attempt in attempts {
+            if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
+                let index_key = [
+                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                    outpoint.as_slice(),
+                    attempt.payment_hash.as_ref(),
+                    &attempt.id.to_le_bytes(),
+                ]
+                .concat();
+                batch.delete(index_key);
+            }
+        }
+
+        batch.commit();
+    }
+
+    fn get_pending_attempts_by_channel_outpoint(
+        &self,
+        channel_outpoint: &OutPoint,
+    ) -> Vec<Attempt> {
+        let prefix = [&[ATTEMPT_CHANNEL_INDEX_PREFIX], channel_outpoint.as_slice()].concat();
+
         self.prefix_iterator(&prefix)
-            .filter_map(|(_key, value)| {
-                let attempt: Attempt = deserialize_from(value.as_ref(), "Attempt");
-                if status.contains(&attempt.status) {
+            .filter_map(|(key, _)| {
+                // Key format: [PREFIX, channel_outpoint(36 bytes), payment_hash(32 bytes), attempt_id(8 bytes)]
+                // Extract payment_hash and attempt_id from key
+                let key_slice = key.as_ref();
+                let outpoint_len = channel_outpoint.as_slice().len();
+                let prefix_and_outpoint_len = 1 + outpoint_len;
+
+                if key_slice.len() < prefix_and_outpoint_len + 32 + 8 {
+                    return None;
+                }
+
+                let payment_hash_start = prefix_and_outpoint_len;
+                let payment_hash_end = payment_hash_start + 32;
+                let attempt_id_start = payment_hash_end;
+                let attempt_id_end = attempt_id_start + 8;
+
+                let payment_hash: Hash256 = (&key_slice[payment_hash_start..payment_hash_end])
+                    .try_into()
+                    .ok()?;
+                let attempt_id = u64::from_le_bytes(
+                    key_slice[attempt_id_start..attempt_id_end]
+                        .try_into()
+                        .ok()?,
+                );
+
+                // Only return attempts that are pending (Created or Retrying)
+                let attempt = self.get_attempt(payment_hash, attempt_id)?;
+                if matches!(
+                    attempt.status,
+                    AttemptStatus::Created | AttemptStatus::Retrying
+                ) {
                     Some(attempt)
                 } else {
                     None
@@ -1310,7 +1529,7 @@ fn update_channel_timestamp(
 
 /// Check if the database needs to be migrated
 pub fn check_migrate<P: AsRef<Path>>(path: P, db: Store) -> Result<Store, String> {
-    let migrate = DbMigrate::new(&db);
+    let migrate = DbMigrate::new(&db.inner);
     migrate.init_or_check(path)?;
     Ok(db)
 }

@@ -1,18 +1,16 @@
 use ractor::ActorRef;
 
-use crate::{
-    cch::{
-        actions::{
-            backend_dispatchers::{dispatch_invoice_handler, InvoiceHandlerType},
-            ActionExecutor,
-        },
-        actor::CchState,
-        trackers::LndTrackerMessage,
-        CchMessage, CchOrder, CchOrderStore,
+use crate::cch::{
+    actions::{
+        backend_dispatchers::{dispatch_invoice_handler, InvoiceHandlerType},
+        ActionExecutor,
     },
-    fiber::types::Hash256,
+    actor::CchState,
+    trackers::LndTrackerMessage,
+    CchMessage, CchOrderStore,
 };
 use anyhow::Result;
+use fiber_types::{CchOrder, Hash256};
 
 pub struct TrackIncomingInvoiceDispatcher;
 
@@ -40,6 +38,7 @@ impl TrackIncomingInvoiceDispatcher {
         state: &CchState<S>,
         _cch_actor_ref: &ActorRef<CchMessage>,
         order: &CchOrder,
+        _retry_count: u32,
     ) -> Option<Box<dyn ActionExecutor>> {
         if !Self::should_dispatch(order) {
             return None;

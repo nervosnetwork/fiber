@@ -1,22 +1,19 @@
 use ckb_hash::blake2b_256;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::CellOutput;
+use ckb_types::packed::OutPoint;
 use ckb_types::prelude::{Builder, Entity, Unpack};
-use ckb_types::{packed::OutPoint, prelude::Pack};
-use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::{Keypair, PublicKey, SecretKey, XOnlyPublicKey, SECP256K1};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
-use crate::fiber::features::FeatureVector;
-use crate::fiber::types::{
-    ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, EcdsaSignature,
+use crate::fiber::network::get_chain_hash;
+use crate::fiber::types::new_channel_update_unsigned;
+use crate::fiber::{
+    ChannelAnnouncement, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
+    EcdsaSignature, FeatureVector, NodeAnnouncement, Privkey, Pubkey,
 };
-use crate::{
-    fiber::{
-        config::AnnouncedNodeName,
-        types::{ChannelAnnouncement, NodeAnnouncement, Privkey, Pubkey},
-    },
-    now_timestamp_as_millis_u64,
-};
+use crate::now_timestamp_as_millis_u64;
+use fiber_types::protocol::AnnouncedNodeName;
 
 pub fn gen_rand_fiber_public_key() -> Pubkey {
     gen_rand_secp256k1_public_key().into()
@@ -43,8 +40,7 @@ pub fn gen_rand_secp256k1_public_key() -> PublicKey {
 }
 
 pub fn gen_rand_secp256k1_keypair() -> Keypair {
-    let secp = Secp256k1::new();
-    Keypair::new(&secp, &mut rand::thread_rng())
+    Keypair::new(SECP256K1, &mut rand::thread_rng())
 }
 
 pub fn gen_rand_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {
@@ -56,8 +52,7 @@ pub fn gen_rand_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {
 }
 
 pub fn gen_deterministic_secp256k1_keypair() -> Keypair {
-    let secp = Secp256k1::new();
-    Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[42u8; 32]).unwrap())
+    Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[42u8; 32]).unwrap())
 }
 
 pub fn gen_deterministic_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {
@@ -80,13 +75,16 @@ pub fn gen_rand_node_announcement() -> (Privkey, NodeAnnouncement) {
 }
 
 pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
-    NodeAnnouncement::new(
+    NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         sk,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     )
 }
 
@@ -102,14 +100,14 @@ pub async fn create_funding_tx(x_only: &XOnlyPublicKey) -> TransactionView {
         )
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(get_script_by_contract(
                     Contract::CommitmentLock,
                     commitment_lock_script_args.as_slice(),
                 ))
                 .build(),
         )
-        .output_data(Default::default())
+        .output_data(ckb_types::packed::Bytes::default())
         .build()
 }
 
@@ -134,6 +132,7 @@ impl ChannelTestContext {
             &node1_sk.pubkey(),
             &node2_sk.pubkey(),
             outpoint.clone(),
+            get_chain_hash(),
             &xonly,
             capacity as u128,
             None,
@@ -166,7 +165,7 @@ impl ChannelTestContext {
         timestamp: Option<u64>,
     ) -> ChannelUpdate {
         let timestamp = timestamp.unwrap_or(now_timestamp_as_millis_u64());
-        let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
+        let mut unsigned_channel_update = new_channel_update_unsigned(
             self.channel_announcement.channel_outpoint.clone(),
             timestamp,
             ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
@@ -190,7 +189,7 @@ impl ChannelTestContext {
         timestamp: Option<u64>,
     ) -> ChannelUpdate {
         let timestamp = timestamp.unwrap_or(now_timestamp_as_millis_u64());
-        let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
+        let mut unsigned_channel_update = new_channel_update_unsigned(
             self.channel_announcement.channel_outpoint.clone(),
             timestamp,
             ChannelUpdateMessageFlags::UPDATE_OF_NODE2,

@@ -4,25 +4,21 @@ use crate::ckb::CkbConfig;
 use crate::ckb::GetTxResponse;
 use crate::fiber::channel::*;
 use crate::fiber::config::CKB_SHANNONS;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
-use crate::fiber::payment::Attempt;
-use crate::fiber::payment::PaymentSession;
-use crate::fiber::payment::PaymentStatus;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
-use crate::fiber::payment::SessionRoute;
-use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Init;
-use crate::fiber::types::Pubkey;
 use crate::fiber::types::Shutdown;
-use crate::fiber::PaymentCustomRecords;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
+use crate::fiber::{
+    Attempt, EcdsaSignature, FeatureVector, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    Pubkey, SessionRoute,
+};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
@@ -36,6 +32,8 @@ use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
 };
+use fiber_types::TLCId;
+use fiber_types::TlcInfo;
 #[cfg(not(target_arch = "wasm32"))]
 use hyper::{header::HeaderValue, HeaderMap};
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,7 +47,7 @@ use ractor::{call, Actor, ActorRef};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
 use rand::Rng;
-use secp256k1::{Message, Secp256k1};
+use secp256k1::{Message, SECP256K1};
 #[cfg(not(target_arch = "wasm32"))]
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
@@ -66,7 +64,7 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir as OldTempDir;
-use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use tentacle::multiaddr::MultiAddr;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock as TokioRwLock;
 use tokio::{
@@ -82,7 +80,7 @@ use tracing::warn;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NodeInfo;
 use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
-use crate::fiber::types::Privkey;
+use crate::fiber::Privkey;
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
@@ -94,7 +92,7 @@ use crate::{
     fiber::network::{
         NetworkActor, NetworkActorCommand, NetworkActorMessage, NetworkActorStartArguments,
     },
-    fiber::types::Hash256,
+    fiber::Hash256,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
 };
@@ -182,6 +180,8 @@ pub fn gen_rpc_config() -> RpcConfig {
             "peer".to_string(),
             "watchtower".to_string(),
         ],
+        cors_enabled: false,
+        cors_allowed_origins: vec![],
     }
 }
 
@@ -219,11 +219,10 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
 
 // Mock function to create a dummy EcdsaSignature
 pub fn mock_ecdsa_signature() -> EcdsaSignature {
-    let secp = Secp256k1::new();
     let mut rng = OsRng;
-    let (secret_key, _public_key) = secp.generate_keypair(&mut rng);
+    let (secret_key, _public_key) = SECP256K1.generate_keypair(&mut rng);
     let message = Message::from_digest_slice(&[0u8; 32]).expect("32 bytes");
-    let signature = secp.sign_ecdsa(&message, &secret_key);
+    let signature = SECP256K1.sign_ecdsa(&message, &secret_key);
     EcdsaSignature(signature)
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -255,9 +254,8 @@ pub struct NetworkNode {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub chain_client: MockCkbChainClient,
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
-    pub gossip_actor: ActorRef<GossipActorMessage>,
+    pub gossip_actor: Option<ActorRef<GossipActorMessage>>,
     pub private_key: Privkey,
-    pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
@@ -399,6 +397,7 @@ impl NetworkNodeConfigBuilder {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ChannelParameters {
     pub public: bool,
+    pub one_way: bool,
     pub node_a_funding_amount: u128,
     pub node_b_funding_amount: u128,
     pub a_max_tlc_number_in_flight: Option<u64>,
@@ -418,6 +417,7 @@ impl ChannelParameters {
     pub fn new(node_a_funding_amount: u128, node_b_funding_amount: u128) -> Self {
         Self {
             public: true,
+            one_way: false,
             node_a_funding_amount,
             node_b_funding_amount,
             ..Default::default()
@@ -433,8 +433,9 @@ pub(crate) async fn create_channel_with_nodes(
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: params.public,
+                one_way: params.one_way,
                 shutdown_script: None,
                 funding_amount: params.node_a_funding_amount,
                 funding_udt_type_script: params.funding_udt_type_script,
@@ -456,9 +457,9 @@ pub(crate) async fn create_channel_with_nodes(
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                debug!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                debug!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -488,12 +489,12 @@ pub(crate) async fn create_channel_with_nodes(
 
     let funding_tx_outpoint = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, funding_tx_outpoint) => {
                 debug!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(funding_tx_outpoint.clone())
             }
@@ -503,12 +504,12 @@ pub(crate) async fn create_channel_with_nodes(
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 debug!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -632,7 +633,8 @@ pub(crate) async fn create_n_nodes_network_with_params(
         }
         debug!("finished add channel idx: {:?}", idx);
     }
-    wait_for_network_graph_update(&nodes[0], amounts.len()).await;
+    let expected_graph_channels = amounts.iter().filter(|(_, p)| p.public).count();
+    wait_for_network_graph_update(&nodes[0], expected_graph_channels).await;
     (nodes, channels)
 }
 
@@ -648,6 +650,32 @@ pub async fn create_n_nodes_network(
     create_n_nodes_network_with_params(&amounts, n, None).await
 }
 
+/// Like `create_n_nodes_network`, but allows specifying whether each channel is public.
+///
+/// Each entry is `((i, j), (a_funding, b_funding), public)`.
+#[allow(clippy::type_complexity)]
+pub async fn create_n_nodes_network_with_visibility(
+    channels: &[((usize, usize), (u128, u128), bool)],
+    n: usize,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    let channels = channels
+        .iter()
+        .map(|((i, j), (a, b), public)| {
+            (
+                (*i, *j),
+                ChannelParameters {
+                    public: *public,
+                    one_way: false,
+                    node_a_funding_amount: *a,
+                    node_b_funding_amount: *b,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    create_n_nodes_network_with_params(&channels, n, None).await
+}
+
 impl NetworkNode {
     pub async fn new() -> Self {
         Self::new_with_node_name_opt(None).await
@@ -659,10 +687,6 @@ impl NetworkNode {
 
     pub fn get_public_key(&self) -> Pubkey {
         self.private_key.pubkey()
-    }
-
-    pub fn get_peer_id(&self) -> PeerId {
-        self.private_key.pubkey().tentacle_peer_id()
     }
 
     pub fn get_node_address(&self) -> &MultiAddr {
@@ -709,6 +733,22 @@ impl NetworkNode {
             .expect("insert success");
     }
 
+    pub fn build_basic_invoice(&self, amount: u128, preimage: Hash256) -> CkbInvoice {
+        InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payment_preimage(preimage)
+            .payee_pub_key(self.get_public_key().into())
+            .build()
+            .expect("build invoice")
+    }
+
+    pub fn gen_basic_invoice(&self, amount: u128) -> (CkbInvoice, Hash256) {
+        let preimage = gen_rand_sha256_hash();
+        let invoice = self.build_basic_invoice(amount, preimage);
+        self.insert_invoice(invoice.clone(), Some(preimage));
+        (invoice, preimage)
+    }
+
     pub fn get_invoice_status(&self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
         self.store.get_invoice_status(payment_hash)
     }
@@ -717,6 +757,11 @@ impl NetworkNode {
         self.store
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
             .expect("cancel success");
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SettleHoldTlcSet(*payment_hash),
+            ))
+            .expect("network actor alive");
     }
 
     pub fn get_payment_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
@@ -824,6 +869,12 @@ impl NetworkNode {
         res
     }
 
+    pub async fn assert_send_payment_failure(&self, command: SendPaymentCommand) -> String {
+        let res = self.send_payment(command).await;
+        assert!(res.is_err());
+        res.err().unwrap()
+    }
+
     pub async fn send_payment_with_router(
         &self,
         command: SendPaymentWithRouterCommand,
@@ -880,14 +931,14 @@ impl NetworkNode {
 
     pub async fn send_channel_shutdown_tx_confirmed_event(
         &self,
-        peer_id: PeerId,
+        pubkey: Pubkey,
         channel_id: Hash256,
         force: bool,
     ) {
         use crate::fiber::NetworkActorEvent::ClosingTransactionConfirmed;
 
         let tx_hash = TransactionBuilder::default().build().hash();
-        let event = ClosingTransactionConfirmed(peer_id, channel_id, tx_hash, force, true);
+        let event = ClosingTransactionConfirmed(pubkey, channel_id, tx_hash, force, true);
         self.network_actor
             .send_message(NetworkActorMessage::Event(event))
             .expect("network actor alive");
@@ -1287,14 +1338,14 @@ impl NetworkNode {
         let state = self.get_channel_actor_state(channel_id);
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    state.get_remote_peer_id(),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    state.get_remote_pubkey(),
                     FiberMessage::shutdown(Shutdown {
                         channel_id: state.get_id(),
                         close_script: command
                             .close_script
                             .clone()
-                            .unwrap_or(state.local_shutdown_script),
+                            .unwrap_or_else(|| state.local_shutdown_script.clone()),
                         fee_rate: command
                             .fee_rate
                             .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate)),
@@ -1341,6 +1392,18 @@ impl NetworkNode {
         self.network_actor
             .send_message(message)
             .expect("network actor is live");
+    }
+
+    pub async fn update_node_features_and_wait(&self, features: FeatureVector) {
+        self.update_node_features(features.clone()).await;
+        for _ in 0..50 {
+            let info = self.node_info().await;
+            if info.features == features {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        panic!("node features update did not apply in time");
     }
 
     pub async fn retry_send_payment(&self, payment_hash: Hash256, attempt_id: Option<u64>) {
@@ -1461,17 +1524,17 @@ impl NetworkNode {
         .0;
 
         #[allow(clippy::never_loop)]
-        let (peer_id, _listening_addr, announced_addrs) = loop {
+        let (started_pubkey, _listening_addr, announced_addrs) = loop {
             select! {
-                Some(NetworkServiceEvent::NetworkStarted(peer_id, listening_addr, announced_addrs)) = event_receiver.recv() => {
-                    break (peer_id, listening_addr, announced_addrs);
+                Some(NetworkServiceEvent::NetworkStarted(pubkey, listening_addr, announced_addrs)) = event_receiver.recv() => {
+                    break (pubkey, listening_addr, announced_addrs);
                 }
                 _ = sleep(Duration::from_secs(5)) => {
                     panic!("Failed to start network actor");
                 }
             }
         };
-
+        assert_eq!(started_pubkey, pubkey);
         let mut unexpected_events: HashSet<String> = HashSet::new();
 
         // Some usual unexpected events that we want to not happened
@@ -1511,14 +1574,13 @@ impl NetworkNode {
         });
 
         info!(
-            "Network node started for peer_id {:?} in directory {:?}",
-            &peer_id,
+            "Network node started for pubkey {:?} in directory {:?}",
+            &started_pubkey,
             base_dir.as_ref()
         );
 
-        let gossip_actor = ractor::registry::where_is(get_gossip_actor_name(&peer_id))
-            .expect("gossip actor should have been started")
-            .into();
+        let gossip_actor =
+            ractor::registry::where_is(get_gossip_actor_name(&started_pubkey)).map(Into::into);
         #[cfg(not(target_arch = "wasm32"))]
         let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
@@ -1558,7 +1620,6 @@ impl NetworkNode {
             chain_actor,
             gossip_actor,
             private_key,
-            peer_id,
             event_emitter: self_event_receiver,
             pubkey,
             unexpected_events,
@@ -1587,11 +1648,11 @@ impl NetworkNode {
             .expect("send ckb chain message");
     }
 
-    pub fn send_init_peer_message(&self, remote_peer_id: PeerId, message: Init) {
+    pub fn send_init_peer_message(&self, remote_pubkey: Pubkey, message: Init) {
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    remote_peer_id,
+                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    remote_pubkey,
                     FiberMessage::Init(message),
                 )),
             ))
@@ -1632,9 +1693,9 @@ impl NetworkNode {
     pub async fn stop(&mut self) {
         self.network_actor
             .stop(Some("stopping actor on request".to_string()));
-        let my_peer_id = self.peer_id.clone();
+        let my_pubkey = self.pubkey;
         self.expect_event(
-            |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
+            |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_pubkey),
         )
         .await;
     }
@@ -1734,16 +1795,16 @@ impl NetworkNode {
 
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ConnectPeer(peer_addr.clone()),
+                NetworkActorCommand::ConnectPeer(peer_addr.clone(), false),
             ))
             .expect("self alive");
     }
 
     pub async fn connect_to(&mut self, other: &mut Self) {
         self.connect_to_nonblocking(other).await;
-        let peer_id = &other.peer_id;
+        let pubkey = &other.pubkey;
         self.expect_event(
-            |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id),
+            |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == pubkey),
         )
         .await;
         self.expect_debug_event("PeerInit").await;
@@ -1887,13 +1948,18 @@ impl NetworkNode {
 
     pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
         self.gossip_actor
+            .as_ref()
+            .expect("gossip actor should have been started")
             .send_message(message)
             .expect("send message to gossip actor");
     }
 
-    pub fn mock_received_gossip_message_from_peer(&self, peer_id: PeerId, message: GossipMessage) {
+    pub fn mock_received_gossip_message_from_peer(&self, pubkey: Pubkey, message: GossipMessage) {
         self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
-            GossipMessageWithPeerId { peer_id, message },
+            GossipMessageWithTarget {
+                target: pubkey,
+                message,
+            },
         ));
     }
 
@@ -1959,6 +2025,40 @@ pub async fn wait_until<F: Fn() -> bool>(f: F) {
     wait_until_timeout(MAX_WAIT_TIME, f).await;
 }
 
+pub async fn wait_until_async_timeout<F, Fut>(mut f: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = tokio::time::Instant::now();
+    let interval = Duration::from_millis(200);
+    let max_wait_time = Duration::from_secs(10);
+    loop {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(interval).await;
+        if start.elapsed() > max_wait_time {
+            panic!(
+                "Wait timeout after {:?} (interval {:?})",
+                max_wait_time, interval
+            );
+        }
+    }
+}
+
+pub async fn wait_until_node_supports_trampoline_routing(node: &NetworkNode, target: &NetworkNode) {
+    let target = target.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_nodes()
+            .await
+            .into_iter()
+            .find(|n| n.node_id == target)
+            .is_some_and(|n| n.features.supports_trampoline_routing())
+    })
+    .await;
+}
+
 pub async fn wait_for_tlc_sync(
     sender: &NetworkNode,
     receiver: &NetworkNode,
@@ -1974,6 +2074,128 @@ pub async fn wait_for_tlc_sync(
             && receiver_state.tlc_state.received_tlcs.tlcs.len() == expected_offered
     })
     .await;
+}
+
+pub async fn wait_until_graph_channel_has_update(
+    node: &NetworkNode,
+    node1: &NetworkNode,
+    node2: &NetworkNode,
+) {
+    let node1 = node1.get_public_key();
+    let node2 = node2.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_graph_channels()
+            .await
+            .into_iter()
+            .any(|c| {
+                let is_pair = (c.node1 == node1 && c.node2 == node2)
+                    || (c.node1 == node2 && c.node2 == node1);
+                is_pair && (c.update_of_node1.is_some() || c.update_of_node2.is_some())
+            })
+    })
+    .await;
+}
+
+pub async fn wait_until_graph_channel_has_update_for_direction(
+    node: &NetworkNode,
+    from: &NetworkNode,
+    to: &NetworkNode,
+) {
+    let from = from.get_public_key();
+    let to = to.get_public_key();
+    wait_until_async_timeout(|| async {
+        node.get_network_graph_channels()
+            .await
+            .into_iter()
+            .any(|c| {
+                if c.node1 == from && c.node2 == to {
+                    c.update_of_node1.is_some()
+                } else if c.node2 == from && c.node1 == to {
+                    c.update_of_node2.is_some()
+                } else {
+                    false
+                }
+            })
+    })
+    .await;
+}
+
+pub async fn wait_until_graph_channel_has_updates(
+    node: &NetworkNode,
+    edges: &[(&NetworkNode, &NetworkNode)],
+) {
+    for (node1, node2) in edges {
+        wait_until_graph_channel_has_update(node, node1, node2).await;
+    }
+}
+
+pub async fn wait_until_graph_channel_updates_along_path(
+    node: &NetworkNode,
+    path: &[&NetworkNode],
+) {
+    assert!(
+        path.len() >= 2,
+        "path must include at least 2 nodes (got {})",
+        path.len()
+    );
+
+    for window in path.windows(2) {
+        wait_until_graph_channel_has_update(node, window[0], window[1]).await;
+    }
+}
+
+pub async fn wait_until_graph_channel_updates_along_directed_path(
+    node: &NetworkNode,
+    path: &[&NetworkNode],
+) {
+    assert!(
+        path.len() >= 2,
+        "path must include at least 2 nodes (got {})",
+        path.len()
+    );
+
+    for window in path.windows(2) {
+        wait_until_graph_channel_has_update_for_direction(node, window[0], window[1]).await;
+    }
+}
+
+pub async fn wait_until_node_has_public_channels_at_least(node: &NetworkNode, channels: usize) {
+    wait_until_async_timeout(|| async { node.get_network_channels().await.len() >= channels })
+        .await;
+}
+
+/// Helper function to capture all nodes' balances across all channels
+/// Returns 0 for channels that don't exist on a particular node
+pub fn capture_balances(nodes: &[&NetworkNode], channels: &[Hash256]) -> Vec<Vec<u128>> {
+    nodes
+        .iter()
+        .map(|node| {
+            channels
+                .iter()
+                .map(|channel| {
+                    node.store
+                        .get_channel_actor_state(channel)
+                        .map(|state| state.to_local_amount)
+                        .unwrap_or(0)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Helper function to calculate balance changes
+pub fn calculate_balance_changes(before: &[Vec<u128>], after: &[Vec<u128>]) -> Vec<Vec<i128>> {
+    before
+        .iter()
+        .zip(after.iter())
+        .map(|(before_node, after_node)| {
+            before_node
+                .iter()
+                .zip(after_node.iter())
+                .map(|(b, a)| *a as i128 - *b as i128)
+                .collect()
+        })
+        .collect()
 }
 
 #[tokio::test]

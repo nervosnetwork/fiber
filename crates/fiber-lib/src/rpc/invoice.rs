@@ -4,16 +4,13 @@
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
-use crate::fiber::features::FeatureVector;
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::serde_utils::{duration_hex, U128Hex, U64Hex};
-use crate::fiber::types::{Hash256, Privkey};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
     Attribute as InternalAttribute, CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, CkbScript,
     Currency, InvoiceBuilder, InvoiceData as InternalInvoiceData, InvoiceSignature, InvoiceStore,
 };
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
+use fiber_types::{duration_hex, FeatureVector, Hash256, HashAlgorithm, Privkey, U128Hex, U64Hex};
 
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
@@ -21,7 +18,7 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use ractor::{call, ActorRef};
 use rand::Rng;
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::time::Duration;
@@ -162,6 +159,8 @@ pub struct NewInvoiceParams {
     pub hash_algorithm: Option<HashAlgorithm>,
     /// Whether allow payment to use MPP
     pub allow_mpp: Option<bool>,
+    /// Whether allow payment to use trampoline routing
+    pub allow_trampoline_routing: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -280,11 +279,7 @@ impl<S> InvoiceRpcServerImpl<S> {
             );
 
             // restrict currency to be the same as network
-            let currency = match config.chain.as_str() {
-                "mainnet" => Currency::Fibb,
-                "testnet" => Currency::Fibt,
-                _ => Currency::Fibd,
-            };
+            let currency = config.currency();
 
             (
                 Some(keypair),
@@ -415,6 +410,17 @@ where
                 invoice_builder = invoice_builder.payment_secret(payment_secret.into());
             }
         };
+        if let Some(allow_trampoline_routing) = params.allow_trampoline_routing {
+            invoice_builder = invoice_builder.allow_trampoline_routing(allow_trampoline_routing);
+            if allow_trampoline_routing
+                && !self
+                    .node_features
+                    .as_ref()
+                    .is_some_and(|f| f.supports_trampoline_routing())
+            {
+                return error("Node does not support trampoline routing, please enable trampoline routing feature");
+            }
+        };
 
         let final_expiry_delta = params.final_expiry_delta.unwrap_or(MIN_TLC_EXPIRY_DELTA);
         if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
@@ -441,7 +447,7 @@ where
         let invoice = if let Some((public_key, secret_key)) = &self.keypair {
             invoice_builder = invoice_builder.payee_pub_key(*public_key);
             invoice_builder
-                .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, secret_key))
+                .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, secret_key))
         } else {
             invoice_builder.build()
         };
@@ -545,6 +551,11 @@ where
                             Some(payment_hash),
                         )
                     })?;
+                if let Some(network_actor) = &self.network_actor {
+                    let _ = network_actor.send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+                    ));
+                }
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice: invoice.into(),

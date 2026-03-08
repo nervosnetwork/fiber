@@ -1,4 +1,5 @@
-use crate::fiber::network::{PeerDisconnectReason, PeerInfo};
+use crate::fiber::network::PeerDisconnectReason;
+use crate::fiber::types::Pubkey;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::log_and_error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -9,13 +10,17 @@ use jsonrpsee::types::ErrorObjectOwned;
 use ractor::call;
 use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
-pub use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use serde_with::serde_as;
+pub use tentacle::multiaddr::MultiAddr;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConnectPeerParams {
     /// The address of the peer to connect to.
-    pub address: MultiAddr,
+    /// Either `address` or `pubkey` must be provided.
+    pub address: Option<MultiAddr>,
+    /// The public key of the peer to connect to.
+    /// The node resolves the address from locally synced graph data.
+    pub pubkey: Option<Pubkey>,
     /// Whether to save the peer address to the peer store.
     pub save: Option<bool>,
 }
@@ -23,9 +28,20 @@ pub struct ConnectPeerParams {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DisconnectPeerParams {
-    /// The peer ID of the peer to disconnect.
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
+    /// The public key of the peer to disconnect.
+    pub pubkey: Pubkey,
+}
+
+/// The information about a peer connected to the node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// The identity public key of the peer.
+    pub pubkey: Pubkey,
+
+    /// The multi-address associated with the connecting peer.
+    /// Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
+    /// The `graph_nodes` in Graph rpc module will return all addresses of the peer.
+    pub address: MultiAddr,
 }
 
 /// The result of the `list_peers` RPC method.
@@ -82,18 +98,27 @@ impl PeerRpcServer for PeerRpcServerImpl {
 
 impl PeerRpcServerImpl {
     pub async fn connect_peer(&self, params: ConnectPeerParams) -> Result<(), ErrorObjectOwned> {
-        let message =
-            NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(params.address.clone()));
-        if params.save.unwrap_or(true) {
-            crate::handle_actor_cast!(
-                self.actor,
-                NetworkActorMessage::Command(NetworkActorCommand::SavePeerAddress(
-                    params.address.clone()
-                )),
-                params.clone()
-            )?;
+        if let Some(address) = params.address.clone() {
+            let save = params.save.unwrap_or(true);
+            let message =
+                NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(address, save));
+            return crate::handle_actor_cast!(self.actor, message, params);
         }
-        crate::handle_actor_cast!(self.actor, message, params)
+
+        if let Some(pubkey) = params.pubkey {
+            let message = |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
+                    pubkey, rpc_reply,
+                ))
+            };
+            return crate::handle_actor_call!(self.actor, message, params);
+        }
+
+        Err(ErrorObjectOwned::owned(
+            CALL_EXECUTION_FAILED_CODE,
+            "either `address` or `pubkey` is required",
+            Some(params),
+        ))
     }
 
     pub async fn disconnect_peer(
@@ -101,7 +126,7 @@ impl PeerRpcServerImpl {
         params: DisconnectPeerParams,
     ) -> Result<(), ErrorObjectOwned> {
         let message = NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
-            params.peer_id.clone(),
+            params.pubkey,
             PeerDisconnectReason::Requested,
         ));
         crate::handle_actor_cast!(self.actor, message, params)
@@ -112,7 +137,13 @@ impl PeerRpcServerImpl {
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply));
 
         crate::handle_actor_call!(self.actor, message, ()).map(|response| ListPeersResult {
-            peers: response.clone(),
+            peers: response
+                .into_iter()
+                .map(|peer| PeerInfo {
+                    pubkey: peer.pubkey,
+                    address: peer.address,
+                })
+                .collect(),
         })
     }
 }

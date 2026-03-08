@@ -1,6 +1,4 @@
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::payment::SendPaymentCommand;
-use crate::fiber::types::Hash256;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{
     CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore, SettleInvoiceError,
@@ -10,6 +8,8 @@ use crate::tests::test_utils::{
     create_n_nodes_network, create_n_nodes_network_with_params, gen_rpc_config, init_tracing,
     ChannelParameters, NetworkNode, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
 };
+use fiber_types::Hash256;
+use fiber_types::HashAlgorithm;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
@@ -230,21 +230,84 @@ async fn test_send_payment_with_hold_invoice_workflow() {
     assert!(res.is_ok());
     println!("res: {:?}", res);
 
-    for _i in 0..50 {
+    // wait until invoice in received
+    for _ in 0..30 {
         let status = node_1
+            .store
             .get_invoice_status(&payment_hash)
-            .expect("get invoice status");
+            .expect("invoice status");
         if status == CkbInvoiceStatus::Received {
             break;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     }
+
     node_1
         .settle_invoice(&payment_hash, payment_preimage)
         .await
         .expect("settle invoice");
 
     node_0.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_cancel_hold_invoice_fails_pending_tlcs() {
+    init_tracing();
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash
+        .hash(payment_preimage.as_ref())
+        .into();
+    let invoice = node_1
+        .gen_invoice(NewInvoiceParams {
+            amount: 1000,
+            description: Some("hold invoice to cancel".to_string()),
+            payment_hash: Some(payment_hash),
+            ..Default::default()
+        })
+        .await;
+
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.invoice_address),
+            ..Default::default()
+        })
+        .await;
+    assert!(res.is_ok());
+
+    for _ in 0..30 {
+        let status = node_1
+            .store
+            .get_invoice_status(&payment_hash)
+            .expect("invoice status");
+        if status == CkbInvoiceStatus::Received {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    }
+    assert_eq!(
+        node_1.store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Received)
+    );
+
+    node_1.cancel_invoice(&payment_hash);
+
+    node_0.wait_until_failed(payment_hash).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -285,7 +348,7 @@ async fn test_send_mpp_to_hold_invoice() {
     };
 
     let res = node_0.send_payment(command).await;
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     node_1
         .settle_invoice(&payment_hash, payment_preimage)
         .await

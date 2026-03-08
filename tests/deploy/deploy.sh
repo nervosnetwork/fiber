@@ -18,7 +18,7 @@ fi
 
 ckb-cli() {
     # Don't pollute the home directory.
-    env HOME="$data_dir" ckb-cli "$@"
+    env HOME="$data_dir" ckb-cli --url http://127.0.0.1:8114 "$@"
 }
 
 if ! (echo | ckb-cli account import --local-only --privkey-path "$miner_key_file"); then

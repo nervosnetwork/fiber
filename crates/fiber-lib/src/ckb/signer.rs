@@ -12,7 +12,7 @@ use ckb_sdk::{
     util::blake160,
     ScriptId,
 };
-use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Message, PublicKey, SecretKey, SECP256K1};
 use std::collections::HashMap;
 
 use super::{FundingError, FundingTx};
@@ -36,8 +36,7 @@ impl LocalSigner {
     ///
     /// This computes and caches the public key and its blake160 hash.
     pub fn new(secret_key: SecretKey) -> Self {
-        let secp = Secp256k1::new();
-        let pubkey = secret_key.public_key(&secp);
+        let pubkey = secret_key.public_key(SECP256K1);
         let pubkey_hash = blake160(pubkey.serialize().as_ref()).0;
         Self {
             secret_key,
@@ -65,14 +64,13 @@ impl LocalSigner {
     /// This is the low-level signing API. Callers are responsible for computing
     /// the message (e.g., CKB sighash or Fiber's compute_tx_message).
     pub fn sign_recoverable(&self, message: &[u8; 32]) -> [u8; 65] {
-        let secp = Secp256k1::new();
         let msg = Message::from_digest(*message);
-        let signature = secp.sign_ecdsa_recoverable(&msg, &self.secret_key);
+        let signature = SECP256K1.sign_ecdsa_recoverable(&msg, &self.secret_key);
         let (recov_id, data) = signature.serialize_compact();
 
         let mut signature_bytes = [0u8; 65];
         signature_bytes[0..64].copy_from_slice(&data[0..64]);
-        signature_bytes[64] = recov_id.to_i32() as u8;
+        signature_bytes[64] = i32::from(recov_id) as u8;
         signature_bytes
     }
 
@@ -85,21 +83,7 @@ impl LocalSigner {
         mut tx: FundingTx,
         rpc_url: String,
     ) -> Result<FundingTx, FundingError> {
-        // Convert between different versions of secp256k1.
-        // This app requires 0.28 because of:
-        // ```
-        // #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
-        // pub struct Signature(pub Secp256k1Signature);
-        // ```
-        //
-        // However, ckb-sdk-rust still uses 0.30 .
-        //
-        // It's complex to use map_err and return an error as well because secp256k1 used by ckb sdk is not public.
-        // Expect is OK here since the secret key is valid and can be parsed in both versions.
-        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![std::str::FromStr::from_str(
-            hex::encode(self.secret_key.as_ref()).as_ref(),
-        )
-        .expect("convert secret key between different secp256k1 versions")]);
+        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![self.secret_key]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
         let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
         let mut unlockers = HashMap::default();
@@ -128,8 +112,7 @@ impl LocalSigner {
     ///
     /// This is useful for creating channel announcements and other protocol messages.
     pub fn x_only_pub_key(&self) -> secp256k1::XOnlyPublicKey {
-        let secp = Secp256k1::new();
-        let keypair = secp256k1::Keypair::from_secret_key(&secp, &self.secret_key);
+        let keypair = secp256k1::Keypair::from_secret_key(SECP256K1, &self.secret_key);
         secp256k1::XOnlyPublicKey::from_keypair(&keypair).0
     }
 }
@@ -156,8 +139,7 @@ mod tests {
         let signer = LocalSigner::new(secret_key);
 
         // Verify pubkey is derived correctly
-        let secp = Secp256k1::new();
-        let expected_pubkey = secret_key.public_key(&secp);
+        let expected_pubkey = secret_key.public_key(SECP256K1);
         assert_eq!(signer.pubkey(), &expected_pubkey);
 
         // Verify pubkey_hash is 20 bytes
@@ -194,13 +176,12 @@ mod tests {
         let signer_sig = signer.sign_recoverable(&message);
 
         // Sign directly using secp256k1
-        let secp = Secp256k1::new();
         let msg = Message::from_digest(message);
-        let direct_sig = secp.sign_ecdsa_recoverable(&msg, &secret_key);
+        let direct_sig = SECP256K1.sign_ecdsa_recoverable(&msg, &secret_key);
         let (recov_id, data) = direct_sig.serialize_compact();
         let mut direct_sig_bytes = [0u8; 65];
         direct_sig_bytes[0..64].copy_from_slice(&data[0..64]);
-        direct_sig_bytes[64] = recov_id.to_i32() as u8;
+        direct_sig_bytes[64] = i32::from(recov_id) as u8;
 
         // They should be identical
         assert_eq!(signer_sig, direct_sig_bytes);

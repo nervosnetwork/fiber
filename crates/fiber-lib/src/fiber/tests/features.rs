@@ -1,7 +1,5 @@
-use crate::fiber::features::{
-    feature_bits::{GOSSIP_QUERIES_OPTIONAL, GOSSIP_QUERIES_REQUIRED},
-    *,
-};
+use crate::fiber::FeatureVector;
+use fiber_types::feature_bits::{GOSSIP_QUERIES_OPTIONAL, GOSSIP_QUERIES_REQUIRED};
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -131,6 +129,8 @@ fn test_feature_default() {
     assert!(vector.supports_gossip_queries());
     assert!(vector.supports_basic_mpp());
     assert!(vector.requires_basic_mpp());
+    assert!(vector.requires_trampoline_routing());
+    assert!(vector.supports_trampoline_routing());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

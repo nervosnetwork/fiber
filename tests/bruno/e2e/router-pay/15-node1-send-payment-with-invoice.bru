@@ -43,5 +43,5 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("send payment result: ", res.body);
-
+  bru.setVar("payment_hash", res.body.result.payment_hash);
 }

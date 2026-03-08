@@ -1,24 +1,22 @@
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
-use bech32::ToBase32;
-use ckb_hash::blake2b_256;
-use ckb_types::packed::Script;
-use secp256k1::{
-    ecdsa::{RecoverableSignature, RecoveryId},
-    Message, Secp256k1,
-};
-
 use crate::{
-    fiber::{gen::invoice::RawCkbInvoice, types::Hash256},
+    fiber::types::Hash256,
     gen_deterministic_secp256k1_keypair_tuple,
-    invoice::{
-        invoice_impl::{CkbScript, InvoiceData, SIGNATURE_U5_SIZE},
-        utils::{ar_decompress, ar_encompress},
-        Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceError, InvoiceSignature,
-    },
+    invoice::{Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceError, InvoiceSignature},
 };
 use crate::{
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_secp256k1_private_key,
     gen_rand_sha256_hash,
+};
+use bech32::{FromBase32, ToBase32};
+use ckb_hash::blake2b_256;
+use ckb_types::packed::Script;
+use fiber_types::gen::invoice::RawCkbInvoice;
+use fiber_types::CkbScript;
+use fiber_types::InvoiceData;
+use secp256k1::{
+    ecdsa::{RecoverableSignature, RecoveryId},
+    Message, Secp256k1,
 };
 
 fn mock_invoice() -> CkbInvoice {
@@ -85,7 +83,7 @@ fn test_signature() {
     );
     let signature = InvoiceSignature(signature);
     let base32 = signature.to_base32();
-    assert_eq!(base32.len(), SIGNATURE_U5_SIZE);
+    assert_eq!(base32.len(), fiber_types::SIGNATURE_U5_SIZE);
 
     let decoded_signature = InvoiceSignature::from_base32(&base32).unwrap();
     assert_eq!(decoded_signature, signature);
@@ -192,19 +190,6 @@ fn test_invoice_bc32m_not_same() {
     let mock_invoice = mock_invoice();
     let mock_address = mock_invoice.to_string();
     assert_ne!(mock_address, address);
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_compress() {
-    let input = "hrp1gyqsqqq5qqqqq9gqqqqp6qqqqq0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq2qqqqqqqqqqqyvqsqqqsqqqqqvqqqqq8";
-    let bytes = input.as_bytes();
-    let compressed = ar_encompress(input.as_bytes()).unwrap();
-
-    let decompressed = ar_decompress(&compressed).unwrap();
-    let decompressed_str = std::str::from_utf8(&decompressed).unwrap();
-    assert_eq!(input, decompressed_str);
-    assert!(compressed.len() < bytes.len());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -552,7 +537,7 @@ fn test_check_signature_should_not_panic() {
 
     // create a recoverable signature with invalid recovery id
     let raw_signature = [0u8; 64];
-    let recovery_id = RecoveryId::from_i32(0).expect("valid recovery id");
+    let recovery_id = RecoveryId::try_from(0).expect("valid recovery id");
     let recoverable_signature = RecoverableSignature::from_compact(&raw_signature, recovery_id)
         .expect("signature from compact");
     invoice.signature = Some(InvoiceSignature(recoverable_signature));
