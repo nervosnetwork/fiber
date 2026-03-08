@@ -1,5 +1,3 @@
-
-use super::check_migrate;
 use super::{KVStore, KeyValue, StoreChange, StoreKeyValue};
 
 pub use fiber_store::DbDirection;
@@ -78,9 +76,9 @@ impl Store {
 }
 
 impl KVStore for Store {
-    /// Returns the underlying database instance for backup and maintenance.
-    fn inner_db(&self) -> &Arc<DB> {
-        &self.db
+    /// Returns the Store type.
+    fn inner_db(&self) -> &fiber_store::Store {
+        &self.inner
     }
 }
 

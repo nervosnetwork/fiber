@@ -72,7 +72,7 @@ where
 
 #[cfg(not(target_arch = "wasm32"))]
 pub trait KVStore {
-    fn inner_db(&self) -> &std::sync::Arc<rocksdb::DB>;
+    fn inner_db(&self) -> &fiber_store::Store;
 }
 
 impl Store {
