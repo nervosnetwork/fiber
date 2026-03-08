@@ -882,9 +882,9 @@ checksum = "8b3b72a38c9920a29990df12002c4d069a147c8782f0c211f8a01b2df8f42bfd"
 
 [[package]]
 name = "ckb-chain-spec"
-version = "1.0.2"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0603c6ae41aedb224cd37a6caac5609fe79ce2ec8b8bab13b65e8fadb78a60d"
+checksum = "f3e8265b28af91d3b31015a21da9c596c061a4cb5e7dda18556a00273ed72b8a"
 dependencies = [
  "cacache",
  "ckb-constant",
