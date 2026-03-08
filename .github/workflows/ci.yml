@@ -189,12 +189,34 @@ jobs:
           git checkout origin/${{ github.base_ref }}
 
           export ON_GITHUB_ACTION=y
-          CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > baseline.log 2>&1 &
+          baseline_supports_metrics=0
+          if grep -q "ENABLE_FIBER_METRICS" ./tests/nodes/start.sh; then
+            baseline_supports_metrics=1
+          fi
+          echo "${baseline_supports_metrics}" > /tmp/benchmark_enable_metrics
+
+          if [ "${baseline_supports_metrics}" = "1" ]; then
+            ENABLE_FIBER_METRICS=1 CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > baseline.log 2>&1 &
+          else
+            CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > baseline.log 2>&1 &
+          fi
           ./tests/nodes/wait.sh
 
           cd ./tests/perf/
           cargo run --bin run-test --release integration
           cargo run --bin run-test --release benchmark 90 30 base
+          if [ "${baseline_supports_metrics}" = "1" ] && cargo run --bin run-test --release 2>&1 | grep -q "gossip-benchmark"; then
+            cargo run --bin run-test --release -- gossip-benchmark steady --duration-secs 30 --interval-ms 50 --result-mode base
+            cp gossip_baseline.json /tmp/gossip_baseline.json
+            echo "1" > /tmp/gossip_benchmark_base_supported
+          else
+            echo "0" > /tmp/gossip_benchmark_base_supported
+            if [ "${baseline_supports_metrics}" != "1" ]; then
+              echo "ℹ️ Base branch start script does not support metrics-enabled startup yet, skip gossip baseline compare seed."
+            else
+              echo "ℹ️ Base branch does not support gossip-benchmark yet, skip baseline compare seed."
+            fi
+          fi
           cd -
           git stash
 
@@ -206,12 +228,43 @@ jobs:
           pkill -f 'fnn|ckb run|npm' || true
           rm -rf ./tests/nodes/.ports
           export ON_GITHUB_ACTION=y
-          REMOVE_OLD_STATE=y CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > current.log 2>&1 &
+          benchmark_enable_metrics=0
+          if [ -f /tmp/benchmark_enable_metrics ]; then
+            benchmark_enable_metrics="$(cat /tmp/benchmark_enable_metrics)"
+          fi
+
+          if [ "${benchmark_enable_metrics}" = "1" ]; then
+            REMOVE_OLD_STATE=y ENABLE_FIBER_METRICS=1 CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > current.log 2>&1 &
+          else
+            REMOVE_OLD_STATE=y CKB_LOG=warn TEST_ENV=release ./tests/nodes/start.sh > current.log 2>&1 &
+          fi
           ./tests/nodes/wait.sh
 
           cd ./tests/perf/
           cargo run --bin run-test --release integration
           cargo run --bin run-test --release benchmark 90 30 compare
+          gossip_compare_enabled=0
+          if [ "${benchmark_enable_metrics}" = "1" ] && cargo run --bin run-test --release 2>&1 | grep -q "gossip-benchmark"; then
+            if [ -f /tmp/gossip_benchmark_base_supported ] && [ "$(cat /tmp/gossip_benchmark_base_supported)" = "1" ] && [ -f /tmp/gossip_baseline.json ]; then
+              cp /tmp/gossip_baseline.json gossip_baseline.json
+              cargo run --bin run-test --release -- gossip-benchmark steady --duration-secs 30 --interval-ms 50 --result-mode compare
+              gossip_compare_enabled=1
+            else
+              # Bootstrap mode: this allows the first PR that introduces gossip benchmark
+              # to land even if the base branch has no compatible baseline command yet.
+              # TODO: Remove this fallback and require gossip compare on every PR once
+              # baseline branches all support `gossip-benchmark`.
+              echo "ℹ️ Gossip benchmark compare is in bootstrap mode (missing base support); run current baseline snapshot only."
+              cargo run --bin run-test --release -- gossip-benchmark steady --duration-secs 30 --interval-ms 50 --result-mode base
+            fi
+          else
+            if [ "${benchmark_enable_metrics}" != "1" ]; then
+              echo "ℹ️ Skip gossip benchmark: baseline branch lacks metrics-enabled startup support, keeping benchmark builds symmetrical."
+            else
+              echo "ℹ️ Current commit does not expose gossip-benchmark entrypoint; skip gossip benchmark."
+            fi
+          fi
+          echo "${gossip_compare_enabled}" > /tmp/gossip_benchmark_compare_enabled
           cd -
 
       - name: Upload benchmark results
@@ -224,6 +277,9 @@ jobs:
             ./tests/perf/comparison_report.txt
             ./tests/perf/baseline.json
             ./tests/perf/current.json
+            ./tests/perf/gossip_baseline.json
+            ./tests/perf/gossip_current.json
+            ./tests/perf/gossip_comparison_report.txt
 
       - name: Check benchmark result
         run: |
@@ -239,6 +295,25 @@ jobs:
             echo "⚠️ Comparison report not found at ./tests/perf/comparison_report.txt"
             echo "This might indicate a benchmark execution failure."
             exit 1
+          fi
+
+          # Gossip benchmark regression gating is temporarily bootstrap-only.
+          # We gate only when baseline and current branches both support gossip compare.
+          if [ -f /tmp/gossip_benchmark_compare_enabled ] && [ "$(cat /tmp/gossip_benchmark_compare_enabled)" = "1" ]; then
+            if [ -f "./tests/perf/gossip_comparison_report.txt" ]; then
+              if grep -q "Performance regression detected" "./tests/perf/gossip_comparison_report.txt"; then
+                echo "❌ Gossip performance regression detected! Failing the workflow."
+                exit 1
+              else
+                echo "✅ No gossip performance regression detected."
+              fi
+            else
+              echo "⚠️ Gossip comparison report not found at ./tests/perf/gossip_comparison_report.txt"
+              echo "This might indicate a gossip benchmark execution failure."
+              exit 1
+            fi
+          else
+            echo "ℹ️ Gossip regression check skipped in bootstrap mode."
           fi
 
   payment-benchmark:
