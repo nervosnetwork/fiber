@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 /// Parameters for sending a commitment_signed message.
-// TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CommitmentSignedParams {
     /// The channel ID of the channel to send the commitment_signed message to
