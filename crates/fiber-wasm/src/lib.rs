@@ -323,7 +323,7 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                 .create_watch_channel(CreateWatchChannelParams {
                     channel_id: channel_id.into(),
                     funding_udt_type_script: funding_udt_type_script.map(Into::into),
-                    local_settlement_key: hex::encode(local_settlement_key.as_ref()),
+                    local_settlement_key: local_settlement_key.0.secret_bytes().into(),
                     remote_settlement_key: remote_settlement_key.into(),
                     local_funding_pubkey: local_funding_pubkey.into(),
                     remote_funding_pubkey: remote_funding_pubkey.into(),

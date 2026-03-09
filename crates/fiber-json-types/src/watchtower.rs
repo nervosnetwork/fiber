@@ -1,7 +1,7 @@
 //! Watchtower types for the Fiber Network JSON-RPC API.
 
 use crate::invoice::HashAlgorithm;
-use crate::serde_utils::{EntityHex, Hash256, Pubkey, SliceHex, U128Hex, U64Hex};
+use crate::serde_utils::{EntityHex, Hash256, Privkey, Pubkey, SliceHex, U128Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::{Bytes, CellOutput};
 use serde::{Deserialize, Serialize};
@@ -33,8 +33,8 @@ pub struct SettlementTlc {
     /// The expiry time for the TLC in milliseconds
     #[serde_as(as = "U64Hex")]
     pub expiry: u64,
-    /// The local party's private key used to sign the TLC (hex string)
-    pub local_key: String,
+    /// The local party's private key used to sign the TLC (hex without 0x prefix)
+    pub local_key: Privkey,
     /// The remote party's public key used to verify the TLC (hex without 0x prefix)
     pub remote_key: Pubkey,
 }
@@ -79,8 +79,8 @@ pub struct CreateWatchChannelParams {
     pub channel_id: Hash256,
     /// Funding UDT type script
     pub funding_udt_type_script: Option<Script>,
-    /// The local party's private key used to settle the commitment transaction (hex string)
-    pub local_settlement_key: String,
+    /// The local party's private key used to settle the commitment transaction (hex without 0x prefix)
+    pub local_settlement_key: Privkey,
     /// The remote party's public key used to settle the commitment transaction (hex without 0x prefix)
     pub remote_settlement_key: Pubkey,
     /// The local party's funding public key (hex without 0x prefix)

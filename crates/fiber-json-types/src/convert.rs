@@ -41,7 +41,7 @@ use crate::payment::{
     PaymentStatus as JsonPaymentStatus, SessionRoute as JsonSessionRoute,
     SessionRouteNode as JsonSessionRouteNode,
 };
-use crate::serde_utils::{Hash256 as JsonHash256, Pubkey as JsonPubkey};
+use crate::serde_utils::{Hash256 as JsonHash256, Privkey as JsonPrivkey, Pubkey as JsonPubkey};
 
 use ckb_types::prelude::Entity;
 use fiber_types::{
@@ -83,6 +83,20 @@ impl TryFrom<JsonPubkey> for Pubkey {
 
     fn try_from(jp: JsonPubkey) -> Result<Self, Self::Error> {
         Pubkey::from_slice(&jp.0).map_err(|e| format!("invalid pubkey '{}': {}", jp, e))
+    }
+}
+
+impl From<fiber_types::Privkey> for JsonPrivkey {
+    fn from(privkey: fiber_types::Privkey) -> Self {
+        JsonPrivkey::from(privkey.0.secret_bytes())
+    }
+}
+
+impl TryFrom<JsonPrivkey> for fiber_types::Privkey {
+    type Error = String;
+
+    fn try_from(jp: JsonPrivkey) -> Result<Self, Self::Error> {
+        Ok(fiber_types::Privkey::from_slice(jp.as_bytes()))
     }
 }
 
@@ -568,7 +582,7 @@ mod watchtower_convert {
                 payment_amount: tlc.payment_amount,
                 payment_hash: tlc.payment_hash.into(),
                 expiry: tlc.expiry,
-                local_key: hex::encode(tlc.local_key.0.secret_bytes()),
+                local_key: tlc.local_key.into(),
                 remote_key: tlc.remote_key.into(),
             }
         }
@@ -577,19 +591,13 @@ mod watchtower_convert {
     impl TryFrom<JsonSettlementTlc> for InternalSettlementTlc {
         type Error = String;
         fn try_from(tlc: JsonSettlementTlc) -> Result<Self, Self::Error> {
-            let local_key_bytes =
-                hex::decode(&tlc.local_key).map_err(|e| format!("invalid local_key hex: {e}"))?;
-            let local_key_arr: [u8; 32] = local_key_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| "invalid local_key length, expected 32 bytes".to_string())?;
             Ok(InternalSettlementTlc {
                 tlc_id: tlc.tlc_id.into(),
                 hash_algorithm: tlc.hash_algorithm.into(),
                 payment_amount: tlc.payment_amount,
                 payment_hash: tlc.payment_hash.into(),
                 expiry: tlc.expiry,
-                local_key: local_key_arr.into(),
+                local_key: tlc.local_key.try_into()?,
                 remote_key: Pubkey::try_from(tlc.remote_key)
                     .map_err(|e| format!("invalid remote_key: {e}"))?,
             })

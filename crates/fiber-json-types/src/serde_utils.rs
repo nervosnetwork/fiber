@@ -254,6 +254,73 @@ impl core::str::FromStr for Pubkey {
     }
 }
 
+/// A private key byte array (32 bytes), serialized as hex without `0x` prefix.
+///
+/// On deserialization, only hex format and 32-byte length are checked.
+/// Both `0x`-prefixed and non-prefixed hex strings are accepted on input.
+/// Cryptographic validation is left to the RPC layer's conversion to internal `Privkey`.
+#[serde_as]
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Privkey(#[serde_as(as = "SliceHexNoPrefix")] pub [u8; 32]);
+
+impl Privkey {
+    /// Create a `Privkey` from a 32-byte slice.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != 32 {
+            return Err(format!(
+                "invalid privkey length: expected 32 bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes);
+        Ok(Privkey(arr))
+    }
+
+    /// Return the underlying 32 bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl From<[u8; 32]> for Privkey {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Privkey> for [u8; 32] {
+    fn from(value: Privkey) -> Self {
+        value.0
+    }
+}
+
+impl core::fmt::Debug for Privkey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Privkey({})", hex::encode(self.0))
+    }
+}
+
+impl core::fmt::Display for Privkey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+impl core::str::FromStr for Privkey {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let hex_str = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(s);
+        let bytes =
+            hex::decode(hex_str).map_err(|e| format!("invalid privkey hex '{}': {}", s, e))?;
+        Privkey::from_slice(&bytes)
+    }
+}
+
 /// A 256-bit hash (32 bytes), serialized as `0x`-prefixed hex string.
 ///
 /// On deserialization, both `0x`-prefixed and non-prefixed hex strings are accepted.

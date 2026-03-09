@@ -151,12 +151,10 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
         let channel_id = params.channel_id.into();
-        let local_settlement_key_bytes =
-            hex::decode(&params.local_settlement_key).rpc_err(&params)?;
-        let local_settlement_key: fiber_types::Privkey =
-            <[u8; 32]>::try_from(local_settlement_key_bytes.as_slice())
-                .map_err(|_| rpc_error("invalid local_settlement_key length", &params))?
-                .into();
+        let local_settlement_key: fiber_types::Privkey = params
+            .local_settlement_key
+            .try_into()
+            .map_err(|e: String| rpc_error(e, &params))?;
         let remote_settlement_key =
             Pubkey::try_from(params.remote_settlement_key).rpc_err(&params)?;
         let local_funding_pubkey =

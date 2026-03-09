@@ -85,6 +85,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentStatus`](#type-paymentstatus)
     * [Type `PeerInfo`](#type-peerinfo)
+    * [Type `Privkey`](#type-privkey)
     * [Type `Pubkey`](#type-pubkey)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `RevocationData`](#type-revocationdata)
@@ -968,7 +969,7 @@ Create a new watched channel
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, Funding UDT type script
-* `local_settlement_key` - <em>`String`</em>, The local party's private key used to settle the commitment transaction (hex string)
+* `local_settlement_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to settle the commitment transaction (hex without 0x prefix)
 * `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to settle the commitment transaction (hex without 0x prefix)
 * `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
@@ -1471,6 +1472,19 @@ The information about a peer connected to the node.
  The `graph_nodes` in Graph rpc module will return all addresses of the peer.
 ---
 
+<a id="#type-privkey"></a>
+### Type `Privkey`
+
+A private key byte array (32 bytes), serialized as hex without `0x` prefix.
+
+ On deserialization, only hex format and 32-byte length are checked.
+ Both `0x`-prefixed and non-prefixed hex strings are accepted on input.
+ Cryptographic validation is left to the RPC layer's conversion to internal `Privkey`.
+
+
+
+---
+
 <a id="#type-pubkey"></a>
 ### Type `Pubkey`
 
@@ -1575,7 +1589,7 @@ Data needed to authorize and execute a Time-Locked Contract (TLC) settlement tra
 * `payment_amount` - <em>`u128`</em>, The amount of CKB/UDT involved in the TLC
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the payment preimage
 * `expiry` - <em>`u64`</em>, The expiry time for the TLC in milliseconds
-* `local_key` - <em>`String`</em>, The local party's private key used to sign the TLC (hex string)
+* `local_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to sign the TLC (hex without 0x prefix)
 * `remote_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to verify the TLC (hex without 0x prefix)
 ---
 
