@@ -28,6 +28,9 @@ pub mod protocol;
 pub mod schema;
 pub mod serde_utils;
 
+#[cfg(feature = "sample")]
+pub mod sample;
+
 #[cfg(feature = "cch")]
 pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
 pub use channel::*;
