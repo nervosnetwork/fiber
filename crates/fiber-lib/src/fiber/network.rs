@@ -6,7 +6,6 @@ use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
-use getrandom::fill;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
@@ -4449,7 +4448,7 @@ where
             .expect("valid length for key")
             .into();
         let mut entropy_rand = [0u8; 32];
-        fill(&mut entropy_rand).expect("getrandom fill should not fail");
+        getrandom::fill(&mut entropy_rand).expect("getrandom fill should not fail");
         let entropy = blake2b_hash_with_salt(
             [kp.as_ref(), entropy_rand.as_slice()].concat().as_slice(),
             b"FIBER_NETWORK_ENTROPY",
