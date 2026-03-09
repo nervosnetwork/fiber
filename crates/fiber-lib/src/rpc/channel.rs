@@ -212,27 +212,19 @@ pub struct ListChannelsResult {
 )]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
-    NegotiatingFunding(
-        #[schemars(schema_with = "schema_as_integer")] NegotiatingFundingFlags,
-    ),
+    NegotiatingFunding(#[schemars(schema_with = "schema_as_integer")] NegotiatingFundingFlags),
     /// We're collaborating with the other party on the funding transaction.
     CollaboratingFundingTx(
         #[schemars(schema_with = "schema_as_integer")] CollaboratingFundingTxFlags,
     ),
     /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
-    SigningCommitment(
-        #[schemars(schema_with = "schema_as_integer")] SigningCommitmentFlags,
-    ),
+    SigningCommitment(#[schemars(schema_with = "schema_as_integer")] SigningCommitmentFlags),
     /// We've received and sent `commitment_signed` and are now waiting for both
     /// party to collaborate on creating a valid funding transaction.
-    AwaitingTxSignatures(
-        #[schemars(schema_with = "schema_as_integer")] AwaitingTxSignaturesFlags,
-    ),
+    AwaitingTxSignatures(#[schemars(schema_with = "schema_as_integer")] AwaitingTxSignaturesFlags),
     /// We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
     /// funding transaction to confirm.
-    AwaitingChannelReady(
-        #[schemars(schema_with = "schema_as_integer")] AwaitingChannelReadyFlags,
-    ),
+    AwaitingChannelReady(#[schemars(schema_with = "schema_as_integer")] AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
     ChannelReady,

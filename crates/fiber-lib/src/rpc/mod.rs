@@ -397,4 +397,3 @@ pub mod server {
         assert!(!is_public_addr("127.0.0.1:0").unwrap());
     }
 }
-
