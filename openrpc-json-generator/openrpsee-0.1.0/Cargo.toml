@@ -38,8 +38,7 @@ features = ["server"]
 version = "1"
 
 [dependencies.schemars]
-version = "0.8"
-package = "ckb_schemars"
+version = "1"
 
 [dependencies.serde]
 version = "1"

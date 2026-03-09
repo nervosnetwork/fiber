@@ -23,14 +23,9 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::types::ErrorObjectOwned;
 
-use schemars::schema::InstanceType;
-use schemars::schema::Metadata;
-use schemars::schema::ObjectValidation;
-use schemars::schema::Schema;
-use schemars::schema::SchemaObject;
-use schemars::schema::SingleOrVec;
-use schemars::schema::StringValidation;
+use schemars::json_schema;
 use schemars::JsonSchema;
+use schemars::Schema;
 use schemars::SchemaGenerator;
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -125,48 +120,24 @@ pub struct PaymentCustomRecords {
 }
 
 impl JsonSchema for PaymentCustomRecords {
-    fn schema_name() -> String {
-        "PaymentCustomRecords".to_string()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PaymentCustomRecords".into()
     }
 
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
-        let key_schema = SchemaObject {
-            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
-            string: Some(Box::new(StringValidation {
-                pattern: Some("^0x(0|[1-9a-fA-F][0-9a-fA-F]{0,3})$".to_string()),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-
-        let value_schema = Schema::Object(SchemaObject {
-            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
-            string: Some(Box::new(StringValidation {
-                pattern: Some("^0x([0-9a-fA-F]{2})*$".to_string()),
-                ..Default::default()
-            })),
-            ..Default::default()
-        });
-
-        let schema = SchemaObject {
-            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Object))),
-            object: Some(Box::new(ObjectValidation {
-                property_names: Some(Box::new(key_schema.into())),
-                additional_properties: Some(Box::new(value_schema)),
-                ..Default::default()
-            })),
-            metadata: Some(Box::new(Metadata {
-                description: Some(
-                    "Custom records map. Keys are hex-encoded u32 (0~65535), \
-                 values are hex-encoded bytes. Both prefixed with 0x."
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-
-        schema.into()
+        json_schema!({
+            "type": "object",
+            "description": "Custom records map. Keys are hex-encoded u32 (0~65535), \
+                values are hex-encoded bytes. Both prefixed with 0x.",
+            "propertyNames": {
+                "type": "string",
+                "pattern": "^0x(0|[1-9a-fA-F][0-9a-fA-F]{0,3})$"
+            },
+            "additionalProperties": {
+                "type": "string",
+                "pattern": "^0x([0-9a-fA-F]{2})*$"
+            }
+        })
     }
 }
 

@@ -2,7 +2,9 @@
 
 use documented::Documented;
 use jsonrpsee::core::RpcResult;
-use schemars::{JsonSchema, Map, SchemaGenerator, r#gen::SchemaSettings, schema::Schema};
+use std::borrow::Cow;
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use serde::Serialize;
 
 /// Response to an `rpc.discover` RPC request.
@@ -135,7 +137,7 @@ impl Generator {
     /// Consumes the generator and produces the OpenRPC components.
     pub fn into_components(mut self) -> Components {
         Components {
-            schemas: self.inner.take_definitions(),
+            schemas: self.inner.take_definitions(true),
         }
     }
 }
@@ -154,8 +156,8 @@ pub struct OpenRpc {
 }
 
 impl JsonSchema for OpenRpc {
-    fn schema_name() -> String {
-        String::from("OpenRPC Schema")
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("OpenRPC Schema")
     }
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
@@ -212,7 +214,7 @@ pub struct ContentDescriptor {
 /// The components (schemas) used in the OpenRPC document.
 #[derive(Clone, Debug, Serialize)]
 pub struct Components {
-    schemas: Map<String, Schema>,
+    schemas: serde_json::Map<String, serde_json::Value>,
 }
 
 fn is_false(b: &bool) -> bool {
