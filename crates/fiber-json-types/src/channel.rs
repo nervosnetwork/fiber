@@ -1,5 +1,6 @@
 //! Channel management types for the Fiber Network JSON-RPC API.
 
+use crate::define_rpc_flags;
 use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
 use ckb_types::packed::OutPoint;
@@ -7,137 +8,7 @@ use ckb_types::H256;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-/// Convert SCREAMING_SNAKE_CASE to PascalCase.
-/// Example: "OUR_INIT_SENT" -> "OurInitSent"
-fn to_pascal_case(s: &str) -> String {
-    s.split('_')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => {
-                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-                }
-            }
-        })
-        .collect()
-}
-
-/// Convert PascalCase to SCREAMING_SNAKE_CASE.
-/// Example: "OurInitSent" -> "OUR_INIT_SENT"
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('_');
-        }
-        result.push(c.to_ascii_uppercase());
-    }
-    result
-}
-
-/// Macro to define flags types that serialize to PascalCase strings.
-/// For single flag, returns the flag name in PascalCase (e.g., "OurInitSent").
-/// For multiple flags, returns comma-separated names (e.g., "OurInitSent,TheirInitSent").
-macro_rules! define_flags {
-    (
-        $(#[$struct_meta:meta])*
-        pub struct $name:ident($ty:ty) {
-            $($(#[$flag_meta:meta])* const $flag_name:ident = $flag_value:expr;)*
-        }
-    ) => {
-        $(#[$struct_meta])*
-        pub struct $name(pub $ty);
-
-        impl $name {
-            $(pub const $flag_name: $ty = $flag_value;)*
-
-            #[allow(clippy::wrong_self_convention)]
-            fn to_strings(self) -> Vec<String> {
-                let mut names = Vec::new();
-                $(
-                    if self.0 & Self::$flag_name != 0 {
-                        names.push(to_pascal_case(stringify!($flag_name)));
-                    }
-                )*
-                names
-            }
-
-            fn from_string(s: &str) -> Option<Self> {
-                let mut flags: $ty = 0;
-                for name in s.split(',') {
-                    let name = name.trim();
-                    let snake_name = to_snake_case(name);
-                    match snake_name.as_str() {
-                        $(stringify!($flag_name) => flags |= Self::$flag_name,)*
-                        _ => return None,
-                    }
-                }
-                Some($name(flags))
-            }
-        }
-
-        impl Serialize for $name {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                let names = self.clone().to_strings();
-                if names.is_empty() {
-                    serializer.serialize_str("")
-                } else {
-                    serializer.serialize_str(&names.join(","))
-                }
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let s = String::deserialize(deserializer)?;
-                if s.is_empty() {
-                    Ok($name(0))
-                } else {
-                    $name::from_string(&s)
-                        .ok_or_else(|| serde::de::Error::custom(format!("Invalid {}: {}", stringify!($name), s)))
-                }
-            }
-        }
-
-        impl From<$ty> for $name {
-            fn from(v: $ty) -> Self {
-                $name(v)
-            }
-        }
-
-        impl From<$name> for $ty {
-            fn from(v: $name) -> Self {
-                v.0
-            }
-        }
-    };
-}
-
-define_flags! {
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    pub struct ChannelFlags(u8) {
-        const PUBLIC = 1;
-        const ONE_WAY = 1 << 1;
-    }
-}
-
-define_flags! {
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-    pub struct ChannelUpdateChannelFlags(u32) {
-        const DISABLED = 1;
-    }
-}
-
-define_flags! {
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-    pub struct ChannelUpdateMessageFlags(u32) {
-        const UPDATE_OF_NODE1 = 0;
-        const UPDATE_OF_NODE2 = 1;
-    }
-}
-
-define_flags! {
+define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct NegotiatingFundingFlags(u32) {
         const OUR_INIT_SENT = 1;
@@ -146,7 +17,7 @@ define_flags! {
     }
 }
 
-define_flags! {
+define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct CollaboratingFundingTxFlags(u32) {
         const AWAITING_REMOTE_TX_COLLABORATION_MSG = 1;
@@ -157,7 +28,7 @@ define_flags! {
     }
 }
 
-define_flags! {
+define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct SigningCommitmentFlags(u32) {
         const OUR_COMMITMENT_SIGNED_SENT = 1;
@@ -166,7 +37,7 @@ define_flags! {
     }
 }
 
-define_flags! {
+define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct AwaitingTxSignaturesFlags(u32) {
         const OUR_TX_SIGNATURES_SENT = 1;
@@ -175,7 +46,7 @@ define_flags! {
     }
 }
 
-define_flags! {
+define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct AwaitingChannelReadyFlags(u32) {
         const OUR_CHANNEL_READY = 1;
@@ -184,7 +55,7 @@ define_flags! {
     }
 }
 
-define_flags! {
+define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct ShuttingDownFlags(u32) {
         const OUR_SHUTDOWN_SENT = 1;
@@ -195,7 +66,7 @@ define_flags! {
     }
 }
 
-define_flags! {
+define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct CloseFlags(u32) {
         const COOPERATIVE = 1;
@@ -204,14 +75,6 @@ define_flags! {
         const FUNDING_ABORTED = 1 << 3;
         const UNCOOPERATIVE_REMOTE = 1 << 4;
         const WAITING_ONCHAIN_SETTLEMENT = 1 << 5;
-    }
-}
-
-define_flags! {
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct AppliedFlags(u8) {
-        const ADD = 1;
-        const REMOVE = 1 << 1;
     }
 }
 
