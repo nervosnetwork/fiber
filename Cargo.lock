@@ -1295,9 +1295,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-types"
-version = "1.0.2"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5326563ecb732527a899d3c1f25ef7f5f7fc3f7e83e39456d33f508c93b50f3f"
+checksum = "bb1a584004fc6f2066a024b247e498305273cb37c14d34b23787977baefc018e"
 dependencies = [
  "bit-vec",
  "bytes",
@@ -1312,7 +1312,7 @@ dependencies = [
  "derive_more 1.0.0",
  "golomb-coded-set",
  "merkle-cbt",
- "molecule 0.8.0",
+ "molecule 0.9.2",
  "numext-fixed-uint",
  "paste",
 ]
