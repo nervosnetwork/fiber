@@ -125,10 +125,14 @@ impl ChannelActorState {
                 created_at: deterministic_time(0),
             },
             // #[serde(skip)] fields — not serialized, use defaults
+            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
+            defer_peer_tlc_updates: false,
+            deferred_peer_tlc_updates: VecDeque::new(),
+            last_was_revoke: false,
             ephemeral_config: Default::default(),
             private_key: None,
         }
@@ -358,10 +362,14 @@ impl ChannelActorState {
                 created_at: deterministic_time(3600),
             },
             // #[serde(skip)] fields — not serialized, use defaults
+            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
+            defer_peer_tlc_updates: false,
+            deferred_peer_tlc_updates: VecDeque::new(),
+            last_was_revoke: true,
             ephemeral_config: Default::default(),
             private_key: None,
         }
