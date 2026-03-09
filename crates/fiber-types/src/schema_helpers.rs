@@ -40,9 +40,6 @@ pub fn schema_as_byte_array(_generator: &mut SchemaGenerator) -> Schema {
 
 pub(crate) fn schema_as_uint_hex(generator: &mut SchemaGenerator) -> Schema {
     let mut schema = String::json_schema(generator);
-    schema.insert(
-        "pattern".into(),
-        "^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$".into(),
-    );
+    schema.insert("pattern".into(), "^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$".into());
     schema
 }
