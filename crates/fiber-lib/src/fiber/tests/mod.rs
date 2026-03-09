@@ -1,5 +1,6 @@
 mod channel;
 mod channel_commit_diff;
+mod channel_restart_stress;
 mod features;
 mod gossip;
 mod graph;
