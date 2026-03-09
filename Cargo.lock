@@ -2206,6 +2206,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-json-types"
+version = "0.7.1"
+dependencies = [
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "fiber-types",
+ "hex",
+ "molecule 0.8.0",
+ "musig2",
+ "serde",
+ "serde_json",
+ "serde_with",
+]
+
+[[package]]
 name = "fiber-sphinx"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2373,6 +2388,7 @@ dependencies = [
  "clap-serde-derive",
  "criterion",
  "either",
+ "fiber-json-types",
  "fiber-sphinx",
  "fiber-store",
  "fiber-types",

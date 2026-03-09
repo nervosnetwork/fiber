@@ -207,14 +207,14 @@ async fn test_send_payment_with_hold_invoice_workflow() {
     let [node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let payment_preimage = gen_rand_sha256_hash();
-    let payment_hash = HashAlgorithm::CkbHash
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash
         .hash(payment_preimage.as_ref())
         .into();
     let invoice = node_1
         .gen_invoice(NewInvoiceParams {
             amount: 1000,
             description: Some("test invoice".to_string()),
-            payment_hash: Some(payment_hash),
+            payment_hash: Some(payment_hash.into()),
             ..Default::default()
         })
         .await;
@@ -277,7 +277,7 @@ async fn test_cancel_hold_invoice_fails_pending_tlcs() {
         .gen_invoice(NewInvoiceParams {
             amount: 1000,
             description: Some("hold invoice to cancel".to_string()),
-            payment_hash: Some(payment_hash),
+            payment_hash: Some(payment_hash.into()),
             ..Default::default()
         })
         .await;

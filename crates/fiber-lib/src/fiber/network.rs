@@ -92,6 +92,7 @@ use crate::invoice::{
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
 use fiber_types::{
@@ -406,18 +407,6 @@ pub struct OpenChannelCommand {
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
-}
-
-/// A hop requirement need to meet when building router, do not including the source node,
-/// the last hop is the target node.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HopRequire {
-    /// The public key of the node
-    pub(crate) pubkey: Pubkey,
-    /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
-    #[serde_as(as = "Option<EntityHex>")]
-    pub(crate) channel_outpoint: Option<OutPoint>,
 }
 
 #[serde_as]

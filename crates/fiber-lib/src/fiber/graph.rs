@@ -17,11 +17,11 @@ use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::ChannelUpdateInfo;
 use fiber_types::{
-    Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelTlcInfo, ChannelUpdate, Cursor,
-    FeatureVector, Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession,
-    PaymentStatus, Privkey, Pubkey, RouterHop, SendPaymentData, TlcErr, U128Hex, U64Hex,
-    UdtCfgInfos,
+    Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, FeatureVector,
+    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus, Privkey,
+    Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
 };
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
@@ -230,67 +230,6 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
             udt_type_script: channel_announcement.udt_type_script,
             update_of_node2: None,
             update_of_node1: None,
-        }
-    }
-}
-
-/// The channel update info with a single direction of channel
-#[serde_as]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ChannelUpdateInfo {
-    /// The timestamp is the time when the channel update was received by the node.
-    #[serde_as(as = "U64Hex")]
-    pub timestamp: u64,
-    /// Whether the channel can be currently used for payments (in this one direction).
-    pub enabled: bool,
-    /// The exact amount of balance that we can send to the other party via the channel.
-    #[serde_as(as = "Option<U128Hex>")]
-    pub outbound_liquidity: Option<u128>,
-    /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
-    #[serde_as(as = "U64Hex")]
-    pub tlc_expiry_delta: u64,
-    /// The minimum value, which must be relayed to the next hop via the channel
-    #[serde_as(as = "U128Hex")]
-    pub tlc_minimum_value: u128,
-    /// The forwarding fee rate for the channel.
-    #[serde_as(as = "U64Hex")]
-    pub fee_rate: u64,
-}
-
-impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
-    fn from(info: &ChannelTlcInfo) -> Self {
-        Self {
-            timestamp: info.timestamp,
-            enabled: info.enabled,
-            outbound_liquidity: None,
-            tlc_expiry_delta: info.tlc_expiry_delta,
-            tlc_minimum_value: info.tlc_minimum_value,
-            fee_rate: info.tlc_fee_proportional_millionths as u64,
-        }
-    }
-}
-
-impl From<ChannelTlcInfo> for ChannelUpdateInfo {
-    fn from(info: ChannelTlcInfo) -> Self {
-        Self::from(&info)
-    }
-}
-
-impl From<ChannelUpdate> for ChannelUpdateInfo {
-    fn from(update: ChannelUpdate) -> Self {
-        Self::from(&update)
-    }
-}
-
-impl From<&ChannelUpdate> for ChannelUpdateInfo {
-    fn from(update: &ChannelUpdate) -> Self {
-        Self {
-            timestamp: update.timestamp,
-            enabled: !update.is_disabled(),
-            outbound_liquidity: None,
-            tlc_expiry_delta: update.tlc_expiry_delta,
-            tlc_minimum_value: update.tlc_minimum_value,
-            fee_rate: update.tlc_fee_proportional_millionths as u64,
         }
     }
 }

@@ -4,7 +4,6 @@ pub mod biscuit;
 pub mod cch;
 pub mod channel;
 pub mod config;
-pub mod context;
 #[cfg(debug_assertions)]
 pub mod dev;
 pub mod graph;
