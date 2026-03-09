@@ -1101,16 +1101,16 @@ The attributes of the invoice.
 
 #### Enum with values of
 
-* `FinalHtlcTimeout` - <em>`u64`</em>, This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
-* `FinalHtlcMinimumExpiryDelta` - <em>`u64`</em>, The final tlc minimum expiry delta, in milliseconds, default is 1 day
-* `ExpiryTime` - <em>`std::time::Duration`</em>, The expiry time of the invoice, in seconds
-* `Description` - <em>`String`</em>, The description of the invoice
-* `FallbackAddr` - <em>`String`</em>, The fallback address of the invoice
-* `UdtScript` - <em>`String`</em>, The udt type script of the invoice (serialized as 0x-prefixed hex of molecule bytes)
-* `PayeePublicKey` - <em>[Pubkey](#type-pubkey)</em>, The payee public key of the invoice (validated compressed secp256k1 key, hex without 0x prefix)
-* `HashAlgorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
-* `Feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
-* `PaymentSecret` - <em>`String`</em>, The payment secret of the invoice
+* `final_htlc_timeout` - <em>`u64`</em>, This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
+* `final_htlc_minimum_expiry_delta` - <em>`u64`</em>, The final tlc minimum expiry delta, in milliseconds, default is 1 day
+* `expiry_time` - <em>`std::time::Duration`</em>, The expiry time of the invoice, in seconds
+* `description` - <em>`String`</em>, The description of the invoice
+* `fallback_addr` - <em>`String`</em>, The fallback address of the invoice
+* `udt_script` - <em>`String`</em>, The udt type script of the invoice (serialized as 0x-prefixed hex of molecule bytes)
+* `payee_public_key` - <em>[Pubkey](#type-pubkey)</em>, The payee public key of the invoice (validated compressed secp256k1 key, hex without 0x prefix)
+* `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
+* `feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
+* `payment_secret` - <em>`String`</em>, The payment secret of the invoice
 ---
 
 <a id="#type-cchinvoice"></a>
@@ -1337,8 +1337,8 @@ HashAlgorithm is the hash algorithm used in the hash lock.
 
 #### Enum with values of
 
-* `CkbHash` - The default hash algorithm, CkbHash
-* `Sha256` - The sha256 hash algorithm
+* `ckb_hash` - The default hash algorithm, CkbHash
+* `sha256` - The sha256 hash algorithm
 ---
 
 <a id="#type-hophint"></a>
