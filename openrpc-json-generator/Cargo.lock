@@ -2036,7 +2036,6 @@ dependencies = [
  "ractor",
  "rand 0.8.5",
  "regex",
- "schemars 1.2.1",
  "scrypt",
  "secp256k1 0.30.0",
  "serde",

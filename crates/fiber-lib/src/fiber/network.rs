@@ -1,5 +1,3 @@
-use crate::rpc::schema_as_string;
-
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::core::tx_pool::TxStatus;
@@ -14,7 +12,6 @@ use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
 use rand::seq::{IteratorRandom, SliceRandom};
-use schemars::JsonSchema;
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -256,7 +253,7 @@ pub struct NodeInfoResponse {
 }
 
 /// The information about a peer connected to the node.
-#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PeerInfo {
     /// The identity public key of the peer (also known as `node_id`).
     pub pubkey: Pubkey,
@@ -264,7 +261,6 @@ pub struct PeerInfo {
     /// The multi-address associated with the connecting peer.
     /// Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
     /// The `graph_nodes` in Graph rpc module will return all addresses of the peer.
-    #[schemars(schema_with = "schema_as_string")]
     pub address: MultiAddr,
 }
 
@@ -425,7 +421,7 @@ pub struct BuildRouterCommand {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentRouter {
     pub router_hops: Vec<RouterHop>,
 }

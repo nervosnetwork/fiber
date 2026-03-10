@@ -1,5 +1,3 @@
-pub(crate) use schema_helpers::*;
-
 #[cfg(not(target_arch = "wasm32"))]
 pub mod biscuit;
 #[cfg(not(target_arch = "wasm32"))]
@@ -17,7 +15,6 @@ pub mod payment;
 pub mod peer;
 #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
 pub mod prof;
-pub mod schema_helpers;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
