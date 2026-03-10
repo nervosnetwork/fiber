@@ -58,3 +58,6 @@ pub use serde_utils::Privkey;
 pub use serde_utils::Pubkey;
 #[cfg(feature = "watchtower")]
 pub use watchtower::*;
+
+#[cfg(all(test, feature = "cli"))]
+mod cli_tests;

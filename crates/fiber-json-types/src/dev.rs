@@ -1,5 +1,8 @@
 //! Development/debug types for the Fiber Network JSON-RPC API.
 
+#[cfg(feature = "cli")]
+use fiber_cli_derive::CliArgs;
+
 use crate::invoice::HashAlgorithm;
 use crate::serde_utils::{Hash256, U128Hex, U64Hex};
 use serde::{Deserialize, Serialize};
@@ -7,6 +10,7 @@ use serde_with::serde_as;
 
 /// Parameters for sending a commitment_signed message.
 #[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct CommitmentSignedParams {
     /// The channel ID of the channel to send the commitment_signed message to
     pub channel_id: Hash256,
@@ -15,6 +19,7 @@ pub struct CommitmentSignedParams {
 /// Parameters for adding a TLC.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct AddTlcParams {
     /// The channel ID of the channel to add the TLC to
     pub channel_id: Hash256,
@@ -27,6 +32,7 @@ pub struct AddTlcParams {
     #[serde_as(as = "U64Hex")]
     pub expiry: u64,
     /// The hash algorithm of the TLC
+    #[cfg_attr(feature = "cli", cli(serde_enum))]
     pub hash_algorithm: Option<HashAlgorithm>,
 }
 
@@ -42,6 +48,7 @@ pub struct AddTlcResult {
 /// Parameters for removing a TLC.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct RemoveTlcParams {
     /// The channel ID of the channel to remove the TLC from
     pub channel_id: Hash256,
@@ -49,6 +56,7 @@ pub struct RemoveTlcParams {
     /// The ID of the TLC to remove
     pub tlc_id: u64,
     /// The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
+    #[cfg_attr(feature = "cli", cli(json))]
     pub reason: RemoveTlcReason,
 }
 
@@ -66,6 +74,7 @@ pub enum RemoveTlcReason {
 /// Parameters for submitting a commitment transaction.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct SubmitCommitmentTransactionParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -85,6 +94,7 @@ pub struct SubmitCommitmentTransactionResult {
 /// Parameters for checking channel shutdown.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct CheckChannelShutdownParams {
     /// Channel ID
     pub channel_id: Hash256,

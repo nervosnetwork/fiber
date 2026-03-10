@@ -1,5 +1,8 @@
 //! Network graph types for the Fiber Network JSON-RPC API.
 
+#[cfg(feature = "cli")]
+use fiber_cli_derive::CliArgs;
+
 use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script, ScriptHashType};
 use ckb_types::packed::OutPoint;
@@ -10,11 +13,13 @@ use serde_with::serde_as;
 /// Parameters for querying graph nodes.
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct GraphNodesParams {
     #[serde_as(as = "Option<U64Hex>")]
     /// The maximum number of nodes to return.
     pub limit: Option<u64>,
     /// The cursor to start returning nodes from.
+    #[cfg_attr(feature = "cli", cli(json_quoted))]
     pub after: Option<JsonBytes>,
 }
 
@@ -110,11 +115,13 @@ pub struct GraphNodesResult {
 /// Parameters for querying graph channels.
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct GraphChannelsParams {
     /// The maximum number of channels to return.
     #[serde_as(as = "Option<U64Hex>")]
     pub limit: Option<u64>,
     /// The cursor to start returning channels from.
+    #[cfg_attr(feature = "cli", cli(json_quoted))]
     pub after: Option<JsonBytes>,
 }
 

@@ -1,65 +1,30 @@
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
-use clap::{Arg, ArgMatches, Command};
-use fiber_json_types::{ConnectPeerParams, DisconnectPeerParams, ListPeersResult, Pubkey};
+use clap::{ArgMatches, Command};
+use fiber_json_types::{ConnectPeerParams, DisconnectPeerParams, ListPeersResult};
 use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("peer")
         .about("Manage peer connections")
-        .subcommand(
-            Command::new("connect_peer")
-                .about("Connect to a peer")
-                .arg(
-                    Arg::new("address")
-                        .long("address")
-                        .required(true)
-                        .help("The multi-address of the peer to connect to"),
-                )
-                .arg(
-                    Arg::new("save")
-                        .long("save")
-                        .num_args(0..=1)
-                        .default_missing_value("true")
-                        .help("Whether to save the peer address to the peer store"),
-                ),
-        )
-        .subcommand(
-            Command::new("disconnect_peer")
-                .about("Disconnect from a peer")
-                .arg(
-                    Arg::new("pubkey")
-                        .long("pubkey")
-                        .required(true)
-                        .help("The public key of the peer to disconnect"),
-                ),
-        )
+        .subcommand(ConnectPeerParams::augment_command(
+            Command::new("connect_peer").about("Connect to a peer"),
+        ))
+        .subcommand(DisconnectPeerParams::augment_command(
+            Command::new("disconnect_peer").about("Disconnect from a peer"),
+        ))
         .subcommand(Command::new("list_peers").about("List connected peers"))
 }
 
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("connect_peer", sub)) => {
-            let address = sub.get_one::<String>("address").unwrap().clone();
-            let save = sub
-                .get_one::<String>("save")
-                .map(|v| v.parse::<bool>().unwrap_or(true));
-
-            let params = ConnectPeerParams {
-                address: Some(address),
-                pubkey: None,
-                save,
-            };
+            let params = ConnectPeerParams::from_arg_matches(sub)?;
             let result: Value = client.call_typed("connect_peer", &params).await?;
             Ok(result)
         }
         Some(("disconnect_peer", sub)) => {
-            let pubkey: Pubkey = sub
-                .get_one::<String>("pubkey")
-                .unwrap()
-                .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
-            let params = DisconnectPeerParams { pubkey };
+            let params = DisconnectPeerParams::from_arg_matches(sub)?;
             let result: Value = client.call_typed("disconnect_peer", &params).await?;
             Ok(result)
         }

@@ -2263,11 +2263,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-cli-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
 name = "fiber-json-types"
 version = "0.7.1"
 dependencies = [
+ "anyhow",
  "ckb-jsonrpc-types",
  "ckb-types",
+ "clap",
+ "fiber-cli-derive",
  "fiber-types",
  "hex",
  "molecule 0.8.0",

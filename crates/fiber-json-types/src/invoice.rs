@@ -1,5 +1,8 @@
 //! Invoice types for the Fiber Network JSON-RPC API.
 
+#[cfg(feature = "cli")]
+use fiber_cli_derive::CliArgs;
+
 use crate::serde_utils::{duration_hex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
 use serde::{Deserialize, Serialize};
@@ -109,6 +112,7 @@ pub struct CkbInvoice {
 /// The parameter struct for generating a new invoice.
 #[serde_as]
 #[derive(Serialize, Deserialize, Default, Clone)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct NewInvoiceParams {
     /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
@@ -116,6 +120,7 @@ pub struct NewInvoiceParams {
     /// The description of the invoice.
     pub description: Option<String>,
     /// The currency of the invoice.
+    #[cfg_attr(feature = "cli", cli(serde_enum))]
     pub currency: Currency,
     /// The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
     /// If both preimage and hash are absent, a random preimage is generated.
@@ -133,12 +138,16 @@ pub struct NewInvoiceParams {
     #[serde_as(as = "Option<U64Hex>")]
     pub final_expiry_delta: Option<u64>,
     /// The UDT type script of the invoice.
+    #[cfg_attr(feature = "cli", cli(json))]
     pub udt_type_script: Option<Script>,
     /// The hash algorithm of the invoice.
+    #[cfg_attr(feature = "cli", cli(serde_enum))]
     pub hash_algorithm: Option<HashAlgorithm>,
     /// Whether allow payment to use MPP
+    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub allow_mpp: Option<bool>,
     /// Whether allow payment to use trampoline routing
+    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub allow_trampoline_routing: Option<bool>,
 }
 
@@ -153,6 +162,7 @@ pub struct InvoiceResult {
 
 /// Parameters for parsing an invoice.
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct ParseInvoiceParams {
     /// The encoded invoice address.
     pub invoice: String,
@@ -167,6 +177,7 @@ pub struct ParseInvoiceResult {
 
 /// Parameters for getting an invoice by payment hash.
 #[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct InvoiceParams {
     /// The payment hash of the invoice.
     pub payment_hash: Hash256,
@@ -174,6 +185,7 @@ pub struct InvoiceParams {
 
 /// Parameters for settling an invoice.
 #[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct SettleInvoiceParams {
     /// The payment hash of the invoice.
     pub payment_hash: Hash256,

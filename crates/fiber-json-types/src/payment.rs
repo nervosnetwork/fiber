@@ -1,5 +1,8 @@
 //! Payment types for the Fiber Network JSON-RPC API.
 
+#[cfg(feature = "cli")]
+use fiber_cli_derive::CliArgs;
+
 use crate::serde_utils::{EntityHex, Hash256, Pubkey, SliceHex, U128Hex, U32Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::OutPoint;
@@ -26,6 +29,7 @@ pub enum PaymentStatus {
 /// Parameters for getting a payment.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct GetPaymentCommandParams {
     /// The payment hash of the payment to retrieve
     pub payment_hash: Hash256,
@@ -89,8 +93,10 @@ pub struct GetPaymentCommandResult {
 /// Parameters for listing payments.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Default)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct ListPaymentsParams {
     /// Filter payments by status. If not set, all payments are returned.
+    #[cfg_attr(feature = "cli", cli(serde_enum))]
     pub status: Option<PaymentStatus>,
     /// The maximum number of payments to return. Default is 15.
     #[serde_as(as = "Option<U64Hex>")]
@@ -131,6 +137,7 @@ pub struct PaymentCustomRecords {
 /// Parameters for sending a payment.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct SendPaymentCommandParams {
     /// The public key (`Pubkey`) of the payment target node, serialized as a hex string.
     /// You can obtain a node's pubkey via the `node_info` or `graph_nodes` RPC.
@@ -181,12 +188,15 @@ pub struct SendPaymentCommandParams {
     ///
     /// When set to a non-empty list `[t1, t2, ...]`, routing will only find a path from the
     /// payer to `t1`, and the inner trampoline onion will encode `t1 -> t2 -> ... -> final`.
+    #[cfg_attr(feature = "cli", cli(json))]
     pub trampoline_hops: Option<Vec<Pubkey>>,
 
     /// keysend payment
+    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub keysend: Option<bool>,
 
     /// udt type script for the payment
+    #[cfg_attr(feature = "cli", cli(json))]
     pub udt_type_script: Option<Script>,
 
     /// Allow paying yourself through a circular route, default is false.
@@ -195,6 +205,7 @@ pub struct SendPaymentCommandParams {
     /// total balance (only routing fees are deducted).
     /// Set `target_pubkey` to your own node pubkey and `keysend` to `true` to perform a rebalance.
     /// Note: `allow_self_payment` is not compatible with trampoline routing.
+    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub allow_self_payment: Option<bool>,
 
     /// Some custom records for the payment which contains a map of u32 to Vec<u8>
@@ -208,6 +219,7 @@ pub struct SendPaymentCommandParams {
     ///    "0x4": "0x0d0e0f10010d090a0b0c"
     ///  }
     /// ```
+    #[cfg_attr(feature = "cli", cli(json))]
     pub custom_records: Option<PaymentCustomRecords>,
 
     /// Optional route hints to reach the destination through private channels.
@@ -220,11 +232,13 @@ pub struct SendPaymentCommandParams {
     /// For example `(pubkey, channel_outpoint, fee_rate, tlc_expiry_delta)` suggest path router
     /// to use the channel of `channel_outpoint` at hop with `pubkey` to forward the payment
     /// and the fee rate is `fee_rate` and tlc_expiry_delta is `tlc_expiry_delta`.
+    #[cfg_attr(feature = "cli", cli(json))]
     pub hop_hints: Option<Vec<HopHint>>,
 
     /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
     /// it's useful for the sender to double check the payment before sending it to the network,
     /// default is false
+    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub dry_run: Option<bool>,
 }
 
@@ -249,6 +263,7 @@ pub struct HopHint {
 /// Parameters for building a payment router.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct BuildRouterParams {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     /// If not set, the minimum routable amount `1` is used
@@ -256,6 +271,7 @@ pub struct BuildRouterParams {
     pub amount: Option<u128>,
 
     /// udt type script for the payment router
+    #[cfg_attr(feature = "cli", cli(json))]
     pub udt_type_script: Option<Script>,
 
     /// A list of hops that defines the route. This does not include the source hop pubkey.
@@ -265,6 +281,7 @@ pub struct BuildRouterParams {
     /// If channel is not specified, find path algorithm will pick a channel within these two peers.
     ///
     /// An error will be returned if there is no router could be build from given hops and channels
+    #[cfg_attr(feature = "cli", cli(json))]
     pub hops_info: Vec<HopRequire>,
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
@@ -313,6 +330,7 @@ pub struct BuildPaymentRouterResult {
 /// Parameters for sending a payment with a specified router.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct SendPaymentWithRouterParams {
     /// the hash to use within the payment's HTLC.
     /// If not set and `keysend` is set to true, a random hash will be generated.
@@ -321,6 +339,7 @@ pub struct SendPaymentWithRouterParams {
     pub payment_hash: Option<Hash256>,
 
     /// The router to use for the payment
+    #[cfg_attr(feature = "cli", cli(json))]
     pub router: Vec<RouterHop>,
 
     /// the encoded invoice to send to the recipient
@@ -339,16 +358,20 @@ pub struct SendPaymentWithRouterParams {
     ///    "0x4": "0x0d0e0f10010d090a0b0c"
     ///  }
     /// ```
+    #[cfg_attr(feature = "cli", cli(json))]
     pub custom_records: Option<PaymentCustomRecords>,
 
     /// keysend payment
+    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub keysend: Option<bool>,
 
     /// udt type script for the payment
+    #[cfg_attr(feature = "cli", cli(json))]
     pub udt_type_script: Option<Script>,
 
     /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
     /// it's useful for the sender to double check the payment before sending it to the network,
     /// default is false
+    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub dry_run: Option<bool>,
 }
