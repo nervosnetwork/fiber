@@ -255,7 +255,7 @@ pub fn colorize_help(text: &str) -> String {
 
 /// Colorize a "Usage: fnn-cli command [OPTIONS]" line.
 fn colorize_usage_line(line: &str) -> String {
-    // "Usage: fnn-cli channel [OPTIONS] --peer-id <peer_id>"
+    // "Usage: fnn-cli channel [OPTIONS] --pubkey <pubkey>"
     // Color "Usage:" as section header, the rest with flag/placeholder coloring
     if let Some(rest) = line.strip_prefix("Usage: ") {
         let colored_rest = colorize_inline_flags(rest);

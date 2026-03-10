@@ -14,10 +14,10 @@ pub fn command() -> Command {
             Command::new("open_channel")
                 .about("Open a channel with a peer")
                 .arg(
-                    Arg::new("peer_id")
-                        .long("peer-id")
+                    Arg::new("pubkey")
+                        .long("pubkey")
                         .required(true)
-                        .help("The peer ID to open a channel with"),
+                        .help("The public key of the peer to open a channel with"),
                 )
                 .arg(
                     Arg::new("funding_amount")
@@ -150,9 +150,9 @@ pub fn command() -> Command {
             Command::new("list_channels")
                 .about("List all channels")
                 .arg(
-                    Arg::new("peer_id")
-                        .long("peer-id")
-                        .help("Filter by peer ID"),
+                    Arg::new("pubkey")
+                        .long("pubkey")
+                        .help("Filter by public key"),
                 )
                 .arg(
                     Arg::new("include_closed")
@@ -257,10 +257,10 @@ pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> 
     match matches.subcommand() {
         Some(("open_channel", sub)) => {
             let pubkey: Pubkey = sub
-                .get_one::<String>("peer_id")
+                .get_one::<String>("pubkey")
                 .unwrap()
                 .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid peer_id: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
             let funding_amount: u128 = sub
                 .get_one::<String>("funding_amount")
                 .unwrap()
@@ -351,10 +351,10 @@ pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> 
         }
         Some(("list_channels", sub)) => {
             let pubkey = sub
-                .get_one::<String>("peer_id")
+                .get_one::<String>("pubkey")
                 .map(|s| s.parse::<Pubkey>())
                 .transpose()
-                .map_err(|e| anyhow::anyhow!("Invalid peer_id: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
             let include_closed = parse_optional_bool(sub, "include_closed", false);
             let only_pending = parse_optional_bool(sub, "only_pending", false);
 

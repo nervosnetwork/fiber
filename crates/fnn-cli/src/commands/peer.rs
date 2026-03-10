@@ -28,10 +28,10 @@ pub fn command() -> Command {
             Command::new("disconnect_peer")
                 .about("Disconnect from a peer")
                 .arg(
-                    Arg::new("peer_id")
-                        .long("peer-id")
+                    Arg::new("pubkey")
+                        .long("pubkey")
                         .required(true)
-                        .help("The peer ID of the peer to disconnect"),
+                        .help("The public key of the peer to disconnect"),
                 ),
         )
         .subcommand(Command::new("list_peers").about("List connected peers"))
@@ -55,10 +55,10 @@ pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> 
         }
         Some(("disconnect_peer", sub)) => {
             let pubkey: Pubkey = sub
-                .get_one::<String>("peer_id")
+                .get_one::<String>("pubkey")
                 .unwrap()
                 .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid peer_id: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
             let params = DisconnectPeerParams { pubkey };
             let result: Value = client.call_typed("disconnect_peer", &params).await?;
             Ok(result)
