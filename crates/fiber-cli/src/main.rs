@@ -16,7 +16,7 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Editor, Helper};
 
 const FNN_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8228";
+const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8227";
 
 const BANNER: &str = r#"
   ______ ___ ___  ______ _____
@@ -68,6 +68,21 @@ fn build_cli() -> Command {
                 .default_value("auto")
                 .help("Color output: auto, always, or never"),
         )
+        .arg(
+            Arg::new("auth_token")
+                .long("auth-token")
+                .global(true)
+                .env("FNN_AUTH_TOKEN")
+                .help("Bearer token for RPC authentication, use quotes for long tokens (e.g. --auth-token 'YOUR_TOKEN'). Or set FNN_AUTH_TOKEN env var"),
+        )
+        .arg(
+            Arg::new("auth_token_file")
+                .long("auth-token-file")
+                .global(true)
+                .value_name("FILE")
+                .conflicts_with("auth_token")
+                .help("Read bearer token from a file"),
+        )
         .subcommand(commands::info::command())
         .subcommand(commands::peer::command())
         .subcommand(commands::channel::command())
@@ -97,11 +112,18 @@ fn build_interactive_cli() -> Command {
         .subcommand(Command::new("quit").about("Exit the interactive shell"))
 }
 
-fn print_banner(url: &str, output_format: &str) {
+fn print_banner(url: &str, output_format: &str, auth_token: Option<&str>) {
     println!("{}", BANNER.bright_cyan());
     println!("[  fnn-cli version ]: {}", FNN_CLI_VERSION.bright_yellow());
     println!("[              url ]: {}", url.bright_green());
     println!("[    output format ]: {}", output_format.bright_white());
+    if let Some(token) = auth_token {
+        println!(
+            "[             auth ]: {} ({} chars)",
+            "Bearer token set".bright_green(),
+            token.len()
+        );
+    }
     println!();
 }
 
@@ -250,7 +272,7 @@ async fn run_interactive(
     use_color: bool,
 ) -> Result<()> {
     if !no_banner {
-        print_banner(client.url(), output_format);
+        print_banner(client.url(), output_format, client.auth_token());
     }
 
     // Health check: try to reach the RPC endpoint
@@ -420,6 +442,20 @@ async fn main() -> Result<()> {
     let no_banner = matches.get_flag("no_banner");
     let color_mode = matches.get_one::<String>("color").unwrap().clone();
 
+    // Resolve auth token: --auth-token > --auth-token-file > FNN_AUTH_TOKEN env
+    let auth_token = match matches.get_one::<String>("auth_token").cloned() {
+        Some(token) => Some(token),
+        None => match matches.get_one::<String>("auth_token_file") {
+            Some(path) => {
+                let content = std::fs::read_to_string(path).map_err(|e| {
+                    anyhow::anyhow!("Failed to read auth token file '{}': {}", path, e)
+                })?;
+                Some(content)
+            }
+            None => None,
+        },
+    };
+
     // Configure color output based on --color flag
     let use_color = match color_mode.as_str() {
         "always" => true,
@@ -435,7 +471,7 @@ async fn main() -> Result<()> {
         colored::control::set_override(false);
     }
 
-    let client = RpcClient::new(&url, raw_data);
+    let client = RpcClient::new(&url, raw_data, auth_token)?;
 
     // If a subcommand was given, run it directly (one-shot mode)
     if matches.subcommand().is_some() {
@@ -632,6 +668,24 @@ mod tests {
         assert!(arg_names.contains(&"output-format"));
         assert!(arg_names.contains(&"no-banner"));
         assert!(arg_names.contains(&"color"));
+        assert!(arg_names.contains(&"auth-token"));
+    }
+
+    #[test]
+    fn test_build_cli_auth_token_parsed() {
+        let cli = build_cli();
+        let matches = cli
+            .try_get_matches_from(["fnn-cli", "--auth-token", "my-secret", "info"])
+            .unwrap();
+        let token = matches.get_one::<String>("auth_token").unwrap();
+        assert_eq!(token, "my-secret");
+    }
+
+    #[test]
+    fn test_build_cli_auth_token_optional() {
+        let cli = build_cli();
+        let matches = cli.try_get_matches_from(["fnn-cli", "info"]).unwrap();
+        assert!(matches.get_one::<String>("auth_token").is_none());
     }
 
     #[test]
