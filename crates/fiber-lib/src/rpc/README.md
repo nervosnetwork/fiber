@@ -1103,7 +1103,7 @@ Query the status of a TLC
 
 ##### Returns
 
-* `preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage for the payment hash, if known
+* `preimage` - <em>Option<[Hash256](#type-hash256)></em>, Found preimage when the TLC has been settled on chain with the preimage path.
 * `is_settled` - <em>`bool`</em>, Whether the TLC has been settled on chain
 
 ---
