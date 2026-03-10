@@ -16,6 +16,12 @@ fn main() {
         // ["prof.rs", "ProfRpc"],
         ["watchtower.rs", "WatchtowerRpc"],
     ];
+    for line in rpc_files.iter() {
+        println!(
+            "cargo:rerun-if-changed={}",
+            rpc_dir.join(line[0]).as_os_str().to_str().unwrap()
+        );
+    }
     let output_dir = PathBuf::from_str(env!("CARGO_MANIFEST_DIR"))
         .unwrap()
         .join("src/output");
@@ -25,6 +31,7 @@ fn main() {
     let mut root_mod_file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(true)
         .open(output_dir.join("mod.rs"))
         .unwrap();
     let mut rpc_mods = vec![];

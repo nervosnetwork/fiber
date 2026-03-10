@@ -12,7 +12,6 @@ pub type Response = RpcResult<ResultType>;
 /// The result type for an `rpc.discover` RPC request.
 pub type ResultType = OpenRpc;
 
-/// Static information about a Zallet JSON-RPC method.
 pub struct RpcMethod {
     /// A description of the method.
     pub description: &'static str,

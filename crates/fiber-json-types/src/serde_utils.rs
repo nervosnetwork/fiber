@@ -274,7 +274,7 @@ impl JsonSchema for Pubkey {
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let mut schema = String::json_schema(generator);
-        schema.insert("pattern".into(), "^([0-9a-fA-F]{2})*$".into());
+        schema.insert("pattern".into(), "^[0-9a-fA-F]{66}$".into());
         schema
     }
 }
@@ -353,7 +353,7 @@ impl JsonSchema for Privkey {
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let mut schema = String::json_schema(generator);
-        schema.insert("pattern".into(), "^([0-9a-fA-F]{2})*$".into());
+        schema.insert("pattern".into(), "^[0-9a-fA-F]{64}$".into());
         schema
     }
 }
@@ -419,7 +419,7 @@ impl JsonSchema for Hash256 {
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let mut schema = String::json_schema(generator);
-        schema.insert("pattern".into(), "^0x([0-9a-fA-F]{2})*$".into());
+        schema.insert("pattern".into(), "^0x[0-9a-fA-F]{64}$".into());
         schema
     }
 }
