@@ -2245,7 +2245,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2 0.10.9",
- "strum 0.26.3",
+ "strum 0.27.2",
  "tentacle-multiaddr",
  "thiserror 1.0.69",
  "tracing",
@@ -2387,7 +2387,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_yaml",
- "strum 0.26.3",
+ "strum 0.27.2",
  "tempfile",
  "tentacle",
  "thiserror 1.0.69",
@@ -4722,7 +4722,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.12.1",
  "log",
  "multimap",
