@@ -8,7 +8,7 @@ members = [
     "crates/fiber-wasm-db-common",
     "crates/fiber-types",
     "crates/fiber-json-types",
-    "crates/fnn-cli",
+    "crates/fiber-cli",
     "crates/fiber-cli-derive",
 ]
 exclude = ["rpc-doc-gen"]
