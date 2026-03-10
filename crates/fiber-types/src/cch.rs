@@ -59,15 +59,9 @@ impl From<PaymentStatus> for CchOrderStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CchInvoice {
     /// Fiber invoice that once paid, the hub will send the outgoing payment to Lightning
-    Fiber(
-        #[serde_as(as = "DisplayFromStr")]
-        CkbInvoice,
-    ),
+    Fiber(#[serde_as(as = "DisplayFromStr")] CkbInvoice),
     /// Lightning invoice that once paid, the hub will send the outgoing payment to Fiber
-    Lightning(
-        #[serde_as(as = "DisplayFromStr")]
-        Bolt11Invoice,
-    ),
+    Lightning(#[serde_as(as = "DisplayFromStr")] Bolt11Invoice),
 }
 
 /// A cross-chain hub order.

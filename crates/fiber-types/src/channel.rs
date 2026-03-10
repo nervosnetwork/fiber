@@ -120,9 +120,7 @@ bitflags! {
 }
 
 /// The id of a tlc, it can be either offered or received.
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash,
-)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash)]
 pub enum TLCId {
     /// Offered tlc id
     Offered(u64),

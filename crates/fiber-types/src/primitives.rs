@@ -263,10 +263,7 @@ impl From<SecretKey> for Privkey {
 /// A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
 #[serde_as]
 #[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
-pub struct Hash256(
-    #[serde_as(as = "SliceHex")]
-    [u8; 32],
-);
+pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
 
 impl From<[u8; 32]> for Hash256 {
     fn from(value: [u8; 32]) -> Self {
@@ -444,10 +441,7 @@ impl Privkey {
 /// It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
 #[serde_as]
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Pubkey(
-    #[serde_as(as = "IfIsHumanReadable<SliceHexNoPrefix, [_; 33]>")]
-    pub [u8; 33],
-);
+pub struct Pubkey(#[serde_as(as = "IfIsHumanReadable<SliceHexNoPrefix, [_; 33]>")] pub [u8; 33]);
 
 impl std::fmt::Debug for Pubkey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

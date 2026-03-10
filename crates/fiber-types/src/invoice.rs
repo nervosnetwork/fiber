@@ -354,16 +354,11 @@ impl TryFrom<Byte> for HashAlgorithm {
 /// A wrapper around `ckb_types::packed::Script` with hex serialization.
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CkbScript(
-    #[serde_as(as = "EntityHex")]
-    pub PackedScript,
-);
+pub struct CkbScript(#[serde_as(as = "EntityHex")] pub PackedScript);
 
 /// Recoverable signature
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvoiceSignature(
-    pub  RecoverableSignature,
-);
+pub struct InvoiceSignature(pub RecoverableSignature);
 
 impl PartialOrd for InvoiceSignature {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
