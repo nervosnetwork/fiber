@@ -1,58 +1,44 @@
-//! Cross-chain hub (CCH) types for the Fiber Network Node RPC API.
+//! Cross-chain hub types for the Fiber Network JSON-RPC API.
 
 use crate::invoice::Currency;
-use crate::serde_utils::{U128Hex, U64Hex};
-use crate::Hash256;
-
-use lightning_invoice::Bolt11Invoice;
+use crate::serde_utils::{Hash256, U128Hex, U64Hex};
+use ckb_jsonrpc_types::Script;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 
-pub use fiber_types::cch::CchOrderStatus;
-
-// ============================================================
-// CCH invoice
-// ============================================================
+/// The status of a cross-chain hub order, will update as the order progresses.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum CchOrderStatus {
+    /// Order is created and waiting for the incoming invoice to collect enough TLCs.
+    Pending,
+    /// The incoming invoice collected the required TLCs and is ready to send outgoing payment to obtain the preimage.
+    IncomingAccepted,
+    /// The outgoing payment is in flight.
+    OutgoingInFlight,
+    /// The outgoing payment is settled and preimage has been obtained.
+    OutgoingSucceeded,
+    /// Both payments are settled and the order succeeds.
+    Succeeded,
+    /// Order is failed.
+    Failed,
+}
 
 /// The generated proxy invoice for the incoming payment.
-#[serde_as]
+///
+/// The JSON representation:
+///
+/// ```text
+/// { "Fiber": String } | { "Lightning": String }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CchInvoice {
-    /// Fiber invoice as an encoded string
+    /// Fiber invoice string
     Fiber(String),
-    /// Lightning invoice
-    Lightning(#[serde_as(as = "DisplayFromStr")] Bolt11Invoice),
+    /// Lightning invoice string
+    Lightning(String),
 }
 
-// ============================================================
-// CCH order
-// ============================================================
-
-/// A cross-chain hub order.
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CchOrder {
-    #[serde_as(as = "U64Hex")]
-    pub created_at: u64,
-    #[serde_as(as = "U64Hex")]
-    pub expiry_delta_seconds: u64,
-    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
-    pub outgoing_pay_req: String,
-    pub incoming_invoice: CchInvoice,
-    pub payment_hash: Hash256,
-    pub payment_preimage: Option<Hash256>,
-    #[serde_as(as = "U128Hex")]
-    pub amount_sats: u128,
-    #[serde_as(as = "U128Hex")]
-    pub fee_sats: u128,
-    pub status: CchOrderStatus,
-    pub failure_reason: Option<String>,
-}
-
-// ============================================================
-// RPC param/result types
-// ============================================================
-
+/// Parameters for sending BTC via cross-chain hub.
 #[derive(Serialize, Deserialize)]
 pub struct SendBTCParams {
     /// Payment request string for the BTC Lightning payee.
@@ -61,20 +47,23 @@ pub struct SendBTCParams {
     pub currency: Currency,
 }
 
+/// Cross-chain hub order response.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CchOrderResponse {
     /// Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
-    /// Relative expiry time in seconds
+    /// Relative expiry time in seconds from `created_at` that the order expires
     #[serde_as(as = "U64Hex")]
     pub expiry_delta_seconds: u64,
+
     /// Wrapped BTC type script
-    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
+    pub wrapped_btc_type_script: Script,
+
     /// Generated invoice for the incoming payment
     pub incoming_invoice: CchInvoice,
-    /// The final payee to accept the payment.
+    /// The final payee to accept the payment. It has the different network with incoming invoice.
     pub outgoing_pay_req: String,
     /// Payment hash for the HTLC for both CKB and BTC.
     pub payment_hash: Hash256,
@@ -88,6 +77,7 @@ pub struct CchOrderResponse {
     pub status: CchOrderStatus,
 }
 
+/// Parameters for receiving BTC via cross-chain hub.
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct ReceiveBTCParams {
@@ -95,6 +85,7 @@ pub struct ReceiveBTCParams {
     pub fiber_pay_req: String,
 }
 
+/// Parameters for getting a CCH order.
 #[derive(Serialize, Deserialize)]
 pub struct GetCchOrderParams {
     /// Payment hash for the HTLC for both CKB and BTC.

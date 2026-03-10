@@ -1,7 +1,7 @@
 #![allow(clippy::needless_range_loop)]
-use crate::fiber::channel::CloseFlags;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::network::PeerDisconnectReason;
+use crate::fiber::CloseFlags;
+use crate::fiber::FeatureVector;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
@@ -11,14 +11,13 @@ use crate::rpc::info::NodeInfoResult;
 use crate::rpc::invoice::Attribute;
 use crate::tests::*;
 use crate::{
-    fiber::types::Hash256,
-    invoice::Currency,
+    fiber::Hash256,
     rpc::{
         channel::{ListChannelsParams, ListChannelsResult},
         graph::{GraphNodesParams, GraphNodesResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
-        peer::ListPeersResult,
+        peer::{ConnectPeerParams, ListPeersResult},
     },
 };
 use biscuit_auth::macros::biscuit;
@@ -66,7 +65,7 @@ async fn test_rpc_basic() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
                 only_pending: None,
             },
@@ -85,22 +84,27 @@ async fn test_rpc_basic() {
     node_0.wait_until_success(payment_hash).await;
 
     let payment: GetPaymentCommandResult = node_0
-        .send_rpc_request("get_payment", GetPaymentCommandParams { payment_hash })
+        .send_rpc_request(
+            "get_payment",
+            GetPaymentCommandParams {
+                payment_hash: payment_hash.into(),
+            },
+        )
         .await
         .unwrap();
-    assert_eq!(payment.payment_hash, payment_hash);
+    assert_eq!(payment.payment_hash, payment_hash.into());
 
     let new_invoice_params = NewInvoiceParams {
         amount: 1000,
         description: Some("test".to_string()),
-        currency: Currency::Fibd,
+        currency: fiber_json_types::Currency::Fibd,
         expiry: Some(322),
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: Some(Hash256::default()),
+        payment_preimage: Some(Hash256::default().into()),
         payment_hash: None,
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
         allow_trampoline_routing: Some(true),
     };
@@ -153,14 +157,14 @@ async fn test_rpc_basic() {
     let new_invoice_params = NewInvoiceParams {
         amount: 1000,
         description: Some("test".to_string()),
-        currency: Currency::Fibd,
+        currency: fiber_json_types::Currency::Fibd,
         expiry: Some(322),
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: Some(gen_rand_sha256_hash()),
+        payment_preimage: Some(gen_rand_sha256_hash().into()),
         payment_hash: None,
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
         allow_trampoline_routing: Some(false),
     };
@@ -209,18 +213,18 @@ async fn test_rpc_list_peers() {
         Some(gen_rpc_config()),
     )
     .await;
-    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
-    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey);
-    let node_1_peer_id = list_peers.peers[0].peer_id.clone();
+    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey.into());
+    let node_1_pubkey = list_peers.peers[0].pubkey;
 
     let _res: () = node_0
         .send_rpc_request(
             "disconnect_peer",
             crate::rpc::peer::DisconnectPeerParams {
-                peer_id: node_1_peer_id,
+                pubkey: node_1_pubkey,
             },
         )
         .await
@@ -230,6 +234,23 @@ async fn test_rpc_list_peers() {
 
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 0);
+
+    let _res: () = node_0
+        .send_rpc_request(
+            "connect_peer",
+            ConnectPeerParams {
+                address: None,
+                pubkey: Some(node_1_pubkey),
+                save: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
+    assert_eq!(list_peers.peers.len(), 1);
+    assert_eq!(list_peers.peers[0].pubkey, node_1.pubkey.into());
 
     let mut node_3 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
@@ -246,16 +267,19 @@ async fn test_rpc_list_peers() {
     node_0.connect_to(&mut node_3).await;
     let list_peers: ListPeersResult = node_3.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 1);
-    assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey);
+    assert_eq!(list_peers.peers[0].pubkey, node_0.pubkey.into());
 
-    node_0.connect_to(&mut node_1).await;
     let list_peers: ListPeersResult = node_0.send_rpc_request("list_peers", ()).await.unwrap();
     assert_eq!(list_peers.peers.len(), 2);
     dbg!("list_peers: {:?}", &list_peers);
-    assert!(list_peers.peers.iter().any(|p| p.pubkey == node_1.pubkey));
-    assert!(list_peers.peers.iter().any(|p| p.pubkey == node_3.pubkey));
-    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_1.peer_id));
-    assert!(list_peers.peers.iter().any(|p| p.peer_id == node_3.peer_id));
+    assert!(list_peers
+        .peers
+        .iter()
+        .any(|p| p.pubkey == node_1.pubkey.into()));
+    assert!(list_peers
+        .peers
+        .iter()
+        .any(|p| p.pubkey == node_3.pubkey.into()));
 }
 
 #[tokio::test]
@@ -301,7 +325,10 @@ async fn test_rpc_graph() {
     eprintln!("Graph nodes: {:#?}", graph_nodes);
 
     assert!(!graph_nodes.nodes.is_empty());
-    assert!(graph_nodes.nodes.iter().any(|n| n.node_id == node_1.pubkey));
+    assert!(graph_nodes
+        .nodes
+        .iter()
+        .any(|n| n.pubkey == node_1.pubkey.into()));
     assert!(graph_nodes
         .nodes
         .iter()
@@ -342,7 +369,7 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
                 only_pending: None,
             },
@@ -371,7 +398,7 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: Some(true),
                 only_pending: None,
             },
@@ -389,7 +416,7 @@ async fn test_rpc_shutdown_channels() {
     eprintln!("Channel status: {:?}", status);
     assert!(matches!(
         status,
-        ChannelState::Closed(CloseFlags::COOPERATIVE)
+        ChannelState::Closed(flags) if flags.0 == CloseFlags::COOPERATIVE.bits()
     ));
 
     // test force close
@@ -413,7 +440,7 @@ async fn test_rpc_shutdown_channels() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: Some(true),
                 only_pending: None,
             },
@@ -431,7 +458,7 @@ async fn test_rpc_shutdown_channels() {
     eprintln!("Channel status: {:?}", status);
     assert!(matches!(
         status,
-        ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+        ChannelState::Closed(flags) if CloseFlags::from_bits_truncate(flags.0).contains(CloseFlags::UNCOOPERATIVE_LOCAL)
     ));
 }
 
@@ -471,10 +498,10 @@ async fn test_rpc_node_info() {
     assert_eq!(node_info.default_funding_lock_script, Default::default());
 }
 
-/// Test that node_id in node_info RPC and payee_public_key in invoice RPC
+/// Test that pubkey in node_info RPC and payee_public_key in invoice RPC
 /// have the same JSON format (both without "0x" prefix).
 #[tokio::test]
-async fn test_rpc_node_id_and_payee_public_key_same_format() {
+async fn test_rpc_pubkey_and_payee_public_key_same_format() {
     let (nodes, _channels) = create_n_nodes_network_with_params(
         &[(
             (0, 1),
@@ -493,20 +520,20 @@ async fn test_rpc_node_id_and_payee_public_key_same_format() {
 
     // Get node_info raw response
     let node_info_raw = node_0.send_rpc_request_raw("node_info", ()).await.unwrap();
-    let node_id = node_info_raw["node_id"]
+    let pubkey = node_info_raw["pubkey"]
         .as_str()
-        .expect("node_id should be a string");
+        .expect("pubkey should be a string");
 
     // Create an invoice and get raw response
     let new_invoice_params = NewInvoiceParams {
         amount: 1000,
         description: Some("test".to_string()),
-        currency: Currency::Fibd,
+        currency: fiber_json_types::Currency::Fibd,
         expiry: Some(322),
         fallback_address: None,
         final_expiry_delta: None,
         udt_type_script: None,
-        payment_preimage: Some(gen_rand_sha256_hash()),
+        payment_preimage: Some(gen_rand_sha256_hash().into()),
         payment_hash: None,
         hash_algorithm: None,
         allow_mpp: None,
@@ -529,18 +556,18 @@ async fn test_rpc_node_id_and_payee_public_key_same_format() {
 
     // Both should have the same format (without "0x" prefix)
     assert_eq!(
-        node_id, payee_public_key,
-        "node_id and payee_public_key should have the same format.\n\
-         node_id: {}\n\
+        pubkey, payee_public_key,
+        "pubkey and payee_public_key should have the same format.\n\
+         pubkey: {}\n\
          payee_public_key: {}",
-        node_id, payee_public_key
+        pubkey, payee_public_key
     );
 
     // Verify neither has "0x" prefix
     assert!(
-        !node_id.starts_with("0x"),
-        "node_id should not have 0x prefix, got: {}",
-        node_id
+        !pubkey.starts_with("0x"),
+        "pubkey should not have 0x prefix, got: {}",
+        pubkey
     );
     assert!(
         !payee_public_key.starts_with("0x"),
@@ -604,7 +631,7 @@ async fn test_rpc_basic_with_auth() {
         .send_rpc_request(
             "list_channels",
             ListChannelsParams {
-                peer_id: None,
+                pubkey: None,
                 include_closed: None,
                 only_pending: None,
             },
@@ -623,10 +650,15 @@ async fn test_rpc_basic_with_auth() {
     node_0.wait_until_success(payment_hash).await;
 
     let payment: GetPaymentCommandResult = node_0
-        .send_rpc_request("get_payment", GetPaymentCommandParams { payment_hash })
+        .send_rpc_request(
+            "get_payment",
+            GetPaymentCommandParams {
+                payment_hash: payment_hash.into(),
+            },
+        )
         .await
         .unwrap();
-    assert_eq!(payment.payment_hash, payment_hash);
+    assert_eq!(payment.payment_hash, payment_hash.into());
 
     // node0 generate a invoice
     let invoice_res: InvoiceResult = node_0
@@ -635,14 +667,14 @@ async fn test_rpc_basic_with_auth() {
             NewInvoiceParams {
                 amount: 1000,
                 description: Some("test".to_string()),
-                currency: Currency::Fibd,
+                currency: fiber_json_types::Currency::Fibd,
                 expiry: Some(322),
                 fallback_address: None,
                 final_expiry_delta: Some(900000 + 1234),
                 udt_type_script: Some(Script::default().into()),
-                payment_preimage: Some(Hash256::default()),
+                payment_preimage: Some(Hash256::default().into()),
                 payment_hash: None,
-                hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+                hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
                 allow_mpp: None,
                 allow_trampoline_routing: None,
             },
@@ -850,7 +882,7 @@ async fn test_rpc_shutdown_following_disconnect() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node_1.peer_id, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node_1.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
@@ -860,7 +892,7 @@ async fn test_rpc_shutdown_following_disconnect() {
                 "shutdown_channel",
                 ShutdownChannelParams {
                     close_script: Some(Script::default().into()),
-                    channel_id: channels[0],
+                    channel_id: channels[0].into(),
                     fee_rate: Some(1000),
                     force: Some(false),
                 },
@@ -898,14 +930,14 @@ async fn test_rpc_feature_check() {
     let invoice_params = NewInvoiceParams {
         amount: 1000,
         description: Some("test".to_string()),
-        currency: Currency::Fibd,
+        currency: fiber_json_types::Currency::Fibd,
         expiry: Some(322),
         fallback_address: None,
         final_expiry_delta: Some(900000 + 1234),
         udt_type_script: Some(Script::default().into()),
-        payment_preimage: Some(Hash256::default()),
+        payment_preimage: Some(Hash256::default().into()),
         payment_hash: None,
-        hash_algorithm: Some(crate::fiber::hash_algorithm::HashAlgorithm::CkbHash),
+        hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
         allow_trampoline_routing: Some(true),
     };
@@ -1077,4 +1109,148 @@ async fn test_rpc_cors_disabled_by_default() {
             .contains_key("access-control-allow-origin"),
         "Response should NOT contain Access-Control-Allow-Origin header when CORS is disabled"
     );
+}
+
+/// Test that RPC status enums use consistent naming conventions (PascalCase).
+/// This test verifies that ChannelState and other status enums in RPC responses
+/// use PascalCase naming (e.g., "ChannelReady") rather than snake_case or SCREAMING_SNAKE_CASE.
+#[test]
+fn test_rpc_status_enum_naming_consistency() {
+    use serde_json::Value;
+
+    // Test ChannelState uses PascalCase
+    let channel_state = ChannelState::ChannelReady;
+    let json_str = serde_json::to_string(&channel_state).unwrap();
+    let json_value: Value = serde_json::from_str(&json_str).unwrap();
+
+    // Verify the state_name field uses PascalCase
+    if let Some(state_name) = json_value.get("state_name").and_then(|v| v.as_str()) {
+        assert!(
+            !state_name.contains('_'),
+            "ChannelState variant should use PascalCase without underscores, got: {}",
+            state_name
+        );
+        assert_eq!(
+            state_name, "ChannelReady",
+            "ChannelState::ChannelReady should serialize to 'ChannelReady', got: {}",
+            state_name
+        );
+    }
+
+    // Verify no SCREAMING_SNAKE_CASE format
+    assert!(
+        !json_str.contains("CHANNEL_READY"),
+        "ChannelState should NOT use SCREAMING_SNAKE_CASE format, got: {}",
+        json_str
+    );
+
+    // Test all ChannelState variants use PascalCase
+    use fiber_json_types::channel::{
+        AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, CloseFlags,
+        CollaboratingFundingTxFlags, NegotiatingFundingFlags, ShuttingDownFlags,
+        SigningCommitmentFlags,
+    };
+
+    let states = vec![
+        (
+            ChannelState::NegotiatingFunding(NegotiatingFundingFlags(0)),
+            "NegotiatingFunding",
+            "",
+        ),
+        (
+            ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags(0)),
+            "CollaboratingFundingTx",
+            "",
+        ),
+        (
+            ChannelState::SigningCommitment(SigningCommitmentFlags(0)),
+            "SigningCommitment",
+            "",
+        ),
+        (
+            ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags(0)),
+            "AwaitingTxSignatures",
+            "",
+        ),
+        (
+            ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags(0)),
+            "AwaitingChannelReady",
+            "",
+        ),
+        (ChannelState::ChannelReady, "ChannelReady", ""),
+        (
+            ChannelState::ShuttingDown(ShuttingDownFlags(0)),
+            "ShuttingDown",
+            "",
+        ),
+        (
+            ChannelState::Closed(CloseFlags::COOPERATIVE.into()),
+            "Closed",
+            "Cooperative",
+        ),
+    ];
+
+    for (state, expected_name, expected_flags) in states {
+        let json_str = serde_json::to_string(&state).unwrap();
+        let json_value: Value = serde_json::from_str(&json_str).unwrap();
+
+        if let Some(state_name) = json_value.get("state_name").and_then(|v| v.as_str()) {
+            assert_eq!(
+                state_name, expected_name,
+                "ChannelState variant name mismatch: expected {}, got {}",
+                expected_name, state_name
+            );
+            assert!(
+                !state_name.contains('_'),
+                "ChannelState variant should use PascalCase without underscores, got: {}",
+                state_name
+            );
+        }
+
+        // Verify state_flags format
+        if let Some(state_flags) = json_value.get("state_flags").and_then(|v| v.as_str()) {
+            if !expected_flags.is_empty() {
+                assert_eq!(
+                    state_flags, expected_flags,
+                    "state_flags mismatch for {}: expected {}, got {}",
+                    expected_name, expected_flags, state_flags
+                );
+            }
+            // state_flags should be PascalCase (no underscores, not hex)
+            assert!(
+                !state_flags.starts_with("0x"),
+                "state_flags should not be hex for {}, got: {}",
+                expected_name,
+                state_flags
+            );
+        }
+    }
+
+    // Test state_flags field format for state with multiple flags
+    let state_with_flags = ChannelState::NegotiatingFunding(NegotiatingFundingFlags(
+        NegotiatingFundingFlags::OUR_INIT_SENT | NegotiatingFundingFlags::THEIR_INIT_SENT,
+    ));
+    let json_str = serde_json::to_string(&state_with_flags).unwrap();
+    let json_value: Value = serde_json::from_str(&json_str).unwrap();
+
+    eprintln!("Serialized ChannelState with flags: {}", json_str);
+    // Verify state_flags field exists and is PascalCase
+    if let Some(state_flags) = json_value.get("state_flags") {
+        let flags_str = state_flags
+            .as_str()
+            .expect("state_flags should be a string");
+        assert!(
+            !flags_str.starts_with("0x"),
+            "state_flags should be PascalCase, not hex, got: {}",
+            flags_str
+        );
+        // Should contain both flag names in PascalCase
+        assert!(
+            flags_str.contains("OurInitSent") || flags_str.contains("TheirInitSent"),
+            "state_flags should contain flag names in PascalCase, got: {}",
+            flags_str
+        );
+    } else {
+        panic!("state_flags field not found in JSON: {}", json_str);
+    }
 }

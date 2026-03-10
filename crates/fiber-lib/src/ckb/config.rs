@@ -7,6 +7,7 @@ use ckb_types::packed::Script;
 use ckb_types::prelude::Pack;
 use clap_serde_derive::clap::{self};
 use clap_serde_derive::ClapSerde;
+use fiber_types::{UdtArgInfo, UdtCfgInfos};
 use secp256k1::SecretKey;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
@@ -15,8 +16,6 @@ use tracing::info;
 use {ckb_hash::blake2b_256, secp256k1::SECP256K1};
 
 use std::path::PathBuf;
-
-pub use fiber_types::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
 
 pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
 const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
@@ -125,7 +124,13 @@ impl CkbConfig {
 
         let path = self.base_dir().join("key");
         if let Ok(plain_key_hex) = fs::read_to_string(&path) {
-            if let Ok(plain_key) = hex::decode(plain_key_hex.trim()) {
+            let trimmed = plain_key_hex.trim();
+            if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                return Err(crate::Error::SecretKeyFileError(
+                    "key file appears to be plaintext but has an unsupported 0x prefix, please remove it".to_string(),
+                ));
+            }
+            if let Ok(plain_key) = hex::decode(trimmed) {
                 info!("secret key is using plain key format, start migrating to encrypted format");
                 encrypt_to_file(&path, plain_key.as_ref(), password_bytes)
                     .map_err(crate::Error::SecretKeyFileError)?;

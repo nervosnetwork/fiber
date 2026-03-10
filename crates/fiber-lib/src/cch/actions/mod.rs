@@ -3,6 +3,7 @@ pub(crate) mod send_outgoing_payment;
 pub(crate) mod settle_incoming_invoice;
 pub(crate) mod track_incoming_invoice;
 mod track_outgoing_payment;
+use fiber_types::{CchOrder, CchOrderStatus};
 use send_outgoing_payment::SendOutgoingPaymentDispatcher;
 use settle_incoming_invoice::SettleIncomingInvoiceDispatcher;
 use track_incoming_invoice::TrackIncomingInvoiceDispatcher;
@@ -11,7 +12,7 @@ use track_outgoing_payment::TrackOutgoingPaymentDispatcher;
 use anyhow::Result;
 use ractor::ActorRef;
 
-use crate::cch::{actor::CchState, CchMessage, CchOrder, CchOrderStatus, CchOrderStore};
+use crate::cch::{actor::CchState, CchMessage, CchOrderStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CchOrderAction {

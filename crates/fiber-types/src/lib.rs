@@ -14,60 +14,51 @@
 //! - Serde utilities for hex and base58 serialization
 //! - Molecule generated types for protocol messages
 
-pub mod serde_utils;
-
-pub mod primitives;
-pub mod protocol;
-
+#[cfg(feature = "cch")]
 pub mod cch;
 pub mod channel;
+pub mod config;
 pub mod gen;
 pub mod invoice;
 pub mod network;
+pub mod onion;
 pub mod payment;
+pub mod primitives;
+pub mod protocol;
 pub mod schema;
+pub mod serde_utils;
 
-#[cfg(feature = "watchtower")]
-pub mod watchtower;
+#[cfg(feature = "sample")]
+pub mod sample;
 
-pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
-
-pub use channel::*;
-
-pub use payment::*;
-
-pub use protocol::*;
-
-pub use network::PersistentNetworkActorState;
-
+#[cfg(feature = "cch")]
 pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
-
+pub use channel::*;
+pub use config::*;
 pub use invoice::*;
+pub use network::{HopRequire, PersistentNetworkActorState};
+pub use onion::*;
+pub use payment::*;
+pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
+pub use protocol::*;
 
 #[cfg(feature = "watchtower")]
 pub use watchtower::{ChannelData, RevocationData, SettlementData, SettlementTlc};
+
+#[cfg(feature = "watchtower")]
+pub mod watchtower;
 
 pub use serde_utils::{
     duration_hex, from_hex, to_hex, CompactSignatureAsBytes, EntityHex, PartialSignatureAsBytes,
     PubNonceAsBytes, SliceBase58, SliceHex, SliceHexNoPrefix, U128Hex, U16Hex, U32Hex, U64Hex,
 };
 
-// Re-export tentacle types for external use
 pub use tentacle_multiaddr::Multiaddr;
-pub use tentacle_secio::PeerId;
-
-// ============================================================
-// WASM-compatible time
-// ============================================================
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use std::time as crate_time;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web_time as crate_time;
-
-// ============================================================
-// Utility functions
-// ============================================================
 
 /// Get the current timestamp as milliseconds since the Unix epoch.
 pub fn now_timestamp_as_millis_u64() -> u64 {
@@ -76,10 +67,6 @@ pub fn now_timestamp_as_millis_u64() -> u64 {
         .expect("Duration since unix epoch")
         .as_millis() as u64
 }
-
-// ============================================================
-// Store serialization utilities
-// ============================================================
 
 /// Deserialize a value from bincode-encoded bytes.
 ///

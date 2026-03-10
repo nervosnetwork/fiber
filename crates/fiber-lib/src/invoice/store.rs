@@ -1,7 +1,8 @@
 use thiserror::Error;
 
 use super::{CkbInvoiceStatus, InvoiceError};
-use crate::{fiber::types::Hash256, invoice::CkbInvoice};
+use crate::invoice::CkbInvoice;
+use fiber_types::Hash256;
 
 pub trait InvoiceStore {
     fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice>;

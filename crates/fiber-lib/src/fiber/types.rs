@@ -1,15 +1,5 @@
-use super::channel::{ChannelFlags, ChannelTlcInfo, ProcessingChannelError};
-use super::config::AnnouncedNodeName;
-use super::features::FeatureVector;
-use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
+use super::channel::ProcessingChannelError;
 use super::network::get_chain_hash;
-use super::serde_utils::{PartialSignatureAsBytes, PubNonceAsBytes};
-use crate::ckb::contracts::get_udt_whitelist;
-use crate::fiber::payment::PaymentCustomRecords;
-use fiber_types::gen::fiber::PubNonceOpt;
-use fiber_types::gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt};
-use fiber_types::gen::gossip::{self as molecule_gossip};
-
 use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::{
@@ -19,27 +9,40 @@ use ckb_types::{
 };
 use core::fmt::{self, Formatter};
 use fiber_sphinx::SphinxError;
+use fiber_types::molecule_table_data_len;
+pub use fiber_types::{
+    gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt, PubNonceOpt},
+    gen::gossip::{self as molecule_gossip},
+    BasicMppPaymentData, BroadcastMessage, BroadcastMessageID, ChannelAnnouncement, ChannelFlags,
+    ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Cursor,
+    EcdsaSignature, FeatureVector, Hash256, HashAlgorithm, NodeAnnouncement, OnionPacketError,
+    PartialSignatureAsBytes, PaymentCustomRecords, PaymentOnionPacket, PeeledPaymentOnionPacket,
+    Privkey, PubNonceAsBytes, Pubkey, RemoveTlcReason, RevokeAndAck, TlcErr,
+    UnknownHashAlgorithmError, CURSOR_SIZE, ONION_PACKET_VERSION_V1,
+};
+
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::{PartialSignature, PubNonce};
+use secp256k1::Verification;
 use secp256k1::{PublicKey, Secp256k1, Signing};
-use secp256k1::{Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::fmt::Display;
-use tentacle::multiaddr::MultiAddr;
 use thiserror::Error;
 
-// Re-export primitive types from fiber_types
-pub use fiber_types::{EcdsaSignature, Hash256, NodeId, Privkey, Pubkey, SchnorrSignature};
-// Re-export bitflags types from fiber_types
-pub use fiber_types::{ChannelUpdateChannelFlags, ChannelUpdateMessageFlags};
-// Re-export payment onion types from fiber_types
-pub use fiber_types::{
-    CurrentPaymentHopData, OnionPacketError, PaymentOnionPacket, PaymentSphinxCodec,
-    PeeledPaymentOnionPacket, ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
-};
+/// Convert a `tentacle::secio::PublicKey` to a `Pubkey`.
+pub fn pubkey_from_tentacle(pk: tentacle::secio::PublicKey) -> Pubkey {
+    secp256k1::PublicKey::from_slice(pk.inner_ref())
+        .expect("valid tentacle pubkey can be converted to secp pubkey")
+        .into()
+}
+
+/// Convert a `Pubkey` to a `tentacle::secio::PublicKey`.
+pub fn pubkey_to_tentacle(pk: Pubkey) -> tentacle::secio::PublicKey {
+    tentacle::secio::PublicKey::from_raw_key(pk.serialize().to_vec())
+}
 
 /// The error type wrap various ser/de errors.
 #[derive(Error, Debug)]
@@ -70,8 +73,6 @@ impl From<std::convert::Infallible> for Error {
         match e {}
     }
 }
-
-// OnionPacketError is re-exported from fiber_types via pub use fiber_types::*
 
 #[derive(Clone, Debug)]
 pub struct Init {
@@ -700,15 +701,6 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     }
 }
 
-// Re-export RevokeAndAck from fiber_types (struct + molecule impls live there)
-pub use fiber_types::RevokeAndAck;
-
-// Re-export payment error types from fiber_types
-pub use fiber_types::{
-    RemoveTlcFulfill, RemoveTlcReason, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
-    NO_SHARED_SECRET,
-};
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlc {
     pub channel_id: Hash256,
@@ -818,77 +810,6 @@ pub struct ForwardTlcResult {
     pub payment_hash: Hash256,
     pub tlc_id: u64,
     pub add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
-}
-
-// Re-export protocol types from fiber_types
-pub use fiber_types::{
-    BroadcastMessage, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor,
-    NodeAnnouncement, CURSOR_SIZE,
-};
-
-pub fn new_node_announcement_unsigned(
-    node_name: AnnouncedNodeName,
-    features: FeatureVector,
-    addresses: Vec<MultiAddr>,
-    node_id: Pubkey,
-    timestamp: u64,
-    auto_accept_min_ckb_funding_amount: u64,
-) -> NodeAnnouncement {
-    NodeAnnouncement {
-        signature: None,
-        features,
-        timestamp,
-        node_id,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        node_name,
-        chain_hash: get_chain_hash(),
-        addresses,
-        auto_accept_min_ckb_funding_amount,
-        udt_cfg_infos: get_udt_whitelist(),
-    }
-}
-
-pub fn new_node_announcement(
-    node_name: AnnouncedNodeName,
-    features: FeatureVector,
-    addresses: Vec<MultiAddr>,
-    private_key: &Privkey,
-    timestamp: u64,
-    auto_accept_min_ckb_funding_amount: u64,
-) -> NodeAnnouncement {
-    let mut unsigned = new_node_announcement_unsigned(
-        node_name,
-        features,
-        addresses,
-        private_key.pubkey(),
-        timestamp,
-        auto_accept_min_ckb_funding_amount,
-    );
-    unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
-    unsigned
-}
-
-pub fn new_channel_announcement_unsigned(
-    node1_pubkey: &Pubkey,
-    node2_pubkey: &Pubkey,
-    channel_outpoint: OutPoint,
-    ckb_pubkey: &XOnlyPublicKey,
-    capacity: u128,
-    udt_type_script: Option<Script>,
-) -> ChannelAnnouncement {
-    ChannelAnnouncement {
-        node1_signature: None,
-        node2_signature: None,
-        ckb_signature: None,
-        features: Default::default(),
-        chain_hash: get_chain_hash(),
-        channel_outpoint,
-        node1_id: *node1_pubkey,
-        node2_id: *node2_pubkey,
-        ckb_key: *ckb_pubkey,
-        capacity,
-        udt_type_script,
-    }
 }
 
 pub fn new_channel_update_unsigned(
@@ -1868,8 +1789,6 @@ macro_rules! impl_traits {
 
 impl_traits!(FiberMessage);
 
-pub use fiber_types::BasicMppPaymentData;
-
 /// Trampoline onion hop payload.
 ///
 /// This is carried inside the *inner* trampoline onion packet (which is itself embedded in
@@ -2228,13 +2147,6 @@ impl TrampolineOnionPacket {
         )?))
     }
 }
-
-use fiber_types::molecule_table_data_len;
-pub use fiber_types::PaymentHopData;
-
-// PaymentOnionPacket, PeeledPaymentOnionPacket, CurrentPaymentHopData,
-// PaymentSphinxCodec, OnionPacketError, and helper functions are now in fiber-types.
-// They are re-exported via `pub use fiber_types::*;` in mod.rs.
 
 /// Helper free function to extract MPP custom records from a peeled payment onion packet.
 pub fn peeled_packet_mpp_custom_records(

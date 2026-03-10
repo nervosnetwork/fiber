@@ -1,17 +1,10 @@
-use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
-use super::config::AnnouncedNodeName;
-use super::features::FeatureVector;
+use super::channel::{ChannelActorState, ChannelActorStateStore};
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, BuildRouterCommand};
 use super::path::NodeHeap;
-use super::payment::{HopHint, SendPaymentData};
-use super::types::{
-    BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
-    NodeAnnouncement,
-};
-use super::types::{Cursor, Pubkey, TlcErr};
-use crate::ckb::config::UdtCfgInfos;
+use super::payment::SendPaymentDataExt;
+use super::types::BroadcastMessageWithTimestamp;
 use crate::fiber::channel::DEFAULT_FEE_RATE;
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
@@ -20,13 +13,16 @@ use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
-use crate::fiber::payment::{Attempt, PaymentSession, PaymentStatus};
-use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::PaymentHopData;
-use crate::fiber::types::Privkey;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::ChannelUpdateInfo;
+use fiber_types::{
+    Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, FeatureVector,
+    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus, Privkey,
+    Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
+};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use secp256k1::SECP256K1;
@@ -37,7 +33,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
-use tentacle::secio::PeerId;
 use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
@@ -145,14 +140,6 @@ impl ChannelInfo {
         self.node2
     }
 
-    pub fn node1_peerid(&self) -> PeerId {
-        self.node1.tentacle_peer_id()
-    }
-
-    pub fn node2_peerid(&self) -> PeerId {
-        self.node2.tentacle_peer_id()
-    }
-
     pub fn udt_type_script(&self) -> &Option<Script> {
         &self.udt_type_script
     }
@@ -243,67 +230,6 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
             udt_type_script: channel_announcement.udt_type_script,
             update_of_node2: None,
             update_of_node1: None,
-        }
-    }
-}
-
-/// The channel update info with a single direction of channel
-#[serde_as]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ChannelUpdateInfo {
-    /// The timestamp is the time when the channel update was received by the node.
-    #[serde_as(as = "U64Hex")]
-    pub timestamp: u64,
-    /// Whether the channel can be currently used for payments (in this one direction).
-    pub enabled: bool,
-    /// The exact amount of balance that we can send to the other party via the channel.
-    #[serde_as(as = "Option<U128Hex>")]
-    pub outbound_liquidity: Option<u128>,
-    /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
-    #[serde_as(as = "U64Hex")]
-    pub tlc_expiry_delta: u64,
-    /// The minimum value, which must be relayed to the next hop via the channel
-    #[serde_as(as = "U128Hex")]
-    pub tlc_minimum_value: u128,
-    /// The forwarding fee rate for the channel.
-    #[serde_as(as = "U64Hex")]
-    pub fee_rate: u64,
-}
-
-impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
-    fn from(info: &ChannelTlcInfo) -> Self {
-        Self {
-            timestamp: info.timestamp,
-            enabled: info.enabled,
-            outbound_liquidity: None,
-            tlc_expiry_delta: info.tlc_expiry_delta,
-            tlc_minimum_value: info.tlc_minimum_value,
-            fee_rate: info.tlc_fee_proportional_millionths as u64,
-        }
-    }
-}
-
-impl From<ChannelTlcInfo> for ChannelUpdateInfo {
-    fn from(info: ChannelTlcInfo) -> Self {
-        Self::from(&info)
-    }
-}
-
-impl From<ChannelUpdate> for ChannelUpdateInfo {
-    fn from(update: ChannelUpdate) -> Self {
-        Self::from(&update)
-    }
-}
-
-impl From<&ChannelUpdate> for ChannelUpdateInfo {
-    fn from(update: &ChannelUpdate) -> Self {
-        Self {
-            timestamp: update.timestamp,
-            enabled: !update.is_disabled(),
-            outbound_liquidity: None,
-            tlc_expiry_delta: update.tlc_expiry_delta,
-            tlc_minimum_value: update.tlc_minimum_value,
-            fee_rate: update.tlc_fee_proportional_millionths as u64,
         }
     }
 }
@@ -562,9 +488,6 @@ pub enum PathFindError {
     #[error("Graph other error: {0}")]
     Other(String),
 }
-
-// RouterHop is defined in fiber-types and re-exported here for backward compatibility
-pub use fiber_types::RouterHop;
 
 #[derive(Debug)]
 struct ResolvedRoute {
@@ -948,14 +871,14 @@ where
         self.nodes.len()
     }
 
-    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<MultiAddr>> {
+    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<Pubkey, Vec<MultiAddr>> {
         // TODO: we may need to shuffle the nodes before selecting the first n nodes,
         // to avoid some malicious nodes from being always selected.
         self.nodes
             .iter()
             .filter(|(k, _)| **k != self.source)
             .take(n)
-            .map(|(k, v)| (k.tentacle_peer_id(), v.addresses.clone()))
+            .map(|(k, v)| (*k, v.addresses.clone()))
             .collect()
     }
 

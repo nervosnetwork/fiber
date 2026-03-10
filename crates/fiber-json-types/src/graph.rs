@@ -1,53 +1,13 @@
-//! Graph-related types for the Fiber Network Node RPC API.
+//! Network graph types for the Fiber Network JSON-RPC API.
 
-use crate::serde_utils::{EntityHex, U128Hex, U64Hex};
-use crate::{Hash256, Pubkey};
-
+use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script, ScriptHashType};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use tentacle::multiaddr::MultiAddr;
 
-// ============================================================
-// Internal graph types exposed via RPC
-// ============================================================
-
-/// Channel update info from one direction.
-#[serde_as]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ChannelUpdateInfo {
-    #[serde_as(as = "U64Hex")]
-    pub timestamp: u64,
-    pub enabled: bool,
-    #[serde_as(as = "Option<U128Hex>")]
-    pub outbound_liquidity: Option<u128>,
-    #[serde_as(as = "U64Hex")]
-    pub tlc_expiry_delta: u64,
-    #[serde_as(as = "U128Hex")]
-    pub tlc_minimum_value: u128,
-    #[serde_as(as = "U64Hex")]
-    pub fee_rate: u64,
-}
-
-/// A single hop in a payment route.
-#[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RouterHop {
-    pub target: Pubkey,
-    #[serde_as(as = "EntityHex")]
-    pub channel_outpoint: OutPoint,
-    #[serde_as(as = "U128Hex")]
-    pub amount_received: u128,
-    #[serde_as(as = "U64Hex")]
-    pub incoming_tlc_expiry: u64,
-}
-
-// ============================================================
-// RPC param/result types
-// ============================================================
-
+/// Parameters for querying graph nodes.
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GraphNodesParams {
@@ -58,7 +18,7 @@ pub struct GraphNodesParams {
     pub after: Option<JsonBytes>,
 }
 
-/// The UDT script which is used to identify the UDT configuration for a Fiber Node
+/// The UDT script which is used to identify the UDT configuration for a Fiber Node.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UdtScript {
     /// The code hash of the script.
@@ -69,7 +29,7 @@ pub struct UdtScript {
     pub args: String,
 }
 
-/// UDT script on-chain dependencies.
+/// Udt script on-chain dependencies.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UdtDep {
     /// cell dep described by out_point.
@@ -80,7 +40,7 @@ pub struct UdtDep {
     pub type_id: Option<Script>,
 }
 
-/// The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
+/// The UDT cell dep which is used to identify the UDT configuration for a Fiber Node.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UdtCellDep {
     /// The out point of the cell dep.
@@ -89,7 +49,7 @@ pub struct UdtCellDep {
     pub dep_type: DepType,
 }
 
-/// The UDT argument info which is used to identify the UDT configuration
+/// The UDT argument info which is used to identify the UDT configuration.
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UdtArgInfo {
@@ -119,14 +79,15 @@ pub struct NodeInfo {
     pub node_name: String,
     /// The version of the node.
     pub version: String,
-    /// The addresses of the node.
-    pub addresses: Vec<MultiAddr>,
+    /// The addresses of the node (serialized as strings).
+    pub addresses: Vec<String>,
     /// The node features supported by the node.
     pub features: Vec<String>,
-    /// The identity public key of the node.
-    pub node_id: Pubkey,
+    /// The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
+    pub pubkey: Pubkey,
     #[serde_as(as = "U64Hex")]
     /// The latest timestamp set by the owner for the node announcement.
+    /// When a Node is online this timestamp will be updated to the latest value.
     pub timestamp: u64,
     /// The chain hash of the node.
     pub chain_hash: Hash256,
@@ -137,6 +98,7 @@ pub struct NodeInfo {
     pub udt_cfg_infos: UdtCfgInfos,
 }
 
+/// Result of querying graph nodes.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GraphNodesResult {
     /// The list of nodes.
@@ -145,6 +107,7 @@ pub struct GraphNodesResult {
     pub last_cursor: JsonBytes,
 }
 
+/// Parameters for querying graph channels.
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GraphChannelsParams {
@@ -155,6 +118,29 @@ pub struct GraphChannelsParams {
     pub after: Option<JsonBytes>,
 }
 
+/// The channel update info with a single direction of channel.
+#[serde_as]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChannelUpdateInfo {
+    /// The timestamp is the time when the channel update was received by the node.
+    #[serde_as(as = "U64Hex")]
+    pub timestamp: u64,
+    /// Whether the channel can be currently used for payments (in this one direction).
+    pub enabled: bool,
+    /// The exact amount of balance that we can send to the other party via the channel.
+    #[serde_as(as = "Option<U128Hex>")]
+    pub outbound_liquidity: Option<u128>,
+    /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
+    #[serde_as(as = "U64Hex")]
+    pub tlc_expiry_delta: u64,
+    /// The minimum value, which must be relayed to the next hop via the channel
+    #[serde_as(as = "U128Hex")]
+    pub tlc_minimum_value: u128,
+    /// The forwarding fee rate for the channel.
+    #[serde_as(as = "U64Hex")]
+    pub fee_rate: u64,
+}
+
 /// The Channel information.
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -162,17 +148,21 @@ pub struct ChannelInfo {
     /// The outpoint of the channel.
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
-    /// The identity public key of the first node.
+    /// The identity public key of the first node (secp256k1 compressed, hex string).
     pub node1: Pubkey,
-    /// The identity public key of the second node.
+    /// The identity public key of the second node (secp256k1 compressed, hex string).
     pub node2: Pubkey,
-    /// The created timestamp of the channel.
+    /// The created timestamp of the channel, which is the block header timestamp of the block
+    /// that contains the channel funding transaction.
     #[serde_as(as = "U64Hex")]
     pub created_timestamp: u64,
-    /// The update info from node1 to node2.
+
+    /// The update info from node1 to node2, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
     pub update_info_of_node1: Option<ChannelUpdateInfo>,
-    /// The update info from node2 to node1.
+
+    /// The update info from node2 to node1, e.g. timestamp, fee_rate, tlc_expiry_delta, tlc_minimum_value
     pub update_info_of_node2: Option<ChannelUpdateInfo>,
+
     /// The capacity of the channel.
     #[serde_as(as = "U128Hex")]
     pub capacity: u128,
@@ -182,6 +172,7 @@ pub struct ChannelInfo {
     pub udt_type_script: Option<Script>,
 }
 
+/// Result of querying graph channels.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct GraphChannelsResult {
     /// A list of channels.

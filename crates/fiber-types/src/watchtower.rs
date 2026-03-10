@@ -12,10 +12,6 @@ use musig2::CompactSignature;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-// ============================================================
-// RevocationData
-// ============================================================
-
 /// Data needed to revoke an outdated commitment transaction.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -33,10 +29,6 @@ pub struct RevocationData {
     pub output_data: Bytes,
 }
 
-// ============================================================
-// SettlementData
-// ============================================================
-
 /// Data needed to authorize and execute a settlement transaction.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SettlementData {
@@ -47,10 +39,6 @@ pub struct SettlementData {
     /// The list of pending Time-Locked Contracts (TLCs) included in this settlement
     pub tlcs: Vec<SettlementTlc>,
 }
-
-// ============================================================
-// SettlementTlc
-// ============================================================
 
 /// Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -70,10 +58,6 @@ pub struct SettlementTlc {
     /// The remote party's public key used to verify the TLC
     pub remote_key: Pubkey,
 }
-
-// ============================================================
-// ChannelData
-// ============================================================
 
 /// The data of a channel that the watchtower is monitoring.
 #[serde_as]

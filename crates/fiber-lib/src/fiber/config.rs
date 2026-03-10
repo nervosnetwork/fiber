@@ -1,18 +1,19 @@
 #[cfg(target_arch = "wasm32")]
 use crate::fiber::KeyPair;
-use crate::{ckb::contracts::Contract, Result};
+use crate::{ckb::contracts::Contract, invoice::Currency, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
+use fiber_types::protocol::AnnouncedNodeName;
 #[cfg(not(any(test, feature = "bench")))]
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
-use super::features::FeatureVector;
+use fiber_types::FeatureVector;
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
@@ -101,8 +102,6 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
-/// The maximum number of parts for a multi-part payment.
-pub const DEFAULT_MAX_PARTS: u64 = 12;
 pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 24;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
@@ -391,12 +390,19 @@ pub struct FiberConfig {
     pub metrics_addr: Option<String>,
 }
 
-pub use fiber_types::AnnouncedNodeName;
-
 #[cfg(not(any(test, feature = "bench")))]
 static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
 
 impl FiberConfig {
+    /// Returns the CKB invoice currency corresponding to the configured chain.
+    pub fn currency(&self) -> Currency {
+        match self.chain.as_str() {
+            "mainnet" => Currency::Fibb,
+            "testnet" => Currency::Fibt,
+            _ => Currency::Fibd,
+        }
+    }
+
     pub fn base_dir(&self) -> &PathBuf {
         self.base_dir.as_ref().expect("have set base dir")
     }

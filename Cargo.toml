@@ -2,11 +2,13 @@
 members = [
     "crates/fiber-lib",
     "crates/fiber-bin",
-    "crates/fnn-cli",
+    "crates/fiber-store",
     "crates/fiber-wasm",
     "crates/fiber-wasm-db-worker",
     "crates/fiber-wasm-db-common",
     "crates/fiber-types",
+    "crates/fiber-json-types",
+    "crates/fnn-cli",
 ]
 exclude = ["rpc-doc-gen"]
 resolver = "2"

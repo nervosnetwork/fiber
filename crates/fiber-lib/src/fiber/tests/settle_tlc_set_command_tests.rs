@@ -1,28 +1,24 @@
 //! Tests for SettleTlcSetCommand
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
-use ckb_types::packed::{OutPoint, Script};
-use tentacle::secio::PeerId;
-
-use crate::fiber::channel::InMemorySignerExt;
-use crate::fiber::channel::InboundTlcStatus;
-use crate::fiber::channel::{
-    AppliedFlags, ChannelActorData, ChannelActorState, ChannelActorStateStore,
-    ChannelBasePublicKeys, ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentNumbers,
-    InMemorySigner, TLCId, TlcInfo, TlcState, TlcStatus,
-};
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::payment::PaymentCustomRecords;
+use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore, CommitDiff};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
-use crate::fiber::types::{Hash256, HoldTlc, RemoveTlcReason, TlcErrorCode, NO_SHARED_SECRET};
+use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
 use crate::invoice::{InvoiceStore, PreimageStore};
 use crate::now_timestamp_as_millis_u64;
 use crate::tests::gen_utils::gen_rand_fiber_public_key;
 use crate::time::SystemTime;
+use ckb_types::packed::{OutPoint, Script};
+use fiber_types::{
+    AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelState, ChannelTlcInfo,
+    CommitmentNumbers, InMemorySigner, PaymentCustomRecords, TLCId, TlcInfo, TlcState, TlcStatus,
+    NO_SHARED_SECRET,
+};
+use fiber_types::{ChannelConstraints, InboundTlcStatus};
+use fiber_types::{HashAlgorithm, TlcErrorCode};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// Mock store for testing that implements PreimageStore, InvoiceStore, and ChannelActorStateStore
 struct MockStore {
@@ -138,11 +134,11 @@ impl ChannelActorStateStore for MockStore {
         self.channel_states.borrow_mut().remove(id);
     }
 
-    fn get_channel_ids_by_peer(&self, _peer_id: &PeerId) -> Vec<Hash256> {
+    fn get_channel_ids_by_pubkey(&self, _pubkey: &Pubkey) -> Vec<Hash256> {
         self.channel_states.borrow().keys().cloned().collect()
     }
 
-    fn get_channel_states(&self, _peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
+    fn get_channel_states(&self, _pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)> {
         vec![]
     }
 
@@ -193,6 +189,18 @@ impl ChannelActorStateStore for MockStore {
 
     fn is_tlc_settled(&self, _channel_id: &Hash256, _payment_hash: &Hash256) -> bool {
         false
+    }
+
+    fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {
+        // No-op for tests
+    }
+
+    fn get_pending_commit_diff(&self, _channel_id: &Hash256) -> Option<CommitDiff> {
+        None
+    }
+
+    fn delete_pending_commit_diff(&self, _channel_id: &Hash256) {
+        // No-op for tests
     }
 }
 
@@ -292,10 +300,14 @@ fn create_test_channel_state_with_tlc(
             last_revoke_ack_msg: None,
             created_at: SystemTime::now(),
         },
+        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        defer_peer_tlc_updates: false,
+        deferred_peer_tlc_updates: std::collections::VecDeque::new(),
+        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     }

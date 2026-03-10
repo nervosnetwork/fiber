@@ -1,18 +1,19 @@
 use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
-use crate::fiber::config::AnnouncedNodeName;
-use crate::fiber::features::FeatureVector;
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::payment::PaymentCustomRecords;
+use crate::fiber::network::get_chain_hash;
+use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
 use crate::fiber::{
+    blake2b_hash_with_salt,
     config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT},
     graph::*,
-    history::Direction,
-    history::TimedResult,
-    payment::{PaymentSession, PaymentStatus, SendPaymentData, SendPaymentDataBuilder},
-    types::{Privkey, Pubkey},
+    payment::{PaymentSessionExt, SendPaymentDataBuilder},
+    AwaitingChannelReadyFlags, ChannelActorData, ChannelBasePublicKeys, ChannelConstraints,
+    ChannelState, Direction, FeatureVector, InMemorySigner, NegotiatingFundingFlags, NodeId,
+    PaymentCustomRecords, PaymentSession, PaymentStatus, Privkey, Pubkey, PublicChannelInfo,
+    RevocationData, SendPaymentData, SettlementData, SigningCommitmentFlags, TimedResult,
 };
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
@@ -31,12 +32,12 @@ use crate::time::SystemTime;
 use crate::watchtower::*;
 #[cfg(not(target_arch = "wasm32"))]
 use ckb_hash::blake2b_256;
-use ckb_hash::new_blake2b;
 use ckb_types::packed::*;
 use ckb_types::prelude::*;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
+use fiber_types::protocol::AnnouncedNodeName;
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
@@ -56,13 +57,16 @@ fn mock_node() -> (Privkey, NodeAnnouncement) {
     let sk: Privkey = (*signer.secret_key()).into();
     (
         sk.clone(),
-        new_node_announcement(
+        NodeAnnouncement::new_signed(
             AnnouncedNodeName::from_string("node1").expect("invalid name"),
             FeatureVector::default(),
             vec![],
             &sk,
+            get_chain_hash(),
             now_timestamp_as_millis_u64(),
             0,
+            Default::default(),
+            env!("CARGO_PKG_VERSION").to_string(),
         ),
     )
 }
@@ -75,13 +79,14 @@ fn mock_channel() -> ChannelAnnouncement {
     let rand_hash256 = gen_rand_sha256_hash();
     let pubkey1: Pubkey = (*signer1.pubkey()).into();
     let pubkey2: Pubkey = (*signer2.pubkey()).into();
-    new_channel_announcement_unsigned(
+    ChannelAnnouncement::new_unsigned(
         &pubkey1,
         &pubkey2,
         OutPoint::new_builder()
-            .tx_hash(rand_hash256.into())
-            .index(0u32.pack())
+            .tx_hash(rand_hash256)
+            .index(0u32)
             .build(),
+        get_chain_hash(),
         &xonly,
         0,
         None,
@@ -189,8 +194,8 @@ fn test_store_save_channel_update() {
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
     let channel_update_of_node1 = new_channel_update_unsigned(
         OutPoint::new_builder()
-            .tx_hash(gen_rand_sha256_hash().into())
-            .index(0u32.pack())
+            .tx_hash(gen_rand_sha256_hash())
+            .index(0u32)
             .build(),
         now_timestamp_as_millis_u64(),
         flags_for_update_of_node1,
@@ -463,14 +468,6 @@ fn test_channel_state_serialize() {
     assert_eq!(flags, new_flags);
 }
 
-fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
-    let mut hasher = new_blake2b();
-    hasher.update(salt);
-    hasher.update(data);
-    let mut result = [0u8; 32];
-    hasher.finalize(&mut result);
-    result
-}
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -557,10 +554,14 @@ fn test_channel_actor_state_store() {
             last_revoke_ack_msg: None,
             created_at: SystemTime::now(),
         },
+        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        defer_peer_tlc_updates: false,
+        deferred_peer_tlc_updates: Default::default(),
+        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     };
@@ -578,9 +579,9 @@ fn test_channel_actor_state_store() {
     assert!(get_state.is_some());
     assert!(!get_state.unwrap().is_tlc_forwarding_enabled());
 
-    let remote_peer_id = state.get_remote_peer_id();
+    let remote_pubkey = state.get_remote_pubkey();
     assert_eq!(
-        store.get_channel_ids_by_peer(&remote_peer_id),
+        store.get_channel_ids_by_pubkey(&remote_pubkey),
         vec![state.id]
     );
     let channel_point = state.must_get_funding_transaction_outpoint();
@@ -590,7 +591,7 @@ fn test_channel_actor_state_store() {
 
     store.delete_channel_actor_state(&state.id);
     assert!(store.get_channel_actor_state(&state.id).is_none());
-    assert_eq!(store.get_channel_ids_by_peer(&remote_peer_id), vec![]);
+    assert_eq!(store.get_channel_ids_by_pubkey(&remote_pubkey), vec![]);
     let channel_point = state.must_get_funding_transaction_outpoint();
     assert!(store
         .get_channel_state_by_outpoint(&channel_point)
@@ -682,10 +683,14 @@ fn test_serde_channel_actor_state_ciborium() {
             last_revoke_ack_msg: None,
             created_at: SystemTime::now(),
         },
+        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        defer_peer_tlc_updates: false,
+        deferred_peer_tlc_updates: Default::default(),
+        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     };
@@ -708,7 +713,7 @@ fn test_store_payment_session() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
     assert_eq!(res.payment_hash(), payment_hash);
@@ -728,7 +733,7 @@ fn test_store_payment_sessions_with_status() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
 
     let payment_hash1 = gen_rand_sha256_hash();
@@ -739,7 +744,7 @@ fn test_store_payment_sessions_with_status() {
         .max_fee_amount(Some(1000))
         .build()
         .expect("valid payment_data");
-    let mut payment_session = PaymentSession::new(&store, payment_data.clone(), 10);
+    let mut payment_session = PaymentSession::new_session(&store, payment_data.clone(), 10);
     payment_session.set_success_status();
     store.insert_payment_session(payment_session.clone());
 
@@ -799,8 +804,8 @@ fn test_store_payment_history() {
     assert_eq!(r1, r2);
 
     let outpoint_3 = OutPoint::new_builder()
-        .tx_hash(gen_rand_sha256_hash().into())
-        .index(1u32.pack())
+        .tx_hash(gen_rand_sha256_hash())
+        .index(1u32)
         .build();
     let direction_3 = Direction::Forward;
     let result_3 = TimedResult {
@@ -842,13 +847,16 @@ fn test_store_payment_custom_record() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_serde_node_announcement_as_broadcast_message() {
     let privkey = gen_rand_fiber_private_key();
-    let node_announcement = new_node_announcement(
+    let node_announcement = NodeAnnouncement::new_signed(
         AnnouncedNodeName::from_string("node1").expect("valid name"),
         FeatureVector::default(),
         vec![],
         &privkey,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     assert!(
         node_announcement.verify(),
@@ -889,8 +897,8 @@ fn test_store_save_channel_update_and_get_timestamp() {
     let flags_for_update_of_node1 = ChannelUpdateMessageFlags::UPDATE_OF_NODE1;
     let channel_update_of_node1 = new_channel_update_unsigned(
         OutPoint::new_builder()
-            .tx_hash(gen_rand_sha256_hash().into())
-            .index(0u32.pack())
+            .tx_hash(gen_rand_sha256_hash())
+            .index(0u32)
             .build(),
         now_timestamp_as_millis_u64(),
         flags_for_update_of_node1,
@@ -1026,12 +1034,12 @@ fn test_store_sample_channel_actor_state() {
             sample.shutdown_transaction_hash
         );
 
-        // Verify peer-id index
-        let remote_peer_id = sample.get_remote_peer_id();
-        let channel_ids = store.get_channel_ids_by_peer(&remote_peer_id);
+        // Verify pubkey index
+        let remote_pubkey = sample.get_remote_pubkey();
+        let channel_ids = store.get_channel_ids_by_pubkey(&remote_pubkey);
         assert!(
             channel_ids.contains(&sample.id),
-            "peer-id index should contain the channel id"
+            "pubkey index should contain the channel id"
         );
     }
 
@@ -1048,8 +1056,9 @@ fn test_store_sample_channel_actor_state() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_channel_open_record() {
-    use crate::fiber::channel::{ChannelOpenRecord, ChannelOpenRecordStore, ChannelOpeningStatus};
-    use crate::store::sample::StoreSample;
+    use crate::fiber::channel::ChannelOpenRecordStore;
+    use crate::store::sample::deterministic_pubkey;
+    use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus};
 
     let samples = ChannelOpenRecord::samples(42);
     assert!(!samples.is_empty());
@@ -1087,9 +1096,9 @@ fn test_store_channel_open_record() {
     assert!(store.get_channel_open_records().is_empty());
 
     // Test update_status helper
-    let mut record = ChannelOpenRecord::new_outbound(
+    let mut record = ChannelOpenRecord::new(
         deterministic_hash256(42, 99),
-        sample_peer_id(),
+        deterministic_pubkey(999, 0),
         100_0000_0000,
     );
     assert_eq!(record.status, ChannelOpeningStatus::WaitingForPeer);
@@ -1101,16 +1110,6 @@ fn test_store_channel_open_record() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn sample_peer_id() -> tentacle::secio::PeerId {
-    use crate::store::sample::deterministic_pubkey;
-    let pubkey = deterministic_pubkey(999, 0);
-    let pk_bytes = pubkey.serialize();
-    let tentacle_pk = tentacle::secio::PublicKey::from_raw_key(pk_bytes.to_vec());
-    tentacle::secio::PeerId::from_public_key(&tentacle_pk)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn deterministic_hash256(seed: u64, index: u32) -> crate::fiber::types::Hash256 {
-    use crate::store::sample::deterministic_hash;
-    deterministic_hash(seed, index).into()
+fn deterministic_hash256(seed: u64, index: u32) -> fiber_types::Hash256 {
+    crate::store::sample::deterministic_hash(seed, index).into()
 }

@@ -1,44 +1,38 @@
-//! Peer-related types for the Fiber Network Node RPC API.
+//! Peer management types for the Fiber Network JSON-RPC API.
 
-use crate::Pubkey;
-
+use crate::serde_utils::Pubkey;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
-use tentacle::multiaddr::MultiAddr;
-use tentacle::secio::PeerId;
 
-// ============================================================
-// Internal peer types exposed via RPC
-// ============================================================
-
-/// Information about a connected peer.
-#[serde_as]
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct PeerInfo {
-    pub pubkey: Pubkey,
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
-    pub address: MultiAddr,
-}
-
-// ============================================================
-// RPC param/result types
-// ============================================================
-
+/// Parameters for connecting to a peer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConnectPeerParams {
-    /// The address of the peer to connect to.
-    pub address: MultiAddr,
+    /// The address of the peer to connect to (as a multiaddr string).
+    /// Either `address` or `pubkey` must be provided.
+    pub address: Option<String>,
+    /// The public key of the peer to connect to.
+    /// The node resolves the address from locally synced graph data.
+    pub pubkey: Option<Pubkey>,
     /// Whether to save the peer address to the peer store.
     pub save: Option<bool>,
 }
 
-#[serde_as]
+/// Parameters for disconnecting from a peer.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DisconnectPeerParams {
-    /// The peer ID of the peer to disconnect.
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
+    /// The public key of the peer to disconnect.
+    pub pubkey: Pubkey,
+}
+
+/// The information about a peer connected to the node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// The identity public key of the peer.
+    pub pubkey: Pubkey,
+
+    /// The multi-address associated with the connecting peer (as a string).
+    /// Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
+    /// The `graph_nodes` in Graph rpc module will return all addresses of the peer.
+    pub address: String,
 }
 
 /// The result of the `list_peers` RPC method.

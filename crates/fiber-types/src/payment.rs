@@ -1,6 +1,7 @@
 //! Payment-related types.
 
 use crate::gen::fiber as molecule_fiber;
+use crate::Hash256;
 use crate::{EntityHex, Pubkey, SliceHex};
 use ckb_types::prelude::{Pack, Unpack};
 use molecule::prelude::{Builder, Byte, Entity};
@@ -9,10 +10,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
 use strum::{AsRefStr, EnumString};
-
-// ============================================================
-// Payment status
-// ============================================================
 
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
@@ -40,10 +37,6 @@ impl PaymentStatus {
     }
 }
 
-// ============================================================
-// Payment custom records
-// ============================================================
-
 /// 0 ~ 65535 is reserved for endpoint usage, index above 65535 is reserved for internal usage
 pub const USER_CUSTOM_RECORDS_MAX_INDEX: u32 = 65535;
 
@@ -54,10 +47,6 @@ pub struct PaymentCustomRecords {
     /// The custom records to be included in the payment.
     pub data: HashMap<u32, Vec<u8>>,
 }
-
-// ============================================================
-// Conversions with molecule types
-// ============================================================
 
 impl From<PaymentCustomRecords> for molecule_fiber::CustomRecords {
     fn from(custom_records: PaymentCustomRecords) -> Self {
@@ -89,10 +78,6 @@ impl From<molecule_fiber::CustomRecords> for PaymentCustomRecords {
         }
     }
 }
-
-// ============================================================
-// BasicMppPaymentData
-// ============================================================
 
 /// Bolt04 basic MPP payment data record
 #[derive(Eq, PartialEq, Debug)]
@@ -142,10 +127,6 @@ impl BasicMppPaymentData {
     }
 }
 
-// ============================================================
-// AttemptStatus
-// ============================================================
-
 /// The status of a payment attempt.
 ///
 /// State transitions:
@@ -172,98 +153,6 @@ impl AttemptStatus {
         matches!(self, AttemptStatus::Success | AttemptStatus::Failed)
     }
 }
-
-// ============================================================
-// TimedResult
-// ============================================================
-
-/// A result that tracks timing information for success and failure.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimedResult {
-    pub fail_time: u64,
-    pub fail_amount: u128,
-    pub success_time: u64,
-    pub success_amount: u128,
-}
-
-// ============================================================
-// TlcErrPacket
-// ============================================================
-
-/// An encrypted error packet for TLC failures.
-/// The sender should decode it and then decide what to do with the error.
-/// Note: this is supposed to be only accessible by the sender, and it's not reliable since it
-/// is not placed on-chain due to the possibility of hop failure.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct TlcErrPacket {
-    pub onion_packet: Vec<u8>,
-}
-
-/// Shared secret indicating no encryption (for origin node).
-pub const NO_SHARED_SECRET: [u8; 32] = [0u8; 32];
-const NO_ERROR_PACKET_HMAC: [u8; 32] = [0u8; 32];
-
-use fiber_sphinx::OnionErrorPacket;
-
-impl TlcErrPacket {
-    /// Create a new TlcErrPacket from raw payload bytes.
-    /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
-    /// Use all zeros (NO_SHARED_SECRET) for the origin node.
-    pub fn from_payload(payload: Vec<u8>, shared_secret: &[u8; 32]) -> Self {
-        let onion_packet = if shared_secret != &NO_SHARED_SECRET {
-            OnionErrorPacket::create(shared_secret, payload)
-        } else {
-            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC, payload)
-        }
-        .into_bytes();
-        TlcErrPacket { onion_packet }
-    }
-
-    /// Check if this packet is plaintext (not encrypted).
-    pub fn is_plaintext(&self) -> bool {
-        self.onion_packet.len() >= 32 && self.onion_packet[0..32] == NO_ERROR_PACKET_HMAC
-    }
-
-    /// Intermediate node backwards the error to the previous hop using the shared secret
-    /// used in forwarding the onion packet.
-    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
-        if !self.is_plaintext() {
-            let onion_packet = OnionErrorPacket::from_bytes(self.onion_packet)
-                .xor_cipher_stream(shared_secret)
-                .into_bytes();
-            TlcErrPacket { onion_packet }
-        } else {
-            // If it is not encrypted, just send back as it is.
-            self
-        }
-    }
-}
-
-impl From<TlcErrPacket> for molecule_fiber::TlcErrPacket {
-    fn from(tlc_err_packet: TlcErrPacket) -> Self {
-        molecule_fiber::TlcErrPacket::new_builder()
-            .onion_packet(tlc_err_packet.onion_packet.pack())
-            .build()
-    }
-}
-
-impl From<molecule_fiber::TlcErrPacket> for TlcErrPacket {
-    fn from(tlc_err_packet: molecule_fiber::TlcErrPacket) -> Self {
-        TlcErrPacket {
-            onion_packet: tlc_err_packet.onion_packet().unpack(),
-        }
-    }
-}
-
-impl std::fmt::Display for TlcErrPacket {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TlcErrPacket")
-    }
-}
-
-// ============================================================
-// TlcErr / TlcErrData
-// ============================================================
 
 use crate::protocol::ChannelUpdate;
 use ckb_types::packed::OutPoint;
@@ -495,147 +384,6 @@ impl TryFrom<molecule_fiber::TlcErr> for TlcErr {
     }
 }
 
-// ============================================================
-// TlcErrPacket extended methods
-// ============================================================
-
-/// Always decrypting 27 times so the erroring node cannot learn its relative position in the route
-/// by performing a timing analysis if the sender were to retry the same route multiple times.
-const ERROR_DECODING_PASSES: usize = 27;
-
-impl TlcErrPacket {
-    /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
-    /// Use all zeros for the origin node. Takes a structured `TlcErr` and serializes it.
-    pub fn new(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
-        let payload = tlc_fail.serialize();
-        Self::from_payload(payload, shared_secret)
-    }
-
-    /// Decode the onion error packet using the session key and hop public keys.
-    pub fn decode(
-        &self,
-        session_key: &[u8; 32],
-        hops_public_keys: Vec<crate::Pubkey>,
-    ) -> Option<TlcErr> {
-        use secp256k1::{PublicKey, SecretKey};
-
-        if self.is_plaintext() {
-            let error = TlcErr::deserialize(&self.onion_packet[32..]);
-            if error.is_some() {
-                return error;
-            }
-        }
-
-        let hops_public_keys: Vec<PublicKey> = hops_public_keys
-            .iter()
-            .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
-            .collect();
-        let session_key = SecretKey::from_slice(session_key)
-            .inspect_err(|err| {
-                tracing::error!(
-                    target: "fnn::fiber::types::TlcErrPacket",
-                    "decode session_key error={} key={}",
-                    err,
-                    hex::encode(session_key)
-                )
-            })
-            .ok()?;
-        OnionErrorPacket::from_bytes(self.onion_packet.clone())
-            .parse(hops_public_keys, session_key, TlcErr::deserialize)
-            .map(|(error, hop_index)| {
-                for _ in hop_index..ERROR_DECODING_PASSES {
-                    OnionErrorPacket::from_bytes(self.onion_packet.clone())
-                        .xor_cipher_stream(&NO_SHARED_SECRET);
-                }
-                error
-            })
-    }
-}
-
-// ============================================================
-// PaymentOnionPacket
-// ============================================================
-
-/// An encrypted onion packet for payment routing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PaymentOnionPacket {
-    /// The encrypted packet data.
-    data: Vec<u8>,
-}
-
-impl PaymentOnionPacket {
-    /// Create a new PaymentOnionPacket from raw data.
-    pub fn new(data: Vec<u8>) -> Self {
-        Self { data }
-    }
-
-    /// Get the raw packet data.
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Get the raw packet data as bytes slice (alias for `data()`).
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Consume self and return the raw data.
-    pub fn into_data(self) -> Vec<u8> {
-        self.data
-    }
-
-    /// Consume self and return the raw data as bytes (alias for `into_data()`).
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.data
-    }
-
-    /// Convert into the raw Sphinx onion packet.
-    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, OnionPacketError> {
-        fiber_sphinx::OnionPacket::from_bytes(self.data).map_err(OnionPacketError::Sphinx)
-    }
-
-    /// Peels the next layer of the onion packet using the privkey of the current node.
-    ///
-    /// Returns errors when:
-    /// - This is the packet for the last hop.
-    /// - Fail to peel the packet using the given private key.
-    pub fn peel<C: secp256k1::Verification>(
-        self,
-        peeler: &crate::Privkey,
-        assoc_data: Option<&[u8]>,
-        secp_ctx: &secp256k1::Secp256k1<C>,
-    ) -> Result<PeeledPaymentOnionPacket, OnionPacketError> {
-        let peeled =
-            peel_sphinx_onion::<C, PaymentSphinxCodec>(self.data, peeler, assoc_data, secp_ctx)?;
-        Ok(PeeledPaymentOnionPacket {
-            current: peeled.current,
-            next: peeled.next.map(PaymentOnionPacket::new),
-            shared_secret: peeled.shared_secret,
-        })
-    }
-}
-
-// ============================================================
-// OnionPacketError
-// ============================================================
-
-/// Errors that can occur when processing an onion packet.
-#[derive(thiserror::Error, Debug)]
-pub enum OnionPacketError {
-    #[error("Fail to deserialize the hop data")]
-    InvalidHopData,
-
-    #[error("Unknown onion packet version: {0}")]
-    UnknownVersion(u8),
-
-    #[error("Sphinx protocol error")]
-    Sphinx(#[from] fiber_sphinx::SphinxError),
-}
-
-// ============================================================
-// CurrentPaymentHopData
-// ============================================================
-
 use crate::invoice::HashAlgorithm;
 
 /// The decrypted hop data for the current hop, without the `next_hop` field.
@@ -692,345 +440,6 @@ impl CurrentPaymentHopData {
     }
 }
 
-// ============================================================
-// PeeledPaymentOnionPacket
-// ============================================================
-
-/// A peeled payment onion packet, containing the current hop data and the packet for the next hop.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PeeledPaymentOnionPacket {
-    /// The decrypted hop data for the current hop.
-    pub current: CurrentPaymentHopData,
-    /// The shared secret for `current` used for returning error. Set to all zeros for the origin node
-    /// who has no shared secret.
-    pub shared_secret: [u8; 32],
-    /// The packet for the next hop.
-    pub next: Option<PaymentOnionPacket>,
-}
-
-impl PeeledPaymentOnionPacket {
-    /// - `hops_info`: the first is the instruction for the origin node itself.
-    ///   Remaining elements are for each node to receive the packet.
-    pub fn create<C: secp256k1::Signing>(
-        session_key: crate::Privkey,
-        mut hops_infos: Vec<PaymentHopData>,
-        assoc_data: Option<Vec<u8>>,
-        secp_ctx: &secp256k1::Secp256k1<C>,
-    ) -> Result<Self, OnionPacketError> {
-        if hops_infos.is_empty() {
-            return Err(OnionPacketError::Sphinx(
-                fiber_sphinx::SphinxError::HopsIsEmpty,
-            ));
-        }
-
-        let hops_path: Vec<crate::Pubkey> = hops_infos
-            .iter()
-            .map(|h| h.next_hop())
-            .take_while(Option::is_some)
-            .map(|opt| opt.expect("must be some"))
-            .collect();
-
-        // Keep the original hop ordering for payloads.
-        let current = hops_infos.remove(0);
-        let payloads = hops_infos;
-
-        let next = if !hops_path.is_empty() {
-            Some(PaymentOnionPacket::new(create_sphinx_onion::<
-                C,
-                PaymentSphinxCodec,
-            >(
-                session_key,
-                hops_path,
-                payloads,
-                assoc_data,
-                secp_ctx,
-            )?))
-        } else {
-            None
-        };
-
-        Ok(PeeledPaymentOnionPacket {
-            current: current.into(),
-            next,
-            // Use all zeros for the sender
-            shared_secret: NO_SHARED_SECRET,
-        })
-    }
-
-    /// Returns true if this is the peeled packet for the last destination.
-    pub fn is_last(&self) -> bool {
-        self.next.is_none()
-    }
-
-    /// Returns the MPP custom records from the current hop data, if present.
-    pub fn mpp_custom_records(&self) -> Option<BasicMppPaymentData> {
-        self.current
-            .custom_records
-            .as_ref()
-            .and_then(BasicMppPaymentData::read)
-    }
-}
-
-// ============================================================
-// Sphinx Onion Codec infrastructure
-// ============================================================
-
-/// Onion packet version with u64 BE length header for hop data.
-pub const ONION_PACKET_VERSION_V0: u8 = 0;
-/// Onion packet version with molecule's native u32 LE length for hop data.
-pub const ONION_PACKET_VERSION_V1: u8 = 1;
-
-const PACKET_DATA_LEN: usize = 6500;
-
-/// Length of the u64 BE header used in v0 hop data format.
-const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
-
-/// Trait for encoding/decoding Sphinx onion packet hop data.
-///
-/// This trait abstracts over different onion packet formats (payment vs trampoline),
-/// allowing the generic `peel_sphinx_onion` and `create_sphinx_onion` functions to
-/// work with any format.
-pub trait SphinxOnionCodec {
-    type Decoded;
-    type Current;
-
-    const PACKET_DATA_LEN: usize;
-    /// The onion packet version used when creating new packets.
-    const CURRENT_VERSION: u8;
-
-    /// Packs the decoded data for transmission. Must use `CURRENT_VERSION` format.
-    fn pack(decoded: &Self::Decoded) -> Vec<u8>;
-    /// Unpacks data received from the network. Must handle all versions allowed by `is_version_allowed`.
-    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded>;
-    fn to_current(decoded: Self::Decoded) -> Self::Current;
-    /// Returns true if the given version is allowed for this codec.
-    fn is_version_allowed(version: u8) -> bool;
-    /// Returns the total length of hop data (including any headers) for the specified version.
-    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize>;
-}
-
-/// Internal result of peeling a Sphinx onion layer.
-pub struct SphinxPeeled<Current> {
-    pub current: Current,
-    pub shared_secret: [u8; 32],
-    pub next: Option<Vec<u8>>,
-}
-
-/// Peels one layer of a Sphinx onion packet.
-pub fn peel_sphinx_onion<C: secp256k1::Verification, Codec: SphinxOnionCodec>(
-    packet_bytes: Vec<u8>,
-    peeler: &crate::Privkey,
-    assoc_data: Option<&[u8]>,
-    secp_ctx: &secp256k1::Secp256k1<C>,
-) -> Result<SphinxPeeled<Codec::Current>, OnionPacketError> {
-    let sphinx_packet =
-        fiber_sphinx::OnionPacket::from_bytes(packet_bytes).map_err(OnionPacketError::Sphinx)?;
-    let version = sphinx_packet.version;
-    if !Codec::is_version_allowed(version) {
-        return Err(OnionPacketError::UnknownVersion(version));
-    }
-    let shared_secret = sphinx_packet.shared_secret(&peeler.0);
-
-    let (new_current, new_next) = sphinx_packet
-        .peel(&peeler.0, assoc_data, secp_ctx, |buf| {
-            Codec::hop_data_len(version, buf)
-        })
-        .map_err(OnionPacketError::Sphinx)?;
-
-    let decoded = Codec::unpack(version, &new_current).ok_or(OnionPacketError::InvalidHopData)?;
-    let current = Codec::to_current(decoded);
-
-    // All zeros hmac indicates the last hop.
-    let next = new_next
-        .hmac
-        .iter()
-        .any(|b| *b != 0)
-        .then(|| new_next.into_bytes());
-
-    Ok(SphinxPeeled {
-        current,
-        shared_secret,
-        next,
-    })
-}
-
-/// Creates a Sphinx onion packet from hop data.
-pub fn create_sphinx_onion<C: secp256k1::Signing, Codec: SphinxOnionCodec>(
-    session_key: crate::Privkey,
-    hops_path: Vec<crate::Pubkey>,
-    payloads: Vec<Codec::Decoded>,
-    assoc_data: Option<Vec<u8>>,
-    secp_ctx: &secp256k1::Secp256k1<C>,
-) -> Result<Vec<u8>, OnionPacketError> {
-    let hops_path: Vec<secp256k1::PublicKey> = hops_path
-        .into_iter()
-        .map(|pk| secp256k1::PublicKey::from_slice(&pk.0).expect("valid public key"))
-        .collect();
-    let hops_data: Vec<Vec<u8>> = payloads.iter().map(|p| Codec::pack(p)).collect();
-    let mut packet = fiber_sphinx::OnionPacket::create(
-        session_key.0,
-        hops_path,
-        hops_data,
-        assoc_data,
-        Codec::PACKET_DATA_LEN,
-        secp_ctx,
-    )
-    .map_err(OnionPacketError::Sphinx)?;
-    // Set the version to indicate which hop data format is used
-    packet.version = Codec::CURRENT_VERSION;
-    Ok(packet.into_bytes())
-}
-
-// ============================================================
-// PaymentSphinxCodec
-// ============================================================
-
-/// Codec for payment onion packets (used by the outer payment onion layer).
-pub struct PaymentSphinxCodec;
-
-impl PaymentSphinxCodec {
-    /// Packs hop data according to the specified onion packet version.
-    /// - Version 0: Prepends u64 BE length header before molecule data.
-    /// - Version 1: Returns molecule-serialized data directly (uses molecule's native u32 LE length).
-    pub fn pack_hop_data(version: u8, hop_data: &PaymentHopData) -> Vec<u8> {
-        match version {
-            ONION_PACKET_VERSION_V0 => pack_len_prefixed(hop_data.serialize()),
-            ONION_PACKET_VERSION_V1 => hop_data.serialize(),
-            other => {
-                debug_assert!(
-                    false,
-                    "Unknown onion packet version {} passed to pack_hop_data; defaulting to v1",
-                    other
-                );
-                hop_data.serialize()
-            }
-        }
-    }
-
-    /// Unpacks hop data according to the specified onion packet version.
-    /// - Version 0: Skips u64 BE length header, deserializes molecule data.
-    /// - Version 1: Deserializes molecule data directly (using molecule's u32 LE length).
-    /// - Unknown versions: Returns None to fail fast and avoid silent misparsing.
-    pub fn unpack_hop_data(version: u8, buf: &[u8]) -> Option<PaymentHopData> {
-        match version {
-            ONION_PACKET_VERSION_V0 => {
-                let payload = unpack_len_prefixed_payload(buf)?;
-                PaymentHopData::deserialize(payload)
-            }
-            ONION_PACKET_VERSION_V1 => {
-                let len = molecule_table_data_len(buf)?;
-                if buf.len() < len {
-                    return None;
-                }
-                PaymentHopData::deserialize(&buf[..len])
-            }
-            _ => None,
-        }
-    }
-}
-
-impl SphinxOnionCodec for PaymentSphinxCodec {
-    type Decoded = PaymentHopData;
-    type Current = CurrentPaymentHopData;
-
-    const PACKET_DATA_LEN: usize = PACKET_DATA_LEN;
-    // Send v1, accept both v0 and v1 for backward compatibility
-    const CURRENT_VERSION: u8 = ONION_PACKET_VERSION_V1;
-
-    fn pack(decoded: &Self::Decoded) -> Vec<u8> {
-        Self::pack_hop_data(Self::CURRENT_VERSION, decoded)
-    }
-
-    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded> {
-        Self::unpack_hop_data(version, buf)
-    }
-
-    fn to_current(decoded: Self::Decoded) -> Self::Current {
-        decoded.into()
-    }
-
-    fn is_version_allowed(version: u8) -> bool {
-        // Accept both v0 and v1 for backward compatibility
-        version <= ONION_PACKET_VERSION_V1
-    }
-
-    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize> {
-        match version {
-            ONION_PACKET_VERSION_V0 => len_with_u64_header(buf),
-            ONION_PACKET_VERSION_V1 => molecule_table_data_len(buf),
-            _ => None,
-        }
-    }
-}
-
-// ============================================================
-// Onion packet helper functions
-// ============================================================
-
-/// Packs data with u64 BE length header (v0 format).
-/// Used by Trampoline (bincode serialization) and v0 payment hop data.
-pub fn pack_len_prefixed(mut payload: Vec<u8>) -> Vec<u8> {
-    let mut packed = (payload.len() as u64).to_be_bytes().to_vec();
-    packed.append(&mut payload);
-    packed
-}
-
-/// Unpacks length-prefixed payload (v0 format): [u64 BE length][data].
-pub fn unpack_len_prefixed_payload(buf: &[u8]) -> Option<&[u8]> {
-    let len = len_with_u64_header(buf)?;
-    if buf.len() < len {
-        return None;
-    }
-    buf.get(HOP_DATA_HEAD_LEN..len)
-}
-
-/// Returns the total length with u64 BE header: [u64 BE length] + data.
-/// Used by v0 format (Trampoline and legacy payment hop data).
-pub fn len_with_u64_header(buf: &[u8]) -> Option<usize> {
-    if buf.len() < HOP_DATA_HEAD_LEN {
-        return None;
-    }
-    let len = u64::from_be_bytes(
-        buf[0..HOP_DATA_HEAD_LEN]
-            .try_into()
-            .expect("u64 from slice"),
-    );
-    // Safe conversion: check value fits in usize and addition won't overflow.
-    // Note: Caller (fiber-sphinx) is responsible for validating len against packet bounds.
-    usize::try_from(len).ok()?.checked_add(HOP_DATA_HEAD_LEN)
-}
-
-/// Returns the total length from molecule's native u32 LE header.
-/// Used by v1 format (current payment hop data).
-pub fn molecule_table_data_len(buf: &[u8]) -> Option<usize> {
-    if buf.len() < molecule::NUMBER_SIZE {
-        return None;
-    }
-    let len = molecule::unpack_number(buf) as usize;
-    // Molecule size must be at least NUMBER_SIZE (4 bytes for the length header itself).
-    // Reject malformed data claiming a smaller size.
-    if len < molecule::NUMBER_SIZE {
-        return None;
-    }
-    Some(len)
-}
-
-// ============================================================
-// RemoveTlcFulfill
-// ============================================================
-
-use crate::Hash256;
-
-/// The fulfillment of a TLC removal.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct RemoveTlcFulfill {
-    pub payment_preimage: Hash256,
-}
-
-// ============================================================
-// SessionRouteNode
-// ============================================================
-
 use crate::U128Hex;
 
 /// The node and channel information in a payment route hop
@@ -1046,10 +455,6 @@ pub struct SessionRouteNode {
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
 }
-
-// ============================================================
-// RouterHop
-// ============================================================
 
 use crate::U64Hex;
 
@@ -1075,10 +480,6 @@ pub struct RouterHop {
     pub incoming_tlc_expiry: u64,
 }
 
-// ============================================================
-// HopHint
-// ============================================================
-
 /// A hop hint is a hint for a node to use a specific channel,
 /// usually used for the last hop to the target node.
 #[serde_as]
@@ -1094,85 +495,6 @@ pub struct HopHint {
     /// The TLC expiry delta to use this hop to forward the payment.
     pub tlc_expiry_delta: u64,
 }
-
-// ============================================================
-// RemoveTlcReason
-// ============================================================
-
-use std::fmt::{self, Debug, Formatter};
-
-/// The reason for removing a TLC.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum RemoveTlcReason {
-    RemoveTlcFulfill(RemoveTlcFulfill),
-    RemoveTlcFail(TlcErrPacket),
-}
-
-impl Debug for RemoveTlcReason {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            RemoveTlcReason::RemoveTlcFulfill(_fulfill) => {
-                write!(f, "RemoveTlcFulfill")
-            }
-            RemoveTlcReason::RemoveTlcFail(_fail) => {
-                write!(f, "RemoveTlcFail")
-            }
-        }
-    }
-}
-
-impl RemoveTlcReason {
-    /// Intermediate node backwards the error to the previous hop using the shared secret
-    /// used in forwarding the onion packet.
-    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
-        match self {
-            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
-                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill)
-            }
-            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.backward(shared_secret))
-            }
-        }
-    }
-}
-
-impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
-    fn from(remove_tlc_reason: RemoveTlcReason) -> Self {
-        match remove_tlc_reason {
-            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
-                molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill.into())
-            }
-            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail.into())
-            }
-        }
-    }
-}
-
-impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReason {
-    fn from(remove_tlc_reason: RemoveTlcReason) -> Self {
-        molecule_fiber::RemoveTlcReason::new_builder()
-            .set(remove_tlc_reason)
-            .build()
-    }
-}
-
-impl From<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
-    fn from(remove_tlc_reason: molecule_fiber::RemoveTlcReason) -> Self {
-        match remove_tlc_reason.to_enum() {
-            molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill) => {
-                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill.into())
-            }
-            molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail) => {
-                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.into())
-            }
-        }
-    }
-}
-
-// ============================================================
-// SessionRoute
-// ============================================================
 
 /// The router is a list of nodes that the payment will go through.
 /// We store in the payment session and then will use it to track the payment history.
@@ -1234,10 +556,6 @@ impl SessionRoute {
     }
 }
 
-// ============================================================
-// PaymentHopData
-// ============================================================
-
 /// The data for a single hop in a payment route.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1252,26 +570,8 @@ pub struct PaymentHopData {
     pub custom_records: Option<PaymentCustomRecords>,
 }
 
-/// Helper to store the trampoline onion packet inside `custom_records`.
-///
-/// This embeds the trampoline onion bytes as a custom record entry so that the molecule
-/// `PaymentHopData` schema stays at 7 fields — matching v0.6.1 — and old onion packets
-/// created before trampoline support can still be deserialized.
-pub struct TrampolineOnionData;
-
-impl TrampolineOnionData {
-    /// Custom record key for embedded trampoline onion data.
-    /// `BasicMppPaymentData` uses `USER_CUSTOM_RECORDS_MAX_INDEX + 1` (65536).
-    pub const CUSTOM_RECORD_KEY: u32 = USER_CUSTOM_RECORDS_MAX_INDEX + 2;
-
-    pub fn write(data: Vec<u8>, custom_records: &mut PaymentCustomRecords) {
-        custom_records.data.insert(Self::CUSTOM_RECORD_KEY, data);
-    }
-
-    pub fn read(custom_records: &PaymentCustomRecords) -> Option<Vec<u8>> {
-        custom_records.data.get(&Self::CUSTOM_RECORD_KEY).cloned()
-    }
-}
+// TrampolineOnionData is in crate::onion.
+use crate::onion::TrampolineOnionData;
 
 impl PaymentHopData {
     pub fn next_hop(&self) -> Option<Pubkey> {
@@ -1356,10 +656,6 @@ impl From<molecule_fiber::PaymentHopData> for PaymentHopData {
         }
     }
 }
-
-// ============================================================
-// Attempt
-// ============================================================
 
 /// A payment attempt.
 #[derive(Clone, Serialize, Deserialize)]
@@ -1468,10 +764,6 @@ impl Attempt {
     }
 }
 
-// ============================================================
-// TrampolineContext
-// ============================================================
-
 use crate::channel::PrevTlcInfo;
 
 /// Context for trampoline routing payments.
@@ -1488,10 +780,6 @@ pub struct TrampolineContext {
     /// Hash algorithm used for the payment.
     pub hash_algorithm: HashAlgorithm,
 }
-
-// ============================================================
-// TlcErrorCode
-// ============================================================
 
 // The onion packet is invalid
 const BADONION: u16 = 0x8000;
@@ -1563,10 +851,6 @@ impl TlcErrorCode {
     }
 }
 
-// ============================================================
-// SendPaymentData
-// ============================================================
-
 use ckb_types::packed::Script;
 
 /// Data for sending a payment.
@@ -1603,10 +887,6 @@ pub struct SendPaymentData {
     pub trampoline_context: Option<TrampolineContext>,
 }
 
-// ============================================================
-// PaymentSession
-// ============================================================
-
 /// A payment session tracking the state of a payment attempt.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
@@ -1620,24 +900,258 @@ pub struct PaymentSession {
     pub status: PaymentStatus,
     pub created_at: u64,
     pub last_updated_at: u64,
+    /// Runtime cache for attempts; not persisted.
+    #[serde(skip)]
+    pub cached_attempts: Vec<Attempt>,
 }
 
-// ============================================================
-// Molecule conversions
-// ============================================================
+/// Default maximum number of parts for a multi-part payment.
+pub const DEFAULT_MAX_PARTS: u64 = 12;
 
-impl From<RemoveTlcFulfill> for molecule_fiber::RemoveTlcFulfill {
-    fn from(remove_tlc_fulfill: RemoveTlcFulfill) -> Self {
-        molecule_fiber::RemoveTlcFulfill::new_builder()
-            .payment_preimage(remove_tlc_fulfill.payment_preimage.into())
-            .build()
+/// Default retry limit per attempt in MPP mode.
+pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
+
+impl SendPaymentData {
+    /// Maximum number of parallel parts for this payment.
+    pub fn max_parts(&self) -> usize {
+        self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) as usize
+    }
+
+    /// Whether this payment allows multi-path payment (MPP).
+    pub fn allow_mpp(&self) -> bool {
+        // only allow mpp if max_parts is greater than 1 and not keysend
+        self.allow_mpp && self.max_parts() > 1 && !self.keysend
+    }
+
+    /// Whether this payment uses trampoline routing.
+    pub fn use_trampoline_routing(&self) -> bool {
+        self.trampoline_hops
+            .as_ref()
+            .is_some_and(|hops| !hops.is_empty())
     }
 }
 
-impl From<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
-    fn from(remove_tlc_fulfill: molecule_fiber::RemoveTlcFulfill) -> Self {
-        RemoveTlcFulfill {
-            payment_preimage: remove_tlc_fulfill.payment_preimage().into(),
+impl PaymentSession {
+    pub fn update_with_attempt(&mut self, attempt: Attempt) {
+        if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
+            *a = attempt;
+        }
+        self.status = self.calc_payment_status();
+    }
+
+    pub fn retry_times(&self) -> u32 {
+        self.attempts().map(|a| a.tried_times).sum()
+    }
+
+    pub fn allow_mpp(&self) -> bool {
+        self.request.allow_mpp()
+    }
+
+    pub fn payment_hash(&self) -> crate::Hash256 {
+        self.request.payment_hash
+    }
+
+    pub fn is_payment_with_router(&self) -> bool {
+        !self.request.router.is_empty()
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.request.dry_run
+    }
+
+    pub fn attempts(&self) -> std::slice::Iter<'_, Attempt> {
+        self.cached_attempts.iter()
+    }
+
+    #[cfg(test)]
+    pub fn all_attempts_with_status(&self) -> Vec<(u64, AttemptStatus, Option<String>, u32, u128)> {
+        self.cached_attempts
+            .iter()
+            .map(|a| {
+                (
+                    a.id,
+                    a.status,
+                    a.last_error.clone(),
+                    a.tried_times,
+                    a.route.receiver_amount(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn attempts_count(&self) -> usize {
+        self.cached_attempts.len()
+    }
+
+    pub fn max_parts(&self) -> usize {
+        if self.allow_mpp() && !self.request.use_trampoline_routing() {
+            self.request.max_parts()
+        } else {
+            1
         }
     }
+
+    pub fn active_attempts(&self) -> Vec<&Attempt> {
+        self.attempts().filter(|a| a.is_active()).collect()
+    }
+
+    pub fn fee_paid(&self) -> u128 {
+        if self.request.use_trampoline_routing() {
+            let total_sent: u128 = self
+                .active_attempts()
+                .iter()
+                .map(|a| a.route.nodes.first().map_or(0, |n| n.amount))
+                .sum();
+            let total_received = self.request.amount;
+            total_sent.saturating_sub(total_received)
+        } else {
+            self.active_attempts().iter().map(|a| a.route.fee()).sum()
+        }
+    }
+
+    pub fn remain_fee_amount(&self) -> Option<u128> {
+        let max_fee_amount = self.request.max_fee_amount?;
+        let remain_fee = max_fee_amount.saturating_sub(self.fee_paid());
+        Some(remain_fee)
+    }
+
+    pub fn remain_amount(&self) -> u128 {
+        let sent_amount = self
+            .active_attempts()
+            .iter()
+            .map(|a| a.route.receiver_amount())
+            .sum::<u128>();
+        self.request.amount.saturating_sub(sent_amount)
+    }
+
+    pub fn new_attempt(
+        &self,
+        attempt_id: u64,
+        source: Pubkey,
+        target: Pubkey,
+        route_hops: Vec<PaymentHopData>,
+    ) -> Attempt {
+        let now = crate::now_timestamp_as_millis_u64();
+        let payment_hash = self.payment_hash();
+        let hash = payment_hash;
+        let try_limit = if self.allow_mpp() {
+            DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT
+        } else {
+            self.try_limit
+        };
+
+        let route = SessionRoute::new(source, target, &route_hops);
+
+        Attempt {
+            id: attempt_id,
+            hash,
+            try_limit,
+            tried_times: 1,
+            payment_hash,
+            route,
+            route_hops,
+            session_key: [0; 32],
+            preimage: None,
+            created_at: now,
+            last_updated_at: now,
+            last_error: None,
+            status: AttemptStatus::Created,
+        }
+    }
+
+    pub fn append_attempt(&mut self, attempt: Attempt) {
+        self.cached_attempts.push(attempt);
+    }
+
+    pub fn allow_more_attempts(&self) -> bool {
+        if self.status.is_final() {
+            return false;
+        }
+
+        if self.remain_amount() == 0 {
+            return false;
+        }
+
+        if self.retry_times() >= self.try_limit {
+            return false;
+        }
+
+        if self.active_attempts().len() >= self.max_parts() {
+            return false;
+        }
+
+        true
+    }
+
+    pub fn calc_payment_status(&self) -> PaymentStatus {
+        if self.cached_attempts.is_empty() || self.status.is_final() {
+            return self.status;
+        }
+
+        if self.attempts().any(|a| a.is_inflight()) {
+            return PaymentStatus::Inflight;
+        }
+
+        if self.attempts().all(|a| a.is_failed()) && !self.allow_more_attempts() {
+            return PaymentStatus::Failed;
+        }
+
+        if self.success_attempts_amount_is_enough() {
+            return PaymentStatus::Success;
+        }
+
+        PaymentStatus::Created
+    }
+
+    pub fn set_inflight_status(&mut self) {
+        self.status = PaymentStatus::Inflight;
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+    }
+
+    pub fn set_success_status(&mut self) {
+        self.status = PaymentStatus::Success;
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+        self.last_error = None;
+        self.last_error_code = None;
+    }
+
+    pub fn set_failed_status(&mut self, error: &str) {
+        self.status = PaymentStatus::Failed;
+        self.last_updated_at = crate::now_timestamp_as_millis_u64();
+        self.last_error = Some(error.to_string());
+    }
+
+    fn success_attempts_amount_is_enough(&self) -> bool {
+        let success_amount: u128 = self
+            .cached_attempts
+            .iter()
+            .filter_map(|a| {
+                if a.is_success() {
+                    Some(a.route.receiver_amount())
+                } else {
+                    None
+                }
+            })
+            .sum();
+        success_amount >= self.request.amount
+    }
+}
+
+/// A timed payment result for a channel direction, used to track success/failure
+/// history for probability-based routing.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedResult {
+    pub fail_time: u64,
+    pub fail_amount: u128,
+    pub success_time: u64,
+    pub success_amount: u128,
+}
+
+/// The direction of a channel payment.
+/// Forward means from node_a to node_b;
+/// Backward means from node_b to node_a.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Direction {
+    Forward,
+    Backward,
 }

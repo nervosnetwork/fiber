@@ -1,18 +1,18 @@
-//! Dev/debug RPC types for the Fiber Network Node.
+//! Development/debug types for the Fiber Network JSON-RPC API.
 
 use crate::invoice::HashAlgorithm;
-use crate::serde_utils::{U128Hex, U64Hex};
-use crate::Hash256;
-
+use crate::serde_utils::{Hash256, U128Hex, U64Hex};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+/// Parameters for sending a commitment_signed message.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CommitmentSignedParams {
     /// The channel ID of the channel to send the commitment_signed message to
     pub channel_id: Hash256,
 }
 
+/// Parameters for adding a TLC.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AddTlcParams {
@@ -30,6 +30,7 @@ pub struct AddTlcParams {
     pub hash_algorithm: Option<HashAlgorithm>,
 }
 
+/// Result of adding a TLC.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AddTlcResult {
@@ -38,6 +39,7 @@ pub struct AddTlcResult {
     pub tlc_id: u64,
 }
 
+/// Parameters for removing a TLC.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RemoveTlcParams {
@@ -46,11 +48,11 @@ pub struct RemoveTlcParams {
     #[serde_as(as = "U64Hex")]
     /// The ID of the TLC to remove
     pub tlc_id: u64,
-    /// The reason for removing the TLC
+    /// The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
     pub reason: RemoveTlcReason,
 }
 
-/// The reason for removing a TLC
+/// The reason for removing a TLC.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
@@ -61,6 +63,7 @@ pub enum RemoveTlcReason {
     RemoveTlcFail { error_code: String },
 }
 
+/// Parameters for submitting a commitment transaction.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubmitCommitmentTransactionParams {
@@ -71,6 +74,7 @@ pub struct SubmitCommitmentTransactionParams {
     pub commitment_number: u64,
 }
 
+/// Result of submitting a commitment transaction.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubmitCommitmentTransactionResult {
@@ -78,6 +82,7 @@ pub struct SubmitCommitmentTransactionResult {
     pub tx_hash: Hash256,
 }
 
+/// Parameters for checking channel shutdown.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CheckChannelShutdownParams {

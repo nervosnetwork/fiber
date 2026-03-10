@@ -5,23 +5,17 @@ use tracing::debug;
 use crate::{
     create_n_nodes_network_with_params,
     fiber::{
-        channel::{
-            AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, TLCId,
-        },
+        channel::{ChannelActorStateStore, ChannelCommand, ChannelCommandWithId},
         config::{
             CKB_SHANNONS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
             PAYMENT_MAX_PARTS_LIMIT,
         },
-        features::FeatureVector,
-        hash_algorithm::HashAlgorithm,
         network::DebugEvent,
-        payment::{
-            AttemptStatus, PaymentStatus, SendPaymentCommand, USER_CUSTOM_RECORDS_MAX_INDEX,
-        },
-        types::{
-            BasicMppPaymentData, Hash256, PaymentHopData, PeeledPaymentOnionPacket, RemoveTlcReason,
-        },
-        NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords,
+        payment::SendPaymentCommand,
+        types::RemoveTlcReason,
+        AddTlcCommand, AttemptStatus, BasicMppPaymentData, FeatureVector, Hash256, HashAlgorithm,
+        NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords, PaymentHopData,
+        PaymentStatus, PeeledPaymentOnionPacket, TLCId, USER_CUSTOM_RECORDS_MAX_INDEX,
     },
     gen_rand_secp256k1_public_key, gen_rand_sha256_hash, gen_rpc_config,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
@@ -2970,7 +2964,7 @@ async fn test_send_mpp_with_generated_invoice() {
     let too_large_amount_invoice = nodes[1]
         .gen_invoice(NewInvoiceParams {
             amount: 20000000001,
-            payment_preimage: Some(gen_rand_sha256_hash()),
+            payment_preimage: Some(gen_rand_sha256_hash().into()),
             final_expiry_delta: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             allow_mpp: Some(true),
             ..Default::default()
@@ -2991,7 +2985,7 @@ async fn test_send_mpp_with_generated_invoice() {
     let ok_invoice = nodes[1]
         .gen_invoice(NewInvoiceParams {
             amount: 20000000000,
-            payment_preimage: Some(gen_rand_sha256_hash()),
+            payment_preimage: Some(gen_rand_sha256_hash().into()),
             allow_mpp: Some(true),
             final_expiry_delta: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
             ..Default::default()
