@@ -1,8 +1,3 @@
-use crate::rpc::{
-    schema_as_hex_bytes_optional, schema_as_integer, schema_as_uint_hex,
-    schema_as_uint_hex_optional,
-};
-
 use crate::fiber::{
     channel::{
         ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore,

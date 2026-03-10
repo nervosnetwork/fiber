@@ -1,5 +1,3 @@
-use crate::rpc::{schema_as_hex_bytes, schema_as_uint_hex, schema_as_uint_hex_optional};
-
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;

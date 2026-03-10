@@ -1,4 +1,4 @@
-use crate::rpc::{schema_as_hex_bytes_optional, schema_as_string};
+use crate::rpc::schema_as_string;
 
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
@@ -413,26 +413,12 @@ pub struct OpenChannelCommand {
     pub max_tlc_number_in_flight: Option<u64>,
 }
 
-/// A hop requirement need to meet when building router, do not including the source node,
-/// the last hop is the target node.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct HopRequire {
-    /// The public key of the node
-    pub(crate) pubkey: Pubkey,
-    /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
-    #[serde_as(as = "Option<EntityHex>")]
-    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
-    pub(crate) channel_outpoint: Option<OutPoint>,
-}
-
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildRouterCommand {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     pub amount: Option<u128>,
     #[serde_as(as = "Option<EntityHex>")]
-    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
     pub udt_type_script: Option<Script>,
     pub hops_info: Vec<HopRequire>,
     pub final_tlc_expiry_delta: Option<u64>,

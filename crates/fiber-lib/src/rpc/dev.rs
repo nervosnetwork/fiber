@@ -1,5 +1,3 @@
-use crate::rpc::schema_as_uint_hex;
-
 // #[cfg(not(target_arch = "wasm32"))]
 // use crate::watchtower::WatchtowerStore;
 use crate::rpc::utils::rpc_error;
@@ -22,7 +20,6 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use ractor::call;
-use schemars::JsonSchema;
 use std::str::FromStr;
 use std::{collections::HashMap, sync::Arc};
 

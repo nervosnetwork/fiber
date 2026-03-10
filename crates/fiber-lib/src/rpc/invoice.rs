@@ -3,7 +3,6 @@
 //! We define CkbInvoice and its related types here only for the RPC interface.
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
-use crate::rpc::{schema_as_hex_no_prefix, schema_as_uint_hex, schema_as_uint_hex_optional};
 
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
@@ -19,7 +18,6 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 use ractor::{call, ActorRef};
 use rand::Rng;
-use schemars::JsonSchema;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use std::time::Duration;
 use tentacle::secio::SecioKeyPair;

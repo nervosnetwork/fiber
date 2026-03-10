@@ -1,5 +1,3 @@
-use crate::rpc::{schema_as_string, schema_as_string_optional};
-
 use crate::fiber::network::PeerDisconnectReason;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::log_and_error;

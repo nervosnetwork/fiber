@@ -1,7 +1,3 @@
-use crate::rpc::{
-    schema_as_hex_bytes, schema_as_string_array, schema_as_uint_hex, schema_as_uint_hex_optional,
-};
-
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};

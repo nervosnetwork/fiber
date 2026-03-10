@@ -23,6 +23,7 @@
 //! - `prof`: Profiling types
 //! - `context`: RPC context types
 
+pub mod schema_helpers;
 pub mod serde_utils;
 
 #[cfg(feature = "conversion")]

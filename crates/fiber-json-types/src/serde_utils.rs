@@ -4,6 +4,7 @@
 //! fiber-json-types can be compiled without depending on fiber-types.
 
 use molecule::prelude::Entity;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{serde_as, serde_conv, DeserializeAs, SerializeAs};
 
@@ -172,6 +173,18 @@ impl From<HexU32> for u32 {
     }
 }
 
+impl JsonSchema for HexU32 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "HexU32".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let mut schema = String::json_schema(generator);
+        schema.insert("pattern".into(), "^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$".into());
+        schema
+    }
+}
+
 pub struct SliceHexNoPrefix;
 
 impl<T> SerializeAs<T> for SliceHexNoPrefix
@@ -254,6 +267,18 @@ impl core::str::FromStr for Pubkey {
     }
 }
 
+impl JsonSchema for Pubkey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Pubkey".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let mut schema = String::json_schema(generator);
+        schema.insert("pattern".into(), "^([0-9a-fA-F]{2})*$".into());
+        schema
+    }
+}
+
 /// A private key byte array (32 bytes), serialized as hex without `0x` prefix.
 ///
 /// On deserialization, only hex format and 32-byte length are checked.
@@ -321,6 +346,18 @@ impl core::str::FromStr for Privkey {
     }
 }
 
+impl JsonSchema for Privkey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Privkey".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let mut schema = String::json_schema(generator);
+        schema.insert("pattern".into(), "^([0-9a-fA-F]{2})*$".into());
+        schema
+    }
+}
+
 /// A 256-bit hash (32 bytes), serialized as `0x`-prefixed hex string.
 ///
 /// On deserialization, both `0x`-prefixed and non-prefixed hex strings are accepted.
@@ -372,6 +409,18 @@ impl core::str::FromStr for Hash256 {
         let bytes =
             hex::decode(hex_str).map_err(|e| format!("invalid hash256 hex '{}': {}", s, e))?;
         Hash256::from_slice(&bytes)
+    }
+}
+
+impl JsonSchema for Hash256 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Hash256".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let mut schema = String::json_schema(generator);
+        schema.insert("pattern".into(), "^0x([0-9a-fA-F]{2})*$".into());
+        schema
     }
 }
 
@@ -507,6 +556,24 @@ macro_rules! define_rpc_flags {
         impl From<$name> for $ty {
             fn from(v: $name) -> Self {
                 v.0
+            }
+        }
+
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                let flag_names: Vec<String> = vec![
+                    $($crate::serde_utils::to_pascal_case(stringify!($flag_name)),)*
+                ];
+                let single = flag_names.join("|");
+                let pattern = format!("^(({single})(,({single}))*)?$");
+                schemars::json_schema!({
+                    "type": "string",
+                    "pattern": pattern,
+                })
             }
         }
     };
