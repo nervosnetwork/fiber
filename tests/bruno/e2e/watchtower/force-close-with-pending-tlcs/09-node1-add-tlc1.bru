@@ -45,5 +45,6 @@ script:pre-request {
 script:post-response {
   console.log("generated result: ", res.body.result);
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 1000));
+  // The full AddTlc → CommitmentSigned → RevokeAndAck round-trip can take >1s on slow CI machines.
+  await new Promise(r => setTimeout(r, 2000));
 }
