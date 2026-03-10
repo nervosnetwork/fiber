@@ -170,13 +170,16 @@ pub struct RemovePreimageParams {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct QueryTlcStatusParams {
+    /// Channel ID
     pub channel_id: Hash256,
+    /// Payment hash
     pub payment_hash: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct QueryTlcStatusResult {
+    /// Found preimage when the TLC has been settled on chain with the preimage path.
     pub preimage: Option<Hash256>,
     /// Whether the TLC has been settled on chain
     pub is_settled: bool,
