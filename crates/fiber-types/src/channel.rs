@@ -16,6 +16,7 @@ use bitflags::bitflags;
 use ckb_types::packed::Byte32 as MByte32;
 use ckb_types::packed::Script;
 use ckb_types::packed::Transaction;
+use ckb_types::prelude::{Pack, Unpack};
 use ckb_types::H256;
 use molecule::prelude::{Builder, Entity};
 use musig2::BinaryEncoding;
@@ -883,6 +884,171 @@ pub enum RetryableTlcOperation {
     AddTlc(AddTlcCommand),
 }
 
+/// Message to add a TLC to the channel.
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+pub struct AddTlc {
+    pub channel_id: Hash256,
+    pub tlc_id: u64,
+    pub amount: u128,
+    pub payment_hash: Hash256,
+    pub expiry: u64,
+    pub hash_algorithm: HashAlgorithm,
+    pub onion_packet: Option<PaymentOnionPacket>,
+}
+
+impl fmt::Debug for AddTlc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AddTlc")
+            .field("channel_id", &self.channel_id)
+            .field("tlc_id", &self.tlc_id)
+            .field("amount", &self.amount)
+            .field("payment_hash", &self.payment_hash)
+            .field("expiry", &self.expiry)
+            .field("hash_algorithm", &self.hash_algorithm)
+            .finish()
+    }
+}
+
+impl From<AddTlc> for molecule_fiber::AddTlc {
+    fn from(add_tlc: AddTlc) -> Self {
+        molecule_fiber::AddTlc::new_builder()
+            .channel_id(add_tlc.channel_id.into())
+            .tlc_id(add_tlc.tlc_id.pack())
+            .amount(add_tlc.amount.pack())
+            .payment_hash(add_tlc.payment_hash.into())
+            .expiry(add_tlc.expiry.pack())
+            .hash_algorithm(molecule::prelude::Byte::new(add_tlc.hash_algorithm as u8))
+            .onion_packet(
+                add_tlc
+                    .onion_packet
+                    .map(|p| p.into_bytes())
+                    .unwrap_or_default()
+                    .pack(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
+    type Error = anyhow::Error;
+
+    fn try_from(add_tlc: molecule_fiber::AddTlc) -> Result<Self, Self::Error> {
+        let onion_packet_bytes: Vec<u8> = add_tlc.onion_packet().unpack();
+        let onion_packet =
+            (!onion_packet_bytes.is_empty()).then(|| PaymentOnionPacket::new(onion_packet_bytes));
+        Ok(AddTlc {
+            onion_packet,
+            channel_id: add_tlc.channel_id().into(),
+            tlc_id: add_tlc.tlc_id().unpack(),
+            amount: add_tlc.amount().unpack(),
+            payment_hash: add_tlc.payment_hash().into(),
+            expiry: add_tlc.expiry().unpack(),
+            hash_algorithm: add_tlc
+                .hash_algorithm()
+                .try_into()
+                .map_err(|e: crate::invoice::UnknownHashAlgorithmError| anyhow::anyhow!(e))?,
+        })
+    }
+}
+
+/// Message to remove a TLC from the channel.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+pub struct RemoveTlc {
+    pub channel_id: Hash256,
+    pub tlc_id: u64,
+    pub reason: RemoveTlcReason,
+}
+
+impl From<RemoveTlc> for molecule_fiber::RemoveTlc {
+    fn from(remove_tlc: RemoveTlc) -> Self {
+        molecule_fiber::RemoveTlc::new_builder()
+            .channel_id(remove_tlc.channel_id.into())
+            .tlc_id(remove_tlc.tlc_id.pack())
+            .reason(
+                molecule_fiber::RemoveTlcReason::new_builder()
+                    .set(remove_tlc.reason)
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::RemoveTlc> for RemoveTlc {
+    type Error = anyhow::Error;
+
+    fn try_from(remove_tlc: molecule_fiber::RemoveTlc) -> Result<Self, Self::Error> {
+        Ok(RemoveTlc {
+            channel_id: remove_tlc.channel_id().into(),
+            tlc_id: remove_tlc.tlc_id().unpack(),
+            reason: remove_tlc.reason().into(),
+        })
+    }
+}
+
+/// TLC update message to resend during channel reestablishment.
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug, Hash)]
+pub enum TlcReplayUpdate {
+    Add(AddTlc),
+    Remove(RemoveTlc),
+}
+
+/// Version for `CommitDiff` serialization compatibility.
+pub const CURRENT_COMMIT_DIFF_VERSION: u8 = 2;
+
+fn default_commit_diff_version() -> u8 {
+    CURRENT_COMMIT_DIFF_VERSION
+}
+
+/// Optional template fields for `CommitmentSigned` replay.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitmentSignedTemplate {
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub next_commitment_nonce: PubNonce,
+    #[serde(default)]
+    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
+    pub funding_tx_partial_signature: Option<PartialSignature>,
+}
+
+/// Replay ordering hint when both revoke+commit are owed.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ReplayOrderHint {
+    RevokeThenCommit,
+    CommitThenRevoke,
+}
+
+/// Everything needed to resend a pending `CommitmentSigned` after reconnect.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitDiff {
+    /// Structure version for backward/forward compatibility.
+    #[serde(default = "default_commit_diff_version")]
+    pub version: u8,
+    /// Channel that owns this diff.
+    #[serde(default)]
+    pub channel_id: Hash256,
+    /// Local/remote commitment numbers when this commitment was sent.
+    #[serde(default)]
+    pub local_commitment_number_at_send: u64,
+    #[serde(default)]
+    pub remote_commitment_number_at_send: u64,
+    /// The commitment transaction (used for resign, not rebuilt).
+    #[serde_as(as = "EntityHex")]
+    pub commit_tx: Transaction,
+    /// TLC updates included in this commitment (for resending).
+    #[serde(default, alias = "tlc_updates")]
+    pub replay_updates: Vec<TlcReplayUpdate>,
+    /// Optional template fields for `CommitmentSigned` replay.
+    #[serde(default)]
+    pub commitment_signed_template: Option<CommitmentSignedTemplate>,
+    /// Optional replay ordering hint when both revoke+commit are owed.
+    #[serde(default)]
+    pub replay_order_hint: Option<ReplayOrderHint>,
+    /// Creation timestamp.
+    #[serde(default, alias = "created_at")]
+    pub created_at_ms: u64,
+}
+
 /// Information about a channel shutdown.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
@@ -1349,6 +1515,15 @@ pub struct ChannelActorData {
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
     pub created_at: SystemTime,
+
+    /// TLC updates sent to peer since the last local CommitmentSigned.
+    /// This preserves send order for reestablish replay.
+    #[serde(default)]
+    pub pending_replay_updates: Vec<TlcReplayUpdate>,
+
+    /// Tracks whether the last outbound sync message was RevokeAndAck.
+    #[serde(default)]
+    pub last_was_revoke: bool,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {

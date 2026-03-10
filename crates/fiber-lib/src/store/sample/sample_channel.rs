@@ -1,11 +1,14 @@
-use super::StoreSample;
-use crate::fiber::channel::ChannelActorState;
+use std::collections::VecDeque;
+
 use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+
+use crate::fiber::channel::ChannelActorState;
+
+use super::StoreSample;
+
 /// StoreSample implementation for `ChannelActorState`.
 ///
 /// Provides deterministic sample instances for migration testing.
-use std::collections::VecDeque;
-
 impl StoreSample for ChannelActorState {
     const STORE_PREFIX: u8 = CHANNEL_ACTOR_STATE_PREFIX;
     const TYPE_NAME: &'static str = "ChannelActorState";
@@ -18,7 +21,6 @@ impl StoreSample for ChannelActorState {
 impl ChannelActorState {
     /// Sample 0: Minimal state — use ChannelActorData sample from fiber-types and add runtime fields.
     fn sample_minimal(seed: u64) -> Self {
-        // Get ChannelActorData sample from fiber-types (take the first one - minimal)
         let core = fiber_types::ChannelActorData::samples(seed)
             .into_iter()
             .next()
@@ -26,15 +28,12 @@ impl ChannelActorState {
 
         ChannelActorState {
             core,
-            // Runtime-only fields (not serialized)
-            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
-            last_was_revoke: false,
             ephemeral_config: Default::default(),
             private_key: None,
         }
@@ -43,7 +42,6 @@ impl ChannelActorState {
     /// Sample 1: Fully populated state — use ChannelActorData::sample_full from fiber-types.
     /// All complex types are already populated in fiber-types sample_full.
     fn sample_full(seed: u64) -> Self {
-        // Get the full ChannelActorData sample from fiber-types
         let core = fiber_types::ChannelActorData::samples(seed)
             .into_iter()
             .nth(1)
@@ -51,15 +49,12 @@ impl ChannelActorState {
 
         ChannelActorState {
             core,
-            // Runtime-only fields (not serialized) - use populated values
-            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
-            last_was_revoke: true,
             ephemeral_config: Default::default(),
             private_key: None,
         }

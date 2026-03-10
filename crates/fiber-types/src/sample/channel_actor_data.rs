@@ -119,6 +119,8 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         shutdown_transaction_hash: None,
         reestablishing: false,
         last_revoke_ack_msg: None,
+        pending_replay_updates: vec![],
+        last_was_revoke: false,
         created_at: SystemTime::UNIX_EPOCH,
     }
 }
@@ -341,6 +343,8 @@ fn sample_full(seed: u64) -> ChannelActorData {
         shutdown_transaction_hash: Some(ckb_types::H256(super::deterministic_hash(seed, 950))),
         reestablishing: true,
         last_revoke_ack_msg: Some(revoke_and_ack),
+        pending_replay_updates: vec![],
+        last_was_revoke: true,
         created_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_704_067_200_000),
     }
 }
