@@ -28,6 +28,7 @@ pub mod serde_utils;
 #[cfg(feature = "conversion")]
 pub mod convert;
 
+#[cfg(feature = "cch")]
 pub mod cch;
 pub mod channel;
 pub mod context;
@@ -38,8 +39,10 @@ pub mod invoice;
 pub mod payment;
 pub mod peer;
 pub mod prof;
+#[cfg(feature = "watchtower")]
 pub mod watchtower;
 
+#[cfg(feature = "cch")]
 pub use cch::*;
 pub use channel::*;
 pub use context::*;
@@ -53,4 +56,5 @@ pub use prof::*;
 pub use serde_utils::Hash256;
 pub use serde_utils::Privkey;
 pub use serde_utils::Pubkey;
+#[cfg(feature = "watchtower")]
 pub use watchtower::*;

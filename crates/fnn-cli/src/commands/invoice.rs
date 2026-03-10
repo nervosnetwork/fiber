@@ -1,8 +1,11 @@
-use super::utils::{to_hex_u128, to_hex_u64};
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use fiber_json_types::{
+    GetInvoiceResult, Hash256, InvoiceParams, InvoiceResult, NewInvoiceParams, ParseInvoiceParams,
+    ParseInvoiceResult, SettleInvoiceParams,
+};
+use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("invoice")
@@ -125,6 +128,20 @@ pub fn command() -> Command {
         )
 }
 
+fn parse_optional_u64(sub: &ArgMatches, name: &str) -> Result<Option<u64>> {
+    sub.get_one::<String>(name)
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("Invalid {}", name))
+        })
+        .transpose()
+}
+
+fn parse_optional_bool(sub: &ArgMatches, name: &str, default: bool) -> Option<bool> {
+    sub.get_one::<String>(name)
+        .map(|v| v.parse::<bool>().unwrap_or(default))
+}
+
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("new_invoice", sub)) => {
@@ -133,79 +150,98 @@ pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> 
                 .unwrap()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid amount"))?;
-            let currency = sub.get_one::<String>("currency").unwrap();
+            let currency = serde_json::from_value(Value::String(
+                sub.get_one::<String>("currency").unwrap().clone(),
+            ))
+            .map_err(|e| anyhow::anyhow!("Invalid currency: {}", e))?;
+            let description = sub.get_one::<String>("description").cloned();
+            let payment_preimage = sub
+                .get_one::<String>("payment_preimage")
+                .map(|s| s.parse::<Hash256>())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_preimage: {}", e))?;
+            let payment_hash = sub
+                .get_one::<String>("payment_hash")
+                .map(|s| s.parse::<Hash256>())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let expiry = parse_optional_u64(sub, "expiry")?;
+            let fallback_address = sub.get_one::<String>("fallback_address").cloned();
+            let final_expiry_delta = parse_optional_u64(sub, "final_expiry_delta")?;
+            let udt_type_script = sub
+                .get_one::<String>("udt_type_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid udt_type_script JSON: {}", e))?;
+            let hash_algorithm = sub
+                .get_one::<String>("hash_algorithm")
+                .map(|s| serde_json::from_value(Value::String(s.clone())))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid hash_algorithm: {}", e))?;
+            let allow_mpp = parse_optional_bool(sub, "allow_mpp", true);
+            let allow_trampoline_routing =
+                parse_optional_bool(sub, "allow_trampoline_routing", true);
 
-            let mut params = json!({
-                "amount": to_hex_u128(amount),
-                "currency": currency,
-            });
-
-            if let Some(desc) = sub.get_one::<String>("description") {
-                params["description"] = json!(desc);
-            }
-            if let Some(v) = sub.get_one::<String>("payment_preimage") {
-                params["payment_preimage"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("payment_hash") {
-                params["payment_hash"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("expiry") {
-                let val: u64 = v.parse().map_err(|_| anyhow::anyhow!("Invalid expiry"))?;
-                params["expiry"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("fallback_address") {
-                params["fallback_address"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("final_expiry_delta") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid final_expiry_delta"))?;
-                params["final_expiry_delta"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("udt_type_script") {
-                params["udt_type_script"] = serde_json::from_str(v)?;
-            }
-            if let Some(v) = sub.get_one::<String>("hash_algorithm") {
-                params["hash_algorithm"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("allow_mpp") {
-                params["allow_mpp"] = json!(v.parse::<bool>().unwrap_or(true));
-            }
-            if let Some(v) = sub.get_one::<String>("allow_trampoline_routing") {
-                params["allow_trampoline_routing"] = json!(v.parse::<bool>().unwrap_or(true));
-            }
-
-            client.call_with_params("new_invoice", params).await
+            let params = NewInvoiceParams {
+                amount,
+                currency,
+                description,
+                payment_preimage,
+                payment_hash,
+                expiry,
+                fallback_address,
+                final_expiry_delta,
+                udt_type_script,
+                hash_algorithm,
+                allow_mpp,
+                allow_trampoline_routing,
+            };
+            let result: InvoiceResult = client.call_typed("new_invoice", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("parse_invoice", sub)) => {
-            let invoice = sub.get_one::<String>("invoice").unwrap();
-            let params = json!({
-                "invoice": invoice,
-            });
-            client.call_with_params("parse_invoice", params).await
+            let invoice = sub.get_one::<String>("invoice").unwrap().clone();
+            let params = ParseInvoiceParams { invoice };
+            let result: ParseInvoiceResult = client.call_typed("parse_invoice", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("get_invoice", sub)) => {
-            let payment_hash = sub.get_one::<String>("payment_hash").unwrap();
-            let params = json!({
-                "payment_hash": payment_hash,
-            });
-            client.call_with_params("get_invoice", params).await
+            let payment_hash: Hash256 = sub
+                .get_one::<String>("payment_hash")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let params = InvoiceParams { payment_hash };
+            let result: GetInvoiceResult = client.call_typed("get_invoice", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("cancel_invoice", sub)) => {
-            let payment_hash = sub.get_one::<String>("payment_hash").unwrap();
-            let params = json!({
-                "payment_hash": payment_hash,
-            });
-            client.call_with_params("cancel_invoice", params).await
+            let payment_hash: Hash256 = sub
+                .get_one::<String>("payment_hash")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let params = InvoiceParams { payment_hash };
+            let result: Value = client.call_typed("cancel_invoice", &params).await?;
+            Ok(result)
         }
         Some(("settle_invoice", sub)) => {
-            let payment_hash = sub.get_one::<String>("payment_hash").unwrap();
-            let payment_preimage = sub.get_one::<String>("payment_preimage").unwrap();
-            let params = json!({
-                "payment_hash": payment_hash,
-                "payment_preimage": payment_preimage,
-            });
-            client.call_with_params("settle_invoice", params).await
+            let payment_hash: Hash256 = sub
+                .get_one::<String>("payment_hash")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let payment_preimage: Hash256 = sub
+                .get_one::<String>("payment_preimage")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_preimage: {}", e))?;
+            let params = SettleInvoiceParams {
+                payment_hash,
+                payment_preimage,
+            };
+            let result: Value = client.call_typed("settle_invoice", &params).await?;
+            Ok(result)
         }
         None => {
             command().print_help()?;

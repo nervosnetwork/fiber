@@ -2498,8 +2498,10 @@ name = "fnn-cli"
 version = "0.7.1"
 dependencies = [
  "anyhow",
+ "ckb-jsonrpc-types",
  "clap",
  "colored",
+ "fiber-json-types",
  "reqwest",
  "rustyline",
  "serde",

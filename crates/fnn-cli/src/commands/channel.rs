@@ -1,8 +1,11 @@
-use super::utils::{to_hex_u128, to_hex_u64};
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use fiber_json_types::{
+    AbandonChannelParams, AcceptChannelParams, Hash256, ListChannelsParams, ListChannelsResult,
+    OpenChannelParams, OpenChannelResult, Pubkey, ShutdownChannelParams, UpdateChannelParams,
+};
+use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("channel")
@@ -227,200 +230,186 @@ pub fn command() -> Command {
         )
 }
 
+fn parse_optional_u64(sub: &ArgMatches, name: &str) -> Result<Option<u64>> {
+    sub.get_one::<String>(name)
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("Invalid {}", name))
+        })
+        .transpose()
+}
+
+fn parse_optional_u128(sub: &ArgMatches, name: &str) -> Result<Option<u128>> {
+    sub.get_one::<String>(name)
+        .map(|v| {
+            v.parse::<u128>()
+                .map_err(|_| anyhow::anyhow!("Invalid {}", name))
+        })
+        .transpose()
+}
+
+fn parse_optional_bool(sub: &ArgMatches, name: &str, default: bool) -> Option<bool> {
+    sub.get_one::<String>(name)
+        .map(|v| v.parse::<bool>().unwrap_or(default))
+}
+
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("open_channel", sub)) => {
-            let peer_id = sub.get_one::<String>("peer_id").unwrap();
+            let pubkey: Pubkey = sub
+                .get_one::<String>("peer_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid peer_id: {}", e))?;
             let funding_amount: u128 = sub
                 .get_one::<String>("funding_amount")
                 .unwrap()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid funding_amount"))?;
 
-            let mut params = json!({
-                "peer_id": peer_id,
-                "funding_amount": to_hex_u128(funding_amount),
-            });
+            let funding_udt_type_script = sub
+                .get_one::<String>("funding_udt_type_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid funding_udt_type_script JSON: {}", e))?;
+            let shutdown_script = sub
+                .get_one::<String>("shutdown_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid shutdown_script JSON: {}", e))?;
+            let commitment_delay_epoch = sub
+                .get_one::<String>("commitment_delay_epoch")
+                .map(|s| serde_json::from_str(&format!("\"{}\"", s)))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid commitment_delay_epoch: {}", e))?;
 
-            if let Some(public) = sub.get_one::<String>("public") {
-                params["public"] = json!(public.parse::<bool>().unwrap_or(true));
-            }
-            if let Some(one_way) = sub.get_one::<String>("one_way") {
-                params["one_way"] = json!(one_way.parse::<bool>().unwrap_or(false));
-            }
-            if let Some(script) = sub.get_one::<String>("funding_udt_type_script") {
-                params["funding_udt_type_script"] = serde_json::from_str(script)?;
-            }
-            if let Some(script) = sub.get_one::<String>("shutdown_script") {
-                params["shutdown_script"] = serde_json::from_str(script)?;
-            }
-            if let Some(v) = sub.get_one::<String>("commitment_delay_epoch") {
-                params["commitment_delay_epoch"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("commitment_fee_rate") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid commitment_fee_rate"))?;
-                params["commitment_fee_rate"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("funding_fee_rate") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid funding_fee_rate"))?;
-                params["funding_fee_rate"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_expiry_delta") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_expiry_delta"))?;
-                params["tlc_expiry_delta"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_min_value") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_min_value"))?;
-                params["tlc_min_value"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_fee_proportional_millionths") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_fee_proportional_millionths"))?;
-                params["tlc_fee_proportional_millionths"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("max_tlc_value_in_flight") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid max_tlc_value_in_flight"))?;
-                params["max_tlc_value_in_flight"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("max_tlc_number_in_flight") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid max_tlc_number_in_flight"))?;
-                params["max_tlc_number_in_flight"] = json!(to_hex_u64(val));
-            }
-
-            client.call_with_params("open_channel", params).await
+            let params = OpenChannelParams {
+                pubkey,
+                funding_amount,
+                public: parse_optional_bool(sub, "public", true),
+                one_way: parse_optional_bool(sub, "one_way", false),
+                funding_udt_type_script,
+                shutdown_script,
+                commitment_delay_epoch,
+                commitment_fee_rate: parse_optional_u64(sub, "commitment_fee_rate")?,
+                funding_fee_rate: parse_optional_u64(sub, "funding_fee_rate")?,
+                tlc_expiry_delta: parse_optional_u64(sub, "tlc_expiry_delta")?,
+                tlc_min_value: parse_optional_u128(sub, "tlc_min_value")?,
+                tlc_fee_proportional_millionths: parse_optional_u128(
+                    sub,
+                    "tlc_fee_proportional_millionths",
+                )?,
+                max_tlc_value_in_flight: parse_optional_u128(sub, "max_tlc_value_in_flight")?,
+                max_tlc_number_in_flight: parse_optional_u64(sub, "max_tlc_number_in_flight")?,
+            };
+            let result: OpenChannelResult = client.call_typed("open_channel", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("accept_channel", sub)) => {
-            let temp_id = sub.get_one::<String>("temporary_channel_id").unwrap();
+            let temporary_channel_id: Hash256 = sub
+                .get_one::<String>("temporary_channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid temporary_channel_id: {}", e))?;
             let funding_amount: u128 = sub
                 .get_one::<String>("funding_amount")
                 .unwrap()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid funding_amount"))?;
 
-            let mut params = json!({
-                "temporary_channel_id": temp_id,
-                "funding_amount": to_hex_u128(funding_amount),
-            });
+            let shutdown_script = sub
+                .get_one::<String>("shutdown_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid shutdown_script JSON: {}", e))?;
 
-            if let Some(script) = sub.get_one::<String>("shutdown_script") {
-                params["shutdown_script"] = serde_json::from_str(script)?;
-            }
-            if let Some(v) = sub.get_one::<String>("max_tlc_value_in_flight") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid max_tlc_value_in_flight"))?;
-                params["max_tlc_value_in_flight"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("max_tlc_number_in_flight") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid max_tlc_number_in_flight"))?;
-                params["max_tlc_number_in_flight"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_min_value") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_min_value"))?;
-                params["tlc_min_value"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_fee_proportional_millionths") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_fee_proportional_millionths"))?;
-                params["tlc_fee_proportional_millionths"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_expiry_delta") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_expiry_delta"))?;
-                params["tlc_expiry_delta"] = json!(to_hex_u64(val));
-            }
-
-            client.call_with_params("accept_channel", params).await
+            let params = AcceptChannelParams {
+                temporary_channel_id,
+                funding_amount,
+                shutdown_script,
+                max_tlc_value_in_flight: parse_optional_u128(sub, "max_tlc_value_in_flight")?,
+                max_tlc_number_in_flight: parse_optional_u64(sub, "max_tlc_number_in_flight")?,
+                tlc_min_value: parse_optional_u128(sub, "tlc_min_value")?,
+                tlc_fee_proportional_millionths: parse_optional_u128(
+                    sub,
+                    "tlc_fee_proportional_millionths",
+                )?,
+                tlc_expiry_delta: parse_optional_u64(sub, "tlc_expiry_delta")?,
+            };
+            let result: Value = client.call_typed("accept_channel", &params).await?;
+            Ok(result)
         }
         Some(("abandon_channel", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let params = json!({
-                "channel_id": channel_id,
-            });
-            client.call_with_params("abandon_channel", params).await
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let params = AbandonChannelParams { channel_id };
+            let result: Value = client.call_typed("abandon_channel", &params).await?;
+            Ok(result)
         }
         Some(("list_channels", sub)) => {
-            let mut params = json!({});
+            let pubkey = sub
+                .get_one::<String>("peer_id")
+                .map(|s| s.parse::<Pubkey>())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid peer_id: {}", e))?;
+            let include_closed = parse_optional_bool(sub, "include_closed", false);
+            let only_pending = parse_optional_bool(sub, "only_pending", false);
 
-            if let Some(peer_id) = sub.get_one::<String>("peer_id") {
-                params["peer_id"] = json!(peer_id);
-            }
-            if let Some(v) = sub.get_one::<String>("include_closed") {
-                params["include_closed"] = json!(v.parse::<bool>().unwrap_or(false));
-            }
-            if let Some(v) = sub.get_one::<String>("only_pending") {
-                params["only_pending"] = json!(v.parse::<bool>().unwrap_or(false));
-            }
-
-            client.call_with_params("list_channels", params).await
+            let params = ListChannelsParams {
+                pubkey,
+                include_closed,
+                only_pending,
+            };
+            let result: ListChannelsResult = client.call_typed("list_channels", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("shutdown_channel", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let mut params = json!({
-                "channel_id": channel_id,
-            });
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let close_script = sub
+                .get_one::<String>("close_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid close_script JSON: {}", e))?;
+            let fee_rate = parse_optional_u64(sub, "fee_rate")?;
+            let force = parse_optional_bool(sub, "force", false);
 
-            if let Some(script) = sub.get_one::<String>("close_script") {
-                params["close_script"] = serde_json::from_str(script)?;
-            }
-            if let Some(v) = sub.get_one::<String>("fee_rate") {
-                let val: u64 = v.parse().map_err(|_| anyhow::anyhow!("Invalid fee_rate"))?;
-                params["fee_rate"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("force") {
-                params["force"] = json!(v.parse::<bool>().unwrap_or(false));
-            }
-
-            client.call_with_params("shutdown_channel", params).await
+            let params = ShutdownChannelParams {
+                channel_id,
+                close_script,
+                fee_rate,
+                force,
+            };
+            let result: Value = client.call_typed("shutdown_channel", &params).await?;
+            Ok(result)
         }
         Some(("update_channel", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let mut params = json!({
-                "channel_id": channel_id,
-            });
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let enabled = parse_optional_bool(sub, "enabled", true);
+            let tlc_expiry_delta = parse_optional_u64(sub, "tlc_expiry_delta")?;
+            let tlc_minimum_value = parse_optional_u128(sub, "tlc_minimum_value")?;
+            let tlc_fee_proportional_millionths =
+                parse_optional_u128(sub, "tlc_fee_proportional_millionths")?;
 
-            if let Some(v) = sub.get_one::<String>("enabled") {
-                params["enabled"] = json!(v.parse::<bool>().unwrap_or(true));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_expiry_delta") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_expiry_delta"))?;
-                params["tlc_expiry_delta"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_minimum_value") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_minimum_value"))?;
-                params["tlc_minimum_value"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_fee_proportional_millionths") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_fee_proportional_millionths"))?;
-                params["tlc_fee_proportional_millionths"] = json!(to_hex_u128(val));
-            }
-
-            client.call_with_params("update_channel", params).await
+            let params = UpdateChannelParams {
+                channel_id,
+                enabled,
+                tlc_expiry_delta,
+                tlc_minimum_value,
+                tlc_fee_proportional_millionths,
+            };
+            let result: Value = client.call_typed("update_channel", &params).await?;
+            Ok(result)
         }
         None => {
             command().print_help()?;

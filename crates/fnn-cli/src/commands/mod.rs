@@ -7,7 +7,6 @@ pub mod invoice;
 pub mod payment;
 pub mod peer;
 pub mod prof;
-pub mod utils;
 pub mod watchtower;
 
 use crate::colorize;

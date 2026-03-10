@@ -1,7 +1,8 @@
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use fiber_json_types::{ConnectPeerParams, DisconnectPeerParams, ListPeersResult, Pubkey};
+use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("peer")
@@ -39,28 +40,33 @@ pub fn command() -> Command {
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("connect_peer", sub)) => {
-            let address = sub.get_one::<String>("address").unwrap();
+            let address = sub.get_one::<String>("address").unwrap().clone();
             let save = sub
                 .get_one::<String>("save")
                 .map(|v| v.parse::<bool>().unwrap_or(true));
 
-            let mut params = json!({
-                "address": address,
-            });
-            if let Some(save) = save {
-                params["save"] = json!(save);
-            }
-
-            client.call_with_params("connect_peer", params).await
+            let params = ConnectPeerParams {
+                address: Some(address),
+                pubkey: None,
+                save,
+            };
+            let result: Value = client.call_typed("connect_peer", &params).await?;
+            Ok(result)
         }
         Some(("disconnect_peer", sub)) => {
-            let peer_id = sub.get_one::<String>("peer_id").unwrap();
-            let params = json!({
-                "peer_id": peer_id,
-            });
-            client.call_with_params("disconnect_peer", params).await
+            let pubkey: Pubkey = sub
+                .get_one::<String>("peer_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid peer_id: {}", e))?;
+            let params = DisconnectPeerParams { pubkey };
+            let result: Value = client.call_typed("disconnect_peer", &params).await?;
+            Ok(result)
         }
-        Some(("list_peers", _)) => client.call_no_params("list_peers").await,
+        Some(("list_peers", _)) => {
+            let result: ListPeersResult = client.call_typed_no_params("list_peers").await?;
+            serde_json::to_value(result).map_err(Into::into)
+        }
         None => {
             command().print_help()?;
             println!();

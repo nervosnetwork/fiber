@@ -1,8 +1,8 @@
-use super::utils::to_hex_u64;
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use fiber_json_types::{PprofParams, PprofResult};
+use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("prof")
@@ -21,20 +21,25 @@ pub fn command() -> Command {
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("pprof", sub)) => {
-            let mut params = json!({});
+            let duration_secs = sub
+                .get_one::<String>("duration_secs")
+                .map(|v| {
+                    v.parse::<u64>()
+                        .map_err(|_| anyhow::anyhow!("Invalid duration_secs"))
+                })
+                .transpose()?;
 
-            if let Some(v) = sub.get_one::<String>("duration_secs") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid duration_secs"))?;
-                params["duration_secs"] = json!(to_hex_u64(val));
-            }
-
-            client.call_with_params("pprof", params).await
+            let params = PprofParams { duration_secs };
+            let result: PprofResult = client.call_typed("pprof", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         None => {
             // Default to pprof with no params
-            client.call_with_params("pprof", json!({})).await
+            let params = PprofParams {
+                duration_secs: None,
+            };
+            let result: PprofResult = client.call_typed("pprof", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         _ => Err(anyhow::anyhow!("Unknown prof subcommand. Use --help")),
     }

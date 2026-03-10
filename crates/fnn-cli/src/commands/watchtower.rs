@@ -1,7 +1,12 @@
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use fiber_json_types::{
+    CreatePreimageParams, CreateWatchChannelParams, Hash256, Privkey, Pubkey, RemovePreimageParams,
+    RemoveWatchChannelParams, RevocationData, SettlementData, UpdateLocalSettlementParams,
+    UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
+};
+use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("watchtower")
@@ -146,100 +151,150 @@ pub fn command() -> Command {
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("create_watch_channel", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let local_settlement_key = sub.get_one::<String>("local_settlement_key").unwrap();
-            let remote_settlement_key = sub.get_one::<String>("remote_settlement_key").unwrap();
-            let local_funding_pubkey = sub.get_one::<String>("local_funding_pubkey").unwrap();
-            let remote_funding_pubkey = sub.get_one::<String>("remote_funding_pubkey").unwrap();
-            let settlement_data: Value =
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let local_settlement_key: Privkey = sub
+                .get_one::<String>("local_settlement_key")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid local_settlement_key: {}", e))?;
+            let remote_settlement_key: Pubkey = sub
+                .get_one::<String>("remote_settlement_key")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid remote_settlement_key: {}", e))?;
+            let local_funding_pubkey: Pubkey = sub
+                .get_one::<String>("local_funding_pubkey")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid local_funding_pubkey: {}", e))?;
+            let remote_funding_pubkey: Pubkey = sub
+                .get_one::<String>("remote_funding_pubkey")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid remote_funding_pubkey: {}", e))?;
+            let settlement_data: SettlementData =
                 serde_json::from_str(sub.get_one::<String>("settlement_data").unwrap())
                     .map_err(|e| anyhow::anyhow!("Invalid settlement_data JSON: {}", e))?;
+            let funding_udt_type_script = sub
+                .get_one::<String>("funding_udt_type_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid funding_udt_type_script JSON: {}", e))?;
 
-            let mut params = json!({
-                "channel_id": channel_id,
-                "local_settlement_key": local_settlement_key,
-                "remote_settlement_key": remote_settlement_key,
-                "local_funding_pubkey": local_funding_pubkey,
-                "remote_funding_pubkey": remote_funding_pubkey,
-                "settlement_data": settlement_data,
-            });
-
-            if let Some(script) = sub.get_one::<String>("funding_udt_type_script") {
-                params["funding_udt_type_script"] = serde_json::from_str(script)?;
-            }
-
-            client
-                .call_with_params("create_watch_channel", params)
-                .await
+            let params = CreateWatchChannelParams {
+                channel_id,
+                local_settlement_key,
+                remote_settlement_key,
+                local_funding_pubkey,
+                remote_funding_pubkey,
+                settlement_data,
+                funding_udt_type_script,
+            };
+            let result: Value = client.call_typed("create_watch_channel", &params).await?;
+            Ok(result)
         }
         Some(("remove_watch_channel", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let params = json!({
-                "channel_id": channel_id,
-            });
-            client
-                .call_with_params("remove_watch_channel", params)
-                .await
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let params = RemoveWatchChannelParams { channel_id };
+            let result: Value = client.call_typed("remove_watch_channel", &params).await?;
+            Ok(result)
         }
         Some(("update_revocation", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let revocation_data: Value =
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let revocation_data: RevocationData =
                 serde_json::from_str(sub.get_one::<String>("revocation_data").unwrap())
                     .map_err(|e| anyhow::anyhow!("Invalid revocation_data JSON: {}", e))?;
-            let settlement_data: Value =
+            let settlement_data: SettlementData =
                 serde_json::from_str(sub.get_one::<String>("settlement_data").unwrap())
                     .map_err(|e| anyhow::anyhow!("Invalid settlement_data JSON: {}", e))?;
 
-            let params = json!({
-                "channel_id": channel_id,
-                "revocation_data": revocation_data,
-                "settlement_data": settlement_data,
-            });
-            client.call_with_params("update_revocation", params).await
+            let params = UpdateRevocationParams {
+                channel_id,
+                revocation_data,
+                settlement_data,
+            };
+            let result: Value = client.call_typed("update_revocation", &params).await?;
+            Ok(result)
         }
         Some(("update_pending_remote_settlement", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let settlement_data: Value =
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let settlement_data: SettlementData =
                 serde_json::from_str(sub.get_one::<String>("settlement_data").unwrap())
                     .map_err(|e| anyhow::anyhow!("Invalid settlement_data JSON: {}", e))?;
 
-            let params = json!({
-                "channel_id": channel_id,
-                "settlement_data": settlement_data,
-            });
-            client
-                .call_with_params("update_pending_remote_settlement", params)
-                .await
+            let params = UpdatePendingRemoteSettlementParams {
+                channel_id,
+                settlement_data,
+            };
+            let result: Value = client
+                .call_typed("update_pending_remote_settlement", &params)
+                .await?;
+            Ok(result)
         }
         Some(("update_local_settlement", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let settlement_data: Value =
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let settlement_data: SettlementData =
                 serde_json::from_str(sub.get_one::<String>("settlement_data").unwrap())
                     .map_err(|e| anyhow::anyhow!("Invalid settlement_data JSON: {}", e))?;
 
-            let params = json!({
-                "channel_id": channel_id,
-                "settlement_data": settlement_data,
-            });
-            client
-                .call_with_params("update_local_settlement", params)
-                .await
+            let params = UpdateLocalSettlementParams {
+                channel_id,
+                settlement_data,
+            };
+            let result: Value = client
+                .call_typed("update_local_settlement", &params)
+                .await?;
+            Ok(result)
         }
         Some(("create_preimage", sub)) => {
-            let payment_hash = sub.get_one::<String>("payment_hash").unwrap();
-            let preimage = sub.get_one::<String>("preimage").unwrap();
-            let params = json!({
-                "payment_hash": payment_hash,
-                "preimage": preimage,
-            });
-            client.call_with_params("create_preimage", params).await
+            let payment_hash: Hash256 = sub
+                .get_one::<String>("payment_hash")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let preimage: Hash256 = sub
+                .get_one::<String>("preimage")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid preimage: {}", e))?;
+
+            let params = CreatePreimageParams {
+                payment_hash,
+                preimage,
+            };
+            let result: Value = client.call_typed("create_preimage", &params).await?;
+            Ok(result)
         }
         Some(("remove_preimage", sub)) => {
-            let payment_hash = sub.get_one::<String>("payment_hash").unwrap();
-            let params = json!({
-                "payment_hash": payment_hash,
-            });
-            client.call_with_params("remove_preimage", params).await
+            let payment_hash: Hash256 = sub
+                .get_one::<String>("payment_hash")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+
+            let params = RemovePreimageParams { payment_hash };
+            let result: Value = client.call_typed("remove_preimage", &params).await?;
+            Ok(result)
         }
         None => {
             command().print_help()?;

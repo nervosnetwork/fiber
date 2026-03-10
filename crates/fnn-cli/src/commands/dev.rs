@@ -1,8 +1,12 @@
-use super::utils::{to_hex_u128, to_hex_u64};
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use fiber_json_types::{
+    AddTlcParams, AddTlcResult, CheckChannelShutdownParams, CommitmentSignedParams, Hash256,
+    RemoveTlcParams, RemoveTlcReason, SubmitCommitmentTransactionParams,
+    SubmitCommitmentTransactionResult,
+};
+use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("dev")
@@ -103,80 +107,105 @@ pub fn command() -> Command {
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("commitment_signed", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let params = json!({
-                "channel_id": channel_id,
-            });
-            client.call_with_params("commitment_signed", params).await
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let params = CommitmentSignedParams { channel_id };
+            let result: Value = client.call_typed("commitment_signed", &params).await?;
+            Ok(result)
         }
         Some(("add_tlc", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
             let amount: u128 = sub
                 .get_one::<String>("amount")
                 .unwrap()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid amount"))?;
-            let payment_hash = sub.get_one::<String>("payment_hash").unwrap();
+            let payment_hash: Hash256 = sub
+                .get_one::<String>("payment_hash")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
             let expiry: u64 = sub
                 .get_one::<String>("expiry")
                 .unwrap()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid expiry"))?;
+            let hash_algorithm = sub
+                .get_one::<String>("hash_algorithm")
+                .map(|s| serde_json::from_value(Value::String(s.clone())))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid hash_algorithm: {}", e))?;
 
-            let mut params = json!({
-                "channel_id": channel_id,
-                "amount": to_hex_u128(amount),
-                "payment_hash": payment_hash,
-                "expiry": to_hex_u64(expiry),
-            });
-
-            if let Some(algo) = sub.get_one::<String>("hash_algorithm") {
-                params["hash_algorithm"] = json!(algo);
-            }
-
-            client.call_with_params("add_tlc", params).await
+            let params = AddTlcParams {
+                channel_id,
+                amount,
+                payment_hash,
+                expiry,
+                hash_algorithm,
+            };
+            let result: AddTlcResult = client.call_typed("add_tlc", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("remove_tlc", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
             let tlc_id: u64 = sub
                 .get_one::<String>("tlc_id")
                 .unwrap()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid tlc_id"))?;
-            let reason: Value = serde_json::from_str(sub.get_one::<String>("reason").unwrap())
-                .map_err(|e| anyhow::anyhow!("Invalid reason JSON: {}", e))?;
+            let reason: RemoveTlcReason =
+                serde_json::from_str(sub.get_one::<String>("reason").unwrap())
+                    .map_err(|e| anyhow::anyhow!("Invalid reason JSON: {}", e))?;
 
-            let params = json!({
-                "channel_id": channel_id,
-                "tlc_id": to_hex_u64(tlc_id),
-                "reason": reason,
-            });
-            client.call_with_params("remove_tlc", params).await
+            let params = RemoveTlcParams {
+                channel_id,
+                tlc_id,
+                reason,
+            };
+            let result: Value = client.call_typed("remove_tlc", &params).await?;
+            Ok(result)
         }
         Some(("submit_commitment_transaction", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
             let commitment_number: u64 = sub
                 .get_one::<String>("commitment_number")
                 .unwrap()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid commitment_number"))?;
 
-            let params = json!({
-                "channel_id": channel_id,
-                "commitment_number": to_hex_u64(commitment_number),
-            });
-            client
-                .call_with_params("submit_commitment_transaction", params)
-                .await
+            let params = SubmitCommitmentTransactionParams {
+                channel_id,
+                commitment_number,
+            };
+            let result: SubmitCommitmentTransactionResult = client
+                .call_typed("submit_commitment_transaction", &params)
+                .await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("check_channel_shutdown", sub)) => {
-            let channel_id = sub.get_one::<String>("channel_id").unwrap();
-            let params = json!({
-                "channel_id": channel_id,
-            });
-            client
-                .call_with_params("check_channel_shutdown", params)
-                .await
+            let channel_id: Hash256 = sub
+                .get_one::<String>("channel_id")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid channel_id: {}", e))?;
+            let params = CheckChannelShutdownParams { channel_id };
+            let result: Value = client.call_typed("check_channel_shutdown", &params).await?;
+            Ok(result)
         }
         None => {
             command().print_help()?;

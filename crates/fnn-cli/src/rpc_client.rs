@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 /// A lightweight JSON-RPC 2.0 client for communicating with FNN.
@@ -100,9 +100,38 @@ impl RpcClient {
         Ok(body.result.unwrap_or(Value::Null))
     }
 
-    /// Sends a JSON-RPC request with a single param object.
-    pub async fn call_with_params(&self, method: &str, params: Value) -> Result<Value> {
-        self.call(method, vec![params]).await
+    /// Sends a typed JSON-RPC request with positional params and deserializes the result.
+    pub async fn call_typed_with_values<R>(&self, method: &str, params: Vec<Value>) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let value = self.call(method, params).await?;
+        serde_json::from_value(value).map_err(|e| {
+            anyhow!(
+                "Failed to deserialize JSON-RPC result for {}: {}",
+                method,
+                e
+            )
+        })
+    }
+
+    /// Sends a typed JSON-RPC request with a single param object and deserializes the result.
+    pub async fn call_typed<P, R>(&self, method: &str, params: &P) -> Result<R>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        let value = serde_json::to_value(params)
+            .map_err(|e| anyhow!("Failed to serialize JSON-RPC params for {}: {}", method, e))?;
+        self.call_typed_with_values(method, vec![value]).await
+    }
+
+    /// Sends a typed JSON-RPC request with no params and deserializes the result.
+    pub async fn call_typed_no_params<R>(&self, method: &str) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        self.call_typed_with_values(method, vec![]).await
     }
 
     /// Sends a JSON-RPC request with no params.

@@ -1,7 +1,10 @@
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use fiber_json_types::{
+    CchOrderResponse, GetCchOrderParams, Hash256, ReceiveBTCParams, SendBTCParams,
+};
+use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("cch")
@@ -47,27 +50,34 @@ pub fn command() -> Command {
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("send_btc", sub)) => {
-            let btc_pay_req = sub.get_one::<String>("btc_pay_req").unwrap();
-            let currency = sub.get_one::<String>("currency").unwrap();
-            let params = json!({
-                "btc_pay_req": btc_pay_req,
-                "currency": currency,
-            });
-            client.call_with_params("send_btc", params).await
+            let btc_pay_req = sub.get_one::<String>("btc_pay_req").unwrap().clone();
+            let currency = serde_json::from_value(Value::String(
+                sub.get_one::<String>("currency").unwrap().clone(),
+            ))
+            .map_err(|e| anyhow::anyhow!("Invalid currency: {}", e))?;
+
+            let params = SendBTCParams {
+                btc_pay_req,
+                currency,
+            };
+            let result: CchOrderResponse = client.call_typed("send_btc", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("receive_btc", sub)) => {
-            let fiber_pay_req = sub.get_one::<String>("fiber_pay_req").unwrap();
-            let params = json!({
-                "fiber_pay_req": fiber_pay_req,
-            });
-            client.call_with_params("receive_btc", params).await
+            let fiber_pay_req = sub.get_one::<String>("fiber_pay_req").unwrap().clone();
+            let params = ReceiveBTCParams { fiber_pay_req };
+            let result: CchOrderResponse = client.call_typed("receive_btc", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("get_cch_order", sub)) => {
-            let payment_hash = sub.get_one::<String>("payment_hash").unwrap();
-            let params = json!({
-                "payment_hash": payment_hash,
-            });
-            client.call_with_params("get_cch_order", params).await
+            let payment_hash: Hash256 = sub
+                .get_one::<String>("payment_hash")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let params = GetCchOrderParams { payment_hash };
+            let result: CchOrderResponse = client.call_typed("get_cch_order", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         None => {
             command().print_help()?;

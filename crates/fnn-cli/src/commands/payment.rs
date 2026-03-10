@@ -1,8 +1,12 @@
-use super::utils::{to_hex_u128, to_hex_u64};
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
-use serde_json::{json, Value};
+use fiber_json_types::{
+    BuildRouterParams, GetPaymentCommandParams, GetPaymentCommandResult, Hash256,
+    ListPaymentsParams, ListPaymentsResult, Pubkey, SendPaymentCommandParams,
+    SendPaymentWithRouterParams,
+};
+use serde_json::Value;
 
 pub fn command() -> Command {
     Command::new("payment")
@@ -202,160 +206,182 @@ pub fn command() -> Command {
         )
 }
 
+fn parse_optional_u64(sub: &ArgMatches, name: &str) -> Result<Option<u64>> {
+    sub.get_one::<String>(name)
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("Invalid {}", name))
+        })
+        .transpose()
+}
+
+fn parse_optional_u128(sub: &ArgMatches, name: &str) -> Result<Option<u128>> {
+    sub.get_one::<String>(name)
+        .map(|v| {
+            v.parse::<u128>()
+                .map_err(|_| anyhow::anyhow!("Invalid {}", name))
+        })
+        .transpose()
+}
+
+fn parse_optional_bool(sub: &ArgMatches, name: &str, default: bool) -> Option<bool> {
+    sub.get_one::<String>(name)
+        .map(|v| v.parse::<bool>().unwrap_or(default))
+}
+
 pub async fn execute(client: &RpcClient, matches: &ArgMatches) -> Result<Value> {
     match matches.subcommand() {
         Some(("send_payment", sub)) => {
-            let mut params = json!({});
+            let target_pubkey = sub
+                .get_one::<String>("target_pubkey")
+                .map(|s| s.parse::<Pubkey>())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid target_pubkey: {}", e))?;
+            let amount = parse_optional_u128(sub, "amount")?;
+            let payment_hash = sub
+                .get_one::<String>("payment_hash")
+                .map(|s| s.parse::<Hash256>())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let final_tlc_expiry_delta = parse_optional_u64(sub, "final_tlc_expiry_delta")?;
+            let tlc_expiry_limit = parse_optional_u64(sub, "tlc_expiry_limit")?;
+            let invoice = sub.get_one::<String>("invoice").cloned();
+            let timeout = parse_optional_u64(sub, "timeout")?;
+            let max_fee_amount = parse_optional_u128(sub, "max_fee_amount")?;
+            let max_fee_rate = parse_optional_u64(sub, "max_fee_rate")?;
+            let max_parts = parse_optional_u64(sub, "max_parts")?;
+            let keysend = parse_optional_bool(sub, "keysend", true);
+            let udt_type_script = sub
+                .get_one::<String>("udt_type_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid udt_type_script JSON: {}", e))?;
+            let allow_self_payment = parse_optional_bool(sub, "allow_self_payment", false);
+            let dry_run = parse_optional_bool(sub, "dry_run", false);
+            let trampoline_hops = sub
+                .get_one::<String>("trampoline_hops")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid trampoline_hops JSON: {}", e))?;
+            let custom_records = sub
+                .get_one::<String>("custom_records")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid custom_records JSON: {}", e))?;
+            let hop_hints = sub
+                .get_one::<String>("hop_hints")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid hop_hints JSON: {}", e))?;
 
-            if let Some(v) = sub.get_one::<String>("target_pubkey") {
-                params["target_pubkey"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("amount") {
-                let val: u128 = v.parse().map_err(|_| anyhow::anyhow!("Invalid amount"))?;
-                params["amount"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("payment_hash") {
-                params["payment_hash"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("final_tlc_expiry_delta") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid final_tlc_expiry_delta"))?;
-                params["final_tlc_expiry_delta"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("tlc_expiry_limit") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid tlc_expiry_limit"))?;
-                params["tlc_expiry_limit"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("invoice") {
-                params["invoice"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("timeout") {
-                let val: u64 = v.parse().map_err(|_| anyhow::anyhow!("Invalid timeout"))?;
-                params["timeout"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("max_fee_amount") {
-                let val: u128 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid max_fee_amount"))?;
-                params["max_fee_amount"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("max_fee_rate") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid max_fee_rate"))?;
-                params["max_fee_rate"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("max_parts") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid max_parts"))?;
-                params["max_parts"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("keysend") {
-                params["keysend"] = json!(v.parse::<bool>().unwrap_or(true));
-            }
-            if let Some(v) = sub.get_one::<String>("udt_type_script") {
-                params["udt_type_script"] = serde_json::from_str(v)?;
-            }
-            if let Some(v) = sub.get_one::<String>("allow_self_payment") {
-                params["allow_self_payment"] = json!(v.parse::<bool>().unwrap_or(false));
-            }
-            if let Some(v) = sub.get_one::<String>("dry_run") {
-                params["dry_run"] = json!(v.parse::<bool>().unwrap_or(false));
-            }
-            if let Some(v) = sub.get_one::<String>("trampoline_hops") {
-                params["trampoline_hops"] = serde_json::from_str(v)
-                    .map_err(|e| anyhow::anyhow!("Invalid trampoline_hops JSON: {}", e))?;
-            }
-            if let Some(v) = sub.get_one::<String>("custom_records") {
-                params["custom_records"] = serde_json::from_str(v)
-                    .map_err(|e| anyhow::anyhow!("Invalid custom_records JSON: {}", e))?;
-            }
-            if let Some(v) = sub.get_one::<String>("hop_hints") {
-                params["hop_hints"] = serde_json::from_str(v)
-                    .map_err(|e| anyhow::anyhow!("Invalid hop_hints JSON: {}", e))?;
-            }
-
-            client.call_with_params("send_payment", params).await
+            let params = SendPaymentCommandParams {
+                target_pubkey,
+                amount,
+                payment_hash,
+                final_tlc_expiry_delta,
+                tlc_expiry_limit,
+                invoice,
+                timeout,
+                max_fee_amount,
+                max_fee_rate,
+                max_parts,
+                keysend,
+                udt_type_script,
+                allow_self_payment,
+                dry_run,
+                trampoline_hops,
+                custom_records,
+                hop_hints,
+            };
+            let result: Value = client.call_typed("send_payment", &params).await?;
+            Ok(result)
         }
         Some(("get_payment", sub)) => {
-            let payment_hash = sub.get_one::<String>("payment_hash").unwrap();
-            let params = json!({
-                "payment_hash": payment_hash,
-            });
-            client.call_with_params("get_payment", params).await
+            let payment_hash: Hash256 = sub
+                .get_one::<String>("payment_hash")
+                .unwrap()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let params = GetPaymentCommandParams { payment_hash };
+            let result: GetPaymentCommandResult = client.call_typed("get_payment", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("list_payments", sub)) => {
-            let mut params = json!({});
-            if let Some(v) = sub.get_one::<String>("status") {
-                params["status"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("limit") {
-                let val: u64 = v.parse().map_err(|_| anyhow::anyhow!("Invalid limit"))?;
-                params["limit"] = json!(to_hex_u64(val));
-            }
-            if let Some(v) = sub.get_one::<String>("after") {
-                params["after"] = json!(v);
-            }
-            client.call_with_params("list_payments", params).await
+            let status = sub
+                .get_one::<String>("status")
+                .map(|s| serde_json::from_value(Value::String(s.clone())))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid status: {}", e))?;
+            let limit = parse_optional_u64(sub, "limit")?;
+            let after = sub
+                .get_one::<String>("after")
+                .map(|s| s.parse::<Hash256>())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid after: {}", e))?;
+
+            let params = ListPaymentsParams {
+                status,
+                limit,
+                after,
+            };
+            let result: ListPaymentsResult = client.call_typed("list_payments", &params).await?;
+            serde_json::to_value(result).map_err(Into::into)
         }
         Some(("build_router", sub)) => {
-            let mut params = json!({});
+            let amount = parse_optional_u128(sub, "amount")?;
+            let udt_type_script = sub
+                .get_one::<String>("udt_type_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid udt_type_script JSON: {}", e))?;
+            let hops_info = serde_json::from_str(sub.get_one::<String>("hops_info").unwrap())
+                .map_err(|e| anyhow::anyhow!("Invalid hops_info JSON: {}", e))?;
+            let final_tlc_expiry_delta = parse_optional_u64(sub, "final_tlc_expiry_delta")?;
 
-            if let Some(v) = sub.get_one::<String>("amount") {
-                let val: u128 = v.parse().map_err(|_| anyhow::anyhow!("Invalid amount"))?;
-                params["amount"] = json!(to_hex_u128(val));
-            }
-            if let Some(v) = sub.get_one::<String>("udt_type_script") {
-                params["udt_type_script"] = serde_json::from_str(v)?;
-            }
-
-            let hops_info: Value =
-                serde_json::from_str(sub.get_one::<String>("hops_info").unwrap())?;
-            params["hops_info"] = hops_info;
-
-            if let Some(v) = sub.get_one::<String>("final_tlc_expiry_delta") {
-                let val: u64 = v
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid final_tlc_expiry_delta"))?;
-                params["final_tlc_expiry_delta"] = json!(to_hex_u64(val));
-            }
-
-            client.call_with_params("build_router", params).await
+            let params = BuildRouterParams {
+                amount,
+                udt_type_script,
+                hops_info,
+                final_tlc_expiry_delta,
+            };
+            let result: Value = client.call_typed("build_router", &params).await?;
+            Ok(result)
         }
         Some(("send_payment_with_router", sub)) => {
-            let mut params = json!({});
+            let payment_hash = sub
+                .get_one::<String>("payment_hash")
+                .map(|s| s.parse::<Hash256>())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid payment_hash: {}", e))?;
+            let router = serde_json::from_str(sub.get_one::<String>("router").unwrap())
+                .map_err(|e| anyhow::anyhow!("Invalid router JSON: {}", e))?;
+            let invoice = sub.get_one::<String>("invoice").cloned();
+            let keysend = parse_optional_bool(sub, "keysend", true);
+            let udt_type_script = sub
+                .get_one::<String>("udt_type_script")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid udt_type_script JSON: {}", e))?;
+            let custom_records = sub
+                .get_one::<String>("custom_records")
+                .map(|s| serde_json::from_str(s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid custom_records JSON: {}", e))?;
+            let dry_run = parse_optional_bool(sub, "dry_run", false);
 
-            if let Some(v) = sub.get_one::<String>("payment_hash") {
-                params["payment_hash"] = json!(v);
-            }
-
-            let router: Value = serde_json::from_str(sub.get_one::<String>("router").unwrap())?;
-            params["router"] = router;
-
-            if let Some(v) = sub.get_one::<String>("invoice") {
-                params["invoice"] = json!(v);
-            }
-            if let Some(v) = sub.get_one::<String>("keysend") {
-                params["keysend"] = json!(v.parse::<bool>().unwrap_or(true));
-            }
-            if let Some(v) = sub.get_one::<String>("udt_type_script") {
-                params["udt_type_script"] = serde_json::from_str(v)?;
-            }
-            if let Some(v) = sub.get_one::<String>("custom_records") {
-                params["custom_records"] = serde_json::from_str(v)
-                    .map_err(|e| anyhow::anyhow!("Invalid custom_records JSON: {}", e))?;
-            }
-            if let Some(v) = sub.get_one::<String>("dry_run") {
-                params["dry_run"] = json!(v.parse::<bool>().unwrap_or(false));
-            }
-
-            client
-                .call_with_params("send_payment_with_router", params)
-                .await
+            let params = SendPaymentWithRouterParams {
+                payment_hash,
+                router,
+                invoice,
+                keysend,
+                udt_type_script,
+                custom_records,
+                dry_run,
+            };
+            let result: Value = client
+                .call_typed("send_payment_with_router", &params)
+                .await?;
+            Ok(result)
         }
         None => {
             command().print_help()?;
