@@ -5,6 +5,7 @@ name: Test OpenRPC Spec generating
 jobs:
   generating:
     name: Generate OpenRPC Spec
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dsherret/rust-toolchain-file@v1
