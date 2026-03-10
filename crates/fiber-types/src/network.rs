@@ -3,9 +3,23 @@
 //! Contains the persistent network actor state that is stored in the node's database.
 
 use crate::Pubkey;
+use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::collections::{hash_map::Entry, HashMap};
 use tentacle_multiaddr::Multiaddr;
+
+/// A hop requirement to meet when building a router. Does not include the source node;
+/// the last hop is the target node.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HopRequire {
+    /// The public key of the node
+    pub pubkey: Pubkey,
+    /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
+    #[serde_as(as = "Option<crate::EntityHex>")]
+    pub channel_outpoint: Option<OutPoint>,
+}
 
 /// The persistent state of the network actor.
 #[derive(Default, Clone, Serialize, Deserialize)]

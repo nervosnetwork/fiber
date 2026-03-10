@@ -557,6 +557,20 @@ impl<S: CchOrderStore> CchState<S> {
         let payment_hash = *invoice.payment_hash();
         let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
 
+        // Validate amount and fee early so we reject overflow/too-large before other checks.
+        let fee_sats = amount_sats
+            .checked_mul(self.config.fee_rate_per_million_sats as u128)
+            .and_then(|v| v.checked_div(1_000_000u128))
+            .and_then(|v| v.checked_add(self.config.base_fee_sats as u128))
+            .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
+        let total_msat = i64::try_from(
+            amount_sats
+                .checked_add(fee_sats)
+                .and_then(|s| s.checked_mul(1_000u128))
+                .unwrap_or(u128::MAX),
+        )
+        .map_err(|_| CchError::ReceiveBTCOrderAmountTooLarge)?;
+
         // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
         // CKB uses milliseconds, BTC uses blocks (~10 min each).
@@ -599,19 +613,6 @@ impl<S: CchOrderStore> CchState<S> {
         {
             return Err(CchError::OutgoingInvoiceExpiryTooShort);
         }
-
-        let fee_sats = amount_sats
-            .checked_mul(self.config.fee_rate_per_million_sats as u128)
-            .and_then(|v| v.checked_div(1_000_000u128))
-            .and_then(|v| v.checked_add(self.config.base_fee_sats as u128))
-            .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
-        let total_msat = i64::try_from(
-            amount_sats
-                .checked_add(fee_sats)
-                .and_then(|s| s.checked_mul(1_000u128))
-                .unwrap_or(u128::MAX),
-        )
-        .map_err(|_| CchError::ReceiveBTCOrderAmountTooLarge)?;
 
         // Verify wrapped_btc_type_script matches invoice UDT type script
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(

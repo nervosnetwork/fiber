@@ -72,14 +72,14 @@ coverage-generate-report:
 
 coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
 
-RPC_GEN_VERSION = 0.1.18
+RPC_GEN_VERSION = 0.1.21
 .PHONY: gen-rpc-doc
 gen-rpc-doc:
 	@if ! command -v fiber-rpc-gen >/dev/null 2>&1 || [ "$$(fiber-rpc-gen --version | awk '{print $$2}')" != "$(RPC_GEN_VERSION)" ]; then \
         echo "Installing fiber-rpc-gen $(RPC_GEN_VERSION)..."; \
         cargo install fiber-rpc-gen --version $(RPC_GEN_VERSION) --force; \
 	fi
-	fiber-rpc-gen ./crates/fiber-lib/src/ --extra-types-dir ./crates/fiber-types/src/
+	fiber-rpc-gen ./crates/fiber-lib/src/ --extra-types-dir ./crates/fiber-types/src/ --json-types-dir ./crates/fiber-json-types/src/ --exclude-modules utils
 	if grep -q "TODO: add desc" ./crates/fiber-lib/src/rpc/README.md; then \
         echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
 		exit 1; \
@@ -89,7 +89,7 @@ gen-rpc-doc:
 check-dirty-rpc-doc: gen-rpc-doc
 	git diff --exit-code ./crates/fiber-lib/src/rpc/README.md
 
-MIGRATION_CHECK_VERSION := 0.5.0
+MIGRATION_CHECK_VERSION := 0.5.3
 install-migration-check:
 	@if ! command -v migration-check >/dev/null 2>&1 || [ "$$(migration-check --version | awk '{print $$2}')" != "$(MIGRATION_CHECK_VERSION)" ]; then \
 		echo "Installing migration-check $(MIGRATION_CHECK_VERSION)..."; \

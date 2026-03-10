@@ -1070,7 +1070,8 @@ fn test_store_sample_channel_actor_state() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_channel_open_record() {
-    use crate::{fiber::channel::ChannelOpenRecordStore, store::sample::deterministic_pubkey};
+    use crate::fiber::channel::ChannelOpenRecordStore;
+    use crate::store::sample::deterministic_pubkey;
     use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus};
 
     let samples = ChannelOpenRecord::samples(42);
@@ -1124,6 +1125,5 @@ fn test_store_channel_open_record() {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn deterministic_hash256(seed: u64, index: u32) -> fiber_types::Hash256 {
-    use crate::store::sample::deterministic_hash;
-    deterministic_hash(seed, index).into()
+    crate::store::sample::deterministic_hash(seed, index).into()
 }

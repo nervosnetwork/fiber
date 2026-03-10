@@ -2,8 +2,8 @@
 ///
 /// Since `PersistentNetworkActorState` has private fields, we construct
 /// populated instances via `serde_json` deserialization.
-use crate::fiber::PersistentNetworkActorState;
-use fiber_types::schema::PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX;
+use crate::network::PersistentNetworkActorState;
+use crate::schema::PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX;
 
 use super::{deterministic_pubkey, StoreSample};
 

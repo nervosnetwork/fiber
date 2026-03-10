@@ -11,7 +11,7 @@ use jsonrpsee::MethodResponse;
 use std::future::Future;
 
 use crate::rpc::biscuit::extract_node_id;
-use crate::rpc::context::RpcContext;
+use fiber_json_types::RpcContext;
 use fiber_types::NodeId;
 
 use super::biscuit::BiscuitAuth;
@@ -76,8 +76,10 @@ impl<S> BiscuitAuthMiddleware<S> {
                             return false;
                         };
 
-                        // Inject RpcContext as first param
-                        let ctx = RpcContext { node_id };
+                        // Inject RpcContext as first param (node_id as String)
+                        let ctx = RpcContext {
+                            node_id: node_id.to_string(),
+                        };
                         self.inject_rpc_context(req, ctx);
                     }
                     return true;
@@ -94,8 +96,10 @@ impl<S> BiscuitAuthMiddleware<S> {
                     if rule.require_rpc_context {
                         let node_id = NodeId::local();
 
-                        // Inject RpcContext as first param
-                        let ctx = RpcContext { node_id };
+                        // Inject RpcContext as first param (node_id as String)
+                        let ctx = RpcContext {
+                            node_id: node_id.to_string(),
+                        };
                         self.inject_rpc_context(req, ctx);
                     }
                     return true;
