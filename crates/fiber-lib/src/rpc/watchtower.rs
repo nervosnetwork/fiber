@@ -295,11 +295,11 @@ where
         _ctx: RpcContext,
         params: QueryTlcStatusParams,
     ) -> Result<QueryTlcStatusResult, ErrorObjectOwned> {
-        let status = self
-            .store
-            .query_tlc_status(&params.channel_id, &params.payment_hash);
+        let channel_id = params.channel_id.into();
+        let payment_hash = params.payment_hash.into();
+        let status = self.store.query_tlc_status(&channel_id, &payment_hash);
         Ok(QueryTlcStatusResult {
-            preimage: status.preimage,
+            preimage: status.preimage.map(Into::into),
             is_settled: status.is_settled,
         })
     }
@@ -323,19 +323,19 @@ impl<C: WatchtowerRpcClient + Send + Sync> crate::fiber::WatchtowerQuerier
 {
     async fn query_tlc_status(
         &self,
-        channel_id: &crate::fiber::types::Hash256,
-        payment_hash: &crate::fiber::types::Hash256,
+        channel_id: &fiber_types::Hash256,
+        payment_hash: &fiber_types::Hash256,
     ) -> Option<crate::fiber::TlcWatchtowerStatus> {
         match self
             .client
             .query_tlc_status(QueryTlcStatusParams {
-                channel_id: *channel_id,
-                payment_hash: *payment_hash,
+                channel_id: (*channel_id).into(),
+                payment_hash: (*payment_hash).into(),
             })
             .await
         {
             Ok(result) => Some(crate::fiber::TlcWatchtowerStatus {
-                preimage: result.preimage,
+                preimage: result.preimage.map(Into::into),
                 is_settled: result.is_settled,
             }),
             Err(e) => {
