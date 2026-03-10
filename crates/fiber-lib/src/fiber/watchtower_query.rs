@@ -1,4 +1,4 @@
-use crate::fiber::types::Hash256;
+use fiber_types::Hash256;
 
 /// Status of a TLC as reported by the watchtower
 #[derive(Clone)]
