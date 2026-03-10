@@ -21,7 +21,6 @@ use nom::{
     bytes::{complete::take_while1, streaming::tag},
     IResult,
 };
-use schemars::JsonSchema;
 use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -215,7 +214,7 @@ pub fn parse_hrp(input: &str) -> Result<(Currency, Option<u128>), InvoiceError> 
 }
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CkbInvoiceStatus {
     /// The invoice is open and can be paid.
     Open,
@@ -242,7 +241,7 @@ impl Display for CkbInvoiceStatus {
 }
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default, JsonSchema)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum Currency {
     /// The mainnet currency of CKB.
     Fibb,
@@ -296,7 +295,7 @@ impl TryFrom<u8> for Currency {
 
 /// HashAlgorithm is the hash algorithm used in the hash lock.
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, Hash, JsonSchema)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum HashAlgorithm {
     /// The default hash algorithm, CkbHash
@@ -354,17 +353,15 @@ impl TryFrom<Byte> for HashAlgorithm {
 
 /// A wrapper around `ckb_types::packed::Script` with hex serialization.
 #[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CkbScript(
     #[serde_as(as = "EntityHex")]
-    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_bytes")]
     pub PackedScript,
 );
 
 /// Recoverable signature
-#[derive(Clone, Debug, Eq, PartialEq, JsonSchema)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvoiceSignature(
-    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_no_prefix")]
     pub  RecoverableSignature,
 );
 

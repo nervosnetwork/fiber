@@ -22,7 +22,6 @@ use musig2::BinaryEncoding;
 use musig2::PartialSignature;
 use musig2::PubNonce;
 use musig2::{SecNonce, SecNonceBuilder};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, VecDeque};
@@ -122,7 +121,7 @@ bitflags! {
 
 /// The id of a tlc, it can be either offered or received.
 #[derive(
-    Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash, JsonSchema,
+    Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash,
 )]
 pub enum TLCId {
     /// Offered tlc id
@@ -162,7 +161,7 @@ impl TLCId {
 }
 
 /// The status of an outbound tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum OutboundTlcStatus {
     // Offered tlc created and sent to remote party
     LocalAnnounced,
@@ -180,7 +179,7 @@ pub enum OutboundTlcStatus {
 }
 
 /// The status of an inbound tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum InboundTlcStatus {
     // Received tlc from remote party, but not committed yet
     RemoteAnnounced,
@@ -198,7 +197,7 @@ pub enum InboundTlcStatus {
 }
 
 /// The status of a tlc
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum TlcStatus {
     /// Outbound tlc
     Outbound(OutboundTlcStatus),

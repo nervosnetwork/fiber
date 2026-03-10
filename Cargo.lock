@@ -2240,7 +2240,6 @@ dependencies = [
  "nom",
  "num_enum",
  "paste",
- "schemars 1.2.1",
  "secp256k1 0.30.0",
  "serde",
  "serde_json",

@@ -9,7 +9,6 @@ use ckb_gen_types::packed::Byte32 as MByte32;
 use ckb_types::H256;
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::secp::{Point, Scalar};
-use schemars::JsonSchema;
 use secp256k1::PublicKey;
 use secp256k1::SecretKey;
 use secp256k1::XOnlyPublicKey;
@@ -214,8 +213,8 @@ bitflags::bitflags! {
 }
 
 /// A wrapper for secp256k1 secret key
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct Privkey(#[schemars(schema_with = "crate::schema_helpers::schema_as_any")] pub SecretKey);
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Privkey(pub SecretKey);
 
 impl From<Privkey> for Scalar {
     fn from(pk: Privkey) -> Self {
@@ -263,10 +262,9 @@ impl From<SecretKey> for Privkey {
 
 /// A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
 #[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default, JsonSchema)]
+#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
 pub struct Hash256(
     #[serde_as(as = "SliceHex")]
-    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_bytes")]
     [u8; 32],
 );
 
@@ -445,10 +443,9 @@ impl Privkey {
 /// In the RPC interface this value is exposed as fields such as `pubkey`.
 /// It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
 #[serde_as]
-#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(
     #[serde_as(as = "IfIsHumanReadable<SliceHexNoPrefix, [_; 33]>")]
-    #[schemars(schema_with = "crate::schema_helpers::schema_as_hex_no_prefix")]
     pub [u8; 33],
 );
 

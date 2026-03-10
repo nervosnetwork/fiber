@@ -7,10 +7,7 @@ description = "Core domain types for the Fiber Network"
 [dependencies]
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_with = { version = "3.7", features = ["macros", "schemars_1"] }
-
-# For generating OpenRPC spec
-schemars = "1"
+serde_with = { version = "3.7", features = ["macros"] }
 
 # Encoding
 hex = "0.4"
