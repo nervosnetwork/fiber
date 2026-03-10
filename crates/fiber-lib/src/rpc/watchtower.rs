@@ -8,7 +8,7 @@ use crate::rpc::utils::{rpc_error, rpc_error_no_data, RpcResultExt};
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 #[cfg(feature = "watchtower")]
-use fiber_json_types::RpcContext;
+pub use fiber_json_types::RpcContext;
 #[cfg(feature = "watchtower")]
 use fiber_types::{NodeId, Pubkey};
 

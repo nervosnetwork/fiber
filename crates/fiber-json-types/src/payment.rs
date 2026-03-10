@@ -1,8 +1,10 @@
 //! Payment types for the Fiber Network JSON-RPC API.
 
+use crate::schema_helpers::*;
 use crate::serde_utils::{EntityHex, Hash256, Pubkey, SliceHex, U128Hex, U32Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::OutPoint;
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -11,7 +13,7 @@ use std::collections::HashMap;
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 ///
 /// **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum PaymentStatus {
     /// Initial status. A payment session is created, but no HTLC has been dispatched.
     Created,
@@ -25,7 +27,7 @@ pub enum PaymentStatus {
 
 /// Parameters for getting a payment.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct GetPaymentCommandParams {
     /// The payment hash of the payment to retrieve
     pub payment_hash: Hash256,
@@ -33,20 +35,22 @@ pub struct GetPaymentCommandParams {
 
 /// The node and channel information in a payment route hop.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SessionRouteNode {
     /// The public key of the node
     pub pubkey: Pubkey,
     /// The amount for this hop
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub amount: u128,
     /// The channel outpoint for this hop
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
 }
 
 /// The router is a list of nodes that the payment will go through.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, JsonSchema)]
 pub struct SessionRoute {
     /// The nodes in the route
     pub nodes: Vec<SessionRouteNode>,
@@ -55,22 +59,25 @@ pub struct SessionRoute {
 /// The result of a get_payment command, which includes the payment hash, status, timestamps,
 /// error message if failed, fee paid, and custom records.
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
     /// The status of the payment
     pub status: PaymentStatus,
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     /// The time the payment was created at, in milliseconds from UNIX epoch
     pub created_at: u64,
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     /// The time the payment was last updated at, in milliseconds from UNIX epoch
     pub last_updated_at: u64,
     /// The error message if the payment failed
     pub failed_error: Option<String>,
     /// fee paid for the payment
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub fee: u128,
 
     /// The custom records to be included in the payment.
@@ -88,19 +95,20 @@ pub struct GetPaymentCommandResult {
 
 /// Parameters for listing payments.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
 pub struct ListPaymentsParams {
     /// Filter payments by status. If not set, all payments are returned.
     pub status: Option<PaymentStatus>,
     /// The maximum number of payments to return. Default is 15.
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub limit: Option<u64>,
     /// The payment hash to start returning payments after (exclusive cursor for pagination).
     pub after: Option<Hash256>,
 }
 
 /// Result of listing payments.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct ListPaymentsResult {
     /// The list of payments.
     pub payments: Vec<GetPaymentCommandResult>,
@@ -128,9 +136,31 @@ pub struct PaymentCustomRecords {
     pub data: HashMap<u32, Vec<u8>>,
 }
 
+impl JsonSchema for PaymentCustomRecords {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PaymentCustomRecords".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "description": "Custom records map. Keys are hex-encoded u32 (0~65535), \
+                values are hex-encoded bytes. Both prefixed with 0x.",
+            "propertyNames": {
+                "type": "string",
+                "pattern": "^0x(0|[1-9a-fA-F][0-9a-fA-F]{0,3})$"
+            },
+            "additionalProperties": {
+                "type": "string",
+                "pattern": "^0x([0-9a-fA-F]{2})*$"
+            }
+        })
+    }
+}
+
 /// Parameters for sending a payment.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SendPaymentCommandParams {
     /// The public key (`Pubkey`) of the payment target node, serialized as a hex string.
     /// You can obtain a node's pubkey via the `node_info` or `graph_nodes` RPC.
@@ -139,6 +169,7 @@ pub struct SendPaymentCommandParams {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     /// If not set and there is a invoice, the amount will be set to the invoice amount
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub amount: Option<u128>,
 
     /// the hash to use within the payment's HTLC.
@@ -149,12 +180,14 @@ pub struct SendPaymentCommandParams {
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub final_tlc_expiry_delta: Option<u64>,
 
     /// the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
     /// suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
     /// this is also the default value for the payment if this parameter is not provided
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub tlc_expiry_limit: Option<u64>,
 
     /// the encoded invoice to send to the recipient
@@ -162,19 +195,23 @@ pub struct SendPaymentCommandParams {
 
     /// the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub timeout: Option<u64>,
 
     /// the maximum fee amounts in shannons that the sender is willing to pay.
     /// Note: In trampoline routing mode, the sender will use the max_fee_amount as the total fee as much as possible.
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_fee_amount: Option<u128>,
 
     /// the maximum fee rate per thousand, default is 5 (0.5%)
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_fee_rate: Option<u64>,
 
     /// max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_parts: Option<u64>,
 
     /// Optional explicit trampoline hops.
@@ -230,29 +267,33 @@ pub struct SendPaymentCommandParams {
 
 /// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct HopHint {
     /// The public key of the node
     pub pubkey: Pubkey,
     /// The outpoint of the channel
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
 
     /// The fee rate to use this hop to forward the payment.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub fee_rate: u64,
     /// The TLC expiry delta to use this hop to forward the payment.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub tlc_expiry_delta: u64,
 }
 
 /// Parameters for building a payment router.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildRouterParams {
     /// the amount of the payment, the unit is Shannons for non UDT payment
     /// If not set, the minimum routable amount `1` is used
     #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub amount: Option<u128>,
 
     /// udt type script for the payment router
@@ -269,42 +310,47 @@ pub struct BuildRouterParams {
 
     /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub final_tlc_expiry_delta: Option<u64>,
 }
 
 /// A hop requirement to meet when building a router. Does not include the source node;
 /// the last hop is the target node.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct HopRequire {
     /// The public key of the node
     pub pubkey: Pubkey,
     /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
     #[serde_as(as = "Option<EntityHex>")]
+    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
     pub channel_outpoint: Option<OutPoint>,
 }
 
 /// A router hop information for a payment, a paymenter router is an array of RouterHop,
 /// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
 #[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RouterHop {
     /// The node that is sending the TLC to the next node.
     pub target: Pubkey,
     /// The channel of this hop used to receive TLC
     #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
     pub channel_outpoint: OutPoint,
     /// The amount that the source node will transfer to the target node.
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub amount_received: u128,
     /// The expiry for the TLC that the source node sends to the target node.
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub incoming_tlc_expiry: u64,
 }
 
 /// The router returned by build_router.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct BuildPaymentRouterResult {
     /// The hops information for router
     pub router_hops: Vec<RouterHop>,
@@ -312,7 +358,7 @@ pub struct BuildPaymentRouterResult {
 
 /// Parameters for sending a payment with a specified router.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct SendPaymentWithRouterParams {
     /// the hash to use within the payment's HTLC.
     /// If not set and `keysend` is set to true, a random hash will be generated.

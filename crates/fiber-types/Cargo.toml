@@ -17,7 +17,7 @@ bech32 = "0.9"
 # CKB types
 ckb-types = "1"
 ckb-gen-types = "1"
-molecule = { version = "0.8.0", default-features = false }
+molecule = { version = "0.9.2", default-features = false }
 
 # Hashing
 ckb-hash = "1"
