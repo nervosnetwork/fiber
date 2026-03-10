@@ -19,7 +19,6 @@ rustyline = { version = "15", features = ["derive"] }
 anyhow = "1.0"
 colored = "2"
 fiber-json-types = { path = "../fiber-json-types" , features = ["cch", "watchtower", "cli"]}
-ckb-jsonrpc-types = "1"
 
 [lints.clippy]
 needless-return = "allow"
