@@ -36,7 +36,8 @@
    # Create a local node directory named nodeA
    mkdir -p testnet-fnn/nodeA/ckb
    ./ckb-cli account new
-   ./ckb-cli account export --lock-arg 0xcc015401df73a3287d8b2b19f0cc23572ac8b14d --extended-privkey-path exported-key
+   # Replace <lock_arg> below with the lock_arg from the output of `ckb-cli account new` above
+   ./ckb-cli account export --lock-arg <lock_arg> --extended-privkey-path exported-key
    head -n 1 ./exported-key > testnet-fnn/nodeA/ckb/key
    chmod 600 testnet-fnn/nodeA/ckb/key
    # check nodeA key
@@ -66,10 +67,10 @@
 
 5. Start the node A
 
-   You need to set a `FIBER_SECRET_KEY_PASSWORD` environment variable in the startup command to encrypt your wallet private key file. I used `123` here for demo purposes, but I recommend using a strong password.
+   You need to set the `FIBER_SECRET_KEY_PASSWORD` environment variable in the startup command. This is a user-chosen password used to encrypt and decrypt your CKB private key file — you can set it to any value you like. Please use a strong password and remember it, as you will need it every time you start the node.
    
    ```bash
-   FIBER_SECRET_KEY_PASSWORD='123' RUST_LOG=info ./fnn -c testnet-fnn/nodeA/config.yml -d testnet-fnn/nodeA > testnet-fnn/nodeA/a.log 2>&1 &
+   FIBER_SECRET_KEY_PASSWORD='your_password' RUST_LOG=info ./fnn -c testnet-fnn/nodeA/config.yml -d testnet-fnn/nodeA > testnet-fnn/nodeA/a.log 2>&1 &
    ```
 
 
@@ -322,13 +323,15 @@
                "close_script": {
                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
                    "hash_type": "type",
-                   "args": "0xcc015401df73a3287d8b2b19f0cc23572ac8b14d"
+                   "args": "<your_lock_arg>"
                },
                "fee_rate": "0x3FC"
            }
        ]
    }'
    ```
+
+   Replace `<your_lock_arg>` with the lock arg of your account (the one used in step 2).
 
    ```json
    {"jsonrpc":"2.0","result":null,"id":9}
@@ -543,13 +546,15 @@
                "close_script": {
                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
                    "hash_type": "type",
-                   "args": "0xcc015401df73a3287d8b2b19f0cc23572ac8b14d"
+                   "args": "<your_lock_arg>"
                },
                "fee_rate": "0x3FC"
            }
        ]
    }'
    ```
+
+   Replace `<your_lock_arg>` with the lock arg of your account (the one used in step 2).
 
    ```json
    {"jsonrpc":"2.0","result":null,"id":9}
