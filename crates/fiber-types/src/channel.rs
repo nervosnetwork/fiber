@@ -1500,3 +1500,67 @@ impl From<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
         }
     }
 }
+
+/// The channel update info with a single direction of channel.
+///
+/// This is a pure data struct used by both the internal graph representation
+/// and the RPC JSON response types.
+#[serde_as]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChannelUpdateInfo {
+    /// The timestamp is the time when the channel update was received by the node.
+    #[serde_as(as = "crate::U64Hex")]
+    pub timestamp: u64,
+    /// Whether the channel can be currently used for payments (in this one direction).
+    pub enabled: bool,
+    /// The exact amount of balance that we can send to the other party via the channel.
+    #[serde_as(as = "Option<crate::U128Hex>")]
+    pub outbound_liquidity: Option<u128>,
+    /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
+    #[serde_as(as = "crate::U64Hex")]
+    pub tlc_expiry_delta: u64,
+    /// The minimum value, which must be relayed to the next hop via the channel
+    #[serde_as(as = "crate::U128Hex")]
+    pub tlc_minimum_value: u128,
+    /// The forwarding fee rate for the channel.
+    #[serde_as(as = "crate::U64Hex")]
+    pub fee_rate: u64,
+}
+
+impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
+    fn from(info: &ChannelTlcInfo) -> Self {
+        Self {
+            timestamp: info.timestamp,
+            enabled: info.enabled,
+            outbound_liquidity: None,
+            tlc_expiry_delta: info.tlc_expiry_delta,
+            tlc_minimum_value: info.tlc_minimum_value,
+            fee_rate: info.tlc_fee_proportional_millionths as u64,
+        }
+    }
+}
+
+impl From<ChannelTlcInfo> for ChannelUpdateInfo {
+    fn from(info: ChannelTlcInfo) -> Self {
+        Self::from(&info)
+    }
+}
+
+impl From<crate::protocol::ChannelUpdate> for ChannelUpdateInfo {
+    fn from(update: crate::protocol::ChannelUpdate) -> Self {
+        Self::from(&update)
+    }
+}
+
+impl From<&crate::protocol::ChannelUpdate> for ChannelUpdateInfo {
+    fn from(update: &crate::protocol::ChannelUpdate) -> Self {
+        Self {
+            timestamp: update.timestamp,
+            enabled: !update.is_disabled(),
+            outbound_liquidity: None,
+            tlc_expiry_delta: update.tlc_expiry_delta,
+            tlc_minimum_value: update.tlc_minimum_value,
+            fee_rate: update.tlc_fee_proportional_millionths as u64,
+        }
+    }
+}
