@@ -6,6 +6,7 @@ use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
 use ckb_types::H256;
 use either::Either;
+use futures::StreamExt as _;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
@@ -30,18 +31,14 @@ use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
-    bytes::Bytes,
+    context::ServiceContext,
     context::SessionContext,
-    context::{ProtocolContext, ProtocolContextMutRef, ServiceContext},
     multiaddr::Multiaddr,
     secio::PeerId,
     secio::SecioKeyPair,
-    service::{
-        ProtocolHandle, ProtocolMeta, ServiceAsyncControl, ServiceError, ServiceEvent,
-        TargetProtocol,
-    },
-    traits::{ServiceHandle, ServiceProtocol},
-    ProtocolId, SessionId,
+    service::{ProtocolMeta, ServiceAsyncControl, ServiceError, ServiceEvent, TargetProtocol},
+    traits::{ProtocolSpawn, ServiceHandle},
+    ProtocolId, SessionId, SubstreamReadPart,
 };
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_util::codec::length_delimited;
@@ -90,7 +87,7 @@ use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
-use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
+use crate::{now_timestamp_as_millis_u64, Error};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
@@ -4832,69 +4829,80 @@ impl FiberProtocolHandle {
                         .new_codec(),
                 )
             })
-            .service_handle(move || {
-                let handle = Box::new(self);
-                ProtocolHandle::Callback(handle)
-            })
+            .protocol_spawn(self)
             .build()
     }
 }
 
-#[async_trait]
-impl ServiceProtocol for FiberProtocolHandle {
-    async fn init(&mut self, _context: &mut ProtocolContext) {}
-
-    async fn connected(&mut self, context: ProtocolContextMutRef<'_>, _version: &str) {
-        let _session = context.session;
-        if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
+impl ProtocolSpawn for FiberProtocolHandle {
+    fn spawn(
+        &self,
+        context: Arc<SessionContext>,
+        _control: &ServiceAsyncControl,
+        mut read_part: SubstreamReadPart,
+    ) {
+        if let Some(remote_pubkey) = context.remote_pubkey.clone() {
             try_send_actor_message(
                 &self.actor,
                 NetworkActorMessage::new_event(NetworkActorEvent::PeerConnected(
                     super::types::pubkey_from_tentacle(remote_pubkey),
-                    context.session.clone(),
+                    context.as_ref().clone(),
                 )),
             );
         } else {
-            warn!("Peer connected without remote pubkey {:?}", context.session);
+            warn!("Peer connected without remote pubkey {:?}", context);
         }
-    }
+        let actor = self.actor.clone();
+        tentacle::runtime::spawn(async move {
+            while let Some(frame) = read_part.next().await {
+                let data = match frame {
+                    Ok(data) => data,
+                    Err(err) => {
+                        warn!("Failed to read fiber protocol stream data: {:?}", err);
+                        break;
+                    }
+                };
 
-    async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
-        match context.session.remote_pubkey.as_ref() {
-            Some(pubkey) => {
-                try_send_actor_message(
-                    &self.actor,
-                    NetworkActorMessage::new_event(NetworkActorEvent::PeerDisconnected(
-                        super::types::pubkey_from_tentacle(pubkey.clone()),
-                        context.session.clone(),
-                    )),
-                );
-            }
-            None => {
-                unreachable!("Received message without remote pubkey");
-            }
-        }
-    }
+                let msg = match FiberMessage::from_molecule_slice(&data) {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        warn!("Failed to parse fiber protocol message: {:?}", err);
+                        continue;
+                    }
+                };
 
-    async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
-        let msg = unwrap_or_return!(FiberMessage::from_molecule_slice(&data), "parse message");
-        match context.session.remote_pubkey.as_ref() {
-            Some(pubkey) => {
-                try_send_actor_message(
-                    &self.actor,
-                    NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
-                        super::types::pubkey_from_tentacle(pubkey.clone()),
-                        msg,
-                    )),
-                );
+                match context.remote_pubkey.as_ref() {
+                    Some(pubkey) => {
+                        try_send_actor_message(
+                            &actor,
+                            NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
+                                super::types::pubkey_from_tentacle(pubkey.clone()),
+                                msg,
+                            )),
+                        );
+                    }
+                    None => {
+                        unreachable!("Received message without remote pubkey");
+                    }
+                }
             }
-            None => {
-                unreachable!("Received message without remote pubkey");
-            }
-        }
-    }
 
-    async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
+            match context.remote_pubkey.as_ref() {
+                Some(pubkey) => {
+                    try_send_actor_message(
+                        &actor,
+                        NetworkActorMessage::new_event(NetworkActorEvent::PeerDisconnected(
+                            super::types::pubkey_from_tentacle(pubkey.clone()),
+                            context.as_ref().clone(),
+                        )),
+                    );
+                }
+                None => {
+                    unreachable!("Received message without remote pubkey");
+                }
+            }
+        });
+    }
 }
 
 #[derive(Clone, Debug)]

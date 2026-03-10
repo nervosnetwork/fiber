@@ -67,6 +67,7 @@ tonic = "0.11.0"
 tentacle = { version = "0.7", default-features = false, features = [
   "upnp",
   "parking_lot",
+  "unstable",
   "openssl-vendored",
   "tokio-runtime",
   "tokio-timer",
@@ -102,6 +103,7 @@ jsonrpsee = { version = "0.25.1", features = [
   "wasm-client",
 ] }
 tentacle = { version = "0.7", default-features = false, features = [
+  "unstable",
   "wasm-timer",
 ] }
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
