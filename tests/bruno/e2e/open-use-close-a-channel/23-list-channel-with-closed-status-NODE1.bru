@@ -48,7 +48,7 @@ script:post-response {
   if (!channel || channel.channel_id != expect_channel_id) {
     throw new Error("channel not found");
   }
-  if (channel.state.state_name != "CLOSED" && channel.state.state_flags != "COOPERATIVE") {
+  if (channel.state.state_name != "Closed" || channel.state.state_flags != "Cooperative") {
     throw new Error("channel state is not right");
   }
 }

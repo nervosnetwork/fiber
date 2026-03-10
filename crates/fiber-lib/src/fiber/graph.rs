@@ -19,11 +19,11 @@ use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
 use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::ChannelUpdateInfo;
 use fiber_types::{
-    Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelTlcInfo, ChannelUpdate, Cursor,
-    FeatureVector, Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession,
-    PaymentStatus, Privkey, Pubkey, RouterHop, SendPaymentData, TlcErr, U128Hex, U64Hex,
-    UdtCfgInfos,
+    Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, FeatureVector,
+    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus, Privkey,
+    Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
 };
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};

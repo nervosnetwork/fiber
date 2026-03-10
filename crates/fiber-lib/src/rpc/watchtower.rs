@@ -1,17 +1,21 @@
-use ckb_jsonrpc_types::Script;
 use jsonrpsee::proc_macros::rpc;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 #[cfg(feature = "watchtower")]
-use jsonrpsee::types::error::{ErrorObjectOwned, CALL_EXECUTION_FAILED_CODE};
+use jsonrpsee::types::ErrorObjectOwned;
 
 #[cfg(feature = "watchtower")]
-pub use crate::rpc::context::RpcContext;
+use crate::rpc::utils::{rpc_error, rpc_error_no_data, RpcResultExt};
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
-use fiber_types::{Hash256, Privkey, Pubkey, RevocationData, SettlementData};
+#[cfg(feature = "watchtower")]
+use fiber_json_types::RpcContext;
+#[cfg(feature = "watchtower")]
+use fiber_types::{NodeId, Pubkey};
+
+pub use fiber_json_types::{
+    CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
+    UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
+};
 
 /// RPC module for watchtower related operations
 #[cfg(feature = "watchtower")]
@@ -122,77 +126,6 @@ trait WatchtowerRpc {
     async fn remove_preimage(&self, params: RemovePreimageParams) -> Result<(), ErrorObjectOwned>;
 }
 
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-pub struct CreateWatchChannelParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Funding UDT type script
-    pub funding_udt_type_script: Option<Script>,
-    /// The local party's private key used to settle the commitment transaction
-    pub local_settlement_key: Privkey,
-    /// The remote party's public key used to settle the commitment transaction
-    pub remote_settlement_key: Pubkey,
-    /// The local party's funding public key
-    pub local_funding_pubkey: Pubkey,
-    /// The remote party's funding public key
-    pub remote_funding_pubkey: Pubkey,
-    /// Settlement data
-    pub settlement_data: SettlementData,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-pub struct RemoveWatchChannelParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-pub struct UpdateRevocationParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Revocation data
-    pub revocation_data: RevocationData,
-    /// Settlement data
-    pub settlement_data: SettlementData,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-pub struct UpdatePendingRemoteSettlementParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Settlement data
-    pub settlement_data: SettlementData,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-pub struct UpdateLocalSettlementParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Settlement data
-    pub settlement_data: SettlementData,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-pub struct CreatePreimageParams {
-    /// Payment hash
-    pub payment_hash: Hash256,
-    /// Preimage
-    pub preimage: Hash256,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-pub struct RemovePreimageParams {
-    /// Payment hash
-    pub payment_hash: Hash256,
-}
-
 #[cfg(feature = "watchtower")]
 pub struct WatchtowerRpcServerImpl<S> {
     store: S,
@@ -216,15 +149,33 @@ where
         ctx: RpcContext,
         params: CreateWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
+        let channel_id = params.channel_id.into();
+        let local_settlement_key: fiber_types::Privkey = params
+            .local_settlement_key
+            .try_into()
+            .map_err(|e: String| rpc_error(e, &params))?;
+        let remote_settlement_key =
+            Pubkey::try_from(params.remote_settlement_key).rpc_err(&params)?;
+        let local_funding_pubkey =
+            Pubkey::try_from(params.local_funding_pubkey).rpc_err(&params)?;
+        let remote_funding_pubkey =
+            Pubkey::try_from(params.remote_funding_pubkey).rpc_err(&params)?;
+        // Move fields out of params last, after all borrows of params are done.
+        let funding_udt_type_script = params.funding_udt_type_script;
+        let settlement_data: fiber_types::SettlementData = params
+            .settlement_data
+            .try_into()
+            .map_err(|e: String| rpc_error_no_data(e))?;
         self.store.insert_watch_channel(
-            ctx.node_id,
-            params.channel_id,
-            params.funding_udt_type_script.map(Into::into),
-            params.local_settlement_key,
-            params.remote_settlement_key,
-            params.local_funding_pubkey,
-            params.remote_funding_pubkey,
-            params.settlement_data,
+            node_id,
+            channel_id,
+            funding_udt_type_script.map(Into::into),
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
+            settlement_data,
         );
         Ok(())
     }
@@ -234,8 +185,9 @@ where
         ctx: RpcContext,
         params: RemoveWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.store
-            .remove_watch_channel(ctx.node_id, params.channel_id);
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
+        let channel_id = params.channel_id.into();
+        self.store.remove_watch_channel(node_id, channel_id);
         Ok(())
     }
 
@@ -244,12 +196,18 @@ where
         ctx: RpcContext,
         params: UpdateRevocationParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.store.update_revocation(
-            ctx.node_id,
-            params.channel_id,
-            params.revocation_data,
-            params.settlement_data,
-        );
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
+        let channel_id = params.channel_id.into();
+        let revocation_data: fiber_types::RevocationData = params
+            .revocation_data
+            .try_into()
+            .map_err(|e: String| rpc_error_no_data(e))?;
+        let settlement_data: fiber_types::SettlementData = params
+            .settlement_data
+            .try_into()
+            .map_err(|e: String| rpc_error_no_data(e))?;
+        self.store
+            .update_revocation(node_id, channel_id, revocation_data, settlement_data);
         Ok(())
     }
 
@@ -258,11 +216,14 @@ where
         ctx: RpcContext,
         params: UpdatePendingRemoteSettlementParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.store.update_pending_remote_settlement(
-            ctx.node_id,
-            params.channel_id,
-            params.settlement_data,
-        );
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
+        let channel_id = params.channel_id.into();
+        let settlement_data: fiber_types::SettlementData = params
+            .settlement_data
+            .try_into()
+            .map_err(|e: String| rpc_error_no_data(e))?;
+        self.store
+            .update_pending_remote_settlement(node_id, channel_id, settlement_data);
         Ok(())
     }
 
@@ -271,8 +232,14 @@ where
         ctx: RpcContext,
         params: UpdateLocalSettlementParams,
     ) -> Result<(), ErrorObjectOwned> {
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
+        let channel_id = params.channel_id.into();
+        let settlement_data: fiber_types::SettlementData = params
+            .settlement_data
+            .try_into()
+            .map_err(|e: String| rpc_error_no_data(e))?;
         self.store
-            .update_local_settlement(ctx.node_id, params.channel_id, params.settlement_data);
+            .update_local_settlement(node_id, channel_id, settlement_data);
         Ok(())
     }
 
@@ -282,23 +249,19 @@ where
         params: CreatePreimageParams,
     ) -> Result<(), ErrorObjectOwned> {
         use fiber_types::HashAlgorithm;
-        let CreatePreimageParams {
-            payment_hash,
-            preimage,
-        } = params;
+
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
+        let payment_hash = params.payment_hash.into();
+        let preimage = params.preimage.into();
 
         if HashAlgorithm::supported_algorithms()
             .iter()
             .all(|algorithm| payment_hash != algorithm.hash(preimage).into())
         {
-            return Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                "Wrong preimage",
-                Option::<()>::None,
-            ));
+            return Err(rpc_error_no_data("Wrong preimage"));
         }
         self.store
-            .insert_watch_preimage(ctx.node_id, payment_hash, preimage);
+            .insert_watch_preimage(node_id, payment_hash, preimage);
         Ok(())
     }
     async fn remove_preimage(
@@ -306,8 +269,9 @@ where
         ctx: RpcContext,
         params: RemovePreimageParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.store
-            .remove_watch_preimage(ctx.node_id, params.payment_hash);
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err_no_data()?;
+        let payment_hash = params.payment_hash.into();
+        self.store.remove_watch_preimage(node_id, payment_hash);
         Ok(())
     }
 }

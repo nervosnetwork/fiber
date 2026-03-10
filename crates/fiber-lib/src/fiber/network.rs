@@ -95,6 +95,7 @@ use crate::invoice::{
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
 use fiber_types::{

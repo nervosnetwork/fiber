@@ -7,6 +7,7 @@ members = [
     "crates/fiber-wasm-db-worker",
     "crates/fiber-wasm-db-common",
     "crates/fiber-types",
+    "crates/fiber-json-types",
 ]
 exclude = ["rpc-doc-gen"]
 resolver = "2"

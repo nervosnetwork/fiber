@@ -105,6 +105,12 @@ impl AsRef<[u8]> for NodeId {
     }
 }
 
+impl ::std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        write!(f, "{}", bs58::encode(&self.0).into_string())
+    }
+}
+
 impl ::std::str::FromStr for NodeId {
     type Err = anyhow::Error;
 
