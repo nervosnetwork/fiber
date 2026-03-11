@@ -2,26 +2,21 @@ use anyhow::{anyhow, Result};
 use futures::StreamExt as _;
 use lightning_invoice::Bolt11Invoice;
 use lnd_grpc_tonic_client::routerrpc;
-use ractor::{forward, ActorRef};
+use ractor::ActorRef;
 use std::str::FromStr;
 
-use crate::{
-    cch::{
-        actions::{
-            backend_dispatchers::{dispatch_payment_handler, PaymentHandlerType},
-            ActionExecutor, CchOrderAction,
-        },
-        actor::CchState,
-        trackers::{map_lnd_payment_changed_event, CchTrackingEvent, LndConnectionInfo},
-        CchMessage, CchOrderStore,
+use crate::cch::{
+    actions::{
+        backend_dispatchers::{dispatch_payment_handler, PaymentHandlerType},
+        ActionExecutor,
     },
-    fiber::{
-        config::MAX_PAYMENT_TLC_EXPIRY_LIMIT, payment::SendPaymentCommand, NetworkActorCommand,
-        NetworkActorMessage,
-    },
-    invoice::CkbInvoice,
-    time::{SystemTime, UNIX_EPOCH},
+    actor::CchState,
+    trackers::{map_lnd_payment_changed_event, CchTrackingEvent, LndConnectionInfo},
+    CchFiberAgentRef, CchMessage, CchOrderStore,
 };
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::invoice::CkbInvoice;
+use crate::time::{SystemTime, UNIX_EPOCH};
 use fiber_types::{payment::PaymentStatus, CchInvoice, CchOrder, CchOrderStatus, Hash256};
 
 const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
@@ -31,7 +26,7 @@ pub struct SendOutgoingPaymentDispatcher;
 pub struct SendFiberOutgoingPaymentExecutor {
     payment_hash: Hash256,
     cch_actor_ref: ActorRef<CchMessage>,
-    network_actor_ref: ActorRef<NetworkActorMessage>,
+    fiber_agent_ref: CchFiberAgentRef,
     outgoing_pay_req: String,
     retry_count: u32,
     /// Maximum TLC expiry for the entire payment route (in milliseconds).
@@ -46,80 +41,23 @@ impl ActionExecutor for SendFiberOutgoingPaymentExecutor {
         let Self {
             payment_hash,
             cch_actor_ref,
-            network_actor_ref,
+            fiber_agent_ref,
             outgoing_pay_req,
             retry_count,
             tlc_expiry_limit,
         } = *self;
 
-        let message = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-                SendPaymentCommand {
-                    invoice: Some(outgoing_pay_req),
-                    tlc_expiry_limit: Some(tlc_expiry_limit),
-                    ..Default::default()
-                },
-                rpc_reply,
-            ))
-        };
-
-        forward!(network_actor_ref, message, cch_actor_ref, move |result| {
-            match result {
-                Ok(payment) => CchMessage::TrackingEvent(CchTrackingEvent::PaymentChanged {
-                    payment_hash: payment.payment_hash,
-                    payment_preimage: None,
-                    status: payment.status,
-                    failure_reason: None,
-                }),
-                // TODO: replace string match with structured error type from NetworkActor.
-                Err(err) if err.contains("Payment session already exists") => {
-                    CchMessage::TrackingEvent(CchTrackingEvent::PaymentChanged {
-                        payment_hash,
-                        payment_preimage: None,
-                        status: PaymentStatus::Inflight,
-                        failure_reason: None,
-                    })
-                }
-                Err(err) => {
-                    let failure_reason =
-                        format!("SendFiberOutgoingPaymentExecutor failure: {:?}", err);
-                    if Self::is_permanent_error(&err) {
-                        CchMessage::TrackingEvent(CchTrackingEvent::PaymentChanged {
-                            payment_hash,
-                            payment_preimage: None,
-                            status: PaymentStatus::Failed,
-                            failure_reason: Some(failure_reason),
-                        })
-                    } else {
-                        CchMessage::ActionRetry {
-                            payment_hash,
-                            action: CchOrderAction::SendOutgoingPayment,
-                            retry_count,
-                            reason: failure_reason,
-                        }
-                    }
-                }
-            }
-        })
-        .map_err(|err| anyhow!(err.to_string()))?;
-
+        fiber_agent_ref
+            .forward_send_payment(
+                outgoing_pay_req,
+                tlc_expiry_limit,
+                &cch_actor_ref,
+                payment_hash,
+                retry_count,
+            )
+            .await
+            .map_err(|e| anyhow!("{}", e))?;
         Ok(())
-    }
-}
-
-impl SendFiberOutgoingPaymentExecutor {
-    fn is_permanent_error(err: &str) -> bool {
-        // InvalidParameter errors are permanent validation errors
-        if err.contains("InvalidParameter") {
-            return true;
-        }
-
-        // Additional permanent errors that won't be fixed by retrying
-        let err_lower = err.to_lowercase();
-        err_lower.contains("invalid payment request")
-            || err_lower.contains("invoice expired")
-            || err_lower.contains("payment hash mismatch")
-            || err_lower.contains("no path found")
     }
 }
 
@@ -367,7 +305,7 @@ impl SendOutgoingPaymentDispatcher {
                 Some(Box::new(SendFiberOutgoingPaymentExecutor {
                     payment_hash: order.payment_hash,
                     cch_actor_ref: cch_actor_ref.clone(),
-                    network_actor_ref: state.network_actor.clone(),
+                    fiber_agent_ref: state.fiber_agent_ref.clone(),
                     outgoing_pay_req: order.outgoing_pay_req.clone(),
                     retry_count,
                     tlc_expiry_limit,

@@ -1,0 +1,47 @@
+meta {
+  name: 14-check-hub-received-btc-in-lnd
+  type: http
+  seq: 14
+}
+
+get {
+  url: {{LND_BOB_RPC_URL}}/v1/balance/channels
+  body: none
+  auth: none
+}
+
+vars:post-response {
+  max_iterations: 10
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:pre-request {
+  if(bru.getVar("iteration") === undefined){
+    bru.setVar("iteration", 0);
+  }
+}
+
+script:post-response {
+  const i = bru.getVar("iteration");
+  const n = bru.getVar("max_iterations");
+  if (i < n) {
+    console.log(`Try ${i+1}/${n}`);
+  }
+  
+  const before = parseInt(bru.getVar("LND_BOB_BALANCE"), 10);
+  if (parseInt(res.body.remote_balance.sat, 10) - before === 50000) {
+    console.log("Hub has received the payment");
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setVar("iteration", 0);
+  } else if (i+1 < n) {
+    await new Promise(r => setTimeout(r, 500));
+    bru.setVar("iteration", i + 1);
+    bru.setNextRequest("14-check-hub-received-btc-in-lnd");
+  } else {
+    bru.setVar("iteration", 0);
+    throw new Error("Hub has not received the payment");
+  }
+}

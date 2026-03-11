@@ -12,6 +12,9 @@ use serde::Serialize;
 pub struct Config {
     // fiber config, None represents that we should not run fiber service
     pub fiber: Option<FiberConfig>,
+    // fiber config saved when the fiber service is not enabled,
+    // so other services (e.g. CCH) can still read store_path and currency
+    pub disabled_fiber: Option<FiberConfig>,
     // cch config, None represents that we should not run cch service
     #[cfg(not(target_arch = "wasm32"))]
     pub cch: Option<CchConfig>,
@@ -20,6 +23,13 @@ pub struct Config {
     // ckb actor config, None represents that we should not run ckb actor
     pub ckb: Option<CkbConfig>,
     pub base_dir: PathBuf,
+}
+
+impl Config {
+    /// Returns the fiber config regardless of whether the fiber service is enabled.
+    pub fn parsed_fiber(&self) -> Option<&FiberConfig> {
+        self.fiber.as_ref().or(self.disabled_fiber.as_ref())
+    }
 }
 
 #[derive(Serialize, Deserialize, Parser, Copy, Clone, Debug, PartialEq)]
@@ -217,13 +227,18 @@ pub mod native {
                 ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
             );
 
-            let fiber = services.contains(&Service::FIBER).then_some(fiber);
+            let (fiber, disabled_fiber) = if services.contains(&Service::FIBER) {
+                (Some(fiber), None)
+            } else {
+                (None, Some(fiber))
+            };
             let cch = services.contains(&Service::CCH).then_some(cch);
             let rpc = services.contains(&Service::RPC).then_some(rpc);
             let ckb = services.contains(&Service::CkbChain).then_some(ckb);
 
             Self {
                 fiber,
+                disabled_fiber,
                 cch,
                 rpc,
                 ckb,
@@ -273,10 +288,12 @@ mod wasm {
                 )
             };
 
-            let fiber = services
-                .contains(&Service::FIBER)
-                .then_some(fiber)
-                .map(FiberConfig::from);
+            let fiber_config = Some(FiberConfig::from(fiber));
+            let (fiber, disabled_fiber) = if services.contains(&Service::FIBER) {
+                (fiber_config, None)
+            } else {
+                (None, fiber_config)
+            };
             let rpc = services
                 .contains(&Service::RPC)
                 .then_some(rpc)
@@ -288,6 +305,7 @@ mod wasm {
 
             Self {
                 fiber,
+                disabled_fiber,
                 rpc,
                 ckb,
                 base_dir: PathBuf::from_str(&database_prefix).unwrap(),
