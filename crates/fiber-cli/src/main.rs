@@ -19,7 +19,8 @@ mod commands {
 use std::collections::HashMap;
 
 use anyhow::Result;
-use clap::{Arg, Command};
+use clap::builder::styling::{AnsiColor, Style, Styles};
+use clap::{Arg, ColorChoice, Command};
 use colored::Colorize;
 use rpc_client::RpcClient;
 use rustyline::completion::Completer;
@@ -41,10 +42,22 @@ const BANNER: &str = r#"
  |_|   |___|____/|______|_|  \_\
 "#;
 
+fn cli_styles() -> Styles {
+    Styles::styled()
+        .header(Style::new().fg_color(Some(AnsiColor::Yellow.into())).bold())
+        .usage(Style::new().fg_color(Some(AnsiColor::Yellow.into())).bold())
+        .literal(Style::new().fg_color(Some(AnsiColor::Cyan.into())))
+        .placeholder(Style::new().fg_color(Some(AnsiColor::Cyan.into())).dimmed())
+        .valid(Style::new().fg_color(Some(AnsiColor::Green.into())))
+        .invalid(Style::new().fg_color(Some(AnsiColor::Red.into())).bold())
+        .error(Style::new().fg_color(Some(AnsiColor::Red.into())).bold())
+}
+
 fn build_cli() -> Command {
     let cmd = Command::new("fnn-cli")
         .about("Fiber Network Node CLI - interactive command-line interface for FNN")
         .version(FNN_CLI_VERSION)
+        .styles(cli_styles())
         .arg(
             Arg::new("url")
                 .long("url")
@@ -100,12 +113,18 @@ fn build_cli() -> Command {
     commands::register_subcommands(cmd)
 }
 
-fn build_interactive_cli() -> Command {
+fn build_interactive_cli(use_color: bool) -> Command {
+    let color_choice = if use_color {
+        ColorChoice::Always
+    } else {
+        ColorChoice::Never
+    };
     let cmd = Command::new("interactive")
         .multicall(true)
-        .subcommand(Command::new("exit").about("Exit the interactive shell"))
-        .subcommand(Command::new("quit").about("Exit the interactive shell"));
+        .styles(cli_styles())
+        .color(color_choice);
     commands::register_subcommands(cmd)
+        .subcommand(Command::new("quit").about("Exit the interactive shell"))
 }
 
 fn print_banner(url: &str, output_format: &str, auth_token: Option<&str>) {
@@ -290,7 +309,7 @@ async fn run_interactive(
     }
     println!();
 
-    let interactive_cli = build_interactive_cli();
+    let interactive_cli = build_interactive_cli(use_color);
     let helper = FnnHelper::new(&interactive_cli);
 
     let config = rustyline::Config::builder()
@@ -325,7 +344,7 @@ async fn run_interactive(
                     }
                 };
 
-                let cli = build_interactive_cli();
+                let cli = build_interactive_cli(use_color);
                 match cli.try_get_matches_from(args) {
                     Ok(matches) => {
                         if let Err(e) =
@@ -336,18 +355,13 @@ async fn run_interactive(
                         }
                     }
                     Err(e) => {
-                        // Colorize help output from clap
-                        let rendered = e.render().to_string();
-                        if use_color {
-                            eprintln!("{}", colorize::colorize_help(&rendered));
-                        } else {
-                            eprintln!("{}", rendered);
-                        }
+                        // clap Styles handles coloring natively
+                        let _ = e.print();
                     }
                 }
             }
             Err(ReadlineError::Interrupted) => {
-                println!("Use 'exit' or 'quit' to leave the shell.");
+                println!("Use 'quit' to leave the shell.");
             }
             Err(ReadlineError::Eof) => {
                 break;

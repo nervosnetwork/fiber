@@ -544,9 +544,20 @@ const GROUP_ORDER: &[&str] = &[
     "prof",
 ];
 
-/// Types that are NOT RPC params but appear as method parameters
-/// (e.g. watchtower's `RpcContext` injected by middleware).
-const SKIP_PARAM_TYPES: &[&str] = &["RpcContext"];
+/// Clean up trait doc comments for CLI help: strip "RPC module for " prefix,
+/// trim trailing period, and capitalize the first letter.
+fn clean_about_text(s: &str) -> String {
+    let stripped = s
+        .strip_prefix("The RPC module for ")
+        .or_else(|| s.strip_prefix("RPC module for "))
+        .unwrap_or(s)
+        .trim_end_matches('.');
+    let mut result = stripped.to_string();
+    if let Some(first) = result.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    result
+}
 
 /// Override the default `NoneAction::Help` for specific groups.
 fn none_action_for(group: &str) -> NoneAction {
@@ -680,7 +691,7 @@ fn discover_command_defs(rpc_dir: &Path) -> Vec<CommandGroupDef> {
         let trait_docs = extract_doc_comments(&rpc_trait.attrs);
         let about = trait_docs
             .first()
-            .cloned()
+            .map(|s| clean_about_text(s))
             .unwrap_or_else(|| format!("{} commands", group_name));
 
         let none_action = none_action_for(&group_name);
@@ -697,10 +708,11 @@ fn discover_command_defs(rpc_dir: &Path) -> Vec<CommandGroupDef> {
                 let method_docs = extract_doc_comments(&method.attrs);
                 let method_about = method_docs
                     .first()
-                    .cloned()
+                    .map(|s| s.trim_end_matches('.').to_string())
                     .unwrap_or_else(|| method_name.clone());
 
-                // Extract params type: skip `&self`, skip known non-param types like RpcContext.
+                // Extract params type: only consider types ending with "Params"
+                // (skips `&self` and injected types like `RpcContext`).
                 let params_type = method
                     .sig
                     .inputs
@@ -708,10 +720,11 @@ fn discover_command_defs(rpc_dir: &Path) -> Vec<CommandGroupDef> {
                     .filter_map(|arg| {
                         if let syn::FnArg::Typed(pat_type) = arg {
                             let ty_name = type_path_last_segment(&pat_type.ty)?;
-                            if SKIP_PARAM_TYPES.contains(&ty_name.as_str()) {
-                                return None;
+                            if ty_name.ends_with("Params") {
+                                Some(ty_name)
+                            } else {
+                                None
                             }
-                            Some(ty_name)
                         } else {
                             None // Skip `self`
                         }

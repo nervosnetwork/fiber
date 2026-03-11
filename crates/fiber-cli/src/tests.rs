@@ -200,16 +200,17 @@ fn test_build_cli_auth_token_optional() {
 }
 
 #[test]
-fn test_build_interactive_cli_has_exit_quit() {
-    let cli = build_interactive_cli();
+fn test_build_interactive_cli_has_quit() {
+    let cli = build_interactive_cli(false);
     let sub_names: Vec<&str> = cli.get_subcommands().map(|s| s.get_name()).collect();
-    assert!(sub_names.contains(&"exit"));
     assert!(sub_names.contains(&"quit"));
+    // "quit" should be the last subcommand in help
+    assert_eq!(*sub_names.last().unwrap(), "quit");
 }
 
 #[test]
 fn test_build_interactive_cli_has_same_commands() {
-    let cli = build_interactive_cli();
+    let cli = build_interactive_cli(false);
     let sub_names: Vec<&str> = cli.get_subcommands().map(|s| s.get_name()).collect();
     let expected = [
         "info",
@@ -226,7 +227,7 @@ fn test_build_interactive_cli_has_same_commands() {
     for name in &expected {
         assert!(
             sub_names.contains(name),
-            "build_interactive_cli() missing subcommand: {}",
+            "build_interactive_cli(false) missing subcommand: {}",
             name
         );
     }
@@ -236,7 +237,7 @@ fn test_build_interactive_cli_has_same_commands() {
 
 #[test]
 fn test_completion_tree_has_top_level() {
-    let cli = build_interactive_cli();
+    let cli = build_interactive_cli(false);
     let tree = build_completion_tree(&cli);
     let top = tree.get("").expect("should have empty-string key");
     assert!(top.contains(&"channel".to_string()));
@@ -246,7 +247,7 @@ fn test_completion_tree_has_top_level() {
 
 #[test]
 fn test_completion_tree_has_subcommand_entries() {
-    let cli = build_interactive_cli();
+    let cli = build_interactive_cli(false);
     let tree = build_completion_tree(&cli);
     // "channel" should have subcommand entries (open_channel, list_channels, etc.)
     let channel_entries = tree.get("channel").expect("should have 'channel' key");
@@ -264,7 +265,7 @@ fn test_completion_tree_has_subcommand_entries() {
 
 #[test]
 fn test_completion_tree_subcommand_has_options() {
-    let cli = build_interactive_cli();
+    let cli = build_interactive_cli(false);
     let tree = build_completion_tree(&cli);
     // "channel open_channel" should have --flag options
     let key = "channel open_channel".to_string();
