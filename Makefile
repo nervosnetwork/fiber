@@ -5,7 +5,7 @@ GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
-NATIVE_PACKAGES = -p fnn -p fiber-bin
+NATIVE_PACKAGES = -p fnn -p fiber-bin -p fnn-cli
 WASM_PACKAGES = -p fiber-wasm -p fiber-wasm-db-worker -p fiber-wasm-db-common
 
 .PHONY: build-metrics-prof

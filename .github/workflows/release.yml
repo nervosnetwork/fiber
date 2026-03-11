@@ -135,8 +135,9 @@ jobs:
       run: |
         pkgname="fnn_${{ steps.get_version.outputs.VERSION }}-${{ matrix.pkg_suffix }}.tar.gz"
         cp "target/release/fnn${{ matrix.bin_suffix }}" "fnn${{ matrix.bin_suffix }}"
+        cp "target/release/fnn-cli${{ matrix.bin_suffix }}" "fnn-cli${{ matrix.bin_suffix }}"
         cp "migrate/target/release/fnn-migrate${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}"
-        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}" "config"
+        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "fnn-cli${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}" "config"
         echo "PKGNAME=${pkgname}" >> $GITHUB_OUTPUT
     - name: Upload Release Asset
       uses: softprops/action-gh-release@v1

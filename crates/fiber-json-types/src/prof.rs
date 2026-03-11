@@ -6,7 +6,7 @@ use serde_with::serde_as;
 
 /// Parameters for profiling.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct PprofParams {
     /// Duration to profile in seconds. Defaults 10s.
     #[serde_as(as = "Option<U64Hex>")]

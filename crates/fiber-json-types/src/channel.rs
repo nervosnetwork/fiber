@@ -10,6 +10,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+/// Serde default function returning `Some(true)`.
+/// Used for `Option<bool>` fields whose server-side default is `true`.
+fn default_true() -> Option<bool> {
+    Some(true)
+}
+
 define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct NegotiatingFundingFlags(u32) {
@@ -95,6 +101,7 @@ pub struct OpenChannelParams {
 
     /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs),
     /// an optional parameter, default value is true.
+    #[serde(default = "default_true")]
     pub public: Option<bool>,
 
     /// Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way),
@@ -455,7 +462,8 @@ pub struct ShutdownChannelParams {
 pub struct UpdateChannelParams {
     /// The channel ID of the channel to update
     pub channel_id: Hash256,
-    /// Whether the channel is enabled
+    /// Whether the channel is enabled, default value is true
+    #[serde(default = "default_true")]
     pub enabled: Option<bool>,
     /// The expiry delta for the TLC locktime
     #[serde_as(as = "Option<U64Hex>")]
