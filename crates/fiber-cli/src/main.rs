@@ -33,14 +33,11 @@ use rustyline::{Context, Editor, Helper};
 const FNN_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8227";
 
-const BANNER: &str = r#"
-  ______ ___ ___  ______ _____
- |  ____|_ _| _ \|  ____|  __ \
- | |__   | ||___/| |__  | |__) |
- |  __|  | || _ \|  __| |  _  /
- | |    _| || |_\| |____| | \ \
- |_|   |___|____/|______|_|  \_\
-"#;
+const BANNER_LINES: &[&str] = &[
+    r"  ╔═╗╦╔╗ ╔═╗╦═╗  ╔╗╔╔═╗╔╦╗╦ ╦╔═╗╦═╗╦╔═ ",
+    r"  ╠╣ ║╠╩╗║╣ ╠╦╝  ║║║║╣  ║ ║║║║ ║╠╦╝╠╩╗ ",
+    r"  ╚  ╩╚═╝╚═╝╩╚═  ╝╚╝╚═╝ ╩ ╚╩╝╚═╝╩╚═╩ ╩ ",
+];
 
 fn cli_styles() -> Styles {
     Styles::styled()
@@ -128,7 +125,29 @@ fn build_interactive_cli(use_color: bool) -> Command {
 }
 
 fn print_banner(url: &str, output_format: &str, auth_token: Option<&str>) {
-    println!("{}", BANNER.bright_cyan());
+    // Gradient from bright cyan to bright blue
+    let colors = [
+        colored::Color::TrueColor {
+            r: 0,
+            g: 255,
+            b: 255,
+        },
+        colored::Color::TrueColor {
+            r: 0,
+            g: 200,
+            b: 255,
+        },
+        colored::Color::TrueColor {
+            r: 0,
+            g: 150,
+            b: 255,
+        },
+    ];
+    println!();
+    for (i, line) in BANNER_LINES.iter().enumerate() {
+        println!("{}", line.color(colors[i % colors.len()]).bold());
+    }
+    println!();
     println!("[  fnn-cli version ]: {}", FNN_CLI_VERSION.bright_yellow());
     println!("[              url ]: {}", url.bright_green());
     println!("[    output format ]: {}", output_format.bright_white());
