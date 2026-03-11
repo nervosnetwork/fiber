@@ -501,7 +501,7 @@ fn process_source_file(
 }
 
 // ---------------------------------------------------------------------------
-// Command definitions parsing (from command_defs.rs)
+// Command definitions discovery (from RPC trait files)
 // ---------------------------------------------------------------------------
 
 /// Parsed representation of a single subcommand within a command group.
@@ -530,115 +530,223 @@ struct CommandGroupDef {
     subcommands: Vec<SubcommandDef>,
 }
 
-/// Extract a string literal from a syn Expr.
-fn expr_to_string(expr: &Expr) -> Option<String> {
-    if let Expr::Lit(lit_expr) = expr {
-        if let Lit::Str(s) = &lit_expr.lit {
-            return Some(s.value());
+/// Hardcoded group ordering for consistent --help display.
+const GROUP_ORDER: &[&str] = &[
+    "info",
+    "peer",
+    "channel",
+    "invoice",
+    "payment",
+    "graph",
+    "cch",
+    "dev",
+    "watchtower",
+    "prof",
+];
+
+/// Types that are NOT RPC params but appear as method parameters
+/// (e.g. watchtower's `RpcContext` injected by middleware).
+const SKIP_PARAM_TYPES: &[&str] = &["RpcContext"];
+
+/// Override the default `NoneAction::Help` for specific groups.
+fn none_action_for(group: &str) -> NoneAction {
+    match group {
+        "info" => NoneAction::Call("node_info".to_string()),
+        "prof" => NoneAction::Default("pprof".to_string()),
+        _ => NoneAction::Help,
+    }
+}
+
+/// Extract the `name = "..."` value from a `#[method(name = "...")]` attribute.
+fn extract_method_name(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if attr.path().is_ident("method") {
+            if let Meta::List(ml) = &attr.meta {
+                let tokens_str = ml.tokens.to_string();
+                // Parse `name = "some_name"` from the token stream.
+                if let Some(pos) = tokens_str.find("name") {
+                    let rest = &tokens_str[pos..];
+                    if let Some(start) = rest.find('"') {
+                        if let Some(end) = rest[start + 1..].find('"') {
+                            return Some(rest[start + 1..start + 1 + end].to_string());
+                        }
+                    }
+                }
+            }
         }
     }
     None
 }
 
-/// Parse command_defs.rs and extract all command group definitions.
-///
-/// Each const is a 4-tuple: (group_name, about, none_action, &[(name, about, params, result)])
-fn parse_command_defs(path: &Path) -> Vec<CommandGroupDef> {
-    let content = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e));
-    let syntax = syn::parse_file(&content)
-        .unwrap_or_else(|e| panic!("Failed to parse {}: {}", path.display(), e));
-
-    let mut groups = Vec::new();
-    // Also track the order from ALL_COMMAND_GROUPS
-    let mut ordered_names: Vec<String> = Vec::new();
-
-    for item in &syntax.items {
-        if let syn::Item::Const(c) = item {
-            let const_name = c.ident.to_string();
-
-            if const_name == "ALL_COMMAND_GROUPS" {
-                // Parse the ordering array: &[&str]
-                if let Expr::Reference(ref_expr) = &*c.expr {
-                    if let Expr::Array(arr) = &*ref_expr.expr {
-                        for elem in &arr.elems {
-                            if let Some(s) = expr_to_string(elem) {
-                                ordered_names.push(s);
-                            }
-                        }
-                    }
+/// Check if an attribute list contains `#[rpc(server)]`.
+fn has_rpc_server_attr(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if attr.path().is_ident("rpc") {
+            if let Meta::List(ml) = &attr.meta {
+                let tokens_str = ml.tokens.to_string();
+                if tokens_str.contains("server") {
+                    return true;
                 }
-                continue;
-            }
-
-            if !const_name.ends_with("_COMMANDS") {
-                continue;
-            }
-
-            // Parse the 4-tuple: (group_name, about, none_action, &[...])
-            if let Expr::Tuple(tup) = &*c.expr {
-                let elems: Vec<&Expr> = tup.elems.iter().collect();
-                if elems.len() != 4 {
-                    continue;
-                }
-
-                let group_name = expr_to_string(elems[0]).unwrap_or_default();
-                let about = expr_to_string(elems[1]).unwrap_or_default();
-                let none_action_str =
-                    expr_to_string(elems[2]).unwrap_or_else(|| "help".to_string());
-
-                let none_action = if none_action_str == "help" {
-                    NoneAction::Help
-                } else if let Some(method) = none_action_str.strip_prefix("call:") {
-                    NoneAction::Call(method.to_string())
-                } else if let Some(method) = none_action_str.strip_prefix("default:") {
-                    NoneAction::Default(method.to_string())
-                } else {
-                    NoneAction::Help
-                };
-
-                // Parse the subcommands array: &[(name, about, params, result), ...]
-                let mut subcommands = Vec::new();
-                if let Expr::Reference(ref_expr) = elems[3] {
-                    if let Expr::Array(arr) = &*ref_expr.expr {
-                        for elem in &arr.elems {
-                            if let Expr::Tuple(sub_tup) = elem {
-                                let sub_elems: Vec<&Expr> = sub_tup.elems.iter().collect();
-                                if sub_elems.len() == 4 {
-                                    subcommands.push(SubcommandDef {
-                                        name: expr_to_string(sub_elems[0]).unwrap_or_default(),
-                                        about: expr_to_string(sub_elems[1]).unwrap_or_default(),
-                                        params_type: expr_to_string(sub_elems[2])
-                                            .unwrap_or_default(),
-                                        result_type: expr_to_string(sub_elems[3])
-                                            .unwrap_or_default(),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-
-                groups.push(CommandGroupDef {
-                    group_name,
-                    about,
-                    none_action,
-                    subcommands,
-                });
             }
         }
     }
+    false
+}
 
-    // Sort groups according to ALL_COMMAND_GROUPS ordering if available.
-    if !ordered_names.is_empty() {
-        groups.sort_by_key(|g| {
-            let search = format!("{}_COMMANDS", g.group_name.to_uppercase());
-            ordered_names
-                .iter()
-                .position(|n| *n == search)
-                .unwrap_or(usize::MAX)
+/// Extract the last segment name from a syn Type path (e.g. `Result<Foo, Bar>` → "Result").
+fn type_path_last_segment(ty: &Type) -> Option<String> {
+    if let Type::Path(tp) = ty {
+        tp.path.segments.last().map(|s| s.ident.to_string())
+    } else {
+        None
+    }
+}
+
+/// Extract the inner type T from `Result<T, E>`.
+fn extract_result_inner(ty: &syn::ReturnType) -> Option<String> {
+    if let syn::ReturnType::Type(_, boxed_ty) = ty {
+        if let Type::Path(tp) = &**boxed_ty {
+            if let Some(seg) = tp.path.segments.last() {
+                if seg.ident == "Result" {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            // Check for unit type `()`
+                            if let Type::Tuple(tuple) = inner {
+                                if tuple.elems.is_empty() {
+                                    return Some("()".to_string());
+                                }
+                            }
+                            // Otherwise return the type name
+                            return type_path_last_segment(inner);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Discover command group definitions by parsing `#[rpc(server)]` trait
+/// blocks in the RPC source directory.
+fn discover_command_defs(rpc_dir: &Path) -> Vec<CommandGroupDef> {
+    let mut groups = Vec::new();
+
+    let mut rpc_files: Vec<PathBuf> = fs::read_dir(rpc_dir)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", rpc_dir.display(), e))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    rpc_files.sort();
+
+    for rpc_path in &rpc_files {
+        let group_name = rpc_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let content = fs::read_to_string(rpc_path).unwrap_or_else(|e| {
+            panic!("Failed to read {}: {}", rpc_path.display(), e);
+        });
+
+        let syntax = syn::parse_file(&content).unwrap_or_else(|e| {
+            panic!("Failed to parse {}: {}", rpc_path.display(), e);
+        });
+
+        // Find the trait with #[rpc(server)].
+        let rpc_trait = syntax.items.iter().find_map(|item| {
+            if let syn::Item::Trait(t) = item {
+                if has_rpc_server_attr(&t.attrs) {
+                    return Some(t);
+                }
+            }
+            None
+        });
+
+        let rpc_trait = match rpc_trait {
+            Some(t) => t,
+            None => continue, // No RPC trait in this file
+        };
+
+        // Extract trait-level doc comment for the group "about".
+        let trait_docs = extract_doc_comments(&rpc_trait.attrs);
+        let about = trait_docs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("{} commands", group_name));
+
+        let none_action = none_action_for(&group_name);
+
+        // Extract methods from the trait.
+        let mut subcommands = Vec::new();
+        for item in &rpc_trait.items {
+            if let syn::TraitItem::Fn(method) = item {
+                let method_name = match extract_method_name(&method.attrs) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                let method_docs = extract_doc_comments(&method.attrs);
+                let method_about = method_docs
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| method_name.clone());
+
+                // Extract params type: skip `&self`, skip known non-param types like RpcContext.
+                let params_type = method
+                    .sig
+                    .inputs
+                    .iter()
+                    .filter_map(|arg| {
+                        if let syn::FnArg::Typed(pat_type) = arg {
+                            let ty_name = type_path_last_segment(&pat_type.ty)?;
+                            if SKIP_PARAM_TYPES.contains(&ty_name.as_str()) {
+                                return None;
+                            }
+                            Some(ty_name)
+                        } else {
+                            None // Skip `self`
+                        }
+                    })
+                    .last()
+                    .unwrap_or_else(|| "()".to_string());
+
+                // Extract result type from return type `Result<T, ErrorObjectOwned>`.
+                let result_type =
+                    extract_result_inner(&method.sig.output).unwrap_or_else(|| "()".to_string());
+
+                subcommands.push(SubcommandDef {
+                    name: method_name,
+                    about: method_about,
+                    params_type,
+                    result_type,
+                });
+            }
+        }
+
+        groups.push(CommandGroupDef {
+            group_name,
+            about,
+            none_action,
+            subcommands,
         });
     }
+
+    // Sort groups according to the hardcoded ordering.
+    groups.sort_by_key(|g| {
+        GROUP_ORDER
+            .iter()
+            .position(|n| *n == g.group_name)
+            .unwrap_or(usize::MAX)
+    });
 
     groups
 }
@@ -911,7 +1019,10 @@ fn gen_all_command_modules(groups: &[CommandGroupDef]) -> proc_macro2::TokenStre
             let mod_ident = syn::Ident::new(&group.group_name, proc_macro2::Span::call_site());
             quote! {
                 Some((#name_str, sub)) => {
-                    let result = #mod_ident::execute(client, sub).await?;
+                    let spinner = crate::spinner::start_spinner("Waiting for response...");
+                    let result = #mod_ident::execute(client, sub).await;
+                    spinner.finish_and_clear();
+                    let result = result?;
                     print_result(&result, raw, output_format, color);
                 }
             }
@@ -1045,11 +1156,13 @@ fn main() {
     // Tell cargo to re-run if any source file changes or a new file is added.
     println!("cargo::rerun-if-changed={}", json_types_dir.display());
 
-    // Also re-run if command_defs.rs changes.
-    let command_defs_path = PathBuf::from(&manifest_dir)
+    // Also re-run if any RPC trait definition changes.
+    let rpc_dir = PathBuf::from(&manifest_dir)
+        .join("..")
+        .join("fiber-lib")
         .join("src")
-        .join("command_defs.rs");
-    println!("cargo::rerun-if-changed={}", command_defs_path.display());
+        .join("rpc");
+    println!("cargo::rerun-if-changed={}", rpc_dir.display());
 
     // First pass: collect all enum types with Deserialize across all source files.
     // This lets us auto-detect serde_enum fields without any config.
@@ -1098,8 +1211,8 @@ fn main() {
     let out_path = PathBuf::from(&out_dir).join("cli_generated.rs");
     fs::write(&out_path, generated.to_string()).expect("Failed to write generated CLI code");
 
-    // Third: parse command_defs.rs and generate command modules.
-    let groups = parse_command_defs(&command_defs_path);
+    // Third: discover command definitions from RPC trait files and generate command modules.
+    let groups = discover_command_defs(&rpc_dir);
     let commands_generated = gen_all_command_modules(&groups);
     let commands_out_path = PathBuf::from(&out_dir).join("commands_generated.rs");
     fs::write(&commands_out_path, commands_generated.to_string())
