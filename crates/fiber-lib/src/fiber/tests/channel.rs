@@ -1,20 +1,18 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelState, CloseFlags, NegotiatingFundingFlags, OutboundTlcStatus, TLCId,
-    TlcStatus, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
-    XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ReplayOrderHint, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS,
+    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
     MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
-use crate::fiber::features::FeatureVector;
+
 use crate::fiber::graph::ChannelInfo;
-use crate::fiber::network::{DebugEvent, FiberMessageWithPeerId, PeerDisconnectReason};
-use crate::fiber::payment::{PaymentStatus, SendPaymentCommand};
+use crate::fiber::network::{DebugEvent, FiberMessageWithTarget, PeerDisconnectReason};
+use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PaymentHopData, PeeledPaymentOnionPacket, Pubkey, TlcErr,
-    TlcErrorCode, NO_SHARED_SECRET,
+    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, TlcErr,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode};
@@ -23,14 +21,11 @@ use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
         channel::{
-            derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelActorStateStore,
-            ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
+            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand,
             ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
-        hash_algorithm::HashAlgorithm,
         network::{AcceptChannelCommand, OpenChannelCommand},
-        types::{Privkey, RemoveTlcFulfill, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage,
     },
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
@@ -42,6 +37,12 @@ use ckb_types::{
     packed::{CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
+use fiber_types::{
+    derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelState, HashAlgorithm,
+    InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
+    Privkey, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+};
+use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
 use musig2::KeyAggContext;
 use ractor::call;
@@ -93,7 +94,7 @@ async fn test_open_channel_to_peer() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -117,9 +118,9 @@ async fn test_open_channel_to_peer() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -134,7 +135,7 @@ async fn test_open_and_accept_channel() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -158,9 +159,9 @@ async fn test_open_and_accept_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -211,7 +212,7 @@ async fn test_send_init_msg_with_different_chain_hash() {
 
     let dummy_err_chain_hash = Hash256::from([1; 32]);
     node_a.send_init_peer_message(
-        node_b.peer_id.clone(),
+        node_b.pubkey,
         Init {
             features: FeatureVector::default(),
             chain_hash: dummy_err_chain_hash,
@@ -222,8 +223,8 @@ async fn test_send_init_msg_with_different_chain_hash() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
-                assert_eq!(peer_id, &node_b.peer_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _reason) => {
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -232,8 +233,8 @@ async fn test_send_init_msg_with_different_chain_hash() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _reason) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _reason) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -258,11 +259,11 @@ async fn test_create_channel_with_remote_tlc_info() {
         let node_b_channel_state = node_b.store.get_channel_actor_state(&channel_id).unwrap();
 
         assert_eq!(
-            Some(node_a_channel_state.local_tlc_info),
+            Some(node_a_channel_state.local_tlc_info.clone()),
             node_b_channel_state.remote_tlc_info
         );
         assert_eq!(
-            Some(node_b_channel_state.local_tlc_info),
+            Some(node_b_channel_state.local_tlc_info.clone()),
             node_a_channel_state.remote_tlc_info
         );
     }
@@ -298,17 +299,17 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
         )
         .await;
 
-    let node1_id = node1.peer_id.clone();
+    let node1_pubkey = node1.pubkey;
     node1.stop().await;
-    let node2_id = node2.peer_id.clone();
+    let node2_pubkey = node2.pubkey;
     node2.stop().await;
 
     let node1_channels = node1.get_network_graph_channels().await;
     assert_eq!(node1_channels.len(), 1);
     let node1_channel = &node1_channels[0];
     assert_eq!(
-        HashSet::from([node1_channel.node1_peerid(), node1_channel.node2_peerid()]),
-        HashSet::from([node1_id.clone(), node2_id.clone()])
+        HashSet::from([node1_channel.node1(), node1_channel.node2()]),
+        HashSet::from([node1_pubkey, node2_pubkey])
     );
     assert_ne!(node1_channel.update_of_node1, None);
     assert_ne!(node1_channel.update_of_node2, None);
@@ -324,8 +325,8 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
     assert_ne!(node2_channel.update_of_node1, None);
     assert_ne!(node2_channel.update_of_node2, None);
     assert_eq!(
-        HashSet::from([node2_channel.node1_peerid(), node2_channel.node2_peerid()]),
-        HashSet::from([node1_id, node2_id])
+        HashSet::from([node2_channel.node1(), node2_channel.node2()]),
+        HashSet::from([node1_pubkey, node2_pubkey])
     );
     let node2_nodes = node2.get_network_graph_nodes().await;
     assert_eq!(node2_nodes.len(), 2);
@@ -396,9 +397,6 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
         )
         .await;
 
-    let node1_id = node1.peer_id.clone();
-    let node2_id = node2.peer_id.clone();
-
     let node1_channels = node1.get_network_graph_channels().await;
     assert_ne!(node1_channels, vec![]);
     let node2_channels = node2.get_network_graph_channels().await;
@@ -407,14 +405,14 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node2.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node2_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node2.pubkey);
                 true
             }
             _ => false,
@@ -423,8 +421,8 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
 
     node2
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node1_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node1.pubkey);
                 true
             }
             _ => false,
@@ -460,9 +458,6 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
         )
         .await;
 
-    let node1_id = node1.peer_id.clone();
-    let node2_id = node2.peer_id.clone();
-
     let node1_channels = node1.get_network_graph_channels().await;
     assert_ne!(node1_channels, vec![]);
     let node2_channels = node2.get_network_graph_channels().await;
@@ -471,14 +466,14 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(node2.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node2_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node2.pubkey);
                 true
             }
             _ => false,
@@ -487,8 +482,8 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
 
     node2
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node1_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node1.pubkey);
                 true
             }
             _ => false,
@@ -508,9 +503,9 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
 
     node1
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node2_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node2.pubkey);
                 true
             }
             _ => false,
@@ -519,9 +514,9 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
 
     node2
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node1_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node1.pubkey);
                 true
             }
             _ => false,
@@ -706,8 +701,8 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     assert_eq!(channels.len(), 1);
     let channel = &channels[0];
     assert_eq!(
-        HashSet::from([channel.node1_peerid(), channel.node2_peerid()]),
-        HashSet::from([node1.peer_id.clone(), node2.peer_id.clone()])
+        HashSet::from([channel.node1(), channel.node2()]),
+        HashSet::from([node1.pubkey, node2.pubkey])
     );
 
     let nodes = node3.get_network_graph_nodes().await;
@@ -1013,15 +1008,15 @@ async fn test_network_send_previous_tlc_error() {
 
     let res = call!(node_a.network_actor, message).expect("node_a alive");
     assert!(res.is_ok());
-    let node_b_peer_id = node_b.peer_id.clone();
+    let node_b_pubkey = node_b.pubkey;
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
-                peer_id,
+                pubkey,
                 payment_hash,
                 err,
             )) => {
-                assert_eq!(peer_id, &node_b_peer_id);
+                assert_eq!(pubkey, &node_b_pubkey);
                 assert_eq!(payment_hash, &generated_payment_hash);
                 assert_eq!(err.error_code, TlcErrorCode::InvalidOnionPayload);
                 true
@@ -1108,15 +1103,15 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
 
     let res = call!(node_a.network_actor, message).expect("node_a alive");
     assert!(res.is_ok());
-    let node_b_peer_id = node_b.peer_id.clone();
+    let node_b_pubkey = node_b.pubkey;
     node_b
         .expect_event(|event| match event {
             NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
-                peer_id,
+                pubkey,
                 payment_hash,
                 err,
             )) => {
-                assert_eq!(peer_id, &node_b_peer_id);
+                assert_eq!(pubkey, &node_b_pubkey);
                 assert_eq!(payment_hash, &generated_payment_hash);
                 assert_eq!(err.error_code, TlcErrorCode::InvalidOnionPayload);
                 true
@@ -1264,9 +1259,8 @@ async fn test_network_send_payment_amount_is_too_large() {
         .await;
 
     assert!(res.is_err());
-    // because the amount is too large, we will consider balance for direct channel
-    // so fail to build a path
-    assert!(res.err().unwrap().contains("no path found"));
+    // because the amount exceeds the outbound liquidity, we fail early with an insufficient balance error
+    assert!(res.err().unwrap().contains("Insufficient balance"));
 }
 
 // FIXME: this is the case send_payment with direct channels, we should handle this case
@@ -1755,7 +1749,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -1779,9 +1773,9 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -1809,12 +1803,12 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -1824,12 +1818,12 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -1872,12 +1866,12 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     // to be received by node b.
     let node_b_commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -1911,12 +1905,12 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     // to be received by node a.
     let node_a_commitment_tx = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -3661,12 +3655,12 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 
     let node_a_shutdown_tx_hash = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+            NetworkServiceEvent::ChannelClosed(pubkey, channel_id, tx_hash) => {
                 println!(
                     "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                    &tx_hash, &peer_id, channel_id
+                    &tx_hash, &pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(tx_hash.clone())
             }
@@ -3678,12 +3672,12 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 
     let node_b_shutdown_tx_hash = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+            NetworkServiceEvent::ChannelClosed(pubkey, channel_id, tx_hash) => {
                 println!(
                     "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                    &tx_hash, &peer_id, channel_id
+                    &tx_hash, &pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(tx_hash.clone())
             }
@@ -3719,7 +3713,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -3753,7 +3747,7 @@ async fn test_revoke_old_commitment_transaction() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -3777,9 +3771,9 @@ async fn test_revoke_old_commitment_transaction() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -3828,12 +3822,12 @@ async fn test_revoke_old_commitment_transaction() {
 
     let commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -3843,12 +3837,12 @@ async fn test_revoke_old_commitment_transaction() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -3858,12 +3852,12 @@ async fn test_revoke_old_commitment_transaction() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -3884,12 +3878,12 @@ async fn test_revoke_old_commitment_transaction() {
     let revocation_data = node_a
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::RevokeAndAckReceived(
-                peer_id,
+                pubkey,
                 channel_id,
                 revocation_data,
                 _settlement_data,
             ) => {
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 assert_eq!(revocation_data.commitment_number, 1u64);
                 Some(revocation_data.clone())
@@ -3955,7 +3949,7 @@ async fn test_create_channel() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -3979,9 +3973,9 @@ async fn test_create_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4009,12 +4003,12 @@ async fn test_create_channel() {
 
     let node_a_commitment_tx = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -4024,12 +4018,12 @@ async fn test_create_channel() {
 
     let node_b_commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(pubkey, channel_id, tx, _) => {
                 println!(
                     "Commitment tx {:?} from {:?} for channel {:?} received",
-                    &tx, peer_id, channel_id
+                    &tx, pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(complete_commitment_tx(tx))
             }
@@ -4039,12 +4033,12 @@ async fn test_create_channel() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -4054,12 +4048,12 @@ async fn test_create_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 true
             }
@@ -4085,7 +4079,7 @@ async fn test_reestablish_channel() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -4109,9 +4103,9 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4139,9 +4133,9 @@ async fn test_reestablish_channel() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_b.peer_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -4150,9 +4144,9 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4162,17 +4156,14 @@ async fn test_reestablish_channel() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
-                node_b.peer_id.clone(),
-                PeerDisconnectReason::Requested,
-            ),
+            NetworkActorCommand::DisconnectPeer(node_b.pubkey, PeerDisconnectReason::Requested),
         ))
         .expect("node_a alive");
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node_b.peer_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -4181,8 +4172,8 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4196,9 +4187,9 @@ async fn test_reestablish_channel() {
 
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_b.peer_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -4207,9 +4198,9 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4386,7 +4377,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     node_a.restart().await;
 
     node_a.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
     ).await;
 
     node_a
@@ -4420,7 +4411,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
     debug!("debug tentacle after stop node_a");
 
     node_b.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _addr) if id == &node_a.peer_id),
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _addr) if id == &node_a.pubkey),
     )
     .await;
 
@@ -4431,7 +4422,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
     debug!("debug tentacle after restart node_a");
 
     node_a.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
     )
     .await;
 }
@@ -4466,7 +4457,7 @@ async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     node_b.start().await;
 
     node_a.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
     )
     .await;
 
@@ -4590,7 +4581,7 @@ async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
 
@@ -4640,7 +4631,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: Some(Script::new_builder().args([0u8; 40].pack()).build()),
@@ -4665,10 +4656,10 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
                 assert_eq!(channel_id, &open_channel_result.channel_id);
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -4678,12 +4669,12 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
     // should fail
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _funding_tx_hash) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
-                    &channel_id, &peer_id
+                    &channel_id, &pubkey
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 true
             }
             _ => false,
@@ -4806,12 +4797,12 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
 
     let node_a_shutdown_tx_hash = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+            NetworkServiceEvent::ChannelClosed(pubkey, channel_id, tx_hash) => {
                 println!(
                     "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                    &tx_hash, &peer_id, channel_id
+                    &tx_hash, &pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(pubkey, &node_b.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(tx_hash.clone())
             }
@@ -4821,12 +4812,12 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
 
     let node_b_shutdown_tx_hash = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+            NetworkServiceEvent::ChannelClosed(pubkey, channel_id, tx_hash) => {
                 println!(
                     "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                    &tx_hash, &peer_id, channel_id
+                    &tx_hash, &pubkey, channel_id
                 );
-                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(channel_id, &new_channel_id);
                 Some(tx_hash.clone())
             }
@@ -5787,7 +5778,7 @@ async fn test_abandon_failed_channel_without_accept() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
 
@@ -5835,7 +5826,7 @@ async fn test_open_channel_with_invalid_commitment_delay() {
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
-                    peer_id: node_b.peer_id.clone(),
+                    pubkey: node_b.pubkey,
                     public: false,
                     one_way: false,
                     shutdown_script: None,
@@ -5887,7 +5878,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -5917,7 +5908,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -5947,7 +5938,7 @@ async fn test_abandon_channel_with_peer_accept() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -6066,8 +6057,8 @@ async fn test_channel_with_malicious_peer_send_channel_msg() {
         node_2
             .network_actor
             .send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                    peer_id: target_node.peer_id.clone(),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                    target: target_node.pubkey,
                     message: FiberMessage::add_tlc(AddTlc {
                         channel_id: wrong_channel_id,
                         amount: 1000,
@@ -6111,7 +6102,7 @@ async fn test_funding_timeout() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: nodes[1].peer_id.clone(),
+                pubkey: nodes[1].pubkey,
                 public: false,
                 one_way: false,
                 shutdown_script: None,
@@ -6159,7 +6150,7 @@ async fn test_auto_accept_fails_debug_event() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: nodes[1].peer_id.clone(),
+                pubkey: nodes[1].pubkey,
                 public: false,
                 shutdown_script: None,
                 funding_amount,
@@ -6250,7 +6241,7 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -6278,8 +6269,8 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
     // Wait for node_b to receive the channel pending event
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 assert_eq!(*channel_id, temp_channel_id);
                 true
             }
@@ -6498,4 +6489,603 @@ async fn test_reestablish_restores_send_nonce() {
     assert!(err_string.contains(
         "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
     ));
+}
+
+/// Bidirectional pending operations during reestablish.
+/// Tests reestablish when both nodes have pending operations.
+#[tokio::test]
+async fn test_reestablish_bidirectional_pending() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Both nodes send payments close in time to create pending operations in both directions.
+    let _payment_a = node_a.send_payment_keysend(&node_b, 1000, false).await;
+    let _payment_b = node_b.send_payment_keysend(&node_a, 1000, false).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    let state_b = node_b.get_channel_actor_state(channel_id);
+    debug!(
+        "Node A before restart: waiting_ack={}",
+        state_a.tlc_state.waiting_ack
+    );
+    debug!(
+        "Node B before restart: waiting_ack={}",
+        state_b.tlc_state.waiting_ack
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "Commitment numbers should remain symmetric"
+    );
+}
+
+/// Stress test with multiple payments and restarts.
+/// Tests repeated restart cycles with payments.
+#[tokio::test]
+async fn test_restart_stress_multiple_restarts() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let panic_unexpected_events = vec!["panic".to_string(), "panicked".to_string()];
+    node_a
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+    node_b
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+
+    let initial_balance_a = node_a.get_local_balance_from_channel(channel_id);
+    let initial_balance_b = node_b.get_local_balance_from_channel(channel_id);
+
+    for cycle in 0..5 {
+        let payment_amount = 100 * (cycle + 1) as u128;
+        let _result = node_a
+            .send_payment_keysend(&node_b, payment_amount, false)
+            .await;
+
+        let wait_ms = 100 + (cycle * 50) as u64;
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+
+        node_a.restart().await;
+        node_a
+            .add_unexpected_events(panic_unexpected_events.clone())
+            .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+
+        let state = node_a.get_channel_actor_state(channel_id);
+        assert!(
+            !state.reestablishing,
+            "Should complete reestablish in cycle {}",
+            cycle
+        );
+    }
+
+    let final_balance_a = node_a.get_local_balance_from_channel(channel_id);
+    let final_balance_b = node_b.get_local_balance_from_channel(channel_id);
+    assert_eq!(
+        final_balance_a + final_balance_b,
+        initial_balance_a + initial_balance_b,
+        "Total balance should be conserved"
+    );
+}
+
+/// Restart stress reproducer.
+/// Runs repeated payment bursts with node restart and checks unexpected events.
+#[tokio::test]
+#[ignore] // Long-running restart stress test. Run explicitly when validating restart regressions.
+async fn test_node_restart() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let panic_unexpected_events = vec!["panic".to_string(), "panicked".to_string()];
+    node_a
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+    node_b
+        .add_unexpected_events(panic_unexpected_events.clone())
+        .await;
+
+    for cycle in 0..10 {
+        debug!("=== Restart cycle {} ===", cycle);
+
+        for _i in 0..10 {
+            let _payment1 = node_a.send_payment_keysend(&node_b, 1, false).await;
+            let _payment2 = node_b.send_payment_keysend(&node_a, 1, false).await;
+        }
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events before restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+
+        debug!("Stopping node_a for restart cycle {}", cycle);
+        node_a.restart().await;
+        debug!("Starting node_a after restart cycle {}", cycle);
+        node_a
+            .add_unexpected_events(panic_unexpected_events.clone())
+            .await;
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
+        assert!(
+            node_a_unexpected_events.is_empty(),
+            "node_a got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_a_unexpected_events
+        );
+        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
+        assert!(
+            node_b_unexpected_events.is_empty(),
+            "node_b got unexpected events after restart cycle {}: {:?}",
+            cycle,
+            node_b_unexpected_events
+        );
+    }
+
+    // Verify no stuck TLCs after all restart cycles.
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    let state_b = node_b.get_channel_actor_state(channel_id);
+    let tlc_count_a = state_a.tlc_state.all_tlcs().count();
+    let tlc_count_b = state_b.tlc_state.all_tlcs().count();
+    assert_eq!(
+        tlc_count_a, 0,
+        "node_a channel {:?} still has {} stuck TLCs",
+        channel_id, tlc_count_a
+    );
+    assert_eq!(
+        tlc_count_b, 0,
+        "node_b channel {:?} still has {} stuck TLCs",
+        channel_id, tlc_count_b
+    );
+
+    debug!("test_node_restart completed successfully with no unexpected events");
+}
+
+/// Test that commitment numbers remain consistent after reestablish.
+#[tokio::test]
+async fn test_reestablish_commitment_number_consistency() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive several updates to move commitment numbers before restart.
+    for i in 0..5 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 1000 + i as u128, false)
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN"
+    );
+}
+
+#[tokio::test]
+async fn test_reestablish_dual_owed_ordering() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 500 + i as u128, false)
+            .await;
+        let _ = node_b
+            .send_payment_keysend(&node_a, 700 + i as u128, false)
+            .await;
+    }
+
+    let mut saw_commit_then_revoke_hint = false;
+    for _ in 0..120 {
+        if let Some(diff) = node_a.store.get_pending_commit_diff(&channel_id) {
+            if diff.replay_order_hint == Some(ReplayOrderHint::CommitThenRevoke) {
+                saw_commit_then_revoke_hint = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        saw_commit_then_revoke_hint,
+        "Expected CommitDiff replay_order_hint=CommitThenRevoke in dual-owed scenario"
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish in dual-owed scenario"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "Commitment numbers should remain symmetric after dual-owed replay"
+    );
+}
+
+/// Test legacy fallback for dual-owed reestablish (Path B1) when no CommitDiff is stored.
+/// Simulates a legacy channel by deleting CommitDiff from store before restart.
+/// The fallback should use resend_tlcs_on_reestablish instead of deterministic replay.
+#[tokio::test]
+async fn test_legacy_fallback_dual_owed_no_commit_diff() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive bidirectional payments to create dual-owed state.
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 500 + i as u128, false)
+            .await;
+        let _ = node_b
+            .send_payment_keysend(&node_a, 700 + i as u128, false)
+            .await;
+    }
+
+    // Wait for CommitDiff to appear (confirms pending commitment state).
+    let mut found_commit_diff = false;
+    for _ in 0..120 {
+        if node_a.store.get_pending_commit_diff(&channel_id).is_some() {
+            found_commit_diff = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        found_commit_diff,
+        "Expected CommitDiff to be stored before we can test the legacy path"
+    );
+
+    // Delete CommitDiff to simulate a legacy channel without stored diff.
+    node_a.store.delete_pending_commit_diff(&channel_id);
+    assert!(
+        node_a.store.get_pending_commit_diff(&channel_id).is_none(),
+        "CommitDiff should be deleted"
+    );
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish via legacy fallback"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN after legacy fallback"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN after legacy fallback"
+    );
+
+    // Verify channel is still functional after legacy reestablish.
+    let res = node_a.send_payment_keysend(&node_b, 999, true).await;
+    assert!(
+        res.is_ok(),
+        "Payment should succeed after legacy reestablish"
+    );
+}
+
+/// Test legacy fallback for single-owed reestablish (Path C) when no CommitDiff is stored.
+/// Only commitment is owed (no revoke needed).
+#[tokio::test]
+async fn test_legacy_fallback_single_owed_no_commit_diff() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Drive unidirectional payments to create single-owed state.
+    for i in 0..3 {
+        let _ = node_a
+            .send_payment_keysend(&node_b, 1000 + i as u128, false)
+            .await;
+    }
+
+    // Wait for CommitDiff to appear.
+    let mut found_commit_diff = false;
+    for _ in 0..120 {
+        if node_a.store.get_pending_commit_diff(&channel_id).is_some() {
+            found_commit_diff = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        found_commit_diff,
+        "Expected CommitDiff to be stored before we can test the legacy path"
+    );
+
+    // Delete CommitDiff to simulate a legacy channel.
+    node_a.store.delete_pending_commit_diff(&channel_id);
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let state_a_after = node_a.get_channel_actor_state(channel_id);
+    let state_b_after = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        !state_a_after.reestablishing,
+        "Node A should complete reestablish via legacy single-owed fallback"
+    );
+    assert_eq!(
+        state_a_after.get_local_commitment_number(),
+        state_b_after.get_remote_commitment_number(),
+        "A local CN should equal B remote CN after legacy single-owed fallback"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "A remote CN should equal B local CN after legacy single-owed fallback"
+    );
+
+    // Verify channel is still functional.
+    let res = node_a.send_payment_keysend(&node_b, 999, true).await;
+    assert!(
+        res.is_ok(),
+        "Payment should succeed after legacy single-owed reestablish"
+    );
+}
+
+/// Reproducer: 4-node ring (A-B-C-D-A), all nodes send 100 self-payments
+/// through the ring, then restart A and D.
+/// Expected: all TLCs settle, channel balances conserved (only routing fees change).
+#[tokio::test]
+#[ignore] // Long-running stress test. Run explicitly to reproduce stuck-TLC bug.
+async fn test_ring_self_payments_then_restart_two_nodes() {
+    init_tracing();
+
+    // Build ring topology: A(0)-B(1)-C(2)-D(3)-A(0)
+    let funding = HUGE_CKB_AMOUNT;
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (funding, funding)), // A-B
+            ((1, 2), (funding, funding)), // B-C
+            ((2, 3), (funding, funding)), // C-D
+            ((3, 0), (funding, funding)), // D-A  (closes the ring)
+        ],
+        4,
+    )
+    .await;
+    let [mut node_a, node_b, node_c, mut node_d] = nodes.try_into().expect("4 nodes");
+
+    let panic_events = vec!["panic".to_string(), "panicked".to_string()];
+    node_a.add_unexpected_events(panic_events.clone()).await;
+    node_b.add_unexpected_events(panic_events.clone()).await;
+    node_c.add_unexpected_events(panic_events.clone()).await;
+    node_d.add_unexpected_events(panic_events.clone()).await;
+
+    // Channel layout:
+    //   channels[0]: A-B  (node_a, node_b)
+    //   channels[1]: B-C  (node_b, node_c)
+    //   channels[2]: C-D  (node_c, node_d)
+    //   channels[3]: D-A  (node_d, node_a)
+    //
+    // Each node participates in exactly 2 channels.
+    // Record initial balances from each node's perspective on its channels.
+    let initial_a_ch0 = node_a.get_local_balance_from_channel(channels[0]);
+    let initial_a_ch3 = node_a.get_local_balance_from_channel(channels[3]);
+    let initial_b_ch0 = node_b.get_local_balance_from_channel(channels[0]);
+    let initial_b_ch1 = node_b.get_local_balance_from_channel(channels[1]);
+    let initial_c_ch1 = node_c.get_local_balance_from_channel(channels[1]);
+    let initial_c_ch2 = node_c.get_local_balance_from_channel(channels[2]);
+    let initial_d_ch2 = node_d.get_local_balance_from_channel(channels[2]);
+    let initial_d_ch3 = node_d.get_local_balance_from_channel(channels[3]);
+
+    // For self-payments the sender == receiver, so net balance across each node's
+    // two channels should stay the same (minus routing fees paid to intermediaries).
+    // Total across all channels should be strictly conserved.
+    let initial_total = initial_a_ch0
+        + initial_a_ch3
+        + initial_b_ch0
+        + initial_b_ch1
+        + initial_c_ch1
+        + initial_c_ch2
+        + initial_d_ch2
+        + initial_d_ch3;
+
+    // Fire off 100 self-payments from each node (fire-and-forget, don't wait)
+    let payment_amount = 1000; // small amount so routing has enough capacity
+    let num_payments = 100u32;
+
+    debug!(
+        "=== Sending {} self-payments from each of 4 nodes ===",
+        num_payments
+    );
+    for i in 0..num_payments {
+        let _ = node_a
+            .send_payment_keysend_to_self(payment_amount, false)
+            .await;
+        let _ = node_b
+            .send_payment_keysend_to_self(payment_amount, false)
+            .await;
+        let _ = node_c
+            .send_payment_keysend_to_self(payment_amount, false)
+            .await;
+        let _ = node_d
+            .send_payment_keysend_to_self(payment_amount, false)
+            .await;
+        if i % 20 == 0 {
+            debug!("Sent batch {}/{}", i, num_payments);
+        }
+    }
+
+    // Brief pause to let some TLCs start processing
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Check no unexpected events before restart
+    for (name, node) in [
+        ("A", &node_a),
+        ("B", &node_b),
+        ("C", &node_c),
+        ("D", &node_d),
+    ] {
+        let events = node.get_triggered_unexpected_events().await;
+        assert!(
+            events.is_empty(),
+            "node {} got unexpected events before restart: {:?}",
+            name,
+            events
+        );
+    }
+
+    // Restart A and D simultaneously
+    debug!("=== Restarting node A and D ===");
+    node_a.restart().await;
+    node_d.restart().await;
+    node_a.add_unexpected_events(panic_events.clone()).await;
+    node_d.add_unexpected_events(panic_events.clone()).await;
+
+    // Wait for reestablish and TLC settlement
+    debug!("=== Waiting for reestablish and TLC settlement ===");
+    tokio::time::sleep(Duration::from_secs(30)).await;
+
+    // Verify: no unexpected events after restart
+    for (name, node) in [
+        ("A", &node_a),
+        ("B", &node_b),
+        ("C", &node_c),
+        ("D", &node_d),
+    ] {
+        let events = node.get_triggered_unexpected_events().await;
+        assert!(
+            events.is_empty(),
+            "node {} got unexpected events after restart: {:?}",
+            name,
+            events
+        );
+    }
+
+    // Verify: reestablish completed on restarted node channels
+    for ch in [channels[0], channels[3]] {
+        let state = node_a.get_channel_actor_state(ch);
+        assert!(
+            !state.reestablishing,
+            "Node A channel {:?} still reestablishing",
+            ch
+        );
+    }
+    for ch in [channels[2], channels[3]] {
+        let state = node_d.get_channel_actor_state(ch);
+        assert!(
+            !state.reestablishing,
+            "Node D channel {:?} still reestablishing",
+            ch
+        );
+    }
+
+    // Verify: all TLCs should be settled (none stuck inflight)
+    // Each node checks its own channels.
+    let chs_a = [channels[0], channels[3]];
+    let chs_b = [channels[0], channels[1]];
+    let chs_c = [channels[1], channels[2]];
+    let chs_d = [channels[2], channels[3]];
+    let checks: Vec<(&str, &NetworkNode, &[Hash256])> = vec![
+        ("A", &node_a, &chs_a),
+        ("B", &node_b, &chs_b),
+        ("C", &node_c, &chs_c),
+        ("D", &node_d, &chs_d),
+    ];
+    for (name, node, chs) in &checks {
+        for ch in *chs {
+            let state = node.get_channel_actor_state(*ch);
+            let tlc_count = state.tlc_state.all_tlcs().count();
+            assert_eq!(
+                tlc_count, 0,
+                "Node {} channel {:?} still has {} stuck TLCs",
+                name, ch, tlc_count
+            );
+        }
+    }
+
+    // Verify: total balance across all channels is conserved
+    let final_total = node_a.get_local_balance_from_channel(channels[0])
+        + node_a.get_local_balance_from_channel(channels[3])
+        + node_b.get_local_balance_from_channel(channels[0])
+        + node_b.get_local_balance_from_channel(channels[1])
+        + node_c.get_local_balance_from_channel(channels[1])
+        + node_c.get_local_balance_from_channel(channels[2])
+        + node_d.get_local_balance_from_channel(channels[2])
+        + node_d.get_local_balance_from_channel(channels[3]);
+    assert_eq!(
+        initial_total, final_total,
+        "Total balance across all channels should be conserved.\n  initial: {}\n  final:   {}",
+        initial_total, final_total
+    );
+
+    debug!("test_ring_self_payments_then_restart_two_nodes completed successfully");
 }

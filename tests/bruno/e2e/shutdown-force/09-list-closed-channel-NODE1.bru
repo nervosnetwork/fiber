@@ -22,7 +22,7 @@ body:json {
     "method": "list_channels",
     "params": [
       {
-        "peer_id": "{{NODE3_PEERID}}",
+        "pubkey": "{{NODE3_PUBKEY}}",
         "include_closed": true
       }
     ]
@@ -39,7 +39,7 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 2000));
   console.log("channel first: ", res.body.result.channels[0]);
-  if (res.body.result.channels[0].state.state_name != 'CLOSED') {
+  if (res.body.result.channels[0].state.state_name != 'Closed') {
     throw new Error("Assertion failed: expect thel channel is closed");
   }
   if (res.body.result.channels[0].shutdown_transaction_hash == null) {

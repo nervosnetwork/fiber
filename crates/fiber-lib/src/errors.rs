@@ -1,6 +1,7 @@
 use ckb_sdk::RpcError;
+use fiber_store::StoreError;
 use ractor::{MessagingErr, SpawnErr};
-use tentacle::{error::SendErrorKind, secio::PeerId};
+use tentacle::error::SendErrorKind;
 use thiserror::Error;
 
 use crate::{
@@ -8,10 +9,10 @@ use crate::{
     fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
         graph::PathFindError,
-        types::Hash256,
         InFlightCkbTxActorMessage, NetworkActorMessage,
     },
 };
+use fiber_types::{Hash256, Pubkey};
 
 use crate::invoice::InvoiceError;
 
@@ -20,7 +21,7 @@ pub enum Error {
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
     #[error("Peer not found error: {0:?}")]
-    PeerNotFound(PeerId),
+    PeerNotFound(Pubkey),
     #[error("Channel not found error: {0:?}")]
     ChannelNotFound(Hash256),
     #[error("Failed to send tentacle message: {0}")]
@@ -66,3 +67,11 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<StoreError> for Error {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::DBInternalError(msg) => Error::DBInternalError(msg),
+        }
+    }
+}

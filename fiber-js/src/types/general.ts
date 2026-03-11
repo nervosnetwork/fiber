@@ -21,6 +21,8 @@ interface FiberInvokeRequest {
 type FiberInvokeResponse = { ok: true; data: any; } | { ok: false; error: string };
 
 type HexString = `0x${string}`;
+/** Compressed secp256k1 public key hex string without `0x` prefix (66 chars). */
+type Pubkey = string;
 
 type HashAlgorithm = "ckb_hash" | "sha256";
 
@@ -30,5 +32,6 @@ export type {
     FiberInvokeRequest,
     FiberInvokeResponse,
     HexString,
+    Pubkey,
     HashAlgorithm
 }

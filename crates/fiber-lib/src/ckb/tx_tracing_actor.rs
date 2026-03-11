@@ -4,7 +4,8 @@ use bitmask_enum::bitmask;
 use ckb_types::core::tx_pool::TxStatus;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
-use crate::{ckb::config::new_ckb_rpc_async_client, fiber::types::Hash256};
+use crate::ckb::config::new_ckb_rpc_async_client;
+use fiber_types::Hash256;
 
 use super::jsonrpc_types_convert::tx_status_from_json;
 

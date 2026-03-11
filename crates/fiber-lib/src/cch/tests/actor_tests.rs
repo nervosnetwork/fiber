@@ -12,18 +12,17 @@
 
 use crate::cch::{
     actor::{CchActor, CchArgs, CchMessage},
-    order::{CchInvoice, CchOrder, CchOrderStatus, CchOrderStore},
+    order::CchOrderStore,
     trackers::CchTrackingEvent,
     CchConfig, CchError, CchStoreError,
 };
 use crate::fiber::{
-    network::SendPaymentResponse,
-    payment::{PaymentStatus, SendPaymentCommand},
-    types::Hash256,
-    NetworkActorCommand, NetworkActorMessage,
+    network::SendPaymentResponse, payment::SendPaymentCommand, NetworkActorCommand,
+    NetworkActorMessage,
 };
 use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
+use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, Hash256, HashAlgorithm, PaymentStatus};
 use ractor::{call, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort};
 use secp256k1::{Secp256k1, SecretKey};
 use std::collections::HashMap;
@@ -92,7 +91,7 @@ fn test_payment_hash(value: u8) -> Hash256 {
 /// Helper function to create a valid preimage/payment hash pair.
 /// The preimage will hash to the payment hash using SHA256.
 fn create_valid_preimage_pair(seed: u8) -> (Hash256, Hash256) {
-    use crate::fiber::hash_algorithm::HashAlgorithm;
+    use fiber_types::HashAlgorithm;
     // Generate a preimage from the seed
     let mut preimage_bytes = [0u8; 32];
     preimage_bytes[0] = seed;
@@ -358,7 +357,24 @@ async fn setup_test_harness() -> TestHarness {
     setup_test_harness_with_store(MockCchOrderStore::new()).await
 }
 
+async fn setup_test_harness_with_config(config: CchConfig) -> TestHarness {
+    setup_test_harness_with_config_and_store(config, MockCchOrderStore::new()).await
+}
+
 async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+    setup_test_harness_with_config_and_store(config, store).await
+}
+
+async fn setup_test_harness_with_config_and_store(
+    config: CchConfig,
+    store: MockCchOrderStore,
+) -> TestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 
     let mock_state = MockNetworkState {
@@ -371,13 +387,6 @@ async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness 
         .await
         .expect("spawn mock network actor");
 
-    let config = CchConfig {
-        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
-        min_outgoing_invoice_expiry_delta_seconds: 60,
-        ..Default::default()
-    };
-
     let args = CchArgs {
         config,
         tracker: TaskTracker::new(),
@@ -385,6 +394,7 @@ async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness 
         network_actor,
         node_keypair: crate::fiber::KeyPair::try_from([42u8; 32].as_slice()).unwrap(),
         store,
+        currency: Currency::Fibb,
     };
 
     let (actor_ref, _handle) = Actor::spawn(None, CchActor::default(), args)
@@ -438,13 +448,21 @@ fn create_test_lightning_invoice_with_payment_hash(
 
 /// Create a test Fiber invoice for testing
 fn create_test_fiber_invoice(payment_hash: Hash256) -> CkbInvoice {
+    create_test_fiber_invoice_with_amount(payment_hash, 100000)
+}
+
+/// Create a test Fiber invoice with a specific amount
+fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) -> CkbInvoice {
     // Create a deterministic keypair for tests
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
 
+    // Use DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS (108,000 s) converted to
+    // milliseconds, matching production invoice construction in actor.rs.
+    let default_expiry_delta_ms = 108_000 * 1000;
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
-        amount: Some(100000),
+        amount: Some(amount),
         signature: None,
         data: InvoiceData {
             payment_hash,
@@ -453,7 +471,7 @@ fn create_test_fiber_invoice(payment_hash: Hash256) -> CkbInvoice {
                 .unwrap()
                 .as_millis(),
             attrs: vec![
-                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::FinalHtlcMinimumExpiryDelta(default_expiry_delta_ms),
                 Attribute::Description("test".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(3600)),
                 Attribute::PayeePublicKey(public_key),
@@ -541,9 +559,14 @@ async fn test_receive_btc_happy_path() {
     let harness = setup_test_harness().await;
 
     // Step 1: Create order directly in the database (bypassing LND hold invoice creation)
-    // In production, ReceiveBTC creates a hold invoice via LND, but we skip that for testing
-    let fiber_invoice = create_test_fiber_invoice(payment_hash);
-    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+    // In production, ReceiveBTC creates a hold invoice via LND, but we skip that for testing.
+    // Use a small final TLC expiry delta (10,000 ms = 10 seconds) so it fits
+    // within the default incoming budget (180 blocks * 600 / 2 = 54,000 seconds).
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
+    // The incoming Lightning invoice must carry min_final_cltv_expiry_delta matching
+    // the default btc_final_tlc_expiry_delta_blocks (180) so the stored invoice
+    // reflects a realistic inbound HTLC budget.
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 180);
     let order = CchOrder {
         created_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -736,4 +759,658 @@ async fn test_resume_skips_final_orders() {
     let order2 = harness.get_order(payment_hash2).await.unwrap();
     assert_eq!(order2.status, CchOrderStatus::Failed);
     assert_eq!(order2.failure_reason, Some("Test failure".to_string()));
+}
+
+// =============================================================================
+// Invoice Validation Tests
+// =============================================================================
+
+/// Create a test Lightning invoice with a specific payment hash and currency/network
+fn create_test_lightning_invoice_with_currency(
+    payment_hash: Hash256,
+    ln_currency: lightning_invoice::Currency,
+) -> lightning_invoice::Bolt11Invoice {
+    use bitcoin::hashes::Hash as _;
+    use lightning_invoice::InvoiceBuilder as LnInvoiceBuilder;
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let private_key = bitcoin::secp256k1::SecretKey::from_slice(&[43u8; 32]).unwrap();
+
+    let payment_hash_btc = bitcoin::hashes::sha256::Hash::from_slice(payment_hash.as_ref())
+        .expect("valid 32-byte hash");
+
+    let payment_secret = lightning_invoice::PaymentSecret([0u8; 32]);
+
+    let duration_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time");
+    LnInvoiceBuilder::new(ln_currency)
+        .description("test invoice".to_string())
+        .payment_hash(payment_hash_btc)
+        .payment_secret(payment_secret)
+        .duration_since_epoch(duration_since_epoch)
+        .min_final_cltv_expiry_delta(36)
+        .amount_milli_satoshis(100_000_000) // 100k sats
+        .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
+        .expect("build lightning invoice")
+}
+
+/// Create a test Fiber invoice with a specified currency
+fn create_test_fiber_invoice_with_currency(
+    payment_hash: Hash256,
+    currency: Currency,
+) -> CkbInvoice {
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+
+    let mut invoice = CkbInvoice {
+        currency,
+        amount: Some(100000),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("test".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::PayeePublicKey(public_key),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    invoice
+}
+
+/// Tests that send_btc rejects when the currency parameter doesn't match the configured network.
+/// Issue #981: send_btc should fail when currency (e.g. Fibb) doesn't match node's network (e.g. Fibd)
+#[tokio::test]
+async fn test_send_btc_rejects_currency_mismatch() {
+    let harness = setup_test_harness().await;
+    // The harness is configured with Currency::Fibb
+
+    let (_, payment_hash) = create_valid_preimage_pair(100);
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+    let btc_pay_req = lightning_invoice.to_string();
+
+    // Try to send with Fibd currency (node is configured for Fibb)
+    let result = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::actor::SendBTC {
+            btc_pay_req,
+            currency: Currency::Fibd,
+        }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::CKBInvoiceNetworkMismatch { expected, actual }) => {
+            assert_eq!(expected, Currency::Fibb);
+            assert_eq!(actual, Currency::Fibd);
+        }
+        other => panic!("Expected CKBInvoiceNetworkMismatch, got {:?}", other),
+    }
+}
+
+/// Tests that send_btc rejects when the BTC invoice network doesn't match the expected network.
+/// Issue #978: send_btc should fail when BTC invoice is for regtest but node expects mainnet
+#[tokio::test]
+async fn test_send_btc_rejects_btc_invoice_network_mismatch() {
+    let harness = setup_test_harness().await;
+    // The harness is configured with Currency::Fibb, expecting LnCurrency::Bitcoin
+
+    let (_, payment_hash) = create_valid_preimage_pair(101);
+    // Create a regtest invoice (but node expects mainnet)
+    let lightning_invoice = create_test_lightning_invoice_with_currency(
+        payment_hash,
+        lightning_invoice::Currency::Regtest,
+    );
+    let btc_pay_req = lightning_invoice.to_string();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::actor::SendBTC {
+            btc_pay_req,
+            currency: Currency::Fibb, // Matches configured currency
+        }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::BTCInvoiceNetworkMismatch { expected, actual }) => {
+            assert_eq!(expected, "Bitcoin");
+            assert_eq!(actual, "Regtest");
+        }
+        other => panic!("Expected BTCInvoiceNetworkMismatch, got {:?}", other),
+    }
+}
+
+/// Tests that receive_btc rejects when the CKB invoice currency doesn't match the configured network.
+/// Issue #982: receive_btc should fail when invoice currency (e.g. Fibt) doesn't match node's network (e.g. Fibd)
+#[tokio::test]
+async fn test_receive_btc_rejects_currency_mismatch() {
+    let harness = setup_test_harness().await;
+    // The harness is configured with Currency::Fibb
+
+    let (_, payment_hash) = create_valid_preimage_pair(102);
+    // Create a Fibt invoice (wrong currency for this node)
+    let invoice = create_test_fiber_invoice_with_currency(payment_hash, Currency::Fibt);
+    let fiber_pay_req = invoice.to_string();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC { fiber_pay_req }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::CKBInvoiceNetworkMismatch { expected, actual }) => {
+            assert_eq!(expected, Currency::Fibb);
+            assert_eq!(actual, Currency::Fibt);
+        }
+        other => panic!("Expected CKBInvoiceNetworkMismatch, got {:?}", other),
+    }
+}
+
+/// Tests that receive_btc rejects a plain CKB invoice without UDT type script.
+/// Issue #983: receive_btc should fail when invoice has no wrapped BTC UDT type script
+#[tokio::test]
+async fn test_receive_btc_rejects_ckb_invoice_without_udt() {
+    let harness = setup_test_harness().await;
+    // The harness is configured with Currency::Fibb
+
+    let (_, payment_hash) = create_valid_preimage_pair(103);
+    // create_test_fiber_invoice_with_currency creates an invoice WITHOUT UDT type script
+    let invoice = create_test_fiber_invoice_with_currency(payment_hash, Currency::Fibb);
+    let fiber_pay_req = invoice.to_string();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC { fiber_pay_req }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::WrappedBTCTypescriptMismatch) => {} // Expected
+        other => panic!("Expected WrappedBTCTypescriptMismatch, got {:?}", other),
+    }
+}
+
+/// Tests that receive_btc rejects an invoice where amount + fee overflows i64 in msat.
+/// The total_msat = (amount_sats + fee_sats) * 1000 must fit in i64.
+#[tokio::test]
+async fn test_receive_btc_amount_too_large() {
+    let harness = setup_test_harness().await;
+
+    let (_preimage, payment_hash) = create_valid_preimage_pair(170);
+    // i64::MAX / 1000 + 1 = 9_223_372_036_854_776 sats, which makes total_msat overflow i64
+    let large_amount: u128 = (i64::MAX / 1_000) as u128 + 1;
+    let invoice = create_test_fiber_invoice_with_amount(payment_hash, large_amount);
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CchError::ReceiveBTCOrderAmountTooLarge),
+        "expected ReceiveBTCOrderAmountTooLarge, got: {:?}",
+        err
+    );
+}
+
+/// Tests that receive_btc rejects an invoice where amount_sats + fee_sats overflows u128.
+#[tokio::test]
+async fn test_receive_btc_amount_overflow_u128() {
+    let harness = setup_test_harness().await;
+
+    let (_preimage, payment_hash) = create_valid_preimage_pair(171);
+    // u128::MAX will cause amount_sats * fee_rate to wrap and checked_add/checked_mul to fail
+    let invoice = create_test_fiber_invoice_with_amount(payment_hash, u128::MAX);
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CchError::ReceiveBTCOrderAmountTooLarge),
+        "expected ReceiveBTCOrderAmountTooLarge, got: {:?}",
+        err
+    );
+}
+
+/// Tests that the send_btc proxy Fiber invoice includes the fee in its amount.
+///
+/// In the SendBTC flow, the hub creates a Fiber invoice (the proxy invoice) for the
+/// user to pay. Its amount must be `ceil(btc_amount_msat / 1000) + fee_sats` so
+/// the hub collects enough to cover the outgoing Lightning payment plus its fee.
+#[tokio::test]
+async fn test_send_btc_proxy_invoice_includes_fee() {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        base_fee_sats: 1_000, // 1000 sat base fee to make the fee clearly visible
+        fee_rate_per_million_sats: 10_000, // 1% proportional fee
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    // The lightning invoice has 100_000_000 msat = 100_000 sats
+    let (order, _preimage) = harness.create_send_btc_order_with_preimage().await.unwrap();
+    let btc_amount_sats: u128 = 100_000; // 100_000_000 msat / 1000
+
+    // fee_sats = amount_msat * fee_rate / 1_000_000_000 + base_fee
+    //          = 100_000_000 * 10_000 / 1_000_000_000 + 1_000
+    //          = 1_000 + 1_000
+    //          = 2_000
+    let expected_fee: u128 = 2_000;
+    assert_eq!(
+        order.fee_sats, expected_fee,
+        "fee_sats should be calculated from rate + base"
+    );
+
+    // The proxy invoice amount must include the fee
+    let expected_total = btc_amount_sats + expected_fee;
+    assert_eq!(
+        order.amount_sats, expected_total,
+        "proxy invoice amount should be btc_amount + fee"
+    );
+
+    // Verify the Fiber invoice stored in the order also has the correct amount
+    let fiber_invoice = match &order.incoming_invoice {
+        CchInvoice::Fiber(inv) => inv.clone(),
+        other => panic!("expected Fiber invoice, got: {:?}", other),
+    };
+    assert_eq!(
+        fiber_invoice.amount(),
+        Some(expected_total),
+        "Fiber proxy invoice amount should include the fee"
+    );
+}
+
+/// Tests that the receive_btc order correctly calculates fee_sats and total_msat
+/// that would be used for the LND hold invoice.
+///
+/// Note: We cannot directly test the LND hold invoice creation since it requires
+/// an LND server. Instead we verify that the fee calculation and amount validation
+/// pass correctly (the call fails only at LND), confirming the hold invoice would
+/// be created with `value_msat = (amount_sats + fee_sats) * 1000`.
+#[tokio::test]
+async fn test_receive_btc_fee_calculation() {
+    use crate::ckb::contracts::{get_script_by_contract, Contract};
+    use crate::invoice::CkbScript;
+
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        base_fee_sats: 500,
+        fee_rate_per_million_sats: 5_000, // 0.5% proportional fee
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (_preimage, payment_hash) = create_valid_preimage_pair(180);
+    let amount_sats: u128 = 200_000;
+
+    // Build a Fiber invoice with the correct UDT type script and SHA256 hash algorithm
+    // to pass all validations before the LND call.
+    let wrapped_btc_type_script = get_script_by_contract(Contract::SimpleUDT, &[]);
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(amount_sats),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("test".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::PayeePublicKey(public_key),
+                Attribute::UdtScript(CkbScript(wrapped_btc_type_script)),
+                Attribute::HashAlgorithm(HashAlgorithm::Sha256),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    // receive_btc will fail at the LND call, but all prior validations
+    // (amount, fee, UDT script, hash algorithm) should pass.
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    // The call should fail due to LND being unavailable, not due to amount validation.
+    // This confirms the fee calculation and overflow checks passed successfully,
+    // meaning the hold invoice would have been created with the correct total_msat.
+    let err = result.unwrap_err();
+
+    // fee_sats = 200_000 * 5_000 / 1_000_000 + 500 = 1_000 + 500 = 1_500
+    // total_msat = (200_000 + 1_500) * 1_000 = 201_500_000
+    let expected_fee: u128 = 1_500;
+    let expected_total_msat: i64 = ((amount_sats + expected_fee) * 1_000) as i64;
+    assert_eq!(expected_total_msat, 201_500_000);
+
+    match err {
+        CchError::LndRpcError(msg) => {
+            assert!(
+                msg.contains(&format!("value_msat: {}", expected_total_msat)),
+                "hold invoice request should contain value_msat={}, got: {}",
+                expected_total_msat,
+                msg
+            );
+        }
+        other => panic!(
+            "expected LND connection error (no LND server), got: {:?}. \
+             If this is an amount error, the fee calculation may be wrong.",
+            other
+        ),
+    }
+}
+
+// =============================================================================
+// Insufficient Expiry Delta Tests (#1000)
+// =============================================================================
+
+/// Create a test Lightning invoice with a custom min_final_cltv_expiry_delta.
+fn create_test_lightning_invoice_with_cltv(
+    payment_hash: Hash256,
+    min_final_cltv: u64,
+) -> lightning_invoice::Bolt11Invoice {
+    use bitcoin::hashes::Hash as _;
+    use lightning_invoice::{Currency as LnCurrency, InvoiceBuilder as LnInvoiceBuilder};
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let private_key = bitcoin::secp256k1::SecretKey::from_slice(&[43u8; 32]).unwrap();
+    let payment_hash_btc = bitcoin::hashes::sha256::Hash::from_slice(payment_hash.as_ref())
+        .expect("valid 32-byte hash");
+    let payment_secret = lightning_invoice::PaymentSecret([0u8; 32]);
+    let duration_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time");
+
+    LnInvoiceBuilder::new(LnCurrency::Bitcoin)
+        .description("test invoice".to_string())
+        .payment_hash(payment_hash_btc)
+        .payment_secret(payment_secret)
+        .duration_since_epoch(duration_since_epoch)
+        .min_final_cltv_expiry_delta(min_final_cltv)
+        .amount_milli_satoshis(100_000_000)
+        .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
+        .expect("build lightning invoice")
+}
+
+/// Create a test Fiber invoice with a custom final_tlc_minimum_expiry_delta (in milliseconds).
+fn create_test_fiber_invoice_with_expiry(
+    payment_hash: Hash256,
+    final_tlc_expiry_delta_ms: u64,
+) -> CkbInvoice {
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(100000),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(final_tlc_expiry_delta_ms),
+                Attribute::Description("test".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::PayeePublicKey(public_key),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    invoice
+}
+
+/// Tests that a SendBTC order fails when the incoming CKB TLC does not have enough
+/// remaining time to safely settle after the outgoing BTC payment completes.
+///
+/// Scenario: The order was created a long time ago, so the remaining incoming time
+/// is too short to cover the outgoing BTC payment's min_final_cltv_expiry_delta.
+///
+/// This addresses issue #1000: the check accounts for elapsed time since order creation,
+/// not just comparing final expiry deltas statically.
+#[tokio::test]
+async fn test_send_btc_fails_insufficient_expiry_delta() {
+    let (_, payment_hash) = create_valid_preimage_pair(250);
+    let store = MockCchOrderStore::new();
+
+    // Create a BTC invoice with min_final_cltv_expiry_delta = 36 blocks (= 21,600 seconds)
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 36);
+
+    // The incoming Fiber invoice has ckb_final_tlc_expiry_delta = 50,000 seconds.
+    // Initial static check: 36 * 600 = 21,600 < 50,000 / 2 = 25,000 → passes.
+    // But if the order was created 20,000 seconds ago:
+    //   remaining = 50,000 - 20,000 = 30,000 seconds
+    //   max_outgoing = 30,000 / 2 = 15,000 seconds
+    //   needed = 21,600 seconds
+    //   15,000 < 21,600 → fails!
+    let ckb_final_tlc_seconds: u64 = 50_000;
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ckb_final_tlc_expiry_delta_seconds: ckb_final_tlc_seconds,
+        ..Default::default()
+    };
+
+    // Create an order with created_at 20,000 seconds in the past.
+    // The incoming invoice's final expiry delta must match the config value
+    // because compute_max_outgoing_expiry_seconds reads from the stored invoice.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now - 20_000,
+        expiry_delta_seconds: 100_000, // large enough not to expire
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: lightning_invoice.to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice_with_expiry(
+            payment_hash,
+            ckb_final_tlc_seconds * 1000,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    // The CchActor should detect the IncomingAccepted order on startup, dispatch
+    // SendOutgoingPayment, and the expiry check should fail the order.
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::Failed);
+    assert!(order.failure_reason.is_some());
+    let reason = order.failure_reason.unwrap();
+    assert!(
+        reason.contains("Insufficient HTLC expiry delta"),
+        "Expected expiry delta failure message, got: {}",
+        reason,
+    );
+}
+
+/// Tests that a ReceiveBTC order fails when the incoming BTC HTLC does not have enough
+/// remaining time for the outgoing CKB payment's final TLC expiry delta.
+///
+/// Scenario: The outgoing CKB invoice has a very large final_tlc_minimum_expiry_delta
+/// that exceeds half the remaining incoming time.
+#[tokio::test]
+async fn test_receive_btc_fails_insufficient_expiry_delta() {
+    let (_, payment_hash) = create_valid_preimage_pair(251);
+    let store = MockCchOrderStore::new();
+
+    // Create a CKB invoice with a very large final TLC expiry delta (100,000 seconds = 100M ms)
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 100_000_000);
+
+    // Use a config with btc_final_tlc_expiry_delta_blocks = 180 blocks (= 108,000 seconds).
+    // The incoming Lightning invoice must carry the same CLTV value because
+    // compute_max_outgoing_expiry_seconds now reads from the stored invoice.
+    // If order was just created:
+    //   remaining = 108,000 seconds
+    //   max_outgoing = 54,000 seconds
+    //   outgoing needs 100,000 seconds
+    //   54,000 < 100,000 → fails!
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+
+    // Create a Lightning invoice whose min_final_cltv_expiry_delta matches the
+    // default btc_final_tlc_expiry_delta_blocks (180 blocks).
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 180);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now,
+        expiry_delta_seconds: 200_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: fiber_invoice.to_string(),
+        incoming_invoice: CchInvoice::Lightning(lightning_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    // The CchActor should detect the IncomingAccepted order on startup, dispatch
+    // SendOutgoingPayment, and the expiry check should fail the order.
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::Failed);
+    assert!(order.failure_reason.is_some());
+    let reason = order.failure_reason.unwrap();
+    assert!(
+        reason.contains("Insufficient HTLC expiry delta"),
+        "Expected expiry delta failure message, got: {}",
+        reason,
+    );
+}
+
+/// Tests that a SendBTC order succeeds when there is sufficient remaining incoming time
+/// to cover the outgoing payment's CLTV plus settle the incoming payment.
+/// This verifies that the expiry check doesn't incorrectly reject valid orders.
+#[tokio::test]
+async fn test_send_btc_passes_sufficient_expiry_delta() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(252);
+    let store = MockCchOrderStore::new();
+
+    // Create a BTC invoice with small min_final_cltv_expiry_delta = 3 blocks (= 1,800 seconds)
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 3);
+
+    // The incoming Fiber invoice has ckb_final_tlc_expiry_delta = 100,000 seconds.
+    // Even with 10,000 seconds elapsed:
+    //   remaining = 100,000 - 10,000 = 90,000 seconds
+    //   max_outgoing = 45,000 seconds
+    //   needed = 3 * 600 = 1,800 seconds
+    //   45,000 > 1,800 → passes ✓
+    let ckb_final_tlc_seconds: u64 = 100_000;
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ckb_final_tlc_expiry_delta_seconds: ckb_final_tlc_seconds,
+        ..Default::default()
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now - 10_000,
+        expiry_delta_seconds: 200_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: lightning_invoice.to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice_with_expiry(
+            payment_hash,
+            ckb_final_tlc_seconds * 1000,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    // The order should NOT fail from the expiry check. Since outgoing is Lightning (BTC),
+    // the SendLightningOutgoingPaymentExecutor will try to call LND (which isn't running).
+    // That will cause a transient error and retry, but the order should NOT be Failed.
+    // Wait briefly and confirm the order is NOT in Failed state.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_ne!(
+        order.status,
+        CchOrderStatus::Failed,
+        "Order should not have failed - expiry check should have passed. \
+         Failure reason: {:?}",
+        order.failure_reason,
+    );
 }
