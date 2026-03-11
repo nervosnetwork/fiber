@@ -67,6 +67,8 @@ pub enum CchError {
     LndChannelError(#[from] lnd_grpc_tonic_client::channel::Error),
     #[error("Lnd RPC error: {0}")]
     LndRpcError(String),
+    #[error("Fiber node error: {0}")]
+    FiberNodeError(anyhow::Error),
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;

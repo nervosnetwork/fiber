@@ -1591,7 +1591,9 @@ impl NetworkNode {
                     Some(network_actor.clone()),
                     None,
                     store.clone(),
-                    network_graph.clone(),
+                    Some(network_graph.clone()),
+                    root.get_cell(),
+                    None,
                     #[cfg(debug_assertions)]
                     None,
                     #[cfg(debug_assertions)]
