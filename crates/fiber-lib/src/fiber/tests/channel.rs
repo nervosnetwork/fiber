@@ -4629,6 +4629,88 @@ async fn test_node_reestablish_resend_remove_tlc() {
 }
 
 #[tokio::test]
+async fn test_remove_tlc_fulfill_persists_preimage_while_reestablishing() {
+    init_tracing();
+
+    let (node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 11800000000, true).await;
+
+    let preimage = [9; 32];
+    let expected_preimage: Hash256 = preimage.into();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 1000,
+                        hash_algorithm: HashAlgorithm::CkbHash,
+                        payment_hash,
+                        attempt_id: None,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added tlc");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let mut state = node_b.get_channel_actor_state(channel_id);
+    state.reestablishing = true;
+    node_b.update_channel_actor_state(state, None).await;
+
+    let reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage.into(),
+    });
+    let result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: add_tlc_result.tlc_id,
+                        reason: reason.clone(),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive");
+
+    assert!(
+        result.is_err(),
+        "remove_tlc should be deferred while reestablishing"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(
+        node_b.get_payment_preimage(&payment_hash),
+        Some(expected_preimage),
+        "payment preimage should be persisted even when remove_tlc is deferred"
+    );
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::PreimageCreated(hash, observed_preimage)
+                    if hash == &payment_hash && observed_preimage == &expected_preimage
+            )
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
     let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
