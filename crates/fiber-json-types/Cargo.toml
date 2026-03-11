@@ -1,0 +1,38 @@
+[package]
+name = "fiber-json-types"
+version = "0.7.1"
+edition = "2021"
+description = "RPC JSON request/response types for the Fiber Network"
+
+[dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_with = { version = "3.7", features = ["macros", "schemars_1"] }
+serde_json = "1.0"
+hex = "0.4"
+
+# CKB types
+ckb-jsonrpc-types = "1"
+ckb-types = "1"
+
+# Molecule (for EntityHex serialization of OutPoint)
+molecule = "0.9.2"
+
+# For JsonSchema
+schemars = "1"
+
+# Optional: conversion feature deps
+fiber-types = { path = "../fiber-types", optional = true }
+musig2 = { version = "0.2.4", features = ["secp256k1"], optional = true }
+
+[features]
+default = []
+cch = []
+conversion = ["fiber-types"]
+watchtower = ["fiber-types/watchtower", "musig2"]
+all = ["conversion", "cch", "watchtower", "fiber-types/cch"]
+
+[lints.clippy]
+expect-fun-call = "allow"
+needless-return = "allow"
+upper-case-acronyms = "allow"

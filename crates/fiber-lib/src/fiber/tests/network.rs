@@ -1,6 +1,4 @@
-use crate::fiber::channel::ChannelFlags;
-use crate::fiber::features::FeatureVector;
-use crate::fiber::types::OpenChannel;
+use crate::fiber::network::get_chain_hash;
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -9,17 +7,17 @@ use crate::{
         CkbChainMessage, CkbTxTracingResult,
     },
     fiber::{
-        channel::ShutdownInfo,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{AcceptChannelCommand, NetworkActorStateStore, OpenChannelCommand},
-        payment::{SendPaymentCommand, SendPaymentData},
+        payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
-            BroadcastMessage, BroadcastMessageWithTimestamp, BroadcastMessagesFilterResult,
-            ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, GossipMessage,
-            NodeAnnouncement, Privkey, Pubkey,
+            broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
+            BroadcastMessagesFilterResult, GossipMessage, OpenChannel,
         },
-        NetworkActorCommand, NetworkActorMessage,
+        BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
+        NetworkActorCommand, NetworkActorMessage, NodeAnnouncement, Privkey, Pubkey,
+        SendPaymentData,
     },
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash,
     invoice::InvoiceBuilder,
@@ -33,6 +31,7 @@ use ckb_types::{
     packed::{CellOutput, OutPoint, ScriptBuilder},
     prelude::{Builder, Entity, Pack},
 };
+use fiber_types::{ChannelFlags, ShutdownInfo};
 use musig2::{PartialSignature, SecNonce};
 use ractor::{call, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
@@ -47,11 +46,6 @@ fn get_test_priv_key() -> Privkey {
 
 fn get_test_pub_key() -> Pubkey {
     get_test_priv_key().pubkey()
-}
-
-fn get_test_peer_id() -> PeerId {
-    let pub_key = get_test_pub_key().into();
-    PeerId::from_public_key(&pub_key)
 }
 
 fn get_fake_peer_id_and_address() -> (PeerId, MultiAddr) {
@@ -84,6 +78,7 @@ fn create_fake_channel_announcement_message(
         &sk1.pubkey(),
         &sk2.pubkey(),
         outpoint,
+        get_chain_hash(),
         &x_only_pub_key,
         capacity as u128,
         None,
@@ -102,13 +97,16 @@ fn create_node_announcement_message_with_priv_key(priv_key: &Privkey) -> NodeAnn
         .iter()
         .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
         .collect();
-    NodeAnnouncement::new(
+    NodeAnnouncement::new_signed(
         node_name.into(),
         FeatureVector::default(),
         addresses,
         priv_key,
+        get_chain_hash(),
         now_timestamp_as_millis_u64(),
         0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
     )
 }
 
@@ -218,7 +216,8 @@ async fn test_set_announced_addrs_with_valid_peer_id() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     node.stop().await;
 
-    let peer_id = node.get_peer_id();
+    let tentacle_pubkey = crate::fiber::types::pubkey_to_tentacle(node.pubkey);
+    let peer_id = PeerId::from_public_key(&tentacle_pubkey);
     let addr = format!("/ip4/1.1.1.1/tcp/8346/p2p/{}", peer_id);
     let multiaddr = Multiaddr::from_str(&addr).expect("valid multiaddr");
     let mut node = NetworkNode::new_with_config(
@@ -255,7 +254,8 @@ async fn test_set_announced_addrs_without_p2p() {
     .await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     node.stop().await;
-    let peer_id = node.get_peer_id();
+    let tentacle_pubkey = crate::fiber::types::pubkey_to_tentacle(node.pubkey);
+    let peer_id = PeerId::from_public_key(&tentacle_pubkey);
     let peer_id_bytes = peer_id.clone().into_bytes();
     let multiaddr =
         Multiaddr::from_str(&format!("{}/p2p/{}", addr, peer_id)).expect("valid multiaddr");
@@ -288,7 +288,7 @@ async fn test_sync_channel_announcement_on_startup() {
     let tx = TransactionView::new_advanced_builder()
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
@@ -309,8 +309,8 @@ async fn test_sync_channel_announcement_on_startup() {
         BroadcastMessage::ChannelAnnouncement(channel_announcement.clone()),
     ] {
         node1.mock_received_gossip_message_from_peer(
-            get_test_peer_id(),
-            message.create_broadcast_messages_filter_result(),
+            get_test_pub_key(),
+            broadcast_message_to_gossip(&message),
         );
     }
 
@@ -335,9 +335,8 @@ async fn test_node1_node2_channel_update() {
     let node = NetworkNode::new().await;
     node.submit_tx(funding_tx).await;
     node.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelAnnouncement(channel_announcement)
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelAnnouncement(channel_announcement)),
     );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
@@ -349,9 +348,10 @@ async fn test_node1_node2_channel_update() {
         None,
     );
     node.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelUpdate(channel_update_of_node1.clone())
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelUpdate(
+            channel_update_of_node1.clone(),
+        )),
     );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
@@ -369,9 +369,10 @@ async fn test_node1_node2_channel_update() {
         None,
     );
     node.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelUpdate(channel_update_of_node2.clone())
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelUpdate(
+            channel_update_of_node2.clone(),
+        )),
     );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
@@ -394,9 +395,10 @@ async fn test_channel_update_version() {
     let node = NetworkNode::new().await;
     node.submit_tx(funding_tx).await;
     node.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelAnnouncement(channel_context.channel_announcement.clone())
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelAnnouncement(
+            channel_context.channel_announcement.clone(),
+        )),
     );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
@@ -416,9 +418,8 @@ async fn test_channel_update_version() {
         channel_updates.try_into().expect("3 channel updates");
 
     node.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelUpdate(channel_update_2.clone())
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelUpdate(channel_update_2.clone())),
     );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
@@ -429,9 +430,8 @@ async fn test_channel_update_version() {
 
     // Old channel update will not replace the new one.
     node.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelUpdate(channel_update_1.clone())
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelUpdate(channel_update_1.clone())),
     );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
@@ -442,9 +442,8 @@ async fn test_channel_update_version() {
 
     // New channel update will replace the old one.
     node.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelUpdate(channel_update_3.clone())
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelUpdate(channel_update_3.clone())),
     );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let new_channel_info = node.get_network_graph_channel(&out_point).await.unwrap();
@@ -470,9 +469,8 @@ async fn test_query_missing_broadcast_message() {
     set_next_block_timestamp(long_long_time_ago).await;
     node1.submit_tx(funding_tx.clone()).await;
     node1.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelAnnouncement(channel_announcement)
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelAnnouncement(channel_announcement)),
     );
     let channel_update = channel_context.create_channel_update_of_node1(
         ChannelUpdateChannelFlags::empty(),
@@ -482,9 +480,8 @@ async fn test_query_missing_broadcast_message() {
         Some(long_long_time_ago + 10),
     );
     node1.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelUpdate(channel_update.clone())
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelUpdate(channel_update.clone())),
     );
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let node1_channel_info = node1.get_network_graph_channel(&out_point).await.unwrap();
@@ -526,7 +523,7 @@ async fn test_prune_channel_announcement_and_receive_channel_update() {
         None,
     );
     node1.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
+        get_test_pub_key(),
         GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
             messages: vec![
                 BroadcastMessage::ChannelAnnouncement(channel_announcement.clone()),
@@ -573,9 +570,8 @@ async fn test_prune_channel_announcement_and_receive_channel_update() {
     );
     // Node1 should still have the channel info.
     node1.mock_received_gossip_message_from_peer(
-        get_test_peer_id(),
-        BroadcastMessage::ChannelUpdate(update_of_node2.clone())
-            .create_broadcast_messages_filter_result(),
+        get_test_pub_key(),
+        broadcast_message_to_gossip(&BroadcastMessage::ChannelUpdate(update_of_node2.clone())),
     );
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -612,7 +608,6 @@ async fn test_sync_node_announcement_version() {
 
     let node = NetworkNode::new_with_node_name("node").await;
     let test_pub_key = get_test_pub_key();
-    let test_peer_id = get_test_peer_id();
 
     let [node_announcement_message_version1, node_announcement_message_version2, node_announcement_message_version3] = [
         create_fake_node_announcement_message(),
@@ -623,9 +618,10 @@ async fn test_sync_node_announcement_version() {
     let timestamp_version3 = node_announcement_message_version3.timestamp;
 
     node.mock_received_gossip_message_from_peer(
-        test_peer_id.clone(),
-        BroadcastMessage::NodeAnnouncement(node_announcement_message_version2)
-            .create_broadcast_messages_filter_result(),
+        test_pub_key,
+        broadcast_message_to_gossip(&BroadcastMessage::NodeAnnouncement(
+            node_announcement_message_version2,
+        )),
     );
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -639,9 +635,10 @@ async fn test_sync_node_announcement_version() {
     }
 
     node.mock_received_gossip_message_from_peer(
-        test_peer_id.clone(),
-        BroadcastMessage::NodeAnnouncement(node_announcement_message_version1)
-            .create_broadcast_messages_filter_result(),
+        test_pub_key,
+        broadcast_message_to_gossip(&BroadcastMessage::NodeAnnouncement(
+            node_announcement_message_version1,
+        )),
     );
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -655,9 +652,10 @@ async fn test_sync_node_announcement_version() {
     }
 
     node.mock_received_gossip_message_from_peer(
-        test_peer_id.clone(),
-        BroadcastMessage::NodeAnnouncement(node_announcement_message_version3)
-            .create_broadcast_messages_filter_result(),
+        test_pub_key,
+        broadcast_message_to_gossip(&BroadcastMessage::NodeAnnouncement(
+            node_announcement_message_version3,
+        )),
     );
     // Wait for the broadcast message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -682,12 +680,12 @@ async fn test_sync_node_announcement_on_startup() {
     let mut node1 = NetworkNode::new_with_node_name("node1").await;
     let mut node2 = NetworkNode::new_with_node_name("node2").await;
     let test_pub_key = get_test_pub_key();
-    let test_peer_id = get_test_peer_id();
 
     node1.mock_received_gossip_message_from_peer(
-        test_peer_id.clone(),
-        BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_message())
-            .create_broadcast_messages_filter_result(),
+        test_pub_key,
+        broadcast_message_to_gossip(&BroadcastMessage::NodeAnnouncement(
+            create_fake_node_announcement_message(),
+        )),
     );
     node1.connect_to(&mut node2).await;
 
@@ -728,11 +726,11 @@ async fn test_sync_node_announcement_after_restart() {
     node2.stop().await;
 
     let test_pub_key = get_test_pub_key();
-    let test_peer_id = get_test_peer_id();
     node1.mock_received_gossip_message_from_peer(
-        test_peer_id.clone(),
-        BroadcastMessage::NodeAnnouncement(create_fake_node_announcement_message())
-            .create_broadcast_messages_filter_result(),
+        test_pub_key,
+        broadcast_message_to_gossip(&BroadcastMessage::NodeAnnouncement(
+            create_fake_node_announcement_message(),
+        )),
     );
     node2.start().await;
     node2.connect_to(&mut node1).await;
@@ -751,14 +749,14 @@ async fn test_sync_node_announcement_after_restart() {
 async fn test_persisting_network_state() {
     let mut node = NetworkNode::new().await;
     let state = node.store.clone();
-    let peer_id = node.peer_id.clone();
+    let pubkey = node.pubkey;
     node.stop().await;
-    assert!(state.get_network_actor_state(&peer_id).is_some())
+    assert!(state.get_network_actor_state(&pubkey).is_some())
 }
 
 #[tokio::test]
 async fn test_persisting_bootnode() {
-    let (boot_peer_id, address) = get_fake_peer_id_and_address();
+    let (_, address) = get_fake_peer_id_and_address();
     let address_string = format!("{}", &address);
 
     let mut node = NetworkNode::new_with_config(
@@ -768,12 +766,12 @@ async fn test_persisting_bootnode() {
     )
     .await;
     let state = node.store.clone();
-    let peer_id = node.peer_id.clone();
+    let pubkey = node.pubkey;
     node.stop().await;
 
-    let state = state.get_network_actor_state(&peer_id).unwrap();
+    let state = state.get_network_actor_state(&pubkey).unwrap();
     let peers = state.sample_n_peers_to_connect(1);
-    assert_eq!(peers.get(&boot_peer_id), Some(&vec![address]));
+    assert!(peers.is_empty());
 }
 
 #[tokio::test]
@@ -784,11 +782,10 @@ async fn test_persisting_announced_nodes() {
 
     let announcement = create_fake_node_announcement_message();
     let node_pk = announcement.node_id;
-    let peer_id = node_pk.tentacle_peer_id();
 
     node.mock_received_gossip_message_from_peer(
-        peer_id.clone(),
-        BroadcastMessage::NodeAnnouncement(announcement).create_broadcast_messages_filter_result(),
+        node_pk,
+        broadcast_message_to_gossip(&BroadcastMessage::NodeAnnouncement(announcement)),
     );
     // Wait for the above message to be processed.
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -797,14 +794,14 @@ async fn test_persisting_announced_nodes() {
     let peers = node
         .with_network_graph(|graph| graph.sample_n_peers_to_connect(1))
         .await;
-    assert!(peers.contains_key(&peer_id));
+    assert!(peers.contains_key(&node_pk));
 }
 
 #[tokio::test]
 async fn test_connecting_to_bootnode() {
     let boot_node = NetworkNode::new().await;
     let boot_node_address = format!("{}", boot_node.get_node_address());
-    let boot_node_id = &boot_node.peer_id;
+    let boot_node_pubkey = &boot_node.pubkey;
 
     let mut node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
@@ -814,7 +811,7 @@ async fn test_connecting_to_bootnode() {
     .await;
 
     node.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == boot_node_id),
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == boot_node_pubkey),
     )
     .await;
 }
@@ -823,11 +820,11 @@ async fn test_connecting_to_bootnode() {
 async fn test_saving_and_connecting_to_node() {
     init_tracing();
 
-    let node1 = NetworkNode::new().await;
+    let mut node1 = NetworkNode::new().await;
     let node1_address = node1.get_node_address().clone();
-    let node1_id = &node1.peer_id;
 
     let mut node2 = NetworkNode::new().await;
+    node2.connect_to(&mut node1).await;
 
     node2
         .network_actor
@@ -842,7 +839,7 @@ async fn test_saving_and_connecting_to_node() {
     node2.restart().await;
 
     node2.expect_event(
-        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == node1_id),
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node1.pubkey),
     )
     .await;
 }
@@ -857,7 +854,7 @@ fn test_announcement_message_serialize() {
     let tx = TransactionView::new_advanced_builder()
         .output(
             CellOutput::new_builder()
-                .capacity(capacity.pack())
+                .capacity(capacity)
                 .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
                 .build(),
         )
@@ -1054,7 +1051,7 @@ async fn test_abort_funding_on_building_funding_tx() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -1078,8 +1075,8 @@ async fn test_abort_funding_on_building_funding_tx() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -1186,7 +1183,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -1210,8 +1207,8 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -1277,7 +1274,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_b.peer_id.clone(),
+                pubkey: node_b.pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -1301,8 +1298,8 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
-                assert_eq!(peer_id, &node_a.peer_id);
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+                assert_eq!(pubkey, &node_a.pubkey);
                 true
             }
             _ => false,
@@ -1375,12 +1372,12 @@ async fn test_to_be_accepted_channels_number_limit() {
     let mut peer = NetworkNode::new().await;
     node.connect_to(&mut peer).await;
 
-    let node_peer_id = node.peer_id.clone();
+    let node_pubkey = node.pubkey;
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_peer_id.clone(),
+                pubkey: node_pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -1403,8 +1400,8 @@ async fn test_to_be_accepted_channels_number_limit() {
         .expect("peer alive")
         .expect("open channel");
     node.expect_event(|event| match event {
-        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
-            assert_eq!(peer_id, &peer.peer_id);
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &peer.pubkey);
             true
         }
         _ => false,
@@ -1415,8 +1412,8 @@ async fn test_to_be_accepted_channels_number_limit() {
         .expect("peer alive")
         .expect("open channel");
     node.expect_event(|event| match event {
-        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
-            assert_eq!(peer_id, &peer.peer_id);
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &peer.pubkey);
             true
         }
         _ => false,
@@ -1482,12 +1479,12 @@ async fn test_to_be_accepted_channels_bytes_limit() {
     let mut peer = NetworkNode::new().await;
     node.connect_to(&mut peer).await;
 
-    let node_peer_id = node.peer_id.clone();
+    let node_pubkey = node.pubkey;
 
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
-                peer_id: node_peer_id.clone(),
+                pubkey: node_pubkey,
                 public: true,
                 one_way: false,
                 shutdown_script: None,
@@ -1510,8 +1507,8 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         .expect("peer alive")
         .expect("open channel");
     node.expect_event(|event| match event {
-        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
-            assert_eq!(peer_id, &peer.peer_id);
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &peer.pubkey);
             true
         }
         _ => false,
@@ -1522,8 +1519,8 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         .expect("peer alive")
         .expect("open channel");
     node.expect_event(|event| match event {
-        NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, _channel_id) => {
-            assert_eq!(peer_id, &peer.peer_id);
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &peer.pubkey);
             true
         }
         _ => false,

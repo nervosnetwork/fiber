@@ -43,3 +43,13 @@ The "Asset Handling Fee." Intermediate nodes lock up their own liquidity to forw
 
 ## Watchtower
 Your "Asset Bodyguard." Since channel asset states are stored off-chain, a dishonest partner might try to broadcast an "old agreement" to steal funds while you are offline. A Watchtower monitors the CKB chain 24/7 and automatically intercepts any cheating attempts, punishing the attacker.
+
+## Node Identifiers: Pubkey and Peer ID
+
+Fiber uses two identity forms:
+
+- **Pubkey**: a 33-byte compressed secp256k1 public key (66-char hex), e.g. `"02ab1234..."`.
+- **Peer ID**: a base58 transport identifier derived from the pubkey.
+
+For RPC usage, treat **`pubkey` as the standard node identity**.  
+`Peer ID` is mainly an internal/P2P transport identifier and is generally not what you pass around in normal RPC workflows.

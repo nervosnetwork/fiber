@@ -1,12 +1,12 @@
 import { Script } from "./channel";
-import { HexString } from "./general"
+import { HexString, Pubkey } from "./general"
 type PaymentSessionStatus = "Created" | "Inflight" | "Success" | "Failed";
 
 interface PaymentCustomRecords {
     [k: HexString]: HexString;
 }
 interface SessionRouteNode {
-    pubkey: string;
+    pubkey: Pubkey;
     amount: HexString;
     channel_outpoint: HexString;
 }
@@ -22,17 +22,17 @@ interface GetPaymentCommandResult {
     router?: SessionRouteNode[];
 }
 interface HopHint {
-    pubkey: string;
+    pubkey: Pubkey;
     channel_outpoint: HexString;
     fee_rate: HexString;
     tlc_expiry_delta: HexString;
 }
 interface HopRequire {
-    pubkey: string;
+    pubkey: Pubkey;
     channel_outpoint: HexString;
 }
 interface RouterHop {
-    target: HexString;
+    target: Pubkey;
     channel_outpoint: HexString;
     amount_received: HexString;
     incoming_tlc_expiry: HexString;
@@ -41,7 +41,7 @@ interface GetPaymentCommandParams {
     payment_hash: HexString;
 }
 interface SendPaymentCommandParams {
-    target_pubkey?: string;
+    target_pubkey?: Pubkey;
     amount?: HexString;
     payment_hash?: HexString;
     final_tlc_expiry_delta?: HexString;
@@ -51,7 +51,7 @@ interface SendPaymentCommandParams {
     max_fee_amount?: HexString;
     max_fee_rate?: HexString;
     max_parts?: HexString;
-    trampoline_hops?: string[];
+    trampoline_hops?: Pubkey[];
     keysend?: boolean;
     udt_type_script?: Script;
     allow_self_payment?: boolean;

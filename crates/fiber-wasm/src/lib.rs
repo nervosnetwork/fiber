@@ -7,6 +7,7 @@ use std::{
 use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
+use fnn::fiber::network::init_chain_hash;
 use fnn::{
     Config, NetworkServiceEvent,
     actors::RootActor,
@@ -15,7 +16,7 @@ use fnn::{
         client::CkbRpcClient,
         contracts::{TypeIDResolver, try_init_contracts_context},
     },
-    fiber::{KeyPair, graph::NetworkGraph, network::init_chain_hash},
+    fiber::{KeyPair, graph::NetworkGraph},
     rpc::{
         channel::ChannelRpcServerImpl,
         graph::GraphRpcServerImpl,
@@ -196,7 +197,7 @@ pub async fn fiber(
 
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
-                node_public_key.clone().into(),
+                fnn::fiber::types::pubkey_from_tentacle(node_public_key.clone()),
                 fiber_config.announce_private_addr(),
             )));
 
@@ -320,13 +321,13 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         ) => {
             watchtower_client
                 .create_watch_channel(CreateWatchChannelParams {
-                    channel_id,
+                    channel_id: channel_id.into(),
                     funding_udt_type_script: funding_udt_type_script.map(Into::into),
-                    local_settlement_key,
-                    remote_settlement_key,
-                    local_funding_pubkey,
-                    remote_funding_pubkey,
-                    settlement_data,
+                    local_settlement_key: local_settlement_key.0.secret_bytes().into(),
+                    remote_settlement_key: remote_settlement_key.into(),
+                    local_funding_pubkey: local_funding_pubkey.into(),
+                    remote_funding_pubkey: remote_funding_pubkey.into(),
+                    settlement_data: settlement_data.into(),
                 })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
@@ -334,7 +335,9 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         NetworkServiceEvent::ChannelClosed(_, channel_id, _)
         | NetworkServiceEvent::ChannelAbandon(channel_id) => {
             watchtower_client
-                .remove_watch_channel(RemoveWatchChannelParams { channel_id })
+                .remove_watch_channel(RemoveWatchChannelParams {
+                    channel_id: channel_id.into(),
+                })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
         }
@@ -346,9 +349,9 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         ) => {
             watchtower_client
                 .update_revocation(UpdateRevocationParams {
-                    channel_id,
-                    revocation_data,
-                    settlement_data,
+                    channel_id: channel_id.into(),
+                    revocation_data: revocation_data.into(),
+                    settlement_data: settlement_data.into(),
                 })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
@@ -361,8 +364,8 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         ) => {
             watchtower_client
                 .update_local_settlement(UpdateLocalSettlementParams {
-                    channel_id,
-                    settlement_data,
+                    channel_id: channel_id.into(),
+                    settlement_data: settlement_data.into(),
                 })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
@@ -370,8 +373,8 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
             watchtower_client
                 .update_pending_remote_settlement(UpdatePendingRemoteSettlementParams {
-                    channel_id,
-                    settlement_data,
+                    channel_id: channel_id.into(),
+                    settlement_data: settlement_data.into(),
                 })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
@@ -379,15 +382,17 @@ async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
         NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
             watchtower_client
                 .create_preimage(CreatePreimageParams {
-                    payment_hash,
-                    preimage,
+                    payment_hash: payment_hash.into(),
+                    preimage: preimage.into(),
                 })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
         }
         NetworkServiceEvent::PreimageRemoved(payment_hash) => {
             watchtower_client
-                .remove_preimage(RemovePreimageParams { payment_hash })
+                .remove_preimage(RemovePreimageParams {
+                    payment_hash: payment_hash.into(),
+                })
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
         }

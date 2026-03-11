@@ -3,216 +3,30 @@
 //! We define CkbInvoice and its related types here only for the RPC interface.
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
+
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
-use crate::fiber::features::FeatureVector;
-use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::serde_utils::{duration_hex, U128Hex, U64Hex};
-use crate::fiber::types::{Hash256, Privkey};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
-    Attribute as InternalAttribute, CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, CkbScript,
-    Currency, InvoiceBuilder, InvoiceData as InternalInvoiceData, InvoiceSignature, InvoiceStore,
+    CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
+use crate::rpc::utils::{rpc_error, rpc_error_no_data, RpcResultExt};
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
+use fiber_types::{FeatureVector, Privkey};
 
-use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
-use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
+use jsonrpsee::types::ErrorObjectOwned;
 use ractor::{call, ActorRef};
 use rand::Rng;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use std::time::Duration;
 use tentacle::secio::SecioKeyPair;
 
-/// The attributes of the invoice
-#[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Attribute {
-    #[serde(with = "U64Hex")]
-    /// This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
-    FinalHtlcTimeout(u64),
-    #[serde(with = "U64Hex")]
-    /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
-    FinalHtlcMinimumExpiryDelta(u64),
-    #[serde(with = "duration_hex")]
-    /// The expiry time of the invoice, in seconds
-    ExpiryTime(Duration),
-    /// The description of the invoice
-    Description(String),
-    /// The fallback address of the invoice
-    FallbackAddr(String),
-    /// The udt type script of the invoice
-    UdtScript(CkbScript),
-    /// The payee public key of the invoice
-    PayeePublicKey(PublicKey),
-    /// The hash algorithm of the invoice
-    HashAlgorithm(HashAlgorithm),
-    /// The feature flags of the invoice
-    Feature(Vec<String>),
-    /// The payment secret of the invoice
-    PaymentSecret(Hash256),
-}
-
-/// The metadata of the invoice
-#[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct InvoiceData {
-    /// The timestamp of the invoice
-    #[serde_as(as = "U128Hex")]
-    pub timestamp: u128,
-    /// The payment hash of the invoice
-    pub payment_hash: Hash256,
-    /// The attributes of the invoice, e.g. description, expiry time, etc.
-    pub attrs: Vec<Attribute>,
-}
-
-/// Represents a syntactically and semantically correct lightning BOLT11 invoice
-///
-/// There are three ways to construct a `CkbInvoice`:
-///  1. using [`CkbInvoiceBuilder`]
-///  2. using `str::parse::<CkbInvoice>(&str)` (see [`CkbInvoice::from_str`])
-///
-#[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CkbInvoice {
-    /// The currency of the invoice
-    pub currency: Currency,
-    #[serde_as(as = "Option<U128Hex>")]
-    /// The amount of the invoice
-    pub amount: Option<u128>,
-    /// The signature of the invoice
-    pub signature: Option<InvoiceSignature>,
-    /// The invoice data, including the payment hash, timestamp and other attributes
-    pub data: InvoiceData,
-}
-
-impl From<InternalAttribute> for Attribute {
-    fn from(attr: InternalAttribute) -> Self {
-        match attr {
-            InternalAttribute::FinalHtlcTimeout(timeout) => Attribute::FinalHtlcTimeout(timeout),
-            InternalAttribute::FinalHtlcMinimumExpiryDelta(delta) => {
-                Attribute::FinalHtlcMinimumExpiryDelta(delta)
-            }
-            InternalAttribute::ExpiryTime(duration) => Attribute::ExpiryTime(duration),
-            InternalAttribute::Description(desc) => Attribute::Description(desc),
-            InternalAttribute::FallbackAddr(addr) => Attribute::FallbackAddr(addr),
-            InternalAttribute::UdtScript(script) => Attribute::UdtScript(script),
-            InternalAttribute::PayeePublicKey(pubkey) => Attribute::PayeePublicKey(pubkey),
-            InternalAttribute::HashAlgorithm(alg) => Attribute::HashAlgorithm(alg),
-            InternalAttribute::Feature(feature) => {
-                Attribute::Feature(feature.enabled_features_names())
-            }
-            InternalAttribute::PaymentSecret(secret) => Attribute::PaymentSecret(secret),
-        }
-    }
-}
-
-impl From<InternalInvoiceData> for InvoiceData {
-    fn from(data: InternalInvoiceData) -> Self {
-        InvoiceData {
-            timestamp: data.timestamp,
-            payment_hash: data.payment_hash,
-            attrs: data.attrs.into_iter().map(|a| a.into()).collect(),
-        }
-    }
-}
-
-impl From<InternalCkbInvoice> for CkbInvoice {
-    fn from(inv: InternalCkbInvoice) -> Self {
-        CkbInvoice {
-            currency: inv.currency,
-            amount: inv.amount,
-            signature: inv.signature,
-            data: inv.data.into(),
-        }
-    }
-}
-
-/// The parameter struct for generating a new invoice.
-#[serde_as]
-#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct NewInvoiceParams {
-    /// The amount of the invoice.
-    #[serde_as(as = "U128Hex")]
-    pub amount: u128,
-    /// The description of the invoice.
-    pub description: Option<String>,
-    /// The currency of the invoice.
-    pub currency: Currency,
-    /// The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent. If both preimage and hash are absent, a random preimage is generated.
-    pub payment_preimage: Option<Hash256>,
-    /// The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice' for which the tlc must be accepted and held until the preimage becomes known.
-    pub payment_hash: Option<Hash256>,
-    /// The expiry time of the invoice, in seconds.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub expiry: Option<u64>,
-    /// The fallback address of the invoice.
-    pub fallback_address: Option<String>,
-    /// The final HTLC timeout of the invoice, in milliseconds.
-    /// Minimal value is 16 hours, and maximal value is 14 days.
-    #[serde_as(as = "Option<U64Hex>")]
-    pub final_expiry_delta: Option<u64>,
-    /// The UDT type script of the invoice.
-    pub udt_type_script: Option<Script>,
-    /// The hash algorithm of the invoice.
-    pub hash_algorithm: Option<HashAlgorithm>,
-    /// Whether allow payment to use MPP
-    pub allow_mpp: Option<bool>,
-    /// Whether allow payment to use trampoline routing
-    pub allow_trampoline_routing: Option<bool>,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct InvoiceResult {
-    /// The encoded invoice address.
-    pub invoice_address: String,
-    /// The invoice.
-    pub invoice: CkbInvoice,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ParseInvoiceParams {
-    /// The encoded invoice address.
-    pub invoice: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ParseInvoiceResult {
-    /// The invoice.
-    pub invoice: CkbInvoice,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct InvoiceParams {
-    /// The payment hash of the invoice.
-    pub payment_hash: Hash256,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SettleInvoiceParams {
-    /// The payment hash of the invoice.
-    pub payment_hash: Hash256,
-    /// The payment preimage of the invoice.
-    pub payment_preimage: Hash256,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SettleInvoiceResult {}
-
-/// The status of the invoice.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct GetInvoiceResult {
-    /// The encoded invoice address.
-    pub invoice_address: String,
-    /// The invoice.
-    pub invoice: CkbInvoice,
-    /// The invoice status
-    pub status: CkbInvoiceStatus,
-}
+pub use fiber_json_types::{
+    Attribute, CkbInvoice, GetInvoiceResult, InvoiceData, InvoiceParams, InvoiceResult,
+    NewInvoiceParams, ParseInvoiceParams, ParseInvoiceResult, SettleInvoiceParams,
+    SettleInvoiceResult,
+};
 
 /// RPC module for invoice management.
 #[cfg(not(target_arch = "wasm32"))]
@@ -282,11 +96,7 @@ impl<S> InvoiceRpcServerImpl<S> {
             );
 
             // restrict currency to be the same as network
-            let currency = match config.chain.as_str() {
-                "mainnet" => Currency::Fibb,
-                "testnet" => Currency::Fibt,
-                _ => Currency::Fibd,
-            };
+            let currency = config.currency();
 
             (
                 Some(keypair),
@@ -360,26 +170,26 @@ where
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
-        let error = |msg: &str| {
-            Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                msg.to_string(),
-                Some(params.clone()),
-            ))
-        };
+        let error = |msg: &str| Err(rpc_error(msg.to_string(), params.clone()));
+
+        let params_currency = params.currency.into();
 
         if let Some(currency) = self.currency {
-            if currency != params.currency {
+            if currency != params_currency {
                 return error(&format!(
                     "Currency must be {:?} with the chain network",
                     currency
                 ));
             }
         }
-        let mut invoice_builder = InvoiceBuilder::new(params.currency).amount(Some(params.amount));
+        let mut invoice_builder = InvoiceBuilder::new(params_currency).amount(Some(params.amount));
+
+        // Convert payment_preimage and payment_hash from JSON types -> internal Hash256
+        let preimage_hash = params.payment_preimage.map(fiber_types::Hash256::from);
+        let payment_hash = params.payment_hash.map(fiber_types::Hash256::from);
 
         // If both preimage and hash are absent, a random preimage is generated.
-        let preimage_opt = match (params.payment_preimage, params.payment_hash) {
+        let preimage_opt = match (preimage_hash, payment_hash) {
             (Some(preimage), _) => Some(preimage),
             (None, None) => Some(gen_rand_sha256_hash()),
             _ => None,
@@ -388,7 +198,7 @@ where
         if let Some(preimage) = preimage_opt {
             invoice_builder = invoice_builder.payment_preimage(preimage);
         }
-        if let Some(hash) = params.payment_hash {
+        if let Some(hash) = payment_hash {
             invoice_builder = invoice_builder.payment_hash(hash);
         }
         if let Some(description) = params.description.clone() {
@@ -448,7 +258,7 @@ where
             invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());
         };
         if let Some(hash_algorithm) = params.hash_algorithm {
-            invoice_builder = invoice_builder.hash_algorithm(hash_algorithm);
+            invoice_builder = invoice_builder.hash_algorithm(hash_algorithm.into());
         };
 
         let invoice = if let Some((public_key, secret_key)) = &self.keypair {
@@ -467,7 +277,7 @@ where
                 match self.store.insert_invoice(invoice.clone(), preimage_opt) {
                     Ok(_) => Ok(InvoiceResult {
                         invoice_address: invoice.to_string(),
-                        invoice: invoice.into(),
+                        invoice: invoice.clone().into(),
                     }),
                     Err(e) => error(&e.to_string()),
                 }
@@ -485,11 +295,7 @@ where
             Ok(invoice) => Ok(ParseInvoiceResult {
                 invoice: invoice.into(),
             }),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
-                Some(params),
-            )),
+            Err(e) => Err(rpc_error(e.to_string(), params)),
         }
     }
 
@@ -497,7 +303,7 @@ where
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let payment_hash = params.payment_hash;
+        let payment_hash = params.payment_hash.into();
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
                 let status = match self
@@ -512,14 +318,10 @@ where
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice: invoice.into(),
-                    status,
+                    status: status.into(),
                 })
             }
-            None => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                "invoice not found".to_string(),
-                Some(payment_hash),
-            )),
+            None => Err(rpc_error("invoice not found", params)),
         }
     }
 
@@ -527,7 +329,7 @@ where
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let payment_hash = params.payment_hash;
+        let payment_hash = params.payment_hash.into();
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
                 let status = match self
@@ -541,34 +343,28 @@ where
 
                 let new_status = match status {
                     CkbInvoiceStatus::Paid | CkbInvoiceStatus::Cancelled => {
-                        return Err(ErrorObjectOwned::owned(
-                            CALL_EXECUTION_FAILED_CODE,
+                        return Err(rpc_error(
                             format!("invoice can not be canceled, current status: {}", status),
-                            Some(payment_hash),
+                            params,
                         ));
                     }
                     _ => CkbInvoiceStatus::Cancelled,
                 };
                 self.store
                     .update_invoice_status(&payment_hash, new_status)
-                    .map_err(|e| {
-                        ErrorObjectOwned::owned(
-                            CALL_EXECUTION_FAILED_CODE,
-                            e.to_string(),
-                            Some(payment_hash),
-                        )
-                    })?;
+                    .rpc_err(&params)?;
+                if let Some(network_actor) = &self.network_actor {
+                    let _ = network_actor.send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+                    ));
+                }
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice: invoice.into(),
-                    status: new_status,
+                    status: new_status.into(),
                 })
             }
-            None => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                "invoice not found".to_string(),
-                Some(payment_hash),
-            )),
+            None => Err(rpc_error("invoice not found", params)),
         }
     }
 
@@ -576,16 +372,13 @@ where
         &self,
         params: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
-        let network_actor = self.network_actor.as_ref().ok_or(ErrorObjectOwned::owned(
-            CALL_EXECUTION_FAILED_CODE,
-            "network actor not initialized".to_string(),
-            Option::<()>::None,
-        ))?;
+        let network_actor = self
+            .network_actor
+            .as_ref()
+            .ok_or_else(|| rpc_error_no_data("network actor not initialized"))?;
 
-        let SettleInvoiceParams {
-            payment_hash,
-            payment_preimage,
-        } = params;
+        let payment_hash = params.payment_hash.into();
+        let payment_preimage = params.payment_preimage.into();
 
         let message = move |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(

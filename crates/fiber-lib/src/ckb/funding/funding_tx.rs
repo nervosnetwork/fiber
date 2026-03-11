@@ -1,11 +1,9 @@
 use super::super::{signer::LocalSigner, FundingError};
-use crate::{
-    ckb::{
-        config::{new_ckb_rpc_async_client, new_default_cell_collector},
-        contracts::get_udt_cell_deps,
-    },
-    fiber::serde_utils::EntityHex,
+use crate::ckb::{
+    config::{new_ckb_rpc_async_client, new_default_cell_collector},
+    contracts::get_udt_cell_deps,
 };
+
 use anyhow::anyhow;
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
@@ -24,6 +22,7 @@ use ckb_types::{
     packed::{self, Bytes, CellInput, CellOutput, Script, Transaction},
     prelude::*,
 };
+use fiber_types::serde_utils::EntityHex;
 use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
