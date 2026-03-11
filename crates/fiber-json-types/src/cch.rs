@@ -4,13 +4,15 @@
 use fiber_cli_derive::CliArgs;
 
 use crate::invoice::Currency;
+use crate::schema_helpers::*;
 use crate::serde_utils::{Hash256, U128Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 /// The status of a cross-chain hub order, will update as the order progresses.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
 pub enum CchOrderStatus {
     /// Order is created and waiting for the incoming invoice to collect enough TLCs.
     Pending,
@@ -33,7 +35,7 @@ pub enum CchOrderStatus {
 /// ```text
 /// { "Fiber": String } | { "Lightning": String }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum CchInvoice {
     /// Fiber invoice string
     Fiber(String),
@@ -42,7 +44,7 @@ pub enum CchInvoice {
 }
 
 /// Parameters for sending BTC via cross-chain hub.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct SendBTCParams {
     /// Payment request string for the BTC Lightning payee.
@@ -54,13 +56,15 @@ pub struct SendBTCParams {
 
 /// Cross-chain hub order response.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CchOrderResponse {
     /// Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub timestamp: u64,
     /// Relative expiry time in seconds from `created_at` that the order expires
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub expiry_delta_seconds: u64,
 
     /// Wrapped BTC type script
@@ -74,9 +78,11 @@ pub struct CchOrderResponse {
     pub payment_hash: Hash256,
     /// Amount required to pay in Satoshis, including fee
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub amount_sats: u128,
     /// Fee in Satoshis
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub fee_sats: u128,
     /// Order status
     pub status: CchOrderStatus,
@@ -84,7 +90,7 @@ pub struct CchOrderResponse {
 
 /// Parameters for receiving BTC via cross-chain hub.
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct ReceiveBTCParams {
     /// Payment request string for the CKB Fiber payee.
@@ -92,7 +98,7 @@ pub struct ReceiveBTCParams {
 }
 
 /// Parameters for getting a CCH order.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct GetCchOrderParams {
     /// Payment hash for the HTLC for both CKB and BTC.

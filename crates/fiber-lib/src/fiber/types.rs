@@ -13,12 +13,13 @@ use fiber_types::molecule_table_data_len;
 pub use fiber_types::{
     gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt, PubNonceOpt},
     gen::gossip::{self as molecule_gossip},
-    BasicMppPaymentData, BroadcastMessage, BroadcastMessageID, ChannelAnnouncement, ChannelFlags,
-    ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, Cursor,
-    EcdsaSignature, FeatureVector, Hash256, HashAlgorithm, NodeAnnouncement, OnionPacketError,
-    PartialSignatureAsBytes, PaymentCustomRecords, PaymentOnionPacket, PeeledPaymentOnionPacket,
-    Privkey, PubNonceAsBytes, Pubkey, RemoveTlcReason, RevokeAndAck, TlcErr,
-    UnknownHashAlgorithmError, CURSOR_SIZE, ONION_PACKET_VERSION_V1,
+    AddTlc, BasicMppPaymentData, BroadcastMessage, BroadcastMessageID, ChannelAnnouncement,
+    ChannelFlags, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
+    ChannelUpdateMessageFlags, Cursor, EcdsaSignature, FeatureVector, Hash256, HashAlgorithm,
+    NodeAnnouncement, OnionPacketError, PartialSignatureAsBytes, PaymentCustomRecords,
+    PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, PubNonceAsBytes, Pubkey, RemoveTlc,
+    RemoveTlcReason, RevokeAndAck, TlcErr, UnknownHashAlgorithmError, CURSOR_SIZE,
+    ONION_PACKET_VERSION_V1,
 };
 
 use molecule::prelude::{Builder, Byte, Entity};
@@ -632,105 +633,6 @@ impl From<UpdateTlcInfo> for ChannelTlcInfo {
             tlc_minimum_value: update_tlc_info.tlc_minimum_value,
             tlc_fee_proportional_millionths: update_tlc_info.tlc_fee_proportional_millionths,
         }
-    }
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AddTlc {
-    pub channel_id: Hash256,
-    pub tlc_id: u64,
-    pub amount: u128,
-    pub payment_hash: Hash256,
-    pub expiry: u64,
-    pub hash_algorithm: HashAlgorithm,
-    pub onion_packet: Option<PaymentOnionPacket>,
-}
-
-impl Debug for AddTlc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AddTlc")
-            .field("channel_id", &self.channel_id)
-            .field("tlc_id", &self.tlc_id)
-            .field("amount", &self.amount)
-            .field("payment_hash", &self.payment_hash)
-            .field("expiry", &self.expiry)
-            .field("hash_algorithm", &self.hash_algorithm)
-            .finish()
-    }
-}
-
-impl From<AddTlc> for molecule_fiber::AddTlc {
-    fn from(add_tlc: AddTlc) -> Self {
-        molecule_fiber::AddTlc::new_builder()
-            .channel_id(add_tlc.channel_id.into())
-            .tlc_id(add_tlc.tlc_id.pack())
-            .amount(add_tlc.amount.pack())
-            .payment_hash(add_tlc.payment_hash.into())
-            .expiry(add_tlc.expiry.pack())
-            .hash_algorithm(Byte::new(add_tlc.hash_algorithm as u8))
-            .onion_packet(
-                add_tlc
-                    .onion_packet
-                    .map(|p| p.into_bytes())
-                    .unwrap_or_default()
-                    .pack(),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
-    type Error = Error;
-
-    fn try_from(add_tlc: molecule_fiber::AddTlc) -> Result<Self, Self::Error> {
-        let onion_packet_bytes: Vec<u8> = add_tlc.onion_packet().unpack();
-        let onion_packet =
-            (!onion_packet_bytes.is_empty()).then(|| PaymentOnionPacket::new(onion_packet_bytes));
-        Ok(AddTlc {
-            onion_packet,
-            channel_id: add_tlc.channel_id().into(),
-            tlc_id: add_tlc.tlc_id().unpack(),
-            amount: add_tlc.amount().unpack(),
-            payment_hash: add_tlc.payment_hash().into(),
-            expiry: add_tlc.expiry().unpack(),
-            hash_algorithm: add_tlc
-                .hash_algorithm()
-                .try_into()
-                .map_err(|err: UnknownHashAlgorithmError| Error::AnyHow(err.into()))?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoveTlc {
-    pub channel_id: Hash256,
-    pub tlc_id: u64,
-    pub reason: RemoveTlcReason,
-}
-
-impl From<RemoveTlc> for molecule_fiber::RemoveTlc {
-    fn from(remove_tlc: RemoveTlc) -> Self {
-        molecule_fiber::RemoveTlc::new_builder()
-            .channel_id(remove_tlc.channel_id.into())
-            .tlc_id(remove_tlc.tlc_id.pack())
-            .reason(
-                molecule_fiber::RemoveTlcReason::new_builder()
-                    .set(remove_tlc.reason)
-                    .build(),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::RemoveTlc> for RemoveTlc {
-    type Error = Error;
-
-    fn try_from(remove_tlc: molecule_fiber::RemoveTlc) -> Result<Self, Self::Error> {
-        Ok(RemoveTlc {
-            channel_id: remove_tlc.channel_id().into(),
-            tlc_id: remove_tlc.tlc_id().unpack(),
-            reason: remove_tlc.reason().into(),
-        })
     }
 }
 

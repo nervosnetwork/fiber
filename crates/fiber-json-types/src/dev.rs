@@ -4,12 +4,14 @@
 use fiber_cli_derive::CliArgs;
 
 use crate::invoice::HashAlgorithm;
+use crate::schema_helpers::*;
 use crate::serde_utils::{Hash256, U128Hex, U64Hex};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 /// Parameters for sending a commitment_signed message.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 #[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct CommitmentSignedParams {
     /// The channel ID of the channel to send the commitment_signed message to
@@ -18,18 +20,20 @@ pub struct CommitmentSignedParams {
 
 /// Parameters for adding a TLC.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 #[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct AddTlcParams {
     /// The channel ID of the channel to add the TLC to
     pub channel_id: Hash256,
     /// The amount of the TLC
     #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub amount: u128,
     /// The payment hash of the TLC
     pub payment_hash: Hash256,
     /// The expiry of the TLC
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub expiry: u64,
     /// The hash algorithm of the TLC
     #[cfg_attr(feature = "cli", cli(serde_enum))]
@@ -38,21 +42,23 @@ pub struct AddTlcParams {
 
 /// Result of adding a TLC.
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AddTlcResult {
     /// The ID of the TLC
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub tlc_id: u64,
 }
 
 /// Parameters for removing a TLC.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 #[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct RemoveTlcParams {
     /// The channel ID of the channel to remove the TLC from
     pub channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     /// The ID of the TLC to remove
     pub tlc_id: u64,
     /// The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
@@ -62,7 +68,7 @@ pub struct RemoveTlcParams {
 
 /// The reason for removing a TLC.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 #[serde(untagged)]
 pub enum RemoveTlcReason {
     /// The reason for removing the TLC is that it was fulfilled
@@ -73,19 +79,20 @@ pub enum RemoveTlcReason {
 
 /// Parameters for submitting a commitment transaction.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 #[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct SubmitCommitmentTransactionParams {
     /// Channel ID
     pub channel_id: Hash256,
     /// Commitment number
     #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
     pub commitment_number: u64,
 }
 
 /// Result of submitting a commitment transaction.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct SubmitCommitmentTransactionResult {
     /// Submitted commitment transaction hash
     pub tx_hash: Hash256,
@@ -93,7 +100,7 @@ pub struct SubmitCommitmentTransactionResult {
 
 /// Parameters for checking channel shutdown.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 #[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct CheckChannelShutdownParams {
     /// Channel ID

@@ -481,6 +481,7 @@ fn test_channel_actor_state_store() {
     );
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
+    let channel_id = gen_rand_sha256_hash();
 
     let state = ChannelActorState {
         core: ChannelActorData {
@@ -518,7 +519,7 @@ fn test_channel_actor_state_store() {
             commitment_fee_rate: 100,
             commitment_delay_epoch: 100,
             funding_fee_rate: 100,
-            id: gen_rand_sha256_hash(),
+            id: channel_id,
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
@@ -552,16 +553,24 @@ fn test_channel_actor_state_store() {
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
             last_revoke_ack_msg: None,
+            pending_replay_updates: vec![TlcReplayUpdate::Add(AddTlc {
+                channel_id,
+                tlc_id: 1,
+                amount: 1000,
+                payment_hash: gen_rand_sha256_hash(),
+                expiry: 1200,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                onion_packet: None,
+            })],
+            last_was_revoke: true,
             created_at: SystemTime::now(),
         },
-        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
-        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     };
@@ -575,9 +584,14 @@ fn test_channel_actor_state_store() {
     assert!(store.get_channel_actor_state(&state.id).is_none());
     store.insert_channel_actor_state(state.clone());
 
-    let get_state = store.get_channel_actor_state(&state.id);
-    assert!(get_state.is_some());
-    assert!(!get_state.unwrap().is_tlc_forwarding_enabled());
+    let get_state = store.get_channel_actor_state(&state.id).unwrap();
+    assert!(!get_state.is_tlc_forwarding_enabled());
+    assert_eq!(get_state.pending_replay_updates.len(), 1);
+    assert!(matches!(
+        get_state.pending_replay_updates.first(),
+        Some(TlcReplayUpdate::Add(add)) if add.channel_id == channel_id && add.tlc_id == 1
+    ));
+    assert_eq!(get_state.last_was_revoke, state.last_was_revoke);
 
     let remote_pubkey = state.get_remote_pubkey();
     assert_eq!(
@@ -681,16 +695,16 @@ fn test_serde_channel_actor_state_ciborium() {
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
             last_revoke_ack_msg: None,
+            pending_replay_updates: vec![],
+            last_was_revoke: false,
             created_at: SystemTime::now(),
         },
-        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
-        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     };

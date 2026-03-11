@@ -56,13 +56,16 @@ use fiber_types::{
     ChannelAnnouncement, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
     ChannelOpenRecord, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
     ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
-    EcdsaSignature, EntityHex, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
-    NegotiatingFundingFlags, OutboundTlcStatus, PartialSignatureAsBytes, PaymentCustomRecords,
-    PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey, PubNonceAsBytes,
-    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
+    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
+    PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
+    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr,
+    TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+};
+pub use fiber_types::{
+    CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
+    CURRENT_COMMIT_DIFF_VERSION,
 };
 use molecule::prelude::{Builder, Entity};
 #[cfg(test)]
@@ -81,7 +84,6 @@ use ractor::{
 };
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 #[cfg(test)]
@@ -1592,7 +1594,7 @@ where
 
         // Store CommitDiff for potential reestablishment
         let commit_diff = CommitDiff {
-            version: default_commit_diff_version(),
+            version: CURRENT_COMMIT_DIFF_VERSION,
             channel_id: state.get_id(),
             local_commitment_number_at_send: state.get_local_commitment_number(),
             remote_commitment_number_at_send: state.get_remote_commitment_number(),
@@ -3130,75 +3132,6 @@ pub fn settlement_tlc_local_pubkey_hash(tlc: &SettlementTlc) -> [u8; 20] {
     blake160(&tlc.local_key.pubkey().serialize()).0
 }
 
-/// CommitDiff stores everything needed to resend a pending CommitmentSigned
-/// during channel reestablishment without rebuilding the transaction.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitDiff {
-    /// Structure version for backward/forward compatibility.
-    #[serde(default = "default_commit_diff_version")]
-    pub version: u8,
-
-    /// Channel that owns this diff.
-    #[serde(default)]
-    pub channel_id: Hash256,
-
-    /// Local/remote commitment numbers when this commitment was sent.
-    #[serde(default)]
-    pub local_commitment_number_at_send: u64,
-    #[serde(default)]
-    pub remote_commitment_number_at_send: u64,
-
-    /// The commitment transaction (used for resign, not rebuilt)
-    #[serde_as(as = "EntityHex")]
-    pub commit_tx: Transaction,
-
-    /// TLC updates included in this commitment (for resending).
-    #[serde(default, alias = "tlc_updates")]
-    pub replay_updates: Vec<TlcReplayUpdate>,
-
-    /// Optional template fields for CommitmentSigned replay.
-    #[serde(default)]
-    pub commitment_signed_template: Option<CommitmentSignedTemplate>,
-
-    /// Optional replay ordering hint when both revoke+commit are owed.
-    #[serde(default)]
-    pub replay_order_hint: Option<ReplayOrderHint>,
-
-    /// Creation timestamp
-    #[serde(default, alias = "created_at")]
-    pub created_at_ms: u64,
-}
-
-const CURRENT_COMMIT_DIFF_VERSION: u8 = 2;
-
-fn default_commit_diff_version() -> u8 {
-    CURRENT_COMMIT_DIFF_VERSION
-}
-
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitmentSignedTemplate {
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_commitment_nonce: PubNonce,
-    #[serde(default)]
-    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
-    pub funding_tx_partial_signature: Option<PartialSignature>,
-}
-
-/// TLC update message to resend during reestablishment
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum TlcReplayUpdate {
-    Add(AddTlc),
-    Remove(RemoveTlc),
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ReplayOrderHint {
-    RevokeThenCommit,
-    CommitThenRevoke,
-}
-
 pub(crate) fn validate_commit_diff_for_replay_inputs(
     channel_id: Hash256,
     waiting_ack: bool,
@@ -3308,34 +3241,23 @@ type ScheduledChannelUpdateHandle =
 
 /// Wrapper around [`ChannelActorData`] that adds runtime-only fields.
 ///
-/// All 42 persistable fields live in the embedded `core`.
+/// All persistable fields live in the embedded `core`.
 /// Thanks to `Deref<Target = ChannelActorData>` (and `DerefMut`),
 /// existing code that accesses `self.field` continues to work transparently.
 ///
-/// Serialization delegates entirely to `ChannelActorData`,
-/// preserving the exact same bincode wire format as before.
+/// Serialization delegates entirely to `ChannelActorData`.
 #[derive(Clone)]
 pub struct ChannelActorState {
     /// All persistable channel state fields.
     pub core: ChannelActorData,
 
     // --- Runtime-only fields (not serialized) ---
-    /// TLC updates sent to peer since the last local CommitmentSigned.
-    /// This preserves send order for reestablish replay.
-    #[doc = "skip_store"]
-    pub pending_replay_updates: Vec<TlcReplayUpdate>,
-
     /// Temporarily defer peer TLC updates while replaying dual-owed state.
     #[doc = "skip_store"]
     pub defer_peer_tlc_updates: bool,
     /// Deferred peer TLC updates queued during replay.
     #[doc = "skip_store"]
     pub deferred_peer_tlc_updates: VecDeque<DeferredPeerTlcUpdate>,
-
-    /// Tracks whether the last outbound sync message was RevokeAndAck.
-    #[doc = "skip_store"]
-    pub last_was_revoke: bool,
-
     // The time stamp we last sent a message to the peer, used to check if the peer is still alive.
     // We will disconnect the peer if we haven't sent any message to the peer for a long time.
     // Currently we only have set commitment_signed as the heartbeat message.
@@ -3380,7 +3302,6 @@ impl std::ops::DerefMut for ChannelActorState {
 
 impl Serialize for ChannelActorState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Delegate to ChannelActorData — runtime-only fields are not serialized.
         self.core.serialize(serializer)
     }
 }
@@ -3390,14 +3311,12 @@ impl<'de> Deserialize<'de> for ChannelActorState {
         let core = ChannelActorData::deserialize(deserializer)?;
         Ok(Self {
             core,
-            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
-            last_was_revoke: false,
             ephemeral_config: Default::default(),
             private_key: None,
         })
@@ -4129,16 +4048,16 @@ impl ChannelActorState {
                 latest_commitment_transaction: None,
                 reestablishing: false,
                 last_revoke_ack_msg: None,
+                pending_replay_updates: vec![],
+                last_was_revoke: false,
                 created_at: SystemTime::now(),
             },
-            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
-            last_was_revoke: false,
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
         };
@@ -4219,16 +4138,16 @@ impl ChannelActorState {
                 latest_commitment_transaction: None,
                 reestablishing: false,
                 last_revoke_ack_msg: None,
+                pending_replay_updates: vec![],
+                last_was_revoke: false,
                 created_at: SystemTime::now(),
             },
-            pending_replay_updates: vec![],
             waiting_peer_response: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
-            last_was_revoke: false,
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
         };

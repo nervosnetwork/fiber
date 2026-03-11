@@ -3,6 +3,7 @@
 //! We define CkbInvoice and its related types here only for the RPC interface.
 //! For better separation of concerns, the actual invoice logic is implemented in the `invoice` module.
 //!
+
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
