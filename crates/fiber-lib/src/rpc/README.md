@@ -344,7 +344,7 @@ Updates a channel.
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel to update
-* `enabled` - <em>`Option<bool>`</em>, Whether the channel is enabled
+* `enabled` - <em>`Option<bool>`</em>, Whether the channel is enabled, default value is true
 * `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta for the TLC locktime
 * `tlc_minimum_value` - <em>`Option<u128>`</em>, The minimum value for a TLC
 * `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC

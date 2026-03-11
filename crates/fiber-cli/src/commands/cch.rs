@@ -1,3 +1,4 @@
+use crate::cli_generated::CliArgs;
 use crate::rpc_client::RpcClient;
 use anyhow::Result;
 use clap::{ArgMatches, Command};

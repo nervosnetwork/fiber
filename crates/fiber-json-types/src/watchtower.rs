@@ -1,8 +1,5 @@
 //! Watchtower types for the Fiber Network JSON-RPC API.
 
-#[cfg(feature = "cli")]
-use fiber_cli_derive::CliArgs;
-
 use crate::invoice::HashAlgorithm;
 use crate::schema_helpers::*;
 use crate::serde_utils::{EntityHex, Hash256, Privkey, Pubkey, SliceHex, U128Hex, U64Hex};
@@ -95,12 +92,10 @@ pub struct RevocationData {
 /// Parameters for creating a watch channel.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct CreateWatchChannelParams {
     /// Channel ID
     pub channel_id: Hash256,
     /// Funding UDT type script
-    #[cfg_attr(feature = "cli", cli(json))]
     pub funding_udt_type_script: Option<Script>,
     /// The local party's private key used to settle the commitment transaction (hex without 0x prefix)
     pub local_settlement_key: Privkey,
@@ -111,14 +106,12 @@ pub struct CreateWatchChannelParams {
     /// The remote party's funding public key (hex without 0x prefix)
     pub remote_funding_pubkey: Pubkey,
     /// Settlement data
-    #[cfg_attr(feature = "cli", cli(json))]
     pub settlement_data: SettlementData,
 }
 
 /// Parameters for removing a watch channel.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct RemoveWatchChannelParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -127,46 +120,38 @@ pub struct RemoveWatchChannelParams {
 /// Parameters for updating revocation.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct UpdateRevocationParams {
     /// Channel ID
     pub channel_id: Hash256,
     /// Revocation data
-    #[cfg_attr(feature = "cli", cli(json))]
     pub revocation_data: RevocationData,
     /// Settlement data
-    #[cfg_attr(feature = "cli", cli(json))]
     pub settlement_data: SettlementData,
 }
 
 /// Parameters for updating pending remote settlement.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct UpdatePendingRemoteSettlementParams {
     /// Channel ID
     pub channel_id: Hash256,
     /// Settlement data
-    #[cfg_attr(feature = "cli", cli(json))]
     pub settlement_data: SettlementData,
 }
 
 /// Parameters for updating local settlement.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct UpdateLocalSettlementParams {
     /// Channel ID
     pub channel_id: Hash256,
     /// Settlement data
-    #[cfg_attr(feature = "cli", cli(json))]
     pub settlement_data: SettlementData,
 }
 
 /// Parameters for creating a preimage.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct CreatePreimageParams {
     /// Payment hash
     pub payment_hash: Hash256,
@@ -177,7 +162,6 @@ pub struct CreatePreimageParams {
 /// Parameters for removing a preimage.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct RemovePreimageParams {
     /// Payment hash
     pub payment_hash: Hash256,

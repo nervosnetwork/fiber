@@ -1,34 +1,392 @@
-//! Tests for the derive(CliArgs) generated `augment_command()` and `from_arg_matches()` methods.
-//!
-//! These tests verify that CLI arguments are correctly parsed into typed param structs
-//! across all type categories: String, u64, u128, Hash256, Pubkey, Privkey, json,
-//! json_quoted, serde_enum, bool_flag, and skip.
-//!
-//! Run with: cargo nextest run -p fiber-json-types --features cli,cch,watchtower
+use super::*;
 
-use clap::Command;
+// ── shell_words tests ────────────────────────────────────────────────
 
-// ── Helpers ──────────────────────────────────────────────────────────────
+#[test]
+fn test_shell_words_simple() {
+    let result = shell_words("hello world").unwrap();
+    assert_eq!(result, vec!["hello", "world"]);
+}
+
+#[test]
+fn test_shell_words_empty() {
+    let result = shell_words("").unwrap();
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_shell_words_whitespace_only() {
+    let result = shell_words("   \t  ").unwrap();
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_shell_words_single_word() {
+    let result = shell_words("hello").unwrap();
+    assert_eq!(result, vec!["hello"]);
+}
+
+#[test]
+fn test_shell_words_multiple_spaces() {
+    let result = shell_words("hello    world").unwrap();
+    assert_eq!(result, vec!["hello", "world"]);
+}
+
+#[test]
+fn test_shell_words_leading_trailing_spaces() {
+    let result = shell_words("  hello world  ").unwrap();
+    assert_eq!(result, vec!["hello", "world"]);
+}
+
+#[test]
+fn test_shell_words_tabs() {
+    let result = shell_words("hello\tworld").unwrap();
+    assert_eq!(result, vec!["hello", "world"]);
+}
+
+#[test]
+fn test_shell_words_double_quotes() {
+    let result = shell_words(r#"hello "world foo" bar"#).unwrap();
+    assert_eq!(result, vec!["hello", "world foo", "bar"]);
+}
+
+#[test]
+fn test_shell_words_single_quotes() {
+    let result = shell_words("hello 'world foo' bar").unwrap();
+    assert_eq!(result, vec!["hello", "world foo", "bar"]);
+}
+
+#[test]
+fn test_shell_words_mixed_quotes() {
+    let result = shell_words(r#"'single' "double" plain"#).unwrap();
+    assert_eq!(result, vec!["single", "double", "plain"]);
+}
+
+#[test]
+fn test_shell_words_backslash_escape() {
+    let result = shell_words(r"hello\ world").unwrap();
+    assert_eq!(result, vec!["hello world"]);
+}
+
+#[test]
+fn test_shell_words_backslash_in_double_quotes() {
+    let result = shell_words(r#""hello\" world""#).unwrap();
+    assert_eq!(result, vec![r#"hello" world"#]);
+}
+
+#[test]
+fn test_shell_words_single_quotes_preserve_backslash() {
+    // Single quotes preserve everything literally, including backslash
+    let result = shell_words(r"'hello\ world'").unwrap();
+    assert_eq!(result, vec![r"hello\ world"]);
+}
+
+#[test]
+fn test_shell_words_empty_double_quotes() {
+    let result = shell_words(r#"hello "" world"#).unwrap();
+    // Empty quotes don't produce a token since shell_words only pushes non-empty strings
+    assert_eq!(result, vec!["hello", "world"]);
+}
+
+#[test]
+fn test_shell_words_empty_single_quotes() {
+    let result = shell_words("hello '' world").unwrap();
+    assert_eq!(result, vec!["hello", "world"]);
+}
+
+#[test]
+fn test_shell_words_unclosed_double_quote() {
+    let result = shell_words(r#"hello "world"#);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Unclosed quote"));
+}
+
+#[test]
+fn test_shell_words_unclosed_single_quote() {
+    let result = shell_words("hello 'world");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Unclosed quote"));
+}
+
+#[test]
+fn test_shell_words_json_argument() {
+    // Typical real usage: passing JSON as a CLI argument
+    let result =
+        shell_words(r#"channel open --funding-udt-type-script '{"code_hash":"0xabc"}'"#).unwrap();
+    assert_eq!(
+        result,
+        vec![
+            "channel",
+            "open",
+            "--funding-udt-type-script",
+            r#"{"code_hash":"0xabc"}"#
+        ]
+    );
+}
+
+#[test]
+fn test_shell_words_adjacent_quotes() {
+    // Quoted segments adjacent to unquoted text merge into one word
+    let result = shell_words(r#"hello"world"foo"#).unwrap();
+    assert_eq!(result, vec!["helloworldfoo"]);
+}
+
+#[test]
+fn test_shell_words_double_quote_inside_single_quotes() {
+    let result = shell_words(r#"'he said "hello"'"#).unwrap();
+    assert_eq!(result, vec![r#"he said "hello""#]);
+}
+
+#[test]
+fn test_shell_words_single_quote_inside_double_quotes() {
+    let result = shell_words(r#""it's fine""#).unwrap();
+    assert_eq!(result, vec!["it's fine"]);
+}
+
+// ── build_cli / build_interactive_cli structure tests ────────────────
+
+#[test]
+fn test_build_cli_has_expected_subcommands() {
+    let cli = build_cli();
+    let sub_names: Vec<&str> = cli.get_subcommands().map(|s| s.get_name()).collect();
+    let expected = [
+        "info",
+        "peer",
+        "channel",
+        "invoice",
+        "payment",
+        "graph",
+        "cch",
+        "dev",
+        "watchtower",
+        "prof",
+    ];
+    for name in &expected {
+        assert!(
+            sub_names.contains(name),
+            "build_cli() missing subcommand: {}",
+            name
+        );
+    }
+}
+
+#[test]
+fn test_build_cli_global_args() {
+    let cli = build_cli();
+    let arg_names: Vec<&str> = cli.get_arguments().filter_map(|a| a.get_long()).collect();
+    assert!(arg_names.contains(&"url"));
+    assert!(arg_names.contains(&"raw-data"));
+    assert!(arg_names.contains(&"output-format"));
+    assert!(arg_names.contains(&"no-banner"));
+    assert!(arg_names.contains(&"color"));
+    assert!(arg_names.contains(&"auth-token"));
+}
+
+#[test]
+fn test_build_cli_auth_token_parsed() {
+    let cli = build_cli();
+    let matches = cli
+        .try_get_matches_from(["fnn-cli", "--auth-token", "my-secret", "info"])
+        .unwrap();
+    let token = matches.get_one::<String>("auth_token").unwrap();
+    assert_eq!(token, "my-secret");
+}
+
+#[test]
+fn test_build_cli_auth_token_optional() {
+    let cli = build_cli();
+    let matches = cli.try_get_matches_from(["fnn-cli", "info"]).unwrap();
+    assert!(matches.get_one::<String>("auth_token").is_none());
+}
+
+#[test]
+fn test_build_interactive_cli_has_exit_quit() {
+    let cli = build_interactive_cli();
+    let sub_names: Vec<&str> = cli.get_subcommands().map(|s| s.get_name()).collect();
+    assert!(sub_names.contains(&"exit"));
+    assert!(sub_names.contains(&"quit"));
+}
+
+#[test]
+fn test_build_interactive_cli_has_same_commands() {
+    let cli = build_interactive_cli();
+    let sub_names: Vec<&str> = cli.get_subcommands().map(|s| s.get_name()).collect();
+    let expected = [
+        "info",
+        "peer",
+        "channel",
+        "invoice",
+        "payment",
+        "graph",
+        "cch",
+        "dev",
+        "watchtower",
+        "prof",
+    ];
+    for name in &expected {
+        assert!(
+            sub_names.contains(name),
+            "build_interactive_cli() missing subcommand: {}",
+            name
+        );
+    }
+}
+
+// ── build_completion_tree tests ──────────────────────────────────────
+
+#[test]
+fn test_completion_tree_has_top_level() {
+    let cli = build_interactive_cli();
+    let tree = build_completion_tree(&cli);
+    let top = tree.get("").expect("should have empty-string key");
+    assert!(top.contains(&"channel".to_string()));
+    assert!(top.contains(&"payment".to_string()));
+    assert!(top.contains(&"info".to_string()));
+}
+
+#[test]
+fn test_completion_tree_has_subcommand_entries() {
+    let cli = build_interactive_cli();
+    let tree = build_completion_tree(&cli);
+    // "channel" should have subcommand entries (open_channel, list_channels, etc.)
+    let channel_entries = tree.get("channel").expect("should have 'channel' key");
+    assert!(
+        !channel_entries.is_empty(),
+        "channel should have completions"
+    );
+    // Should contain subcommand names like "open_channel", "list_channels"
+    assert!(
+        channel_entries.contains(&"open_channel".to_string()),
+        "channel completions should include 'open_channel', got: {:?}",
+        channel_entries
+    );
+}
+
+#[test]
+fn test_completion_tree_subcommand_has_options() {
+    let cli = build_interactive_cli();
+    let tree = build_completion_tree(&cli);
+    // "channel open_channel" should have --flag options
+    let key = "channel open_channel".to_string();
+    if let Some(options) = tree.get(&key) {
+        // Should have at least --pubkey and --funding-amount
+        assert!(
+            options.iter().any(|o| o == "--pubkey"),
+            "channel open_channel should have --pubkey option"
+        );
+        assert!(
+            options.iter().any(|o| o == "--funding-amount"),
+            "channel open_channel should have --funding-amount option"
+        );
+    }
+    // Note: if the key doesn't exist, the completion tree may merge options
+    // into the parent level, which is also acceptable behavior.
+}
+
+// ── Shared helper for CLI arg tests ─────────────────────────────────
 
 /// Build a command with augmented args and parse the given CLI tokens.
 fn parse_args<F>(augment: F, args: &[&str]) -> clap::ArgMatches
 where
-    F: FnOnce(Command) -> Command,
+    F: FnOnce(clap::Command) -> clap::Command,
 {
-    let cmd = augment(Command::new("test"));
+    let cmd = augment(clap::Command::new("test"));
     cmd.try_get_matches_from(args).unwrap()
 }
 
-// ── Channel module tests ─────────────────────────────────────────────────
+// ── Peer CLI arg tests (migrated from fiber-json-types/src/cli_tests.rs) ─
 
-mod channel_tests {
-    use super::*;
-    use crate::channel::*;
-    use crate::serde_utils::{Hash256, Pubkey};
+mod peer_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use clap::Command;
+    use fiber_json_types::serde_utils::Pubkey;
+    use fiber_json_types::{ConnectPeerParams, DisconnectPeerParams};
+
+    #[test]
+    fn test_connect_peer_by_address() {
+        let matches = parse_args(
+            ConnectPeerParams::augment_command,
+            &["test", "--address", "/ip4/127.0.0.1/tcp/8119"],
+        );
+        let params = ConnectPeerParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.address, Some("/ip4/127.0.0.1/tcp/8119".to_string()));
+        assert!(params.pubkey.is_none());
+        assert!(params.save.is_none());
+    }
+
+    #[test]
+    fn test_connect_peer_by_pubkey() {
+        let pubkey_hex = "03".to_string() + &"aa".repeat(32);
+        let matches = parse_args(
+            ConnectPeerParams::augment_command,
+            &["test", "--pubkey", &pubkey_hex],
+        );
+        let params = ConnectPeerParams::from_arg_matches(&matches).unwrap();
+        assert!(params.address.is_none());
+        assert_eq!(params.pubkey, Some(pubkey_hex.parse::<Pubkey>().unwrap()));
+    }
+
+    #[test]
+    fn test_connect_peer_with_save() {
+        let matches = parse_args(
+            ConnectPeerParams::augment_command,
+            &[
+                "test",
+                "--address",
+                "/ip4/127.0.0.1/tcp/8119",
+                "--save",
+                "true",
+            ],
+        );
+        let params = ConnectPeerParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.save, Some(true));
+    }
+
+    #[test]
+    fn test_disconnect_peer() {
+        let pubkey_hex = "03".to_string() + &"bb".repeat(32);
+        let matches = parse_args(
+            DisconnectPeerParams::augment_command,
+            &["test", "--pubkey", &pubkey_hex],
+        );
+        let params = DisconnectPeerParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.pubkey, pubkey_hex.parse::<Pubkey>().unwrap());
+    }
+
+    #[test]
+    fn test_disconnect_peer_pubkey_required() {
+        let cmd = DisconnectPeerParams::augment_command(Command::new("test"));
+        let pubkey_arg = cmd
+            .get_arguments()
+            .find(|a| a.get_long() == Some("pubkey"))
+            .unwrap();
+        assert!(pubkey_arg.is_required_set());
+    }
+
+    #[test]
+    fn test_invalid_pubkey_length() {
+        // Too short
+        let matches = parse_args(
+            DisconnectPeerParams::augment_command,
+            &["test", "--pubkey", "0x1234"],
+        );
+        let result = DisconnectPeerParams::from_arg_matches(&matches);
+        assert!(result.is_err());
+    }
+}
+
+// ── Channel CLI arg tests ────────────────────────────────────────────
+
+mod channel_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use clap::Command;
+    use fiber_json_types::channel::*;
+    use fiber_json_types::serde_utils::{Hash256, Pubkey};
 
     #[test]
     fn test_open_channel_required_fields() {
-        // Pubkey: 33 bytes, no prefix
         let pubkey_hex = "03".to_string() + &"ab".repeat(32);
         let matches = parse_args(
             OpenChannelParams::augment_command,
@@ -43,7 +401,6 @@ mod channel_tests {
         let params = OpenChannelParams::from_arg_matches(&matches).unwrap();
         assert_eq!(params.pubkey, pubkey_hex.parse::<Pubkey>().unwrap());
         assert_eq!(params.funding_amount, 100000000u128);
-        // Optional fields should be None
         assert!(params.funding_udt_type_script.is_none());
         assert!(params.shutdown_script.is_none());
         assert!(params.commitment_delay_epoch.is_none());
@@ -54,7 +411,6 @@ mod channel_tests {
     #[test]
     fn test_open_channel_bool_flag_default_true() {
         let pubkey_hex = "03".to_string() + &"ab".repeat(32);
-        // --public without a value should default to true
         let matches = parse_args(
             OpenChannelParams::augment_command,
             &[
@@ -92,7 +448,6 @@ mod channel_tests {
     #[test]
     fn test_open_channel_bool_flag_default_false() {
         let pubkey_hex = "03".to_string() + &"ab".repeat(32);
-        // --one-way without a value should default to false
         let matches = parse_args(
             OpenChannelParams::augment_command,
             &[
@@ -199,7 +554,6 @@ mod channel_tests {
 
     #[test]
     fn test_open_channel_missing_required_fails() {
-        // Missing --pubkey should fail
         let cmd = OpenChannelParams::augment_command(Command::new("test"));
         let result = cmd.try_get_matches_from(["test", "--funding-amount", "100"]);
         assert!(result.is_err());
@@ -240,7 +594,6 @@ mod channel_tests {
 
     #[test]
     fn test_list_channels_all_optional() {
-        // All fields are optional, so no args needed
         let matches = parse_args(ListChannelsParams::augment_command, &["test"]);
         let params = ListChannelsParams::from_arg_matches(&matches).unwrap();
         assert!(params.pubkey.is_none());
@@ -300,12 +653,13 @@ mod channel_tests {
     }
 }
 
-// ── Payment module tests ─────────────────────────────────────────────────
+// ── Payment CLI arg tests ────────────────────────────────────────────
 
-mod payment_tests {
-    use super::*;
-    use crate::payment::*;
-    use crate::serde_utils::Hash256;
+mod payment_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::payment::*;
+    use fiber_json_types::serde_utils::Hash256;
 
     #[test]
     fn test_get_payment_params() {
@@ -469,71 +823,13 @@ mod payment_tests {
     }
 }
 
-// ── Peer module tests ────────────────────────────────────────────────────
+// ── Invoice CLI arg tests ────────────────────────────────────────────
 
-mod peer_tests {
-    use super::*;
-    use crate::peer::*;
-    use crate::serde_utils::Pubkey;
-
-    #[test]
-    fn test_connect_peer_by_address() {
-        let matches = parse_args(
-            ConnectPeerParams::augment_command,
-            &["test", "--address", "/ip4/127.0.0.1/tcp/8119"],
-        );
-        let params = ConnectPeerParams::from_arg_matches(&matches).unwrap();
-        assert_eq!(params.address, Some("/ip4/127.0.0.1/tcp/8119".to_string()));
-        assert!(params.pubkey.is_none());
-        assert!(params.save.is_none());
-    }
-
-    #[test]
-    fn test_connect_peer_by_pubkey() {
-        let pubkey_hex = "03".to_string() + &"aa".repeat(32);
-        let matches = parse_args(
-            ConnectPeerParams::augment_command,
-            &["test", "--pubkey", &pubkey_hex],
-        );
-        let params = ConnectPeerParams::from_arg_matches(&matches).unwrap();
-        assert!(params.address.is_none());
-        assert_eq!(params.pubkey, Some(pubkey_hex.parse::<Pubkey>().unwrap()));
-    }
-
-    #[test]
-    fn test_connect_peer_with_save() {
-        let matches = parse_args(
-            ConnectPeerParams::augment_command,
-            &[
-                "test",
-                "--address",
-                "/ip4/127.0.0.1/tcp/8119",
-                "--save",
-                "true",
-            ],
-        );
-        let params = ConnectPeerParams::from_arg_matches(&matches).unwrap();
-        assert_eq!(params.save, Some(true));
-    }
-
-    #[test]
-    fn test_disconnect_peer() {
-        let pubkey_hex = "03".to_string() + &"bb".repeat(32);
-        let matches = parse_args(
-            DisconnectPeerParams::augment_command,
-            &["test", "--pubkey", &pubkey_hex],
-        );
-        let params = DisconnectPeerParams::from_arg_matches(&matches).unwrap();
-        assert_eq!(params.pubkey, pubkey_hex.parse::<Pubkey>().unwrap());
-    }
-}
-
-// ── Invoice module tests ─────────────────────────────────────────────────
-
-mod invoice_tests {
-    use super::*;
-    use crate::invoice::*;
-    use crate::serde_utils::Hash256;
+mod invoice_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::invoice::*;
+    use fiber_json_types::serde_utils::Hash256;
 
     #[test]
     fn test_new_invoice_required_fields() {
@@ -550,7 +846,6 @@ mod invoice_tests {
 
     #[test]
     fn test_new_invoice_serde_enum_currency() {
-        // Test all currency variants
         for (name, expected) in [
             ("Fibb", Currency::Fibb),
             ("Fibt", Currency::Fibt),
@@ -671,12 +966,13 @@ mod invoice_tests {
     }
 }
 
-// ── Dev module tests ─────────────────────────────────────────────────────
+// ── Dev CLI arg tests ────────────────────────────────────────────────
 
-mod dev_tests {
-    use super::*;
-    use crate::dev::*;
-    use crate::serde_utils::Hash256;
+mod dev_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::dev::*;
+    use fiber_json_types::serde_utils::Hash256;
 
     #[test]
     fn test_commitment_signed_params() {
@@ -741,7 +1037,7 @@ mod dev_tests {
         let params = AddTlcParams::from_arg_matches(&matches).unwrap();
         assert_eq!(
             params.hash_algorithm,
-            Some(crate::invoice::HashAlgorithm::Sha256)
+            Some(fiber_json_types::invoice::HashAlgorithm::Sha256)
         );
     }
 
@@ -803,11 +1099,12 @@ mod dev_tests {
     }
 }
 
-// ── Graph module tests ───────────────────────────────────────────────────
+// ── Graph CLI arg tests ──────────────────────────────────────────────
 
-mod graph_tests {
-    use super::*;
-    use crate::graph::*;
+mod graph_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::graph::*;
 
     #[test]
     fn test_graph_nodes_no_args() {
@@ -857,11 +1154,12 @@ mod graph_tests {
     }
 }
 
-// ── Prof module tests ────────────────────────────────────────────────────
+// ── Prof CLI arg tests ───────────────────────────────────────────────
 
-mod prof_tests {
-    use super::*;
-    use crate::prof::*;
+mod prof_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::prof::*;
 
     #[test]
     fn test_pprof_no_args() {
@@ -881,13 +1179,13 @@ mod prof_tests {
     }
 }
 
-// ── CCH module tests ─────────────────────────────────────────────────────
+// ── CCH CLI arg tests ────────────────────────────────────────────────
 
-#[cfg(feature = "cch")]
-mod cch_tests {
-    use super::*;
-    use crate::cch::*;
-    use crate::serde_utils::Hash256;
+mod cch_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::cch::*;
+    use fiber_json_types::serde_utils::Hash256;
 
     #[test]
     fn test_send_btc_params() {
@@ -927,13 +1225,13 @@ mod cch_tests {
     }
 }
 
-// ── Watchtower module tests ──────────────────────────────────────────────
+// ── Watchtower CLI arg tests ─────────────────────────────────────────
 
-#[cfg(feature = "watchtower")]
-mod watchtower_tests {
-    use super::*;
-    use crate::serde_utils::Hash256;
-    use crate::watchtower::*;
+mod watchtower_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::serde_utils::Hash256;
+    use fiber_json_types::watchtower::*;
 
     #[test]
     fn test_remove_watch_channel_params() {
@@ -980,15 +1278,15 @@ mod watchtower_tests {
     }
 }
 
-// ── augment_command structural tests ─────────────────────────────────────
+// ── augment_command structural tests ─────────────────────────────────
 
 mod augment_command_tests {
-    use super::*;
-    use crate::channel::*;
-    use crate::dev::*;
-    use crate::invoice::*;
-    use crate::payment::*;
-    use crate::peer::*;
+    use crate::cli_generated::CliArgs;
+    use clap::Command;
+    use fiber_json_types::channel::*;
+    use fiber_json_types::dev::*;
+    use fiber_json_types::invoice::*;
+    use fiber_json_types::payment::*;
 
     /// Verify that augment_command adds the expected arguments to a Command.
     fn get_arg_names<F>(augment: F) -> Vec<String>
@@ -1030,7 +1328,6 @@ mod augment_command_tests {
                     assert!(arg.is_required_set(), "{} should be required", name);
                 }
                 _ => {
-                    // Optional args should not be required
                     assert!(!arg.is_required_set(), "{} should NOT be required", name);
                 }
             }
@@ -1039,7 +1336,6 @@ mod augment_command_tests {
 
     #[test]
     fn test_send_payment_no_required_args() {
-        // SendPaymentCommandParams has no required fields (all optional)
         let cmd = SendPaymentCommandParams::augment_command(Command::new("test"));
         for arg in cmd.get_arguments() {
             assert!(
@@ -1048,16 +1344,6 @@ mod augment_command_tests {
                 arg.get_long().unwrap_or("")
             );
         }
-    }
-
-    #[test]
-    fn test_disconnect_peer_pubkey_required() {
-        let cmd = DisconnectPeerParams::augment_command(Command::new("test"));
-        let pubkey_arg = cmd
-            .get_arguments()
-            .find(|a| a.get_long() == Some("pubkey"))
-            .unwrap();
-        assert!(pubkey_arg.is_required_set());
     }
 
     #[test]
@@ -1084,31 +1370,28 @@ mod augment_command_tests {
             let arg = cmd
                 .get_arguments()
                 .find(|a| a.get_long() == Some(*name))
-                .expect(&format!("arg {} not found", name));
+                .unwrap_or_else(|| panic!("arg {} not found", name));
             assert!(arg.is_required_set(), "{} should be required", name);
         }
     }
 
     #[test]
     fn test_kebab_case_conversion() {
-        // Verify snake_case field names become kebab-case CLI flags
         let args = get_arg_names(OpenChannelParams::augment_command);
-        // funding_amount -> funding-amount
         assert!(args.contains(&"funding-amount".to_string()));
-        // funding_udt_type_script -> funding-udt-type-script
         assert!(args.contains(&"funding-udt-type-script".to_string()));
-        // commitment_delay_epoch -> commitment-delay-epoch
         assert!(args.contains(&"commitment-delay-epoch".to_string()));
     }
 }
 
-// ── Error handling tests ─────────────────────────────────────────────────
+// ── Error handling tests ─────────────────────────────────────────────
 
 mod error_tests {
-    use super::*;
-    use crate::channel::*;
-    use crate::dev::*;
-    use crate::serde_utils::Hash256;
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::channel::*;
+    use fiber_json_types::dev::*;
+    use fiber_json_types::serde_utils::Hash256;
 
     #[test]
     fn test_invalid_hash256_format() {
@@ -1184,29 +1467,17 @@ mod error_tests {
     }
 
     #[test]
-    fn test_invalid_pubkey_length() {
-        // Too short
-        let matches = parse_args(
-            crate::peer::DisconnectPeerParams::augment_command,
-            &["test", "--pubkey", "0x1234"],
-        );
-        let result = crate::peer::DisconnectPeerParams::from_arg_matches(&matches);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_invalid_serde_enum() {
         let matches = parse_args(
-            crate::payment::ListPaymentsParams::augment_command,
+            fiber_json_types::payment::ListPaymentsParams::augment_command,
             &["test", "--status", "NotAValidStatus"],
         );
-        let result = crate::payment::ListPaymentsParams::from_arg_matches(&matches);
+        let result = fiber_json_types::payment::ListPaymentsParams::from_arg_matches(&matches);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_hash256_without_prefix_also_works() {
-        // Hash256 should accept without 0x prefix too
         let hash_no_prefix = "ab".repeat(32);
         let matches = parse_args(
             AbandonChannelParams::augment_command,

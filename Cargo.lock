@@ -2239,23 +2239,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "fiber-cli-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "fiber-json-types"
 version = "0.7.1"
 dependencies = [
- "anyhow",
  "ckb-jsonrpc-types",
  "ckb-types",
- "clap",
- "fiber-cli-derive",
  "fiber-types",
  "hex",
  "molecule",
@@ -2487,14 +2475,18 @@ name = "fnn-cli"
 version = "0.7.1"
 dependencies = [
  "anyhow",
+ "ckb-jsonrpc-types",
  "clap",
  "colored",
  "fiber-json-types",
+ "proc-macro2",
+ "quote",
  "reqwest",
  "rustyline",
  "serde",
  "serde_json",
  "serde_yaml",
+ "syn 2.0.117",
  "tokio",
 ]
 

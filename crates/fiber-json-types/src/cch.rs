@@ -1,8 +1,5 @@
 //! Cross-chain hub types for the Fiber Network JSON-RPC API.
 
-#[cfg(feature = "cli")]
-use fiber_cli_derive::CliArgs;
-
 use crate::invoice::Currency;
 use crate::schema_helpers::*;
 use crate::serde_utils::{Hash256, U128Hex, U64Hex};
@@ -45,12 +42,10 @@ pub enum CchInvoice {
 
 /// Parameters for sending BTC via cross-chain hub.
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct SendBTCParams {
     /// Payment request string for the BTC Lightning payee.
     pub btc_pay_req: String,
     /// Request currency
-    #[cfg_attr(feature = "cli", cli(serde_enum))]
     pub currency: Currency,
 }
 
@@ -91,7 +86,6 @@ pub struct CchOrderResponse {
 /// Parameters for receiving BTC via cross-chain hub.
 #[serde_as]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct ReceiveBTCParams {
     /// Payment request string for the CKB Fiber payee.
     pub fiber_pay_req: String,
@@ -99,7 +93,6 @@ pub struct ReceiveBTCParams {
 
 /// Parameters for getting a CCH order.
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct GetCchOrderParams {
     /// Payment hash for the HTLC for both CKB and BTC.
     pub payment_hash: Hash256,

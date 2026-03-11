@@ -1,8 +1,5 @@
 //! Channel management types for the Fiber Network JSON-RPC API.
 
-#[cfg(feature = "cli")]
-use fiber_cli_derive::CliArgs;
-
 use crate::define_rpc_flags;
 use crate::schema_helpers::*;
 use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
@@ -12,6 +9,12 @@ use ckb_types::H256;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+
+/// Serde default function returning `Some(true)`.
+/// Used for `Option<bool>` fields whose server-side default is `true`.
+fn default_true() -> Option<bool> {
+    Some(true)
+}
 
 define_rpc_flags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -86,7 +89,6 @@ define_rpc_flags! {
 /// Parameters for opening a channel.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct OpenChannelParams {
     /// The public key of the peer to open a channel with.
     /// The peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
@@ -99,27 +101,23 @@ pub struct OpenChannelParams {
 
     /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs),
     /// an optional parameter, default value is true.
-    #[cfg_attr(feature = "cli", cli(bool_flag, default = true))]
+    #[serde(default = "default_true")]
     pub public: Option<bool>,
 
     /// Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way),
     /// an optional parameter, default value is false.
-    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub one_way: Option<bool>,
 
     /// The type script of the UDT to fund the channel with, an optional parameter.
-    #[cfg_attr(feature = "cli", cli(json))]
     pub funding_udt_type_script: Option<Script>,
 
     /// The script used to receive the channel balance, an optional parameter,
     /// default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
-    #[cfg_attr(feature = "cli", cli(json))]
     pub shutdown_script: Option<Script>,
 
     /// The delay time for the commitment transaction, must be an
     /// [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png)
     /// in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
-    #[cfg_attr(feature = "cli", cli(json_quoted))]
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
 
     /// The fee rate for the commitment transaction, an optional parameter.
@@ -178,7 +176,6 @@ pub struct OpenChannelResult {
 
 /// Parameters for abandoning a channel.
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct AbandonChannelParams {
     /// The temporary channel ID or real channel ID of the channel being abandoned
     pub channel_id: Hash256,
@@ -187,7 +184,6 @@ pub struct AbandonChannelParams {
 /// Parameters for accepting a channel.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct AcceptChannelParams {
     /// The temporary channel ID of the channel to accept
     pub temporary_channel_id: Hash256,
@@ -199,7 +195,6 @@ pub struct AcceptChannelParams {
 
     /// The script used to receive the channel balance, an optional parameter,
     /// default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
-    #[cfg_attr(feature = "cli", cli(json))]
     pub shutdown_script: Option<Script>,
 
     /// The max tlc sum value in flight for the channel, default is u128::MAX
@@ -248,19 +243,16 @@ pub struct AcceptChannelResult {
 /// Parameters for listing channels.
 #[serde_as]
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct ListChannelsParams {
     /// The public key to list channels for.
     /// An optional parameter, if not provided, all channels will be listed.
     pub pubkey: Option<Pubkey>,
     /// Whether to include closed channels in the list, an optional parameter, default value is false
-    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub include_closed: Option<bool>,
     /// When set to true, only return channels that are still being opened (non-final states:
     /// negotiating, collaborating on funding tx, signing, awaiting tx signatures, awaiting channel
     /// ready) as well as channels whose opening attempt failed. Default is false.
     /// Mutually exclusive with `include_closed`.
-    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub only_pending: Option<bool>,
 }
 
@@ -448,13 +440,11 @@ pub struct Htlc {
 /// Parameters for shutting down a channel.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct ShutdownChannelParams {
     /// The channel ID of the channel to shut down
     pub channel_id: Hash256,
     /// The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
     /// default is `default_funding_lock_script` in `CkbConfig`
-    #[cfg_attr(feature = "cli", cli(json))]
     pub close_script: Option<Script>,
     /// The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
     /// default is 1000 shannons/KW
@@ -463,19 +453,17 @@ pub struct ShutdownChannelParams {
     pub fee_rate: Option<u64>,
     /// Whether to force the channel to close, when set to false, `close_script` and `fee_rate` should be set, default is false.
     /// When set to true, `close_script` and `fee_rate` will be ignored and will use the default value when opening the channel.
-    #[cfg_attr(feature = "cli", cli(bool_flag, default = false))]
     pub force: Option<bool>,
 }
 
 /// Parameters for updating a channel.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[cfg_attr(feature = "cli", derive(CliArgs))]
 pub struct UpdateChannelParams {
     /// The channel ID of the channel to update
     pub channel_id: Hash256,
-    /// Whether the channel is enabled
-    #[cfg_attr(feature = "cli", cli(bool_flag, default = true))]
+    /// Whether the channel is enabled, default value is true
+    #[serde(default = "default_true")]
     pub enabled: Option<bool>,
     /// The expiry delta for the TLC locktime
     #[serde_as(as = "Option<U64Hex>")]

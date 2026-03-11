@@ -9,7 +9,6 @@ members = [
     "crates/fiber-types",
     "crates/fiber-json-types",
     "crates/fiber-cli",
-    "crates/fiber-cli-derive",
 ]
 exclude = ["rpc-doc-gen"]
 resolver = "2"
