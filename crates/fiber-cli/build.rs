@@ -501,6 +501,519 @@ fn process_source_file(
 }
 
 // ---------------------------------------------------------------------------
+// Command definitions parsing (from command_defs.rs)
+// ---------------------------------------------------------------------------
+
+/// Parsed representation of a single subcommand within a command group.
+struct SubcommandDef {
+    name: String,
+    about: String,
+    params_type: String, // "()" means no params
+    result_type: String, // "()" means raw Value
+}
+
+/// What happens when no subcommand is given.
+enum NoneAction {
+    /// Print help and return Value::Null.
+    Help,
+    /// Call the named subcommand (which must have no params, i.e. params_type="()").
+    Call(String),
+    /// Call the named subcommand with Default::default() params.
+    Default(String),
+}
+
+/// Parsed representation of one command group.
+struct CommandGroupDef {
+    group_name: String,
+    about: String,
+    none_action: NoneAction,
+    subcommands: Vec<SubcommandDef>,
+}
+
+/// Extract a string literal from a syn Expr.
+fn expr_to_string(expr: &Expr) -> Option<String> {
+    if let Expr::Lit(lit_expr) = expr {
+        if let Lit::Str(s) = &lit_expr.lit {
+            return Some(s.value());
+        }
+    }
+    None
+}
+
+/// Parse command_defs.rs and extract all command group definitions.
+///
+/// Each const is a 4-tuple: (group_name, about, none_action, &[(name, about, params, result)])
+fn parse_command_defs(path: &Path) -> Vec<CommandGroupDef> {
+    let content = fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e));
+    let syntax = syn::parse_file(&content)
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {}", path.display(), e));
+
+    let mut groups = Vec::new();
+    // Also track the order from ALL_COMMAND_GROUPS
+    let mut ordered_names: Vec<String> = Vec::new();
+
+    for item in &syntax.items {
+        if let syn::Item::Const(c) = item {
+            let const_name = c.ident.to_string();
+
+            if const_name == "ALL_COMMAND_GROUPS" {
+                // Parse the ordering array: &[&str]
+                if let Expr::Reference(ref_expr) = &*c.expr {
+                    if let Expr::Array(arr) = &*ref_expr.expr {
+                        for elem in &arr.elems {
+                            if let Some(s) = expr_to_string(elem) {
+                                ordered_names.push(s);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if !const_name.ends_with("_COMMANDS") {
+                continue;
+            }
+
+            // Parse the 4-tuple: (group_name, about, none_action, &[...])
+            if let Expr::Tuple(tup) = &*c.expr {
+                let elems: Vec<&Expr> = tup.elems.iter().collect();
+                if elems.len() != 4 {
+                    continue;
+                }
+
+                let group_name = expr_to_string(elems[0]).unwrap_or_default();
+                let about = expr_to_string(elems[1]).unwrap_or_default();
+                let none_action_str =
+                    expr_to_string(elems[2]).unwrap_or_else(|| "help".to_string());
+
+                let none_action = if none_action_str == "help" {
+                    NoneAction::Help
+                } else if let Some(method) = none_action_str.strip_prefix("call:") {
+                    NoneAction::Call(method.to_string())
+                } else if let Some(method) = none_action_str.strip_prefix("default:") {
+                    NoneAction::Default(method.to_string())
+                } else {
+                    NoneAction::Help
+                };
+
+                // Parse the subcommands array: &[(name, about, params, result), ...]
+                let mut subcommands = Vec::new();
+                if let Expr::Reference(ref_expr) = elems[3] {
+                    if let Expr::Array(arr) = &*ref_expr.expr {
+                        for elem in &arr.elems {
+                            if let Expr::Tuple(sub_tup) = elem {
+                                let sub_elems: Vec<&Expr> = sub_tup.elems.iter().collect();
+                                if sub_elems.len() == 4 {
+                                    subcommands.push(SubcommandDef {
+                                        name: expr_to_string(sub_elems[0]).unwrap_or_default(),
+                                        about: expr_to_string(sub_elems[1]).unwrap_or_default(),
+                                        params_type: expr_to_string(sub_elems[2])
+                                            .unwrap_or_default(),
+                                        result_type: expr_to_string(sub_elems[3])
+                                            .unwrap_or_default(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                groups.push(CommandGroupDef {
+                    group_name,
+                    about,
+                    none_action,
+                    subcommands,
+                });
+            }
+        }
+    }
+
+    // Sort groups according to ALL_COMMAND_GROUPS ordering if available.
+    if !ordered_names.is_empty() {
+        groups.sort_by_key(|g| {
+            let search = format!("{}_COMMANDS", g.group_name.to_uppercase());
+            ordered_names
+                .iter()
+                .position(|n| *n == search)
+                .unwrap_or(usize::MAX)
+        });
+    }
+
+    groups
+}
+
+// ---------------------------------------------------------------------------
+// Command module code generation
+// ---------------------------------------------------------------------------
+
+/// Generate the `command()` and `execute()` functions for one command group.
+fn gen_command_module(group: &CommandGroupDef) -> proc_macro2::TokenStream {
+    let group_name_str = &group.group_name;
+    let about_str = &group.about;
+
+    // Build the list of .subcommand() calls for the command() function.
+    let subcommand_builders: Vec<proc_macro2::TokenStream> = group
+        .subcommands
+        .iter()
+        .map(|sub| {
+            let name = &sub.name;
+            let about = &sub.about;
+            if sub.params_type == "()" {
+                // No params — plain Command
+                quote! {
+                    .subcommand(::clap::Command::new(#name).about(#about))
+                }
+            } else {
+                // Has params — augment with CliArgs
+                let params_ident =
+                    syn::Ident::new(&sub.params_type, proc_macro2::Span::call_site());
+                quote! {
+                    .subcommand(#params_ident::augment_command(
+                        ::clap::Command::new(#name).about(#about),
+                    ))
+                }
+            }
+        })
+        .collect();
+
+    // Build the match arms for the execute() function.
+    let match_arms: Vec<proc_macro2::TokenStream> = group
+        .subcommands
+        .iter()
+        .map(|sub| {
+            let name = &sub.name;
+            let has_params = sub.params_type != "()";
+            let has_typed_result = sub.result_type != "()";
+
+            if has_params && has_typed_result {
+                // Pattern 1: Typed params + typed result
+                let params_ident =
+                    syn::Ident::new(&sub.params_type, proc_macro2::Span::call_site());
+                let result_ident =
+                    syn::Ident::new(&sub.result_type, proc_macro2::Span::call_site());
+                quote! {
+                    Some((#name, sub)) => {
+                        let params = #params_ident::from_arg_matches(sub)?;
+                        let result: #result_ident = client.call_typed(#name, &params).await?;
+                        ::serde_json::to_value(result).map_err(Into::into)
+                    }
+                }
+            } else if has_params {
+                // Pattern 2: Typed params + raw Value result
+                let params_ident =
+                    syn::Ident::new(&sub.params_type, proc_macro2::Span::call_site());
+                quote! {
+                    Some((#name, sub)) => {
+                        let params = #params_ident::from_arg_matches(sub)?;
+                        let result: ::serde_json::Value = client.call_typed(#name, &params).await?;
+                        Ok(result)
+                    }
+                }
+            } else if has_typed_result {
+                // Pattern 3: No params + typed result
+                let result_ident =
+                    syn::Ident::new(&sub.result_type, proc_macro2::Span::call_site());
+                quote! {
+                    Some((#name, _)) => {
+                        let result: #result_ident = client.call_typed_no_params(#name).await?;
+                        ::serde_json::to_value(result).map_err(Into::into)
+                    }
+                }
+            } else {
+                // Pattern 4: No params + raw Value result
+                quote! {
+                    Some((#name, _)) => {
+                        let result: ::serde_json::Value = client.call_typed_no_params(#name).await?;
+                        Ok(result)
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Generate the None arm based on none_action.
+    let none_arm = match &group.none_action {
+        NoneAction::Help => {
+            quote! {
+                None => {
+                    command().print_help()?;
+                    println!();
+                    Ok(::serde_json::Value::Null)
+                }
+            }
+        }
+        NoneAction::Call(method_name) => {
+            // Find the subcommand to determine its result type
+            let sub = group
+                .subcommands
+                .iter()
+                .find(|s| s.name == *method_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "NoneAction::Call references unknown subcommand '{}'",
+                        method_name
+                    )
+                });
+            let method_str = method_name.as_str();
+            if sub.result_type == "()" {
+                quote! {
+                    None => {
+                        let result: ::serde_json::Value = client.call_typed_no_params(#method_str).await?;
+                        Ok(result)
+                    }
+                }
+            } else {
+                let result_ident =
+                    syn::Ident::new(&sub.result_type, proc_macro2::Span::call_site());
+                quote! {
+                    None => {
+                        let result: #result_ident = client.call_typed_no_params(#method_str).await?;
+                        ::serde_json::to_value(result).map_err(Into::into)
+                    }
+                }
+            }
+        }
+        NoneAction::Default(method_name) => {
+            // Find the subcommand to determine its types
+            let sub = group
+                .subcommands
+                .iter()
+                .find(|s| s.name == *method_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "NoneAction::Default references unknown subcommand '{}'",
+                        method_name
+                    )
+                });
+            let method_str = method_name.as_str();
+            let params_ident = syn::Ident::new(&sub.params_type, proc_macro2::Span::call_site());
+            if sub.result_type == "()" {
+                quote! {
+                    None => {
+                        let params = #params_ident::default();
+                        let result: ::serde_json::Value = client.call_typed(#method_str, &params).await?;
+                        Ok(result)
+                    }
+                }
+            } else {
+                let result_ident =
+                    syn::Ident::new(&sub.result_type, proc_macro2::Span::call_site());
+                quote! {
+                    None => {
+                        let params = #params_ident::default();
+                        let result: #result_ident = client.call_typed(#method_str, &params).await?;
+                        ::serde_json::to_value(result).map_err(Into::into)
+                    }
+                }
+            }
+        }
+    };
+
+    let error_msg = format!("Unknown {} subcommand. Use --help", group_name_str);
+
+    quote! {
+        pub fn command() -> ::clap::Command {
+            ::clap::Command::new(#group_name_str)
+                .about(#about_str)
+                #(#subcommand_builders)*
+        }
+
+        pub async fn execute(
+            client: &crate::rpc_client::RpcClient,
+            matches: &::clap::ArgMatches,
+        ) -> ::anyhow::Result<::serde_json::Value> {
+            match matches.subcommand() {
+                #(#match_arms)*
+                #none_arm
+                _ => Err(::anyhow::anyhow!(#error_msg)),
+            }
+        }
+    }
+}
+
+/// Generate the complete commands_generated.rs file with all command modules.
+fn gen_all_command_modules(groups: &[CommandGroupDef]) -> proc_macro2::TokenStream {
+    // Collect all type names that need to be imported from fiber_json_types.
+    let mut type_names: Vec<String> = Vec::new();
+    for group in groups {
+        for sub in &group.subcommands {
+            if sub.params_type != "()" {
+                type_names.push(sub.params_type.clone());
+            }
+            if sub.result_type != "()" {
+                type_names.push(sub.result_type.clone());
+            }
+        }
+    }
+    type_names.sort();
+    type_names.dedup();
+
+    let type_idents: Vec<syn::Ident> = type_names
+        .iter()
+        .map(|n| syn::Ident::new(n, proc_macro2::Span::call_site()))
+        .collect();
+
+    // Generate per-module code, each wrapped in `pub mod group_name { ... }`.
+    let modules: Vec<proc_macro2::TokenStream> = groups
+        .iter()
+        .map(|group| {
+            let mod_ident = syn::Ident::new(&group.group_name, proc_macro2::Span::call_site());
+            let module_body = gen_command_module(group);
+
+            // Determine which types this module actually needs.
+            let mut needed: Vec<&str> = Vec::new();
+            for sub in &group.subcommands {
+                if sub.params_type != "()" {
+                    needed.push(&sub.params_type);
+                }
+                if sub.result_type != "()" {
+                    needed.push(&sub.result_type);
+                }
+            }
+            needed.sort();
+            needed.dedup();
+
+            let needs_cli_args = group.subcommands.iter().any(|s| s.params_type != "()");
+            let cli_args_import = if needs_cli_args {
+                quote! { use crate::cli_generated::CliArgs; }
+            } else {
+                quote! {}
+            };
+
+            let needed_idents: Vec<syn::Ident> = needed
+                .iter()
+                .map(|n| syn::Ident::new(n, proc_macro2::Span::call_site()))
+                .collect();
+
+            let type_import = if needed_idents.is_empty() {
+                quote! {}
+            } else {
+                quote! { use fiber_json_types::{#(#needed_idents),*}; }
+            };
+
+            quote! {
+                pub mod #mod_ident {
+                    #cli_args_import
+                    #type_import
+
+                    #module_body
+                }
+            }
+        })
+        .collect();
+
+    // Also generate the execute_command dispatcher and build_cli helpers.
+    let dispatch_arms: Vec<proc_macro2::TokenStream> = groups
+        .iter()
+        .map(|group| {
+            let name_str = &group.group_name;
+            let mod_ident = syn::Ident::new(&group.group_name, proc_macro2::Span::call_site());
+            quote! {
+                Some((#name_str, sub)) => {
+                    let result = #mod_ident::execute(client, sub).await?;
+                    print_result(&result, raw, output_format, color);
+                }
+            }
+        })
+        .collect();
+
+    let subcommand_registrations: Vec<proc_macro2::TokenStream> = groups
+        .iter()
+        .map(|group| {
+            let mod_ident = syn::Ident::new(&group.group_name, proc_macro2::Span::call_site());
+            quote! {
+                .subcommand(#mod_ident::command())
+            }
+        })
+        .collect();
+
+    quote! {
+        // Auto-generated by build.rs — do not edit.
+        // This file provides command() and execute() functions for each command group,
+        // plus the top-level execute_command() dispatcher.
+
+        // Suppress unused import warnings — some modules may not need all imports.
+        #[allow(unused_imports)]
+        use fiber_json_types::{#(#type_idents),*};
+
+        #(#modules)*
+
+        /// Format and print the RPC response based on the output settings.
+        pub fn print_result(value: &::serde_json::Value, raw_data: bool, output_format: &str, color: bool) {
+            // Skip printing if the result is null (e.g., from help output)
+            if value.is_null() {
+                // Nothing to print.
+            } else if raw_data {
+                println!(
+                    "{}",
+                    ::serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+                );
+            } else {
+                match output_format {
+                    "json" => {
+                        if color {
+                            println!("{}", crate::colorize::colorize_json(value));
+                        } else {
+                            println!(
+                                "{}",
+                                ::serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+                            );
+                        }
+                    }
+                    "yaml" => {
+                        if color {
+                            println!("{}", crate::colorize::colorize_yaml(value));
+                        } else {
+                            println!(
+                                "{}",
+                                ::serde_yaml::to_string(value).unwrap_or_else(|_| value.to_string())
+                            );
+                        }
+                    }
+                    _ => {
+                        if color {
+                            println!("{}", crate::colorize::colorize_json(value));
+                        } else {
+                            println!(
+                                "{}",
+                                ::serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Execute an RPC subcommand and print its result.
+        pub async fn execute_command(
+            client: &crate::rpc_client::RpcClient,
+            command: &::clap::ArgMatches,
+            output_format: &str,
+            color: bool,
+        ) -> ::anyhow::Result<()> {
+            let raw = client.raw_data();
+
+            match command.subcommand() {
+                #(#dispatch_arms)*
+                _ => {
+                    return Err(::anyhow::anyhow!(
+                        "Unknown command. Use --help for available commands."
+                    ));
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Register all command group subcommands onto a clap Command (for build_cli).
+        pub fn register_subcommands(cmd: ::clap::Command) -> ::clap::Command {
+            cmd #(#subcommand_registrations)*
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -532,6 +1045,12 @@ fn main() {
     // Tell cargo to re-run if any source file changes or a new file is added.
     println!("cargo::rerun-if-changed={}", json_types_dir.display());
 
+    // Also re-run if command_defs.rs changes.
+    let command_defs_path = PathBuf::from(&manifest_dir)
+        .join("src")
+        .join("command_defs.rs");
+    println!("cargo::rerun-if-changed={}", command_defs_path.display());
+
     // First pass: collect all enum types with Deserialize across all source files.
     // This lets us auto-detect serde_enum fields without any config.
     let mut serde_enums = HashSet::new();
@@ -553,7 +1072,7 @@ fn main() {
         all_impls.extend(impls);
     }
 
-    // Generate the output file
+    // Generate the CliArgs trait + impls output file.
     let generated = quote! {
         // Auto-generated by build.rs — do not edit.
         // This file provides CliArgs trait impls for fiber-json-types param structs.
@@ -578,4 +1097,11 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = PathBuf::from(&out_dir).join("cli_generated.rs");
     fs::write(&out_path, generated.to_string()).expect("Failed to write generated CLI code");
+
+    // Third: parse command_defs.rs and generate command modules.
+    let groups = parse_command_defs(&command_defs_path);
+    let commands_generated = gen_all_command_modules(&groups);
+    let commands_out_path = PathBuf::from(&out_dir).join("commands_generated.rs");
+    fs::write(&commands_out_path, commands_generated.to_string())
+        .expect("Failed to write generated commands code");
 }
