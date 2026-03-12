@@ -17,7 +17,7 @@ use crate::{
         graph::{GraphNodesParams, GraphNodesResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
-        peer::{ConnectPeerParams, ListPeersResult},
+        peer::{ConnectPeerParams, DisconnectPeerParams, ListPeersResult},
     },
 };
 use biscuit_auth::macros::biscuit;
@@ -882,7 +882,11 @@ async fn test_rpc_shutdown_following_disconnect() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node_1.pubkey, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node_1.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
@@ -1253,4 +1257,101 @@ fn test_rpc_status_enum_naming_consistency() {
     } else {
         panic!("state_flags field not found in JSON: {}", json_str);
     }
+}
+
+#[tokio::test]
+async fn test_rpc_connect_peer_empty_address() {
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-0".to_string()))
+            .base_dir_prefix("test-fnn-connect-empty-addr-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    let res: Result<(), String> = node
+        .send_rpc_request(
+            "connect_peer",
+            ConnectPeerParams {
+                address: Some("".to_string()),
+                pubkey: None,
+                save: None,
+            },
+        )
+        .await;
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("address must not be empty"),
+        "expected 'address must not be empty' error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_rpc_connect_peer_no_address_no_pubkey() {
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-0".to_string()))
+            .base_dir_prefix("test-fnn-connect-no-params-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    let res: Result<(), String> = node
+        .send_rpc_request(
+            "connect_peer",
+            ConnectPeerParams {
+                address: None,
+                pubkey: None,
+                save: None,
+            },
+        )
+        .await;
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("address") || err.contains("pubkey"),
+        "expected error about missing address/pubkey, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_rpc_disconnect_peer_not_connected() {
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-0".to_string()))
+            .base_dir_prefix("test-fnn-disconnect-not-connected-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    // Use a valid-format but non-connected pubkey (compressed secp256k1 point)
+    // This is a well-known generator point, so it's a valid curve point.
+    let fake_pubkey = fiber_json_types::Pubkey::from_slice(&[
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16,
+        0xf8, 0x17, 0x98,
+    ])
+    .unwrap();
+
+    let res: Result<(), String> = node
+        .send_rpc_request(
+            "disconnect_peer",
+            DisconnectPeerParams {
+                pubkey: fake_pubkey,
+            },
+        )
+        .await;
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("not connected"),
+        "expected 'not connected' error, got: {}",
+        err
+    );
 }

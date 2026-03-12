@@ -89,11 +89,14 @@ impl PeerRpcServerImpl {
         params: DisconnectPeerParams,
     ) -> Result<(), ErrorObjectOwned> {
         let pubkey = Pubkey::try_from(params.pubkey).rpc_err(&params)?;
-        let message = NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
-            pubkey,
-            PeerDisconnectReason::Requested,
-        ));
-        crate::handle_actor_cast!(self.actor, message, params)
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+                pubkey,
+                PeerDisconnectReason::Requested,
+                Some(rpc_reply),
+            ))
+        };
+        crate::handle_actor_call!(self.actor, message, params)
     }
 
     pub async fn list_peers(&self) -> Result<ListPeersResult, ErrorObjectOwned> {
