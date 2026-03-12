@@ -238,7 +238,7 @@ fn test_build_interactive_cli_has_same_commands() {
 #[test]
 fn test_completion_tree_has_top_level() {
     let cli = build_interactive_cli(false);
-    let tree = build_completion_tree(&cli);
+    let (tree, _values) = build_completion_tree(&cli);
     let top = tree.get("").expect("should have empty-string key");
     assert!(top.contains(&"channel".to_string()));
     assert!(top.contains(&"payment".to_string()));
@@ -248,7 +248,7 @@ fn test_completion_tree_has_top_level() {
 #[test]
 fn test_completion_tree_has_subcommand_entries() {
     let cli = build_interactive_cli(false);
-    let tree = build_completion_tree(&cli);
+    let (tree, _values) = build_completion_tree(&cli);
     // "channel" should have subcommand entries (open_channel, list_channels, etc.)
     let channel_entries = tree.get("channel").expect("should have 'channel' key");
     assert!(
@@ -266,7 +266,7 @@ fn test_completion_tree_has_subcommand_entries() {
 #[test]
 fn test_completion_tree_subcommand_has_options() {
     let cli = build_interactive_cli(false);
-    let tree = build_completion_tree(&cli);
+    let (tree, _values) = build_completion_tree(&cli);
     // "channel open_channel" should have --flag options
     let key = "channel open_channel".to_string();
     if let Some(options) = tree.get(&key) {
@@ -282,6 +282,42 @@ fn test_completion_tree_subcommand_has_options() {
     }
     // Note: if the key doesn't exist, the completion tree may merge options
     // into the parent level, which is also acceptable behavior.
+}
+
+#[test]
+fn test_completion_tree_has_enum_value_completions() {
+    let cli = build_interactive_cli(false);
+    let (_tree, values) = build_completion_tree(&cli);
+    // "invoice new_invoice --currency" should have possible values
+    let key = "invoice new_invoice --currency".to_string();
+    let currency_values = values
+        .get(&key)
+        .expect("should have value completions for --currency");
+    assert!(
+        currency_values.contains(&"Fibb".to_string()),
+        "currency values should include 'Fibb', got: {:?}",
+        currency_values
+    );
+    assert!(
+        currency_values.contains(&"Fibd".to_string()),
+        "currency values should include 'Fibd', got: {:?}",
+        currency_values
+    );
+    // "invoice new_invoice --hash-algorithm" should have possible values
+    let key = "invoice new_invoice --hash-algorithm".to_string();
+    let hash_values = values
+        .get(&key)
+        .expect("should have value completions for --hash-algorithm");
+    assert!(
+        hash_values.contains(&"ckb_hash".to_string()),
+        "hash_algorithm values should include 'ckb_hash', got: {:?}",
+        hash_values
+    );
+    assert!(
+        hash_values.contains(&"sha256".to_string()),
+        "hash_algorithm values should include 'sha256', got: {:?}",
+        hash_values
+    );
 }
 
 // ── Shared helper for CLI arg tests ─────────────────────────────────
@@ -1469,12 +1505,12 @@ mod error_tests {
 
     #[test]
     fn test_invalid_serde_enum() {
-        let matches = parse_args(
-            fiber_json_types::payment::ListPaymentsParams::augment_command,
-            &["test", "--status", "NotAValidStatus"],
+        // With value_parser, clap itself rejects invalid enum values at parse time.
+        let cmd = fiber_json_types::payment::ListPaymentsParams::augment_command(
+            clap::Command::new("test"),
         );
-        let result = fiber_json_types::payment::ListPaymentsParams::from_arg_matches(&matches);
-        assert!(result.is_err());
+        let result = cmd.try_get_matches_from(["test", "--status", "NotAValidStatus"]);
+        assert!(result.is_err(), "clap should reject invalid enum value");
     }
 
     #[test]

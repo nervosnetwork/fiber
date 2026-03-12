@@ -170,8 +170,12 @@ fn print_banner(url: &str, output_format: &str, auth_token: Option<&str>) {
 }
 
 /// Build a map of command name -> list of subcommand names from a clap Command.
-fn build_completion_tree(cmd: &Command) -> HashMap<String, Vec<String>> {
+/// Also builds a map of "context --flag" -> list of possible values for tab completion.
+fn build_completion_tree(
+    cmd: &Command,
+) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
     let mut tree = HashMap::new();
+    let mut values = HashMap::new();
 
     // Top-level commands
     let top_level: Vec<String> = cmd
@@ -202,22 +206,39 @@ fn build_completion_tree(cmd: &Command) -> HashMap<String, Vec<String>> {
                 .filter_map(|a| a.get_long().map(|l| format!("--{}", l)))
                 .collect();
             let key = format!("{} {}", sub.get_name(), child.get_name());
-            tree.insert(key, child_options);
+            tree.insert(key.clone(), child_options);
+
+            // Collect possible values for flags that have value_parser with fixed values
+            for arg in child.get_arguments() {
+                if let Some(long) = arg.get_long() {
+                    let pv = arg.get_possible_values();
+                    if !pv.is_empty() {
+                        let flag_key = format!("{} --{}", key, long);
+                        let vals: Vec<String> =
+                            pv.iter().map(|v| v.get_name().to_string()).collect();
+                        values.insert(flag_key, vals);
+                    }
+                }
+            }
         }
     }
 
-    tree
+    (tree, values)
 }
 
 /// Tab-completion helper for the FNN REPL.
 struct FnnHelper {
     completion_tree: HashMap<String, Vec<String>>,
+    /// Maps "group subcommand --flag" -> list of possible values.
+    value_completions: HashMap<String, Vec<String>>,
 }
 
 impl FnnHelper {
     fn new(cmd: &Command) -> Self {
+        let (completion_tree, value_completions) = build_completion_tree(cmd);
         Self {
-            completion_tree: build_completion_tree(cmd),
+            completion_tree,
+            value_completions,
         }
     }
 }
@@ -233,6 +254,37 @@ impl Completer for FnnHelper {
     ) -> rustyline::Result<(usize, Vec<String>)> {
         let line_to_cursor = &line[..pos];
         let words: Vec<&str> = line_to_cursor.split_whitespace().collect();
+
+        // Check if the previous word is a --flag with possible values.
+        // This applies when we have at least 3 words (group, subcommand, --flag)
+        // and a space was typed after the flag.
+        if words.len() >= 3 && line_to_cursor.ends_with(' ') {
+            let prev_word = words[words.len() - 1];
+            if prev_word.starts_with("--") {
+                let key = format!("{} {} {}", words[0], words[1], prev_word);
+                if let Some(vals) = self.value_completions.get(&key) {
+                    return Ok((pos, vals.clone()));
+                }
+            }
+        }
+        // Also handle partial value typing: "group subcmd --flag val<TAB>"
+        if words.len() >= 4 && !line_to_cursor.ends_with(' ') {
+            let flag_word = words[words.len() - 2];
+            let partial = words[words.len() - 1];
+            if flag_word.starts_with("--") {
+                let key = format!("{} {} {}", words[0], words[1], flag_word);
+                if let Some(vals) = self.value_completions.get(&key) {
+                    let filtered: Vec<String> = vals
+                        .iter()
+                        .filter(|v| v.starts_with(partial))
+                        .cloned()
+                        .collect();
+                    if !filtered.is_empty() {
+                        return Ok((pos - partial.len(), filtered));
+                    }
+                }
+            }
+        }
 
         // Determine what we're completing based on how many words are typed
         let (candidates_key, prefix, start_pos) = match words.len() {
