@@ -5048,7 +5048,11 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node1_pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
@@ -5146,7 +5150,11 @@ async fn test_send_payment_send_each_other_reestablishing() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node1_pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
@@ -5781,7 +5789,11 @@ async fn test_send_payment_with_reconnect_two_times() {
         node0
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
+                NetworkActorCommand::DisconnectPeer(
+                    node1_pubkey,
+                    PeerDisconnectReason::Requested,
+                    None,
+                ),
             ))
             .expect("node_a alive");
 
