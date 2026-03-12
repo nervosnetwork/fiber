@@ -14,6 +14,7 @@
 //! - Serde utilities for hex and base58 serialization
 //! - Molecule generated types for protocol messages
 
+pub mod audit;
 #[cfg(feature = "cch")]
 pub mod cch;
 pub mod channel;
@@ -31,6 +32,7 @@ pub mod serde_utils;
 #[cfg(feature = "sample")]
 pub mod sample;
 
+pub use audit::*;
 #[cfg(feature = "cch")]
 pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
 pub use channel::*;

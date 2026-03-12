@@ -1,3 +1,7 @@
+#[cfg(not(target_arch = "wasm32"))]
+pub mod audit;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod restore;
 #[cfg(any(test, feature = "sample"))]
 pub mod sample;
 pub mod store_impl;

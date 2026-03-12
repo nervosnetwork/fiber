@@ -7,7 +7,6 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
 use crate::rpc::config::RpcConfig;
-use crate::rpc::info::NodeInfoResult;
 use crate::rpc::invoice::Attribute;
 use crate::tests::*;
 use crate::{
@@ -23,6 +22,7 @@ use crate::{
 use biscuit_auth::macros::biscuit;
 use biscuit_auth::{KeyPair, PrivateKey};
 use ckb_types::packed::Script;
+use fiber_json_types::info::NodeInfoResult;
 use std::str::FromStr;
 
 fn rpc_config_with_auth() -> (RpcConfig, KeyPair) {

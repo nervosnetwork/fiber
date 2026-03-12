@@ -146,6 +146,10 @@ impl ChannelActorStateStore for MockStore {
         None
     }
 
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState> {
+        vec![]
+    }
+
     fn insert_payment_custom_records(
         &self,
         _payment_hash: &Hash256,

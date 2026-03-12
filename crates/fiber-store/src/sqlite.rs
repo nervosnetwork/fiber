@@ -49,6 +49,10 @@ impl Store {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+
+    pub fn create_checkpoint(&self, _path: &Path) -> Result<(), String> {
+        Err("Checkpoint backup is not supported for SQLite backend yet".into())
+    }
 }
 
 impl StorageBackend for Store {
