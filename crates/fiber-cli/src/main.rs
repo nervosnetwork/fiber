@@ -114,6 +114,14 @@ fn build_cli() -> Command {
                 .global(true)
                 .num_args(0)
                 .help("Launch the Terminal User Interface (TUI) dashboard"),
+        )
+        .arg(
+            Arg::new("theme")
+                .long("theme")
+                .global(true)
+                .value_parser(["auto", "dark", "light"])
+                .default_value("auto")
+                .help("TUI color theme (auto-detects terminal background by default)"),
         );
     commands::register_subcommands(cmd)
 }
@@ -564,7 +572,12 @@ async fn main() -> Result<()> {
 
     // Check if TUI mode was requested
     if matches.get_flag("tui") {
-        return tui::run(client).await;
+        let theme = match matches.get_one::<String>("theme").map(|s| s.as_str()) {
+            Some("dark") => tui::theme::Theme::Dark,
+            Some("light") => tui::theme::Theme::Light,
+            _ => tui::theme::Theme::Auto,
+        };
+        return tui::run(client, theme).await;
     }
 
     // If a subcommand was given, run it directly (one-shot mode)

@@ -23,6 +23,7 @@ use super::tabs::peers::PeerView;
 use super::tabs::{
     ChannelsTab, DashboardTab, GraphTab, InvoicesTab, LogsTab, PaymentsTab, PeersTab, TabKind,
 };
+use super::theme::ThemePalette;
 use super::ui;
 use crate::rpc_client::RpcClient;
 
@@ -296,6 +297,9 @@ pub struct App {
     pub active_tab: ActiveTab,
     pub input_mode: InputMode,
 
+    /// Color palette for theming (dark or light).
+    pub palette: ThemePalette,
+
     // Node info (always shown in header)
     pub node_info: Option<NodeInfoResult>,
     pub node_info_error: Option<String>,
@@ -331,12 +335,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(client: RpcClient) -> Self {
+    pub fn new(client: RpcClient, palette: ThemePalette) -> Self {
         Self {
             client,
             should_quit: false,
             active_tab: ActiveTab::Dashboard,
             input_mode: InputMode::Normal,
+            palette,
             node_info: None,
             node_info_error: None,
             connected: None,

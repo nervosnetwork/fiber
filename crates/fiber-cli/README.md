@@ -233,6 +233,7 @@ Launch a full-screen terminal dashboard with `--tui`:
 fnn-cli --tui
 fnn-cli -u http://54.178.252.1:8227 --tui
 fnn-cli -u http://54.178.252.1:8227 --auth-token 'TOKEN' --tui
+fnn-cli -u http://54.178.252.1:8227 --tui --theme dark/light/auto
 ```
 
 The TUI provides a real-time overview of your Fiber node with 7 tabs:
