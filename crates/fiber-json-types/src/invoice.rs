@@ -205,3 +205,26 @@ pub struct GetInvoiceResult {
     /// The invoice status
     pub status: CkbInvoiceStatus,
 }
+
+/// Parameters for listing invoices.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
+pub struct ListInvoicesParams {
+    /// Filter invoices by status. If not set, all invoices are returned.
+    pub status: Option<CkbInvoiceStatus>,
+    /// The maximum number of invoices to return. Default is 15.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub limit: Option<u64>,
+    /// The payment hash to start returning invoices after (exclusive cursor for pagination).
+    pub after: Option<Hash256>,
+}
+
+/// Result of listing invoices.
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+pub struct ListInvoicesResult {
+    /// The list of invoices.
+    pub invoices: Vec<GetInvoiceResult>,
+    /// The last cursor for pagination. Use this as `after` in the next request to get more results.
+    pub last_cursor: Option<Hash256>,
+}

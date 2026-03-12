@@ -675,6 +675,59 @@ impl InvoiceStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
     }
+
+    fn get_invoices_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<CkbInvoiceStatus>,
+    ) -> Vec<(CkbInvoice, CkbInvoiceStatus)> {
+        let prefix = [CKB_INVOICE_PREFIX];
+        let filter_invoice =
+            |(key, value): (Box<[u8]>, Box<[u8]>)| -> Option<(CkbInvoice, CkbInvoiceStatus)> {
+                let invoice: CkbInvoice = deserialize_from(value.as_ref(), "CkbInvoice");
+                // Extract the payment hash from the key (skip the 1-byte prefix)
+                if key.len() < 33 {
+                    return None;
+                }
+                let hash_bytes: [u8; 32] = key[1..33].try_into().ok()?;
+                let hash = Hash256::from(hash_bytes);
+                let invoice_status = self
+                    .get_invoice_status(&hash)
+                    .unwrap_or(CkbInvoiceStatus::Open);
+                // Check for expired: if stored as Open but actually expired
+                let effective_status =
+                    if invoice_status == CkbInvoiceStatus::Open && invoice.is_expired() {
+                        CkbInvoiceStatus::Expired
+                    } else {
+                        invoice_status
+                    };
+                match status {
+                    Some(ref s) if effective_status != *s => None,
+                    _ => Some((invoice, effective_status)),
+                }
+            };
+
+        match after {
+            Some(after_hash) => {
+                let start_key = [&[CKB_INVOICE_PREFIX], after_hash.as_ref()].concat();
+                let after_hash_owned = after_hash;
+                self.prefix_iterator_with_skip_while_and_start(
+                    &prefix,
+                    IteratorMode::From(&start_key, DbDirection::Forward),
+                    Box::new(move |key| key.len() > 1 && key[1..] == *after_hash_owned.as_ref()),
+                )
+                .filter_map(filter_invoice)
+                .take(limit)
+                .collect()
+            }
+            None => self
+                .prefix_iterator(&prefix)
+                .filter_map(filter_invoice)
+                .take(limit)
+                .collect(),
+        }
+    }
 }
 
 impl PreimageStore for Store {

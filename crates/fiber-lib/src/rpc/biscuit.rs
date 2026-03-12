@@ -108,6 +108,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("get_invoice", r#"allow if read("invoices");"#);
     b.rule("cancel_invoice", r#"allow if write("invoices");"#);
     b.rule("settle_invoice", r#"allow if write("invoices");"#);
+    b.rule("list_invoices", r#"allow if read("invoices");"#);
 
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);

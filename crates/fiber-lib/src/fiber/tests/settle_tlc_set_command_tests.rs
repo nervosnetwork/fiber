@@ -104,6 +104,54 @@ impl InvoiceStore for MockStore {
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {
         self.invoice_statuses.borrow().get(id).cloned()
     }
+
+    fn get_invoices_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<CkbInvoiceStatus>,
+    ) -> Vec<(CkbInvoice, CkbInvoiceStatus)> {
+        let invoices = self.invoices.borrow();
+        let statuses = self.invoice_statuses.borrow();
+        let mut skip = after.is_some();
+        invoices
+            .iter()
+            .filter(|(hash, _)| {
+                if skip {
+                    if Some(**hash) == after {
+                        skip = false;
+                    }
+                    return false;
+                }
+                true
+            })
+            .filter(|(hash, invoice)| {
+                if let Some(ref s) = status {
+                    let actual_status = match statuses.get(hash) {
+                        Some(CkbInvoiceStatus::Open) if invoice.is_expired() => {
+                            CkbInvoiceStatus::Expired
+                        }
+                        Some(st) => *st,
+                        None => return false,
+                    };
+                    &actual_status == s
+                } else {
+                    true
+                }
+            })
+            .take(limit)
+            .map(|(hash, invoice)| {
+                let s = match statuses.get(hash) {
+                    Some(CkbInvoiceStatus::Open) if invoice.is_expired() => {
+                        CkbInvoiceStatus::Expired
+                    }
+                    Some(st) => *st,
+                    None => CkbInvoiceStatus::Open,
+                };
+                (invoice.clone(), s)
+            })
+            .collect()
+    }
 }
 
 impl PreimageStore for MockStore {
