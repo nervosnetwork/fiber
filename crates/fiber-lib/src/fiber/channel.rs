@@ -59,9 +59,9 @@ use fiber_types::{
     EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
     NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
     PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
-    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr,
-    TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+    RemoveTlcReason, RestoreAuditStore, RetryableTlcOperation, RevocationData, RevokeAndAck,
+    SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
+    TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -352,7 +352,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + RestoreAuditStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -385,6 +385,26 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
+                    // Restore Audit Interception
+                    if let Some(audit_map) = self.store.get_restore_audit_map() {
+                        if let Some(audit_info) = audit_map.channels.get(&state.get_id()) {
+                            if reestablish_channel.remote_commitment_number
+                                > audit_info.local_commitment_number
+                            {
+                                error!(
+                                "CRITICAL: Recovery rollback detected for channel {}! Backup CN: {}, Peer expects: {}. Blocking channel to prevent penalty.",
+                                state.get_id(), audit_info.local_commitment_number, reestablish_channel.remote_commitment_number
+                            );
+                                return Err(ProcessingChannelError::InvalidParameter(
+                                "Channel state rollback detected during restore audit. Manual intervention required.".into()
+                            ));
+                            } else {
+                                self.store.resolve_channel_audit(&state.get_id());
+                                info!("Recovery audit passed for channel {}.", state.get_id());
+                            }
+                        }
+                    }
+
                     let pending_commit_diff = self.store.get_pending_commit_diff(&state.get_id());
                     state
                         .handle_reestablish_channel_message(
@@ -2563,7 +2583,13 @@ where
 #[async_trait::async_trait]
 impl<S> Actor for ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + InvoiceStore
+        + PreimageStore
+        + RestoreAuditStore
+        + Send
+        + Sync
+        + 'static,
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;
@@ -7401,6 +7427,7 @@ pub trait ChannelActorStateStore {
             .collect()
     }
     fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState>;
     fn insert_payment_custom_records(
         &self,
         payment_hash: &Hash256,

@@ -12,6 +12,7 @@ use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
 use fnn::rpc::server::start_rpc;
 use fnn::store::open_store;
+use fnn::store::restore::run_restore;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -78,6 +79,18 @@ pub async fn main() -> Result<(), ExitMessage> {
 
     // Derive store_path: prefer fiber config, fall back to base_dir/fiber/store
     let store_path = parsed_fiber_config.store_path();
+
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    let restore_path = parsed_fiber_config
+        .check_restore_path()
+        .map_err(|err| ExitMessage(format!("Restore path error: {}", err)))?;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = restore_path {
+        run_restore(path, &store_path)
+            .map_err(|err| ExitMessage(format!("Restore process error: {}", err)))?;
+    }
+
     let raw_store = open_store(store_path).map_err(|err| ExitMessage(err.to_string()))?;
 
     if config.cch.is_some() || config.rpc.is_some() {

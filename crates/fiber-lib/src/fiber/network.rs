@@ -103,9 +103,9 @@ use fiber_types::{
     ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
     FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos,
+    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RestoreAuditStore, RetryableTlcOperation,
+    RevocationData, RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket,
+    TlcErrorCode, TrampolineContext, UdtCfgInfos,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -671,6 +671,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + RestoreAuditStore
         + Clone
         + Send
         + Sync
@@ -2970,6 +2971,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + RestoreAuditStore
         + Clone
         + Send
         + Sync
@@ -4478,6 +4480,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + RestoreAuditStore
         + Clone
         + Send
         + Sync
@@ -5014,6 +5017,7 @@ pub async fn start_network<
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + RestoreAuditStore
         + Clone
         + Send
         + Sync

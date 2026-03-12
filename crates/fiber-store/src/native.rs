@@ -1,6 +1,6 @@
-use rocksdb::Direction as DbDirection;
-use rocksdb::IteratorMode;
-use rocksdb::{prelude::*, DBCompressionType, WriteBatch, DB};
+pub use rocksdb::Direction as DbDirection;
+pub use rocksdb::IteratorMode;
+use rocksdb::{checkpoint::Checkpoint, prelude::*, DBCompressionType, WriteBatch, DB};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,6 +20,13 @@ impl Store {
         options.set_compression_type(DBCompressionType::Lz4);
         let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
         Ok(Self { db })
+    }
+
+    /// Returns the checkpoint.
+    pub fn create_checkpoint(&self, path: &Path) -> Result<(), Error> {
+        let checkpoint = Checkpoint::new(&self.db)?;
+        checkpoint.create_checkpoint(path)?;
+        Ok(())
     }
 }
 

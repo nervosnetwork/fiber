@@ -2301,6 +2301,7 @@ dependencies = [
  "fiber-wasm-db-common",
  "indicatif 0.18.4",
  "rusqlite",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
  "wasm-bindgen",

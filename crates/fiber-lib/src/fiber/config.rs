@@ -1,5 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 use crate::fiber::KeyPair;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::Error;
 use crate::{ckb::contracts::Contract, invoice::Currency, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
@@ -388,6 +390,16 @@ pub struct FiberConfig {
         help = "Address for metrics endpoint (e.g., 127.0.0.1:9090). Requires binary to be compiled with RUSTFLAGS=\"--cfg tokio_unstable\" and metrics feature enabled"
     )]
     pub metrics_addr: Option<String>,
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Path to a RocksDB checkpoint to restore from
+    #[arg(
+        name = "FIBER_RESTORE_PATH",
+        long = "fiber-restore-path",
+        env,
+        help = "Path to a RocksDB checkpoint to restore from. This is a one-time operation that will replace the current database."
+    )]
+    pub(crate) restore_path: Option<PathBuf>,
 }
 
 #[cfg(not(any(test, feature = "bench")))]
@@ -450,6 +462,28 @@ impl FiberConfig {
             fs::create_dir_all(&path).expect("create store directory");
         }
         path
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn check_restore_path(&self) -> Result<Option<&PathBuf>> {
+        match &self.restore_path {
+            None => Ok(None),
+            Some(path) => {
+                if !path.exists() {
+                    return Err(Error::InvalidParameter(format!(
+                        "Restore path {:?} does not exist",
+                        path
+                    )));
+                }
+                if !path.is_dir() {
+                    return Err(Error::InvalidParameter(format!(
+                        "Restore path {:?} is not a directory",
+                        path
+                    )));
+                }
+                Ok(Some(path))
+            }
+        }
     }
 
     pub fn listening_addr(&self) -> &str {
