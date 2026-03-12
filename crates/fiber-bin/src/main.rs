@@ -15,6 +15,7 @@ use fnn::rpc::watchtower::{
     UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
     WatchtowerRpcClient,
 };
+use fnn::store::restore::run_restore;
 use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -80,11 +81,21 @@ pub async fn main() -> Result<(), ExitMessage> {
 
     let config = Config::parse();
 
-    let store_path = config
+    let fiber_config = config
         .fiber
         .as_ref()
-        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
-        .store_path();
+        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?;
+
+    let restore_path = fiber_config
+        .check_restore_path()
+        .map_err(|err| ExitMessage(format!("Restore path error: {}", err)))?;
+
+    let store_path = fiber_config.store_path();
+
+    if let Some(path) = restore_path {
+        run_restore(path, &store_path)
+            .map_err(|err| ExitMessage(format!("Restore process error: {}", err)))?;
+    }
 
     let mut store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
     let cch_fiber_store_event_port = config.cch.is_some().then(|| {

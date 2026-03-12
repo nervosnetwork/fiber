@@ -1,4 +1,4 @@
-use super::{KeyValue, StoreChange, StoreKeyValue};
+use super::{KVStore, KeyValue, StoreChange, StoreKeyValue};
 
 pub use fiber_store::DbDirection;
 pub use fiber_store::IteratorMode;
@@ -72,6 +72,13 @@ impl Store {
         prefix: &'a [u8],
     ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
         self.inner.prefix_iterator(prefix)
+    }
+}
+
+impl KVStore for Store {
+    /// Returns the Store type.
+    fn inner_db(&self) -> &fiber_store::Store {
+        &self.inner
     }
 }
 
