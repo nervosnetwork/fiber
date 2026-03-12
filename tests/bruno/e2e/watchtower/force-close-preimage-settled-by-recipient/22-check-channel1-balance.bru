@@ -1,0 +1,47 @@
+meta {
+  name: check N1-N2 channel balance, Node2 should have claimed TLC amount by finding Node3's preimage on-chain
+  type: http
+  seq: 22
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE1_PUBKEY}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels[0].offered_tlc_balance: eq "0x0"
+  res.body.result.channels[0].received_tlc_balance: eq "0x0"
+}
+
+script:post-response {
+  console.log("N1-N2 channel state: ", res.body.result.channels[0]);
+  // Node2 is the payee-side intermediary: it forwarded the payment from Node1 to Node3.
+  // After the TLC settles, Node2's local_balance on N1-N2 should have increased
+  // by at least the invoice amount (0x5f5e100 = 100_000_000 shannons).
+  const localBalance = BigInt(res.body.result.channels[0].local_balance);
+  const invoiceAmount = BigInt("0x5f5e100");
+  if (localBalance < invoiceAmount) {
+    throw new Error("Node2 local_balance " + localBalance + " is less than invoice amount " + invoiceAmount);
+  }
+}
