@@ -17,6 +17,8 @@ jobs:
           - 3-nodes-transfer
           - invoice-ops
           - open-use-close-a-channel
+          - period-check/force-close-expiry
+          - shutdown-force
           - udt
           - reestablish
           - cross-chain-hub
