@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::graph::UdtCfgInfos;
 use crate::ckb::CkbConfig;
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage, FiberConfig};
+use crate::fiber::{FiberConfig, NetworkActorCommand, NetworkActorMessage};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]

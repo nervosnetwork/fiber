@@ -72,6 +72,8 @@ impl From<StoreError> for Error {
     fn from(e: StoreError) -> Self {
         match e {
             StoreError::DBInternalError(msg) => Error::DBInternalError(msg),
+            StoreError::IOError(err) => Error::IO(err),
+            StoreError::RestoreError(msg) => Error::DBInternalError(msg),
         }
     }
 }

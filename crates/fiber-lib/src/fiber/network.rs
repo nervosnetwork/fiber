@@ -89,6 +89,7 @@ use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
+use crate::store::audit::RestoreAuditStore;
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
@@ -675,6 +676,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + RestoreAuditStore
         + Clone
         + Send
         + Sync
@@ -2979,6 +2981,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + RestoreAuditStore
         + Clone
         + Send
         + Sync
@@ -4430,6 +4433,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + RestoreAuditStore
         + Clone
         + Send
         + Sync
@@ -4967,6 +4971,7 @@ pub async fn start_network<
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + RestoreAuditStore
         + Clone
         + Send
         + Sync

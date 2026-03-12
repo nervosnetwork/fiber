@@ -1,6 +1,7 @@
 pub mod db_migrate;
 mod error;
 pub mod migration;
+pub mod restore;
 
 pub use error::StoreError;
 
