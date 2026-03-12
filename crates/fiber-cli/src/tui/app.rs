@@ -3,9 +3,17 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use ckb_jsonrpc_types::JsonBytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use fiber_json_types::{
+    Channel, ChannelInfo, CkbInvoiceStatus, GetInvoiceResult, GetPaymentCommandResult,
+    GraphChannelsParams, GraphChannelsResult, GraphNodesParams, GraphNodesResult,
+    ListChannelsParams, ListChannelsResult, ListInvoicesParams, ListInvoicesResult,
+    ListPaymentsParams, ListPaymentsResult, ListPeersResult, NodeInfo, PaymentStatus, PeerInfo,
+};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
+use tokio::task::JoinHandle;
 
 use super::event::{Event, EventHandler};
 use super::tabs::channels::ChannelView;
@@ -165,6 +173,122 @@ pub enum InputMode {
 /// How long a flash message stays visible in the footer (seconds).
 const FLASH_DURATION_SECS: u64 = 5;
 
+/// Results from a background RPC fetch.
+pub struct FetchResult {
+    pub node_info: std::result::Result<NodeInfoResult, String>,
+    pub channels: std::result::Result<Vec<Channel>, String>,
+    pub payments: std::result::Result<(Vec<GetPaymentCommandResult>, Option<Hash256>), String>,
+    pub invoices: std::result::Result<(Vec<GetInvoiceResult>, Option<Hash256>), String>,
+    pub peers: std::result::Result<Vec<PeerInfo>, String>,
+    pub graph_nodes: std::result::Result<(Vec<NodeInfo>, Option<JsonBytes>), String>,
+    pub graph_channels: std::result::Result<(Vec<ChannelInfo>, Option<JsonBytes>), String>,
+}
+
+/// Perform all RPC fetches in the background. This runs on a spawned task
+/// so the main event loop stays responsive.
+async fn fetch_all_rpc(
+    client: RpcClient,
+    include_closed: bool,
+    only_pending: bool,
+    payment_status_filter: Option<PaymentStatus>,
+    invoice_status_filter: Option<CkbInvoiceStatus>,
+) -> FetchResult {
+    // node_info
+    let node_info = client
+        .call_typed_no_params::<NodeInfoResult>("node_info")
+        .await
+        .map_err(|e| e.to_string());
+
+    // channels
+    let ch_params = ListChannelsParams {
+        pubkey: None,
+        include_closed: if include_closed { Some(true) } else { None },
+        only_pending: if only_pending { Some(true) } else { None },
+    };
+    let channels = client
+        .call_typed::<_, ListChannelsResult>("list_channels", &ch_params)
+        .await
+        .map(|r| r.channels)
+        .map_err(|e| e.to_string());
+
+    // payments
+    let pay_params = ListPaymentsParams {
+        status: payment_status_filter,
+        limit: None,
+        after: None,
+    };
+    let payments = client
+        .call_typed::<_, ListPaymentsResult>("list_payments", &pay_params)
+        .await
+        .map(|r| (r.payments, r.last_cursor))
+        .map_err(|e| e.to_string());
+
+    // invoices
+    let inv_params = ListInvoicesParams {
+        status: invoice_status_filter,
+        limit: None,
+        after: None,
+    };
+    let invoices = client
+        .call_typed::<_, ListInvoicesResult>("list_invoices", &inv_params)
+        .await
+        .map(|r| (r.invoices, r.last_cursor))
+        .map_err(|e| e.to_string());
+
+    // peers
+    let peers = client
+        .call_typed_no_params::<ListPeersResult>("list_peers")
+        .await
+        .map(|r| r.peers)
+        .map_err(|e| e.to_string());
+
+    // graph nodes
+    let gn_params = GraphNodesParams {
+        limit: Some(100),
+        after: None,
+    };
+    let graph_nodes = client
+        .call_typed::<_, GraphNodesResult>("graph_nodes", &gn_params)
+        .await
+        .map(|r| {
+            let cursor = if r.last_cursor.is_empty() {
+                None
+            } else {
+                Some(r.last_cursor)
+            };
+            (r.nodes, cursor)
+        })
+        .map_err(|e| e.to_string());
+
+    // graph channels
+    let gc_params = GraphChannelsParams {
+        limit: Some(100),
+        after: None,
+    };
+    let graph_channels = client
+        .call_typed::<_, GraphChannelsResult>("graph_channels", &gc_params)
+        .await
+        .map(|r| {
+            let cursor = if r.last_cursor.is_empty() {
+                None
+            } else {
+                Some(r.last_cursor)
+            };
+            (r.channels, cursor)
+        })
+        .map_err(|e| e.to_string());
+
+    FetchResult {
+        node_info,
+        channels,
+        payments,
+        invoices,
+        peers,
+        graph_nodes,
+        graph_channels,
+    }
+}
+
 /// Main application state.
 pub struct App {
     pub client: RpcClient,
@@ -175,6 +299,8 @@ pub struct App {
     // Node info (always shown in header)
     pub node_info: Option<NodeInfoResult>,
     pub node_info_error: Option<String>,
+    /// Connection status: None = not yet checked, Some(true) = connected, Some(false) = disconnected.
+    pub connected: Option<bool>,
 
     // Per-tab state
     pub dashboard_tab: DashboardTab,
@@ -199,6 +325,9 @@ pub struct App {
 
     // Last data refresh time
     pub last_refresh: Instant,
+
+    // Background fetch task (non-blocking data refresh)
+    pending_fetch: Option<JoinHandle<FetchResult>>,
 }
 
 impl App {
@@ -210,6 +339,7 @@ impl App {
             input_mode: InputMode::Normal,
             node_info: None,
             node_info_error: None,
+            connected: None,
             dashboard_tab: DashboardTab::new(),
             channels_tab: ChannelsTab::new(),
             payments_tab: PaymentsTab::new(),
@@ -222,6 +352,7 @@ impl App {
             detail_popup: None,
             flash_message: None,
             last_refresh: Instant::now() - Duration::from_secs(DATA_REFRESH_SECS + 1),
+            pending_fetch: None,
         }
     }
 
@@ -230,6 +361,17 @@ impl App {
         let event_handler = EventHandler::new(Duration::from_millis(EVENT_POLL_MS));
 
         loop {
+            // Check if background fetch completed (non-blocking)
+            if let Some(handle) = &mut self.pending_fetch {
+                if handle.is_finished() {
+                    if let Some(handle) = self.pending_fetch.take() {
+                        if let Ok(result) = handle.await {
+                            self.apply_fetch_result(result);
+                        }
+                    }
+                }
+            }
+
             // Draw the UI (pass &mut self so stateful widgets can update)
             terminal.draw(|f| ui::draw(f, self))?;
 
@@ -243,9 +385,11 @@ impl App {
                             self.flash_message = None;
                         }
                     }
-                    // Auto-refresh data periodically
-                    if self.last_refresh.elapsed() >= Duration::from_secs(DATA_REFRESH_SECS) {
-                        self.fetch_all_data().await;
+                    // Spawn background fetch if refresh interval elapsed and no fetch in progress
+                    if self.pending_fetch.is_none()
+                        && self.last_refresh.elapsed() >= Duration::from_secs(DATA_REFRESH_SECS)
+                    {
+                        self.spawn_fetch();
                         self.last_refresh = Instant::now();
                     }
                 }
@@ -255,9 +399,168 @@ impl App {
             }
 
             if self.should_quit {
+                // Cancel any pending fetch
+                if let Some(handle) = self.pending_fetch.take() {
+                    handle.abort();
+                }
                 return Ok(());
             }
         }
+    }
+
+    /// Spawn a background task to fetch all data from the RPC endpoint.
+    fn spawn_fetch(&mut self) {
+        let client = self.client.clone();
+        let include_closed = self.channels_tab.include_closed;
+        let only_pending = self.channels_tab.only_pending;
+        let payment_status = self.payments_tab.status_filter;
+        let invoice_status = self.invoices_tab.status_filter;
+        self.pending_fetch = Some(tokio::spawn(fetch_all_rpc(
+            client,
+            include_closed,
+            only_pending,
+            payment_status,
+            invoice_status,
+        )));
+    }
+
+    /// Apply the results from a completed background fetch to the app state.
+    fn apply_fetch_result(&mut self, result: FetchResult) {
+        // Node info
+        match result.node_info {
+            Ok(info) => {
+                self.node_info = Some(info);
+                self.node_info_error = None;
+                self.connected = Some(true);
+            }
+            Err(msg) => {
+                if self.node_info_error.as_deref() != Some(&msg) {
+                    self.logs_tab
+                        .add_error(&format!("[Node] Connection error: {}", msg));
+                }
+                self.node_info_error = Some(msg);
+                self.connected = Some(false);
+            }
+        }
+
+        // Channels
+        match result.channels {
+            Ok(channels) => {
+                if let Some(sel) = self.channels_tab.table_state.selected() {
+                    if sel >= channels.len() && !channels.is_empty() {
+                        self.channels_tab
+                            .table_state
+                            .select(Some(channels.len() - 1));
+                    }
+                }
+                self.channels_tab.channels = channels;
+                self.channels_tab.error = None;
+            }
+            Err(e) => {
+                self.channels_tab.error = Some(e);
+            }
+        }
+
+        // Payments
+        match result.payments {
+            Ok((payments, last_cursor)) => {
+                self.payments_tab.cursor_stack.clear();
+                self.payments_tab.current_page = 1;
+                if !payments.is_empty() {
+                    self.payments_tab.table_state.select(Some(0));
+                } else {
+                    self.payments_tab.table_state.select(None);
+                }
+                self.payments_tab.payments = payments;
+                self.payments_tab.last_cursor = last_cursor;
+                self.payments_tab.error = None;
+            }
+            Err(e) => {
+                self.payments_tab.error = Some(e);
+            }
+        }
+
+        // Invoices
+        match result.invoices {
+            Ok((invoices, last_cursor)) => {
+                self.invoices_tab.cursor_stack.clear();
+                self.invoices_tab.current_page = 1;
+                if !invoices.is_empty() {
+                    self.invoices_tab.list_state.select(Some(0));
+                } else {
+                    self.invoices_tab.list_state.select(None);
+                }
+                self.invoices_tab.invoices = invoices;
+                self.invoices_tab.last_cursor = last_cursor;
+                self.invoices_tab.error = None;
+            }
+            Err(e) => {
+                self.invoices_tab.error = Some(e);
+            }
+        }
+
+        // Peers
+        match result.peers {
+            Ok(peers) => {
+                self.peers_tab.all_peers = peers;
+                self.peers_tab.error = None;
+                self.peers_tab.apply_filter();
+            }
+            Err(e) => {
+                self.peers_tab.error = Some(e);
+            }
+        }
+
+        // Graph nodes
+        match result.graph_nodes {
+            Ok((nodes, last_cursor)) => {
+                self.graph_tab.nodes_cursor_stack.clear();
+                self.graph_tab.nodes_page = 1;
+                if !nodes.is_empty() {
+                    self.graph_tab.nodes_table_state.select(Some(0));
+                } else {
+                    self.graph_tab.nodes_table_state.select(None);
+                }
+                self.graph_tab.nodes = nodes;
+                self.graph_tab.nodes_last_cursor = last_cursor;
+                self.graph_tab.nodes_error = None;
+            }
+            Err(e) => {
+                self.graph_tab.nodes_error = Some(e);
+            }
+        }
+
+        // Graph channels
+        match result.graph_channels {
+            Ok((channels, last_cursor)) => {
+                self.graph_tab.channels_cursor_stack.clear();
+                self.graph_tab.channels_page = 1;
+                if !channels.is_empty() {
+                    self.graph_tab.channels_table_state.select(Some(0));
+                } else {
+                    self.graph_tab.channels_table_state.select(None);
+                }
+                self.graph_tab.channels = channels;
+                self.graph_tab.channels_last_cursor = last_cursor;
+                self.graph_tab.channels_error = None;
+            }
+            Err(e) => {
+                self.graph_tab.channels_error = Some(e);
+            }
+        }
+
+        // Update dashboard aggregate stats from fetched data
+        self.dashboard_tab
+            .update_stats(&self.channels_tab.channels, self.node_info.as_ref());
+        let own_pubkey = self
+            .node_info
+            .as_ref()
+            .map(|info| format!("{}", info.pubkey));
+        self.dashboard_tab.update_network_stats(
+            &self.graph_tab.nodes,
+            &self.graph_tab.channels,
+            own_pubkey.as_deref(),
+        );
     }
 
     /// Handle a key event.
@@ -326,8 +629,10 @@ impl App {
             }
             // Refresh data
             KeyCode::Char('r') => {
-                self.fetch_all_data().await;
-                self.last_refresh = Instant::now();
+                if self.pending_fetch.is_none() {
+                    self.spawn_fetch();
+                    self.last_refresh = Instant::now();
+                }
             }
             // Copy primary identifier of selected item to clipboard
             KeyCode::Char('y') => {
@@ -1078,49 +1383,6 @@ impl App {
             // Show flash message in footer so user sees feedback on any tab view
             self.flash_message = Some((formatted, is_error || is_warn, Instant::now()));
         }
-    }
-
-    /// Fetch all data from the RPC endpoint.
-    pub async fn fetch_all_data(&mut self) {
-        // Fetch node info
-        match self
-            .client
-            .call_typed_no_params::<NodeInfoResult>("node_info")
-            .await
-        {
-            Ok(info) => {
-                self.node_info = Some(info);
-                self.node_info_error = None;
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if self.node_info_error.as_deref() != Some(&msg) {
-                    self.logs_tab
-                        .add_error(&format!("[Node] Connection error: {}", msg));
-                }
-                self.node_info_error = Some(msg);
-            }
-        }
-
-        // Fetch per-tab data
-        self.channels_tab.fetch_data(&self.client).await;
-        self.payments_tab.fetch_data(&self.client).await;
-        self.invoices_tab.fetch_data(&self.client).await;
-        self.peers_tab.fetch_data(&self.client).await;
-        self.graph_tab.fetch_data(&self.client).await;
-
-        // Update dashboard aggregate stats from fetched channel data
-        self.dashboard_tab
-            .update_stats(&self.channels_tab.channels, self.node_info.as_ref());
-        let own_pubkey = self
-            .node_info
-            .as_ref()
-            .map(|info| format!("{}", info.pubkey));
-        self.dashboard_tab.update_network_stats(
-            &self.graph_tab.nodes,
-            &self.graph_tab.channels,
-            own_pubkey.as_deref(),
-        );
     }
 }
 

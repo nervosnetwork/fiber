@@ -57,16 +57,6 @@ impl GraphTab {
         }
     }
 
-    pub async fn fetch_data(&mut self, client: &RpcClient) {
-        // Reset pagination and fetch first pages
-        self.nodes_cursor_stack.clear();
-        self.nodes_page = 1;
-        self.channels_cursor_stack.clear();
-        self.channels_page = 1;
-        self.fetch_nodes_page(client, None).await;
-        self.fetch_channels_page(client, None).await;
-    }
-
     async fn fetch_nodes_page(&mut self, client: &RpcClient, after: Option<JsonBytes>) {
         let params = GraphNodesParams {
             limit: Some(100),

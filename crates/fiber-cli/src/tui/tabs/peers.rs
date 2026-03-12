@@ -54,7 +54,7 @@ impl PeersTab {
         }
     }
 
-    fn apply_filter(&mut self) {
+    pub fn apply_filter(&mut self) {
         if self.search_query.is_empty() {
             self.peers = self.all_peers.clone();
         } else {

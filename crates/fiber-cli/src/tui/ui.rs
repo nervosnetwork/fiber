@@ -210,7 +210,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 ))
             } else {
-                Line::from(Span::styled(label, Style::default().fg(Color::DarkGray)))
+                Line::from(Span::styled(label, Style::default().fg(Color::Gray)))
             }
         })
         .collect();
@@ -260,17 +260,21 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     };
 
     // Connection status indicator
-    let (conn_label, conn_color) = if app.node_info_error.is_none() {
-        ("Connected", Color::Green)
-    } else {
-        ("Disconnected", Color::Red)
+    let (conn_label, conn_color) = match app.connected {
+        Some(true) => ("Connected", Color::Green),
+        Some(false) => ("Disconnected", Color::Red),
+        None => ("Connecting...", Color::Yellow),
     };
 
-    // Last refresh timestamp
-    let elapsed = app.last_refresh.elapsed();
-    let refresh_time =
-        chrono::Local::now() - chrono::Duration::from_std(elapsed).unwrap_or_default();
-    let refresh_str = format!("Updated {}", refresh_time.format("%H:%M:%S"));
+    // Last refresh timestamp (only show if data has been fetched at least once)
+    let refresh_str = if app.connected.is_some() {
+        let elapsed = app.last_refresh.elapsed();
+        let refresh_time =
+            chrono::Local::now() - chrono::Duration::from_std(elapsed).unwrap_or_default();
+        format!("Updated {}", refresh_time.format("%H:%M:%S"))
+    } else {
+        String::new()
+    };
 
     // Right-aligned status: connection + last refresh + RPC URL
     let right_spans = vec![
@@ -282,11 +286,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(&refresh_str, Style::default().fg(Color::DarkGray)),
+        Span::styled(&refresh_str, Style::default().fg(Color::Gray)),
         Span::raw("  "),
         Span::styled(
             format!("RPC: {}", app.client.url()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ),
     ];
     let right_width: u16 = right_spans.iter().map(|s| s.content.len() as u16).sum();
@@ -342,7 +346,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(
             "q:Quit  Tab:Switch  r:Refresh  ?:Help",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ),
     ];
 
@@ -507,7 +511,7 @@ fn draw_dashboard_channel_states(f: &mut Frame, tab: &DashboardTab, area: Rect) 
             Span::raw(", "),
             Span::styled(
                 format!("{} disabled", stats.disabled_count),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Gray),
             ),
             Span::raw(")"),
         ]),
@@ -551,7 +555,7 @@ fn draw_state_bar(stats: &super::tabs::dashboard::DashboardStats) -> Line<'stati
     if total == 0 {
         return Line::from(Span::styled(
             "  No channels",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ));
     }
 
@@ -639,7 +643,7 @@ fn draw_dashboard_network(f: &mut Frame, tab: &DashboardTab, area: Rect) {
 
     if net.total_nodes == 0 && net.total_channels == 0 {
         let text = Paragraph::new("  No graph data available")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(Color::Gray))
             .block(outer_block);
         f.render_widget(text, area);
         return;
@@ -678,14 +682,14 @@ fn draw_dashboard_network(f: &mut Frame, tab: &DashboardTab, area: Rect) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("   Active: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   Active: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", net.active_channels),
                 Style::default().fg(Color::Green),
             ),
         ]),
         Line::from(vec![
-            Span::styled("   Inactive: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("   Inactive: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", inactive),
                 Style::default().fg(Color::DarkGray),
@@ -1221,7 +1225,7 @@ fn draw_invoices_main(f: &mut Frame, tab: &mut InvoicesTab, area: Rect) {
         let text = Paragraph::new(msg)
             .block(block)
             .wrap(Wrap { trim: false })
-            .style(Style::default().fg(Color::DarkGray));
+            .style(Style::default().fg(Color::Gray));
         f.render_widget(text, area);
     } else {
         let items: Vec<ListItem> = tab
@@ -1367,7 +1371,7 @@ fn draw_graph_tab(f: &mut Frame, tab: &mut GraphTab, area: Rect) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(Color::Gray)
             },
         )),
         Line::from(Span::styled(
@@ -1377,7 +1381,7 @@ fn draw_graph_tab(f: &mut Frame, tab: &mut GraphTab, area: Rect) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(Color::Gray)
             },
         )),
     ];
@@ -1578,7 +1582,7 @@ fn draw_logs_tab(f: &mut Frame, tab: &mut LogsTab, area: Rect) {
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{} ", entry.timestamp),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Gray),
                 ),
                 Span::styled(level_str, level_style),
                 Span::raw(" "),

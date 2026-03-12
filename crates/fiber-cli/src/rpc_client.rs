@@ -51,7 +51,10 @@ impl RpcClient {
             .filter(|t| !t.is_empty());
         Ok(Self {
             url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(3))
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?,
             raw_data,
             auth_token,
         })

@@ -25,10 +25,9 @@ pub async fn run(client: RpcClient) -> Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    // Create and run the app
+    // Create and run the app (first frame renders immediately; data fetches on first tick)
     let mut app = app::App::new(client);
     app.logs_tab.maintain_log_file();
-    app.fetch_all_data().await;
     let result = app.run(&mut terminal).await;
 
     // Restore terminal
