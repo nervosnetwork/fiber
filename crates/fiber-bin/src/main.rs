@@ -80,12 +80,16 @@ pub async fn main() -> Result<(), ExitMessage> {
     // Derive store_path: prefer fiber config, fall back to base_dir/fiber/store
     let store_path = parsed_fiber_config.store_path();
 
-    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    // TODO: Enable restore logic for SQLite backend in future
+    #[cfg_attr(
+        any(target_arch = "wasm32", feature = "sqlite"),
+        allow(unused_variables)
+    )]
     let restore_path = parsed_fiber_config
         .check_restore_path()
         .map_err(|err| ExitMessage(format!("Restore path error: {}", err)))?;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "sqlite")))]
     if let Some(path) = restore_path {
         run_restore(path, &store_path)
             .map_err(|err| ExitMessage(format!("Restore process error: {}", err)))?;
