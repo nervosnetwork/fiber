@@ -16,8 +16,6 @@ use crate::rpc_client::RpcClient;
 pub enum ChannelView {
     /// List of channels
     List,
-    /// Detail view of a selected channel
-    Detail,
     /// Open channel form
     OpenForm,
     /// Update channel form
@@ -98,7 +96,6 @@ impl ChannelsTab {
     pub async fn handle_key(&mut self, key: KeyEvent, client: &RpcClient) -> Option<TabKind> {
         match self.view {
             ChannelView::List => self.handle_list_key(key, client).await,
-            ChannelView::Detail => self.handle_detail_key(key),
             ChannelView::OpenForm | ChannelView::UpdateForm => Some(TabKind::EnterEditing),
         }
     }
@@ -125,11 +122,6 @@ impl ChannelsTab {
             KeyCode::End | KeyCode::Char('G') => {
                 if !self.channels.is_empty() {
                     self.table_state.select_last();
-                }
-            }
-            KeyCode::Enter => {
-                if !self.channels.is_empty() && self.table_state.selected().is_some() {
-                    self.view = ChannelView::Detail;
                 }
             }
             KeyCode::Char('c') => {
@@ -189,44 +181,49 @@ impl ChannelsTab {
         None
     }
 
-    fn handle_detail_key(&mut self, key: KeyEvent) -> Option<TabKind> {
-        match key.code {
-            KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('q') => {
-                self.view = ChannelView::List;
-            }
-            KeyCode::Char('u') => {
-                // Update channel form, pre-populated from current channel values
-                if let Some(sel) = self.table_state.selected() {
-                    if let Some(ch) = self.channels.get(sel) {
-                        // Clone values to avoid borrow conflict with &mut self
-                        let enabled = ch.enabled;
-                        let expiry = ch.tlc_expiry_delta;
-                        let fee = ch.tlc_fee_proportional_millionths;
-                        self.form_fields = vec![
-                            ("Enabled (true/false)".to_string(), enabled.to_string()),
-                            ("TLC Expiry Delta".to_string(), expiry.to_string()),
-                            (
-                                "TLC Fee Proportional Millionths".to_string(),
-                                fee.to_string(),
-                            ),
-                        ];
-                        self.form_selected = 0;
-                        self.form_editing = true;
-                        self.view = ChannelView::UpdateForm;
-                        return Some(TabKind::EnterEditing);
-                    }
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
     fn init_open_form(&mut self) {
         self.form_fields = vec![
             ("Peer Pubkey".to_string(), String::new()),
             ("Funding Amount (CKB shannons)".to_string(), String::new()),
             ("Public (true/false)".to_string(), "true".to_string()),
+            ("One-Way (true/false, optional)".to_string(), String::new()),
+            (
+                "Funding UDT Type Script (JSON, optional)".to_string(),
+                String::new(),
+            ),
+            (
+                "Shutdown Script (JSON, optional)".to_string(),
+                String::new(),
+            ),
+            (
+                "Commitment Delay Epoch (u64, optional)".to_string(),
+                String::new(),
+            ),
+            (
+                "Commitment Fee Rate (u64, optional)".to_string(),
+                String::new(),
+            ),
+            (
+                "Funding Fee Rate (u64, optional)".to_string(),
+                String::new(),
+            ),
+            ("TLC Expiry Delta (ms, optional)".to_string(), String::new()),
+            (
+                "TLC Min Value (shannons, optional)".to_string(),
+                String::new(),
+            ),
+            (
+                "TLC Fee Proportional Millionths (optional)".to_string(),
+                String::new(),
+            ),
+            (
+                "Max TLC Value In Flight (shannons, optional)".to_string(),
+                String::new(),
+            ),
+            (
+                "Max TLC Number In Flight (optional)".to_string(),
+                String::new(),
+            ),
         ];
         self.form_selected = 0;
         self.form_editing = true;
@@ -264,10 +261,7 @@ impl ChannelsTab {
             }
             KeyCode::Esc => {
                 // Return to the appropriate view
-                match self.view {
-                    ChannelView::UpdateForm => self.view = ChannelView::Detail,
-                    _ => self.view = ChannelView::List,
-                }
+                self.view = ChannelView::List;
                 self.form_editing = false;
             }
             _ => {}
@@ -308,15 +302,141 @@ impl ChannelsTab {
             }
         };
 
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "pubkey": pubkey,
             "funding_amount": format!("0x{:x}", amount),
             "public": is_public.to_lowercase() == "true",
         });
 
+        // one_way (bool, index 3)
+        let one_way = self.form_fields.get(3).map(|f| f.1.as_str()).unwrap_or("");
+        if !one_way.is_empty() {
+            params["one_way"] = serde_json::Value::Bool(one_way.to_lowercase() == "true");
+        }
+
+        // funding_udt_type_script (JSON, index 4)
+        let udt_script = self.form_fields.get(4).map(|f| f.1.as_str()).unwrap_or("");
+        if !udt_script.is_empty() {
+            match serde_json::from_str::<serde_json::Value>(udt_script) {
+                Ok(v) => params["funding_udt_type_script"] = v,
+                Err(_) => {
+                    self.status_message =
+                        Some("Invalid JSON for funding_udt_type_script".to_string());
+                    return;
+                }
+            }
+        }
+
+        // shutdown_script (JSON, index 5)
+        let shutdown = self.form_fields.get(5).map(|f| f.1.as_str()).unwrap_or("");
+        if !shutdown.is_empty() {
+            match serde_json::from_str::<serde_json::Value>(shutdown) {
+                Ok(v) => params["shutdown_script"] = v,
+                Err(_) => {
+                    self.status_message = Some("Invalid JSON for shutdown_script".to_string());
+                    return;
+                }
+            }
+        }
+
+        // commitment_delay_epoch (u64 hex, index 6)
+        let delay = self.form_fields.get(6).map(|f| f.1.as_str()).unwrap_or("");
+        if !delay.is_empty() {
+            if let Ok(v) = delay.parse::<u64>() {
+                params["commitment_delay_epoch"] = serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid commitment_delay_epoch".to_string());
+                return;
+            }
+        }
+
+        // commitment_fee_rate (u64 hex, index 7)
+        let cfr = self.form_fields.get(7).map(|f| f.1.as_str()).unwrap_or("");
+        if !cfr.is_empty() {
+            if let Ok(v) = cfr.parse::<u64>() {
+                params["commitment_fee_rate"] = serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid commitment_fee_rate".to_string());
+                return;
+            }
+        }
+
+        // funding_fee_rate (u64 hex, index 8)
+        let ffr = self.form_fields.get(8).map(|f| f.1.as_str()).unwrap_or("");
+        if !ffr.is_empty() {
+            if let Ok(v) = ffr.parse::<u64>() {
+                params["funding_fee_rate"] = serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid funding_fee_rate".to_string());
+                return;
+            }
+        }
+
+        // tlc_expiry_delta (u64 hex, index 9)
+        let ted = self.form_fields.get(9).map(|f| f.1.as_str()).unwrap_or("");
+        if !ted.is_empty() {
+            if let Ok(v) = ted.parse::<u64>() {
+                params["tlc_expiry_delta"] = serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid tlc_expiry_delta".to_string());
+                return;
+            }
+        }
+
+        // tlc_min_value (u128 hex, index 10)
+        let tmv = self.form_fields.get(10).map(|f| f.1.as_str()).unwrap_or("");
+        if !tmv.is_empty() {
+            if let Ok(v) = tmv.parse::<u128>() {
+                params["tlc_min_value"] = serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid tlc_min_value".to_string());
+                return;
+            }
+        }
+
+        // tlc_fee_proportional_millionths (u128 hex, index 11)
+        let tfpm = self.form_fields.get(11).map(|f| f.1.as_str()).unwrap_or("");
+        if !tfpm.is_empty() {
+            if let Ok(v) = tfpm.parse::<u128>() {
+                params["tlc_fee_proportional_millionths"] =
+                    serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid tlc_fee_proportional_millionths".to_string());
+                return;
+            }
+        }
+
+        // max_tlc_value_in_flight (u128 hex, index 12)
+        let mtvif = self.form_fields.get(12).map(|f| f.1.as_str()).unwrap_or("");
+        if !mtvif.is_empty() {
+            if let Ok(v) = mtvif.parse::<u128>() {
+                params["max_tlc_value_in_flight"] = serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid max_tlc_value_in_flight".to_string());
+                return;
+            }
+        }
+
+        // max_tlc_number_in_flight (u64 hex, index 13)
+        let mtnif = self.form_fields.get(13).map(|f| f.1.as_str()).unwrap_or("");
+        if !mtnif.is_empty() {
+            if let Ok(v) = mtnif.parse::<u64>() {
+                params["max_tlc_number_in_flight"] =
+                    serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid max_tlc_number_in_flight".to_string());
+                return;
+            }
+        }
+
         match client.call("open_channel", vec![params]).await {
             Ok(result) => {
-                self.status_message = Some(format!("Channel opened: {}", result));
+                // Extract temporary_channel_id from response
+                let channel_id = result
+                    .get("temporary_channel_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                self.status_message = Some(format!("Channel opened, temp_id: {}", channel_id));
                 self.view = ChannelView::List;
                 self.form_editing = false;
                 self.fetch_data(client).await;
@@ -381,7 +501,7 @@ impl ChannelsTab {
         match client.call("update_channel", vec![params]).await {
             Ok(_) => {
                 self.status_message = Some("Channel updated successfully".to_string());
-                self.view = ChannelView::Detail;
+                self.view = ChannelView::List;
                 self.form_editing = false;
                 self.fetch_data(client).await;
             }

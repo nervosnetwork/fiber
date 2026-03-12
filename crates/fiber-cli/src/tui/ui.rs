@@ -7,11 +7,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, LineGauge, List, ListItem, Paragraph, Row, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Sparkline, Table, Tabs, Wrap,
+    ScrollbarOrientation, ScrollbarState, Table, Tabs, Wrap,
 };
 use ratatui::Frame;
 
-use super::app::{ActiveTab, App, ConfirmDialog, InputMode};
+use super::app::{ActiveTab, App, ConfirmDialog, DetailPopup, InputMode};
 use super::tabs::channels::{ChannelView, ChannelsTab};
 use super::tabs::dashboard::DashboardTab;
 use super::tabs::graph::{GraphTab, GraphView};
@@ -52,6 +52,11 @@ fn format_ckb(shannons: u128) -> String {
     }
 }
 
+/// Public wrapper for format_ckb, used by popup row builders in app.rs.
+pub fn format_ckb_pub(shannons: u128) -> String {
+    format_ckb(shannons)
+}
+
 /// Truncate a hex string for display.
 fn truncate_hex(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
@@ -68,6 +73,11 @@ fn format_timestamp(ms: u64) -> String {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         _ => format!("{}ms", ms),
     }
+}
+
+/// Public wrapper for format_timestamp, used by popup row builders in app.rs.
+pub fn format_timestamp_pub(ms: u64) -> String {
+    format_timestamp(ms)
 }
 
 /// Render a vertical scrollbar next to an area.
@@ -103,6 +113,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // Help overlay
     if app.show_help {
         draw_help_overlay(f, size);
+    }
+
+    // Detail popup overlay
+    if let Some(ref popup) = app.detail_popup {
+        draw_detail_popup(f, popup, size);
     }
 
     // Confirmation dialog overlay (shown on top of everything)
@@ -243,6 +258,29 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         InputMode::Editing => Color::Yellow,
     };
 
+    // If there is an active flash message, show it prominently
+    if let Some((ref msg, is_error, _)) = app.flash_message {
+        let flash_color = if is_error { Color::Red } else { Color::Green };
+        let footer = Line::from(vec![
+            Span::styled(
+                format!(" {} ", mode_str),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(mode_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                msg.as_str(),
+                Style::default()
+                    .fg(flash_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(footer), area);
+        return;
+    }
+
     let footer = Line::from(vec![
         Span::styled(
             format!(" {} ", mode_str),
@@ -283,13 +321,13 @@ fn draw_dashboard_tab(
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
-    // Layout: top stats row + capacity gauge + channel state breakdown + TLC info + sparkline
+    // Layout: top stats row + capacity gauge + channel state breakdown + TLC info + network overview
     let chunks = Layout::vertical([
         Constraint::Length(3), // Summary stats row
         Constraint::Length(3), // Capacity utilization gauge
         Constraint::Length(9), // Channel state breakdown
         Constraint::Length(5), // TLC stats
-        Constraint::Min(4),    // Sparkline (activity graph)
+        Constraint::Min(4),    // Network overview (from graph)
     ])
     .split(inner);
 
@@ -305,8 +343,8 @@ fn draw_dashboard_tab(
     // ── Row 4: TLC stats ────────────────────────────────────────────
     draw_dashboard_tlc_stats(f, tab, chunks[3]);
 
-    // ── Row 5: Sparkline (capacity history) ─────────────────────────
-    draw_dashboard_sparkline(f, tab, chunks[4]);
+    // ── Row 5: Network overview (graph nodes & channels) ────────────
+    draw_dashboard_network(f, tab, chunks[4]);
 }
 
 fn draw_dashboard_summary(
@@ -531,26 +569,204 @@ fn draw_dashboard_tlc_stats(f: &mut Frame, tab: &DashboardTab, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-fn draw_dashboard_sparkline(f: &mut Frame, tab: &DashboardTab, area: Rect) {
-    let block = Block::default()
+fn draw_dashboard_network(f: &mut Frame, tab: &DashboardTab, area: Rect) {
+    let net = &tab.network_stats;
+
+    let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(" Capacity History (CKB) ");
+        .title(" Network Topology ");
 
-    if tab.capacity_history.is_empty() {
-        let text = Paragraph::new("  Collecting data...")
+    if net.total_nodes == 0 && net.total_channels == 0 {
+        let text = Paragraph::new("  No graph data available")
             .style(Style::default().fg(Color::DarkGray))
-            .block(block);
+            .block(outer_block);
         f.render_widget(text, area);
         return;
     }
 
-    let sparkline = Sparkline::default()
-        .block(block)
-        .data(&tab.capacity_history)
-        .style(Style::default().fg(Color::Cyan));
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
 
-    f.render_widget(sparkline, area);
+    // Split: left = adjacency tree, right = stats text
+    let chunks = Layout::horizontal([
+        Constraint::Min(20),    // Adjacency list (takes remaining space)
+        Constraint::Length(36), // Stats panel
+    ])
+    .split(inner);
+
+    // ── Right: stats text ───────────────────────────────────────────
+    let inactive = net.total_channels.saturating_sub(net.active_channels);
+    let stats_lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Nodes: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}", net.total_nodes),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" Channels: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}", net.total_channels),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("   Active: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", net.active_channels),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("   Inactive: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", inactive),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" Capacity: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format_ckb(net.total_capacity),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ];
+    let stats_block = Block::default()
+        .borders(Borders::LEFT)
+        .border_type(BorderType::Plain);
+    let stats_paragraph = Paragraph::new(stats_lines).block(stats_block);
+    f.render_widget(stats_paragraph, chunks[1]);
+
+    // ── Left: adjacency tree list ───────────────────────────────────
+    let max_lines = chunks[0].height as usize;
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    // Self node header.
+    if !tab.self_label.is_empty() {
+        let peer_count = tab.self_peers.len();
+        lines.push(Line::from(vec![
+            Span::styled(
+                " ◆ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                tab.self_label.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ({} peers, {} ch)", peer_count, tab.self_degree),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+
+        // List direct peers.
+        let peer_limit = max_lines.saturating_sub(4); // reserve room for "Other" section
+        let show_count = tab.self_peers.len().min(peer_limit);
+        for (i, peer) in tab.self_peers.iter().take(show_count).enumerate() {
+            let is_last = i == show_count - 1 && tab.self_peers.len() <= show_count;
+            let branch = if is_last { " └─" } else { " ├─" };
+            let status_dot = if peer.active_count > 0 {
+                Span::styled(" ●", Style::default().fg(Color::Green))
+            } else {
+                Span::styled(" ○", Style::default().fg(Color::DarkGray))
+            };
+            let ch_label = if peer.channel_count > 1 {
+                format!(" {}ch", peer.channel_count)
+            } else {
+                " 1ch".to_string()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(branch, Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(" [{}]", peer.label),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(ch_label, Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("  {}", format_ckb(peer.capacity)),
+                    Style::default().fg(Color::Green),
+                ),
+                status_dot,
+            ]));
+        }
+        if tab.self_peers.len() > show_count {
+            lines.push(Line::from(Span::styled(
+                format!(" └─ … +{} more", tab.self_peers.len() - show_count),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else if net.total_nodes > 0 {
+        // No self node in graph — just show summary.
+        lines.push(Line::from(Span::styled(
+            " (own node not in graph)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    // Other connections section.
+    if !tab.other_connections.is_empty() {
+        let remaining = max_lines.saturating_sub(lines.len() + 1);
+        if remaining > 1 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " Other connections:",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            let show_other = tab.other_connections.len().min(remaining.saturating_sub(2));
+            for conn in tab.other_connections.iter().take(show_other) {
+                let status_dot = if conn.active_count > 0 {
+                    Span::styled(" ●", Style::default().fg(Color::Green))
+                } else {
+                    Span::styled(" ○", Style::default().fg(Color::DarkGray))
+                };
+                let ch_label = if conn.channel_count > 1 {
+                    format!(" {}ch", conn.channel_count)
+                } else {
+                    String::new()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled(conn.label_a.clone(), Style::default().fg(Color::White)),
+                    Span::styled(" ── ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(conn.label_b.clone(), Style::default().fg(Color::White)),
+                    Span::styled(ch_label, Style::default().fg(Color::DarkGray)),
+                    status_dot,
+                ]));
+            }
+            if tab.other_connections.len() > show_other {
+                lines.push(Line::from(Span::styled(
+                    format!("   … +{} more", tab.other_connections.len() - show_other),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " No topology data",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, chunks[0]);
 }
 
 // ── Channels Tab ────────────────────────────────────────────────────────
@@ -558,7 +774,6 @@ fn draw_dashboard_sparkline(f: &mut Frame, tab: &DashboardTab, area: Rect) {
 fn draw_channels_tab(f: &mut Frame, tab: &mut ChannelsTab, area: Rect) {
     match tab.view {
         ChannelView::List => draw_channels_list(f, tab, area),
-        ChannelView::Detail => draw_channel_detail(f, tab, area),
         ChannelView::OpenForm => draw_form(
             f,
             "Open Channel",
@@ -664,139 +879,11 @@ fn draw_channels_list(f: &mut Frame, tab: &mut ChannelsTab, area: Rect) {
     render_scrollbar(f, area, tab.channels.len(), position);
 }
 
-fn draw_channel_detail(f: &mut Frame, tab: &ChannelsTab, area: Rect) {
-    let selected = tab.table_state.selected().unwrap_or(0);
-    let ch = match tab.channels.get(selected) {
-        Some(ch) => ch,
-        None => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(" Channel Detail ");
-            let text = Paragraph::new("No channel selected").block(block);
-            f.render_widget(text, area);
-            return;
-        }
-    };
-
-    let outer_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Channel Detail  [u:Update  Esc:Back] ");
-
-    let inner = outer_block.inner(area);
-    f.render_widget(outer_block, area);
-
-    // Split: balance gauge (3 lines) + detail fields
-    let chunks = Layout::vertical([
-        Constraint::Length(3), // Balance gauge
-        Constraint::Min(5),    // Detail fields
-    ])
-    .split(inner);
-
-    // ── Balance gauge ──
-    let total = ch.local_balance + ch.remote_balance;
-    let ratio = if total > 0 {
-        ch.local_balance as f64 / total as f64
-    } else {
-        0.0
-    };
-
-    let gauge_label = format!(
-        "Local: {}  |  Remote: {}",
-        format_ckb(ch.local_balance),
-        format_ckb(ch.remote_balance),
-    );
-
-    let gauge = LineGauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(" Balance "),
-        )
-        .filled_style(Style::default().fg(Color::Green))
-        .unfilled_style(Style::default().fg(Color::Red))
-        .ratio(ratio)
-        .label(gauge_label)
-        .line_set(ratatui::symbols::line::THICK);
-
-    f.render_widget(gauge, chunks[0]);
-
-    // ── Detail fields ──
-    let state = ChannelsTab::state_name(ch);
-    let state_color = channel_state_color(state);
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Channel ID:     ", Style::default().fg(Color::Yellow)),
-            Span::raw(format!("{}", ch.channel_id)),
-        ]),
-        Line::from(vec![
-            Span::styled("State:          ", Style::default().fg(Color::Yellow)),
-            Span::styled(state, Style::default().fg(state_color)),
-        ]),
-        Line::from(vec![
-            Span::styled("Peer:           ", Style::default().fg(Color::Yellow)),
-            Span::raw(format!("{}", ch.pubkey)),
-        ]),
-        Line::from(vec![
-            Span::styled("Public:         ", Style::default().fg(Color::Yellow)),
-            Span::raw(if ch.is_public { "Yes" } else { "No" }),
-        ]),
-        Line::from(vec![
-            Span::styled("One-Way:        ", Style::default().fg(Color::Yellow)),
-            Span::raw(if ch.is_one_way { "Yes" } else { "No" }),
-        ]),
-        Line::from(vec![
-            Span::styled("Acceptor:       ", Style::default().fg(Color::Yellow)),
-            Span::raw(if ch.is_acceptor { "Yes" } else { "No" }),
-        ]),
-        Line::from(vec![
-            Span::styled("Enabled:        ", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                if ch.enabled { "Yes" } else { "No" },
-                Style::default().fg(if ch.enabled {
-                    Color::Green
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Created:        ", Style::default().fg(Color::Yellow)),
-            Span::raw(format_timestamp(ch.created_at)),
-        ]),
-        Line::from(vec![
-            Span::styled("Offered TLC:    ", Style::default().fg(Color::Yellow)),
-            Span::raw(format_ckb(ch.offered_tlc_balance)),
-        ]),
-        Line::from(vec![
-            Span::styled("Received TLC:   ", Style::default().fg(Color::Yellow)),
-            Span::raw(format_ckb(ch.received_tlc_balance)),
-        ]),
-        Line::from(vec![
-            Span::styled("Pending TLCs:   ", Style::default().fg(Color::Yellow)),
-            Span::raw(format!("{}", ch.pending_tlcs.len())),
-        ]),
-        Line::from(vec![
-            Span::styled("TLC Fee Rate:   ", Style::default().fg(Color::Yellow)),
-            Span::raw(format!(
-                "{}ppm ({}%)",
-                ch.tlc_fee_proportional_millionths,
-                ch.tlc_fee_proportional_millionths as f64 / 10_000.0
-            )),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    f.render_widget(paragraph, chunks[1]);
-}
-
 // ── Payments Tab ────────────────────────────────────────────────────────
 
 fn draw_payments_tab(f: &mut Frame, tab: &mut PaymentsTab, area: Rect) {
     match tab.view {
         PaymentView::List => draw_payments_list(f, tab, area),
-        PaymentView::Detail => draw_payment_detail(f, tab, area),
         PaymentView::SendForm => draw_form(
             f,
             "Send Payment",
@@ -898,62 +985,6 @@ fn draw_payments_list(f: &mut Frame, tab: &mut PaymentsTab, area: Rect) {
 
     let position = tab.table_state.selected().unwrap_or(0);
     render_scrollbar(f, area, tab.payments.len(), position);
-}
-
-fn draw_payment_detail(f: &mut Frame, tab: &PaymentsTab, area: Rect) {
-    let selected = tab.table_state.selected().unwrap_or(0);
-    let payment = match tab.payments.get(selected) {
-        Some(p) => p,
-        None => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(" Payment Detail ");
-            let text = Paragraph::new("No payment selected").block(block);
-            f.render_widget(text, area);
-            return;
-        }
-    };
-
-    let status = PaymentsTab::status_name(payment);
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Payment Hash: ", Style::default().fg(Color::Yellow)),
-            Span::raw(format!("{}", payment.payment_hash)),
-        ]),
-        Line::from(vec![
-            Span::styled("Status:       ", Style::default().fg(Color::Yellow)),
-            Span::styled(status, Style::default().fg(Color::Green)),
-        ]),
-        Line::from(vec![
-            Span::styled("Fee:          ", Style::default().fg(Color::Yellow)),
-            Span::raw(format_ckb(payment.fee)),
-        ]),
-        Line::from(vec![
-            Span::styled("Created:      ", Style::default().fg(Color::Yellow)),
-            Span::raw(format_timestamp(payment.created_at)),
-        ]),
-        Line::from(vec![
-            Span::styled("Updated:      ", Style::default().fg(Color::Yellow)),
-            Span::raw(format_timestamp(payment.last_updated_at)),
-        ]),
-    ];
-
-    if let Some(ref err) = payment.failed_error {
-        lines.push(Line::from(vec![
-            Span::styled("Error:        ", Style::default().fg(Color::Red)),
-            Span::raw(err.as_str()),
-        ]));
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Payment Detail  [Esc:Back] ");
-
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(paragraph, area);
 }
 
 // ── Peers Tab ───────────────────────────────────────────────────────────
@@ -1680,6 +1711,183 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         .block(block)
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, popup_area);
+}
+
+// ── Detail Popup Overlay ────────────────────────────────────────────────
+
+fn draw_detail_popup(f: &mut Frame, popup: &DetailPopup, area: Rect) {
+    // Padding inside the border: 2 chars left+right, 1 line top+bottom.
+    let pad_x: u16 = 2;
+    let pad_y: u16 = 1;
+
+    let popup_width = 80u16.min(area.width.saturating_sub(4));
+    // inner_width accounts for borders (2) and horizontal padding (2 * pad_x).
+    let inner_width = popup_width.saturating_sub(2 + pad_x * 2) as usize;
+
+    // First pass: compute total visual lines so we can size the popup.
+    let visual_line_count = count_visual_lines(&popup.rows, inner_width);
+    // +2 for borders, +2*pad_y for vertical padding.
+    let popup_height = ((visual_line_count as u16).saturating_add(2 + pad_y * 2))
+        .min(area.height.saturating_sub(4));
+
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .title(format!(" {} ", popup.title))
+        .title_alignment(Alignment::Center)
+        .title_bottom(Line::from(Span::styled(
+            " j/k:Navigate  y:Copy  u:Update(Ch)  Esc:Close ",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .style(Style::default().bg(Color::Black).fg(Color::White));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Apply padding inside the border.
+    let padded = Rect::new(
+        inner.x + pad_x,
+        inner.y + pad_y,
+        inner.width.saturating_sub(pad_x * 2),
+        inner.height.saturating_sub(pad_y * 2),
+    );
+
+    if popup.rows.is_empty() {
+        let text = Paragraph::new("No data").style(Style::default().fg(Color::DarkGray));
+        f.render_widget(text, padded);
+        return;
+    }
+
+    let visible_height = padded.height as usize;
+
+    // Build all visual lines, tracking which belong to the selected row.
+    let mut visual_lines: Vec<Line> = Vec::new();
+    let mut selected_visual_start: usize = 0;
+    let mut selected_visual_count: usize = 0;
+
+    for (i, (key, value)) in popup.rows.iter().enumerate() {
+        let is_selected = i == popup.selected;
+        let marker = if is_selected { "> " } else { "  " };
+        let key_prefix = format!("{}{}: ", marker, key);
+        let prefix_len = key_prefix.len();
+
+        let key_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+        let value_style = if is_selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        let first_line_capacity = inner_width.saturating_sub(prefix_len);
+        let cont_indent = " ".repeat(prefix_len);
+        let cont_capacity = inner_width.saturating_sub(prefix_len);
+
+        if i == popup.selected {
+            selected_visual_start = visual_lines.len();
+        }
+
+        if value.len() <= first_line_capacity || cont_capacity == 0 {
+            visual_lines.push(Line::from(vec![
+                Span::styled(marker.to_string(), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{}: ", key), key_style),
+                Span::styled(value.clone(), value_style),
+            ]));
+        } else {
+            let mut remaining = value.as_str();
+            let mut is_first = true;
+            while !remaining.is_empty() {
+                let cap = if is_first {
+                    first_line_capacity
+                } else {
+                    cont_capacity
+                };
+                let split_at = remaining
+                    .char_indices()
+                    .nth(cap)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(remaining.len());
+                let chunk = &remaining[..split_at];
+                remaining = &remaining[split_at..];
+
+                if is_first {
+                    visual_lines.push(Line::from(vec![
+                        Span::styled(marker.to_string(), Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("{}: ", key), key_style),
+                        Span::styled(chunk.to_string(), value_style),
+                    ]));
+                    is_first = false;
+                } else {
+                    visual_lines.push(Line::from(vec![
+                        Span::styled(cont_indent.clone(), Style::default()),
+                        Span::styled(chunk.to_string(), value_style),
+                    ]));
+                }
+            }
+        }
+
+        if i == popup.selected {
+            selected_visual_count = visual_lines.len() - selected_visual_start;
+        }
+    }
+
+    // Scroll: keep the selected row visible.
+    let total_visual = visual_lines.len();
+    let scroll_offset = {
+        let selected_visual_end = selected_visual_start + selected_visual_count;
+        if selected_visual_end > visible_height {
+            let ideal = selected_visual_start;
+            let max_scroll = total_visual.saturating_sub(visible_height);
+            ideal.min(max_scroll)
+        } else {
+            0
+        }
+    };
+
+    let lines: Vec<Line> = visual_lines
+        .into_iter()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .collect();
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, padded);
+}
+
+/// Count how many visual lines the popup rows will occupy at the given width.
+fn count_visual_lines(rows: &[(String, String)], inner_width: usize) -> usize {
+    let mut count = 0usize;
+    for (key, value) in rows {
+        let prefix_len = key.len() + 4; // "  " marker + key + ": "
+        let first_cap = inner_width.saturating_sub(prefix_len);
+        let cont_cap = inner_width.saturating_sub(prefix_len);
+        if value.len() <= first_cap || cont_cap == 0 {
+            count += 1;
+        } else {
+            // first line
+            count += 1;
+            let mut remaining = value.len().saturating_sub(first_cap);
+            while remaining > 0 {
+                let used = remaining.min(cont_cap);
+                count += 1;
+                remaining -= used;
+            }
+        }
+    }
+    count
 }
 
 // ── Confirm Dialog Overlay ──────────────────────────────────────────────

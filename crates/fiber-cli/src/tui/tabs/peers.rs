@@ -201,6 +201,10 @@ impl PeersTab {
                 "Pubkey (optional, alternative to address)".to_string(),
                 String::new(),
             ),
+            (
+                "Save (true/false, default: true)".to_string(),
+                "true".to_string(),
+            ),
         ];
         self.form_selected = 0;
         self.form_editing = true;
@@ -254,6 +258,11 @@ impl PeersTab {
             .get(1)
             .map(|f| f.1.clone())
             .unwrap_or_default();
+        let save_str = self
+            .form_fields
+            .get(2)
+            .map(|f| f.1.clone())
+            .unwrap_or_default();
 
         if address.is_empty() && pubkey.is_empty() {
             self.status_message = Some("Address or pubkey is required".to_string());
@@ -267,7 +276,9 @@ impl PeersTab {
         if !pubkey.is_empty() {
             params["pubkey"] = serde_json::Value::String(pubkey);
         }
-        params["save"] = serde_json::Value::Bool(true);
+        // Default to true if empty or explicitly "true"
+        let save = save_str.is_empty() || save_str.to_lowercase() == "true";
+        params["save"] = serde_json::Value::Bool(save);
 
         match client.call("connect_peer", vec![params]).await {
             Ok(_) => {

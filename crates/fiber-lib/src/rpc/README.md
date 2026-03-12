@@ -42,6 +42,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
         * [Method `settle_invoice`](#invoice-settle_invoice)
+        * [Method `list_invoices`](#invoice-list_invoices)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -74,6 +75,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
     * [Type `Currency`](#type-currency)
+    * [Type `GetInvoiceResult`](#type-getinvoiceresult)
     * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
     * [Type `HashAlgorithm`](#type-hashalgorithm)
@@ -641,6 +643,26 @@ Settles an invoice by saving the preimage to this invoice.
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="invoice-list_invoices"></a>
+#### Method `list_invoices`
+
+Lists all invoices, optionally filtered by status.
+
+##### Params
+
+* `status` - <em>Option<[CkbInvoiceStatus](#type-ckbinvoicestatus)></em>, Filter invoices by status. If not set, all invoices are returned.
+* `limit` - <em>`Option<u64>`</em>, The maximum number of invoices to return. Default is 15.
+* `after` - <em>Option<[Hash256](#type-hash256)></em>, The payment hash to start returning invoices after (exclusive cursor for pagination).
+
+##### Returns
+
+* `invoices` - <em>Vec<[GetInvoiceResult](#type-getinvoiceresult)></em>, The list of invoices.
+* `last_cursor` - <em>Option<[Hash256](#type-hash256)></em>, The last cursor for pagination. Use this as `after` in the next request to get more results.
 
 ---
 
@@ -1292,6 +1314,19 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Fibb` - The mainnet currency of CKB.
 * `Fibt` - The testnet currency of the CKB network.
 * `Fibd` - The devnet currency of the CKB network.
+---
+
+<a id="#type-getinvoiceresult"></a>
+### Type `GetInvoiceResult`
+
+The status of the invoice.
+
+
+#### Fields
+
+* `invoice_address` - <em>`String`</em>, The encoded invoice address.
+* `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+* `status` - <em>[CkbInvoiceStatus](#type-ckbinvoicestatus)</em>, The invoice status
 ---
 
 <a id="#type-getpaymentcommandresult"></a>

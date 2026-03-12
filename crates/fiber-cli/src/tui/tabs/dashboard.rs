@@ -1,6 +1,8 @@
 //! Dashboard tab: overview of node status, channel stats, and capacity utilization.
 
-use fiber_json_types::{Channel, NodeInfoResult};
+use std::collections::HashMap;
+
+use fiber_json_types::{Channel, ChannelInfo, NodeInfo as GraphNodeInfo, NodeInfoResult};
 
 /// Aggregated stats computed client-side from channel data + node info.
 #[derive(Debug, Clone, Default)]
@@ -33,24 +35,71 @@ pub struct DashboardStats {
     pub total_channels: usize,
 }
 
-/// Maximum number of sparkline data points to keep.
-const SPARKLINE_MAX_POINTS: usize = 60;
+/// Aggregated network-wide stats from the graph.
+#[derive(Debug, Clone, Default)]
+pub struct NetworkStats {
+    /// Total number of nodes in the network graph.
+    pub total_nodes: usize,
+    /// Total number of channels in the network graph.
+    pub total_channels: usize,
+    /// Total capacity across all graph channels (shannons).
+    pub total_capacity: u128,
+    /// Number of graph channels with at least one direction enabled.
+    pub active_channels: usize,
+}
+
+/// A peer connection visible from the topology (for the adjacency list view).
+#[derive(Debug, Clone)]
+pub struct PeerConnection {
+    /// Display label for the peer node.
+    pub label: String,
+    /// Number of channels between these two nodes.
+    pub channel_count: usize,
+    /// Total capacity across those channels (shannons).
+    pub capacity: u128,
+    /// Number of active channels (at least one direction enabled).
+    pub active_count: usize,
+}
+
+/// A connection between two non-self nodes (for "Other connections" section).
+#[derive(Debug, Clone)]
+pub struct OtherConnection {
+    /// Display label for node A.
+    pub label_a: String,
+    /// Display label for node B.
+    pub label_b: String,
+    /// Number of channels.
+    pub channel_count: usize,
+    /// Total capacity (shannons).
+    pub capacity: u128,
+    /// Number of active channels.
+    pub active_count: usize,
+}
 
 /// Dashboard tab state.
 pub struct DashboardTab {
     pub stats: DashboardStats,
-    /// Historical channel counts for sparkline (most recent at end).
-    pub channel_history: Vec<u64>,
-    /// Historical capacity data for sparkline (most recent at end, in CKB units).
-    pub capacity_history: Vec<u64>,
+    /// Network-wide stats derived from graph data.
+    pub network_stats: NetworkStats,
+    /// Label for the self node (empty if not found in graph).
+    pub self_label: String,
+    /// Total degree (channel count) of the self node.
+    pub self_degree: usize,
+    /// Direct peers of the self node, sorted by capacity descending.
+    pub self_peers: Vec<PeerConnection>,
+    /// Connections between non-self nodes, sorted by capacity descending.
+    pub other_connections: Vec<OtherConnection>,
 }
 
 impl DashboardTab {
     pub fn new() -> Self {
         Self {
             stats: DashboardStats::default(),
-            channel_history: Vec::new(),
-            capacity_history: Vec::new(),
+            network_stats: NetworkStats::default(),
+            self_label: String::new(),
+            self_degree: 0,
+            self_peers: Vec::new(),
+            other_connections: Vec::new(),
         }
     }
 
@@ -86,20 +135,131 @@ impl DashboardTab {
 
         stats.total_capacity = stats.total_local_balance + stats.total_remote_balance;
         self.stats = stats;
+    }
 
-        // Update sparkline history
-        self.channel_history.push(self.stats.total_channels as u64);
-        if self.channel_history.len() > SPARKLINE_MAX_POINTS {
-            self.channel_history
-                .drain(..self.channel_history.len() - SPARKLINE_MAX_POINTS);
+    /// Update network-wide stats and adjacency data from graph data.
+    pub fn update_network_stats(
+        &mut self,
+        graph_nodes: &[GraphNodeInfo],
+        graph_channels: &[ChannelInfo],
+        own_pubkey: Option<&str>,
+    ) {
+        // ── Stats ───────────────────────────────────────────────────
+        let mut net = NetworkStats {
+            total_nodes: graph_nodes.len(),
+            total_channels: graph_channels.len(),
+            ..NetworkStats::default()
+        };
+        for ch in graph_channels {
+            net.total_capacity += ch.capacity;
+            let node1_enabled = ch.update_info_of_node1.as_ref().is_some_and(|u| u.enabled);
+            let node2_enabled = ch.update_info_of_node2.as_ref().is_some_and(|u| u.enabled);
+            if node1_enabled || node2_enabled {
+                net.active_channels += 1;
+            }
         }
-        // Capacity in CKB (whole units) for sparkline
-        let capacity_ckb = (self.stats.total_capacity / 100_000_000) as u64;
-        self.capacity_history.push(capacity_ckb);
-        if self.capacity_history.len() > SPARKLINE_MAX_POINTS {
-            self.capacity_history
-                .drain(..self.capacity_history.len() - SPARKLINE_MAX_POINTS);
+        self.network_stats = net;
+
+        // ── Build node labels map ───────────────────────────────────
+        let mut pubkey_to_label: HashMap<String, String> = HashMap::new();
+        let mut self_pk: Option<String> = None;
+
+        for node in graph_nodes {
+            let pk = format!("{}", node.pubkey);
+            let is_self = own_pubkey.is_some_and(|own| own == pk);
+            let label = if is_self {
+                if node.node_name.is_empty() {
+                    "me".to_string()
+                } else {
+                    node.node_name.chars().take(12).collect::<String>()
+                }
+            } else if !node.node_name.is_empty() {
+                node.node_name.chars().take(10).collect()
+            } else {
+                truncate_pubkey(&pk)
+            };
+            if is_self {
+                self_pk = Some(pk.clone());
+                self.self_label = label.clone();
+            }
+            pubkey_to_label.insert(pk, label);
         }
+
+        // ── Build per-pair aggregation ──────────────────────────────
+        // Key: (min_pk, max_pk) to deduplicate direction.
+        struct PairAgg {
+            channel_count: usize,
+            capacity: u128,
+            active_count: usize,
+        }
+
+        let mut pairs: HashMap<(String, String), PairAgg> = HashMap::new();
+        for ch in graph_channels {
+            let pk1 = format!("{}", ch.node1);
+            let pk2 = format!("{}", ch.node2);
+            let active = ch.update_info_of_node1.as_ref().is_some_and(|u| u.enabled)
+                || ch.update_info_of_node2.as_ref().is_some_and(|u| u.enabled);
+            let key = if pk1 <= pk2 { (pk1, pk2) } else { (pk2, pk1) };
+            let entry = pairs.entry(key).or_insert(PairAgg {
+                channel_count: 0,
+                capacity: 0,
+                active_count: 0,
+            });
+            entry.channel_count += 1;
+            entry.capacity += ch.capacity;
+            if active {
+                entry.active_count += 1;
+            }
+        }
+
+        // ── Partition into self-peers vs other connections ───────────
+        let mut self_peers: Vec<PeerConnection> = Vec::new();
+        let mut other_connections: Vec<OtherConnection> = Vec::new();
+        let mut self_total_channels = 0usize;
+
+        for ((pk_a, pk_b), agg) in &pairs {
+            let is_self_a = self_pk.as_ref().is_some_and(|s| s == pk_a);
+            let is_self_b = self_pk.as_ref().is_some_and(|s| s == pk_b);
+
+            if is_self_a || is_self_b {
+                let peer_pk = if is_self_a { pk_b } else { pk_a };
+                let label = pubkey_to_label
+                    .get(peer_pk)
+                    .cloned()
+                    .unwrap_or_else(|| truncate_pubkey(peer_pk));
+                self_peers.push(PeerConnection {
+                    label,
+                    channel_count: agg.channel_count,
+                    capacity: agg.capacity,
+                    active_count: agg.active_count,
+                });
+                self_total_channels += agg.channel_count;
+            } else {
+                let label_a = pubkey_to_label
+                    .get(pk_a)
+                    .cloned()
+                    .unwrap_or_else(|| truncate_pubkey(pk_a));
+                let label_b = pubkey_to_label
+                    .get(pk_b)
+                    .cloned()
+                    .unwrap_or_else(|| truncate_pubkey(pk_b));
+                other_connections.push(OtherConnection {
+                    label_a,
+                    label_b,
+                    channel_count: agg.channel_count,
+                    capacity: agg.capacity,
+                    active_count: agg.active_count,
+                });
+            }
+        }
+
+        // Sort by capacity descending.
+        self_peers.sort_by(|a, b| b.capacity.cmp(&a.capacity));
+        other_connections.sort_by(|a, b| b.capacity.cmp(&a.capacity));
+
+        self.self_degree = self_total_channels;
+        self.self_peers = self_peers;
+        self.other_connections = other_connections;
     }
 }
 
@@ -117,5 +277,14 @@ fn channel_state_category(ch: &Channel) -> StateCategory {
         fiber_json_types::ChannelState::ShuttingDown(_) => StateCategory::ShuttingDown,
         fiber_json_types::ChannelState::Closed(_) => StateCategory::Closed,
         _ => StateCategory::Pending,
+    }
+}
+
+/// Shorten a pubkey hex string to first 4 + last 4 chars.
+fn truncate_pubkey(pk: &str) -> String {
+    if pk.len() <= 10 {
+        pk.to_string()
+    } else {
+        format!("{}..{}", &pk[..4], &pk[pk.len() - 4..])
     }
 }

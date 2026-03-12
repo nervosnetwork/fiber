@@ -27,6 +27,7 @@ pub async fn run(client: RpcClient) -> Result<()> {
 
     // Create and run the app
     let mut app = app::App::new(client);
+    app.logs_tab.maintain_log_file();
     app.fetch_all_data().await;
     let result = app.run(&mut terminal).await;
 
