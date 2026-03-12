@@ -27,6 +27,7 @@ jobs:
           - watchtower/force-close-after-open-channel
           - watchtower/force-close-preimage
           - watchtower/force-close-preimage-multiple
+          - watchtower/force-close-preimage-settled-by-recipient
           - watchtower/force-close-remote-with-pending-tlcs-and-stop-watchtower
           - watchtower/force-close-remote-without-pending-tlcs-and-stop-watchtower
           - watchtower/force-close-with-consecutive-settlement

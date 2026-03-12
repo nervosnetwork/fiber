@@ -1,0 +1,70 @@
+meta {
+  name: Node3 generate hold invoice
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "new_invoice",
+    "params": [
+      {
+        "amount": "0x5f5e100",
+        "currency": "Fibd",
+        "description": "hold invoice for preimage settlement test",
+        "expiry": "0xe10",
+        "final_expiry_delta": "0xDFFA0",
+        "payment_hash": "{{payment_hash}}",
+        "hash_algorithm": "sha256"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:pre-request {
+  let payment_preimage;
+  let payment_hash;
+  try {
+    const crypto = require('crypto');
+    function generateRandomPreimage() {
+      let hex = '0x';
+      for (let i = 0; i < 64; i++) {
+        hex += Math.floor(Math.random() * 16).toString(16);
+      }
+      return hex;
+    }
+    payment_preimage = generateRandomPreimage();
+    const preimage_bytes = Buffer.from(payment_preimage.slice(2), 'hex');
+    payment_hash = "0x" + crypto.createHash('sha256').update(preimage_bytes).digest('hex');
+  } catch (e) {
+    // Fallback: hardcoded SHA256 pair if crypto module unavailable
+    payment_preimage = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    payment_hash = "0x8200cf0ce11447bf6353cbac964d07d1c390d61d07e6c5d0214450b3add6449b";
+  }
+  bru.setVar("payment_preimage", payment_preimage);
+  bru.setVar("payment_hash", payment_hash);
+}
+
+script:post-response {
+  console.log("generated result: ", res.body.result);
+  bru.setVar("encoded_invoice", res.body.result.invoice_address);
+  await new Promise(r => setTimeout(r, 1000));
+}
