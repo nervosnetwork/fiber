@@ -198,7 +198,7 @@ pub struct App {
     pub flash_message: Option<(String, bool, Instant)>,
 
     // Last data refresh time
-    last_refresh: Instant,
+    pub last_refresh: Instant,
 }
 
 impl App {
@@ -880,7 +880,7 @@ impl App {
     /// Handle key events when a confirmation dialog is active.
     async fn handle_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 // Execute the confirmed action
                 if let Some(dialog) = self.confirm_dialog.take() {
                     match dialog.action {
@@ -969,24 +969,9 @@ impl App {
                 // If we are on the Channels tab, allow 'u' to open the update form
                 if self.active_tab == ActiveTab::Channels {
                     self.detail_popup = None;
-                    if let Some(sel) = self.channels_tab.table_state.selected() {
-                        if let Some(ch) = self.channels_tab.channels.get(sel) {
-                            let enabled = ch.enabled;
-                            let expiry = ch.tlc_expiry_delta;
-                            let fee = ch.tlc_fee_proportional_millionths;
-                            self.channels_tab.form_fields = vec![
-                                ("Enabled (true/false)".to_string(), enabled.to_string()),
-                                ("TLC Expiry Delta".to_string(), expiry.to_string()),
-                                (
-                                    "TLC Fee Proportional Millionths".to_string(),
-                                    fee.to_string(),
-                                ),
-                            ];
-                            self.channels_tab.form_selected = 0;
-                            self.channels_tab.form_editing = true;
-                            self.channels_tab.view = ChannelView::UpdateForm;
-                            self.input_mode = InputMode::Editing;
-                        }
+                    self.channels_tab.init_update_form();
+                    if self.channels_tab.view == ChannelView::UpdateForm {
+                        self.input_mode = InputMode::Editing;
                     }
                 }
             }

@@ -243,10 +243,7 @@ impl InvoicesTab {
             ("Amount (shannons)".to_string(), String::new()),
             ("Description (optional)".to_string(), String::new()),
             ("Expiry (seconds, optional)".to_string(), String::new()),
-            (
-                "Currency (optional, default: Fibd)".to_string(),
-                String::new(),
-            ),
+            ("Currency (Fibb/Fibt/Fibd)".to_string(), "Fibd".to_string()),
             (
                 "Payment Preimage (hex, optional)".to_string(),
                 String::new(),
@@ -262,8 +259,8 @@ impl InvoicesTab {
                 String::new(),
             ),
             (
-                "Hash Algorithm (optional: ckb_hash/sha256)".to_string(),
-                String::new(),
+                "Hash Algorithm (ckb_hash/sha256)".to_string(),
+                "ckb_hash".to_string(),
             ),
             (
                 "Allow MPP (true/false, optional)".to_string(),

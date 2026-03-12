@@ -176,6 +176,13 @@ impl ChannelsTab {
                     }
                 }
             }
+            KeyCode::Char('u') => {
+                // Update selected channel
+                self.init_update_form();
+                if self.view == ChannelView::UpdateForm {
+                    return Some(TabKind::EnterEditing);
+                }
+            }
             _ => {}
         }
         None
@@ -186,7 +193,10 @@ impl ChannelsTab {
             ("Peer Pubkey".to_string(), String::new()),
             ("Funding Amount (CKB shannons)".to_string(), String::new()),
             ("Public (true/false)".to_string(), "true".to_string()),
-            ("One-Way (true/false, optional)".to_string(), String::new()),
+            (
+                "One-Way (true/false, optional)".to_string(),
+                "false".to_string(),
+            ),
             (
                 "Funding UDT Type Script (JSON, optional)".to_string(),
                 String::new(),
@@ -197,24 +207,27 @@ impl ChannelsTab {
             ),
             (
                 "Commitment Delay Epoch (u64, optional)".to_string(),
-                String::new(),
+                "1".to_string(),
             ),
             (
                 "Commitment Fee Rate (u64, optional)".to_string(),
-                String::new(),
+                "1000".to_string(),
             ),
             (
                 "Funding Fee Rate (u64, optional)".to_string(),
                 String::new(),
             ),
-            ("TLC Expiry Delta (ms, optional)".to_string(), String::new()),
+            (
+                "TLC Expiry Delta (ms, optional)".to_string(),
+                "14400000".to_string(),
+            ),
             (
                 "TLC Min Value (shannons, optional)".to_string(),
-                String::new(),
+                "0".to_string(),
             ),
             (
                 "TLC Fee Proportional Millionths (optional)".to_string(),
-                String::new(),
+                "1000".to_string(),
             ),
             (
                 "Max TLC Value In Flight (shannons, optional)".to_string(),
@@ -222,11 +235,41 @@ impl ChannelsTab {
             ),
             (
                 "Max TLC Number In Flight (optional)".to_string(),
-                String::new(),
+                "125".to_string(),
             ),
         ];
         self.form_selected = 0;
         self.form_editing = true;
+    }
+
+    /// Initialize the update channel form with current values from the selected channel.
+    pub fn init_update_form(&mut self) {
+        let sel = match self.table_state.selected() {
+            Some(s) => s,
+            None => return,
+        };
+        let ch = match self.channels.get(sel) {
+            Some(c) => c,
+            None => return,
+        };
+        self.form_fields = vec![
+            ("Enabled (true/false)".to_string(), ch.enabled.to_string()),
+            (
+                "TLC Expiry Delta (ms)".to_string(),
+                ch.tlc_expiry_delta.to_string(),
+            ),
+            (
+                "TLC Min Value (shannons, optional)".to_string(),
+                String::new(),
+            ),
+            (
+                "TLC Fee Proportional Millionths".to_string(),
+                ch.tlc_fee_proportional_millionths.to_string(),
+            ),
+        ];
+        self.form_selected = 0;
+        self.form_editing = true;
+        self.view = ChannelView::UpdateForm;
     }
 
     pub async fn handle_editing_key(&mut self, key: KeyEvent, client: &RpcClient) {
@@ -467,9 +510,14 @@ impl ChannelsTab {
             .get(1)
             .map(|f| f.1.clone())
             .unwrap_or_default();
-        let fee_str = self
+        let min_value_str = self
             .form_fields
             .get(2)
+            .map(|f| f.1.clone())
+            .unwrap_or_default();
+        let fee_str = self
+            .form_fields
+            .get(3)
             .map(|f| f.1.clone())
             .unwrap_or_default();
 
@@ -485,6 +533,14 @@ impl ChannelsTab {
                 params["tlc_expiry_delta"] = serde_json::Value::String(format!("0x{:x}", v));
             } else {
                 self.status_message = Some("Invalid TLC expiry delta".to_string());
+                return;
+            }
+        }
+        if !min_value_str.is_empty() {
+            if let Ok(v) = min_value_str.parse::<u128>() {
+                params["tlc_minimum_value"] = serde_json::Value::String(format!("0x{:x}", v));
+            } else {
+                self.status_message = Some("Invalid TLC minimum value".to_string());
                 return;
             }
         }

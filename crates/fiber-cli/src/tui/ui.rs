@@ -2,6 +2,7 @@
 //!
 //! This module handles all drawing logic using ratatui widgets.
 
+use chrono;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -117,7 +118,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Detail popup overlay
     if let Some(ref popup) = app.detail_popup {
-        draw_detail_popup(f, popup, size);
+        draw_detail_popup(f, popup, app.active_tab, size);
     }
 
     // Confirmation dialog overlay (shown on top of everything)
@@ -258,10 +259,43 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         InputMode::Editing => Color::Yellow,
     };
 
+    // Connection status indicator
+    let (conn_label, conn_color) = if app.node_info_error.is_none() {
+        ("Connected", Color::Green)
+    } else {
+        ("Disconnected", Color::Red)
+    };
+
+    // Last refresh timestamp
+    let elapsed = app.last_refresh.elapsed();
+    let refresh_time =
+        chrono::Local::now() - chrono::Duration::from_std(elapsed).unwrap_or_default();
+    let refresh_str = format!("Updated {}", refresh_time.format("%H:%M:%S"));
+
+    // Right-aligned status: connection + last refresh + RPC URL
+    let right_spans = vec![
+        Span::styled(
+            format!(" {} ", conn_label),
+            Style::default()
+                .fg(Color::Black)
+                .bg(conn_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(&refresh_str, Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled(
+            format!("RPC: {}", app.client.url()),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+    let right_width: u16 = right_spans.iter().map(|s| s.content.len() as u16).sum();
+
     // If there is an active flash message, show it prominently
     if let Some((ref msg, is_error, _)) = app.flash_message {
         let flash_color = if is_error { Color::Red } else { Color::Green };
-        let footer = Line::from(vec![
+
+        let left_spans = vec![
             Span::styled(
                 format!(" {} ", mode_str),
                 Style::default()
@@ -276,12 +310,28 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     .fg(flash_color)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]);
-        f.render_widget(Paragraph::new(footer), area);
+        ];
+
+        // Render left-aligned flash message
+        f.render_widget(Paragraph::new(Line::from(left_spans)), area);
+
+        // Render right-aligned status
+        if area.width > right_width + 2 {
+            let right_area = Rect {
+                x: area.x + area.width - right_width,
+                y: area.y,
+                width: right_width,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
+                right_area,
+            );
+        }
         return;
     }
 
-    let footer = Line::from(vec![
+    let left_spans = vec![
         Span::styled(
             format!(" {} ", mode_str),
             Style::default()
@@ -294,14 +344,24 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             "q:Quit  Tab:Switch  r:Refresh  ?:Help",
             Style::default().fg(Color::DarkGray),
         ),
-        Span::raw("  "),
-        Span::styled(
-            format!("RPC: {}", app.client.url()),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+    ];
 
-    f.render_widget(Paragraph::new(footer), area);
+    // Render left-aligned help text
+    f.render_widget(Paragraph::new(Line::from(left_spans)), area);
+
+    // Render right-aligned status
+    if area.width > right_width + 2 {
+        let right_area = Rect {
+            x: area.x + area.width - right_width,
+            y: area.y,
+            width: right_width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
+            right_area,
+        );
+    }
 }
 
 // ── Dashboard Tab ──────────────────────────────────────────────────────
@@ -847,7 +907,7 @@ fn draw_channels_list(f: &mut Frame, tab: &mut ChannelsTab, area: Rect) {
     };
 
     let title = format!(
-        " Channels ({}){}  [o:Open  s:Shutdown  a:Abandon  c:Closed  p:Pending  Enter:Detail] ",
+         " Channels ({}){}  [o:Open  u:Update  s:Shutdown  a:Abandon  c:Closed  p:Pending  Enter:Detail] ",
         tab.channels.len(),
         filter_label,
     );
@@ -1715,7 +1775,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
 
 // ── Detail Popup Overlay ────────────────────────────────────────────────
 
-fn draw_detail_popup(f: &mut Frame, popup: &DetailPopup, area: Rect) {
+fn draw_detail_popup(f: &mut Frame, popup: &DetailPopup, active_tab: ActiveTab, area: Rect) {
     // Padding inside the border: 2 chars left+right, 1 line top+bottom.
     let pad_x: u16 = 2;
     let pad_y: u16 = 1;
@@ -1742,7 +1802,11 @@ fn draw_detail_popup(f: &mut Frame, popup: &DetailPopup, area: Rect) {
         .title(format!(" {} ", popup.title))
         .title_alignment(Alignment::Center)
         .title_bottom(Line::from(Span::styled(
-            " j/k:Navigate  y:Copy  u:Update(Ch)  Esc:Close ",
+            if active_tab == ActiveTab::Channels {
+                " j/k:Navigate  y:Copy  u:Update  Esc:Close "
+            } else {
+                " j/k:Navigate  y:Copy  Esc:Close "
+            },
             Style::default().fg(Color::DarkGray),
         )))
         .style(Style::default().bg(Color::Black).fg(Color::White));
@@ -1893,8 +1957,11 @@ fn count_visual_lines(rows: &[(String, String)], inner_width: usize) -> usize {
 // ── Confirm Dialog Overlay ──────────────────────────────────────────────
 
 fn draw_confirm_dialog(f: &mut Frame, dialog: &ConfirmDialog, area: Rect) {
-    let popup_width = 50u16.min(area.width.saturating_sub(4));
-    let popup_height = 7u16.min(area.height.saturating_sub(4));
+    // Size the popup to fit the description (full channel ID) plus padding for borders
+    let desc_len = dialog.action.description().len() as u16;
+    let min_width = (desc_len + 6).max(40); // +6 for borders + inner padding
+    let popup_width = min_width.min(area.width.saturating_sub(4));
+    let popup_height = 9u16.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -1917,7 +1984,7 @@ fn draw_confirm_dialog(f: &mut Frame, dialog: &ConfirmDialog, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "  y",
+                "  y/Enter",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
