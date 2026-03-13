@@ -1,7 +1,9 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ReplayOrderHint, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS,
-    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelActor, ChannelActorMessage, ChannelActorState, ChannelActorStateStore,
+    CommitDiff, ReplayOrderHint, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
+    XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -12,19 +14,19 @@ use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithTarget, PeerDisconnectReason};
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, ReestablishChannel,
-    TlcErr,
+    AddTlc, FiberChannelMessage, FiberMessage, Hash256, HoldTlc, Init, PeeledPaymentOnionPacket,
+    Pubkey, ReestablishChannel, TlcErr,
 };
-use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::invoice::{
+    CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError, InvoiceStore,
+    PreimageStore,
+};
 use crate::test_utils::{init_tracing, NetworkNode};
 use crate::tests::test_utils::*;
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
-        channel::{
-            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand,
-            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
-        },
+        channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, ShutdownCommand},
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         network::{AcceptChannelCommand, OpenChannelCommand},
         NetworkActorCommand, NetworkActorMessage,
@@ -35,22 +37,230 @@ use crate::{
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
-    packed::{CellInput, Script, Transaction},
+    packed::{CellInput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
 use fiber_types::{
-    derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelState, HashAlgorithm,
-    InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
-    Privkey, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelConstraints, ChannelState,
+    ChannelTlcInfo, HashAlgorithm, InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus,
+    PaymentCustomRecords, PaymentHopData, PaymentStatus, Privkey, RemoveTlcFulfill,
+    RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
 use musig2::KeyAggContext;
-use ractor::call;
+use ractor::{call, Actor, ActorProcessingErr, ActorRef};
 use secp256k1::SECP256K1;
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, error};
+
+struct NoopNetworkActor;
+
+#[async_trait::async_trait]
+impl Actor for NoopNetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = ();
+    type Arguments = ();
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _message: Self::Msg,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        Ok(())
+    }
+}
+
+struct NoopChannelMailboxActor;
+
+#[async_trait::async_trait]
+impl Actor for NoopChannelMailboxActor {
+    type Msg = ChannelActorMessage;
+    type State = ();
+    type Arguments = ();
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _message: Self::Msg,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct DeferredReplayMockStore {
+    channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
+    preimages: RefCell<HashMap<Hash256, Hash256>>,
+}
+
+impl InvoiceStore for DeferredReplayMockStore {
+    fn get_invoice(&self, _id: &Hash256) -> Option<CkbInvoice> {
+        None
+    }
+
+    fn insert_invoice(
+        &self,
+        _invoice: CkbInvoice,
+        _preimage: Option<Hash256>,
+    ) -> Result<(), InvoiceError> {
+        Ok(())
+    }
+
+    fn update_invoice_status(
+        &self,
+        _id: &Hash256,
+        _status: CkbInvoiceStatus,
+    ) -> Result<(), InvoiceError> {
+        Ok(())
+    }
+
+    fn get_invoice_status(&self, _id: &Hash256) -> Option<CkbInvoiceStatus> {
+        None
+    }
+}
+
+impl PreimageStore for DeferredReplayMockStore {
+    fn insert_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
+        self.preimages.borrow_mut().insert(payment_hash, preimage);
+    }
+
+    fn remove_preimage(&self, payment_hash: &Hash256) {
+        self.preimages.borrow_mut().remove(payment_hash);
+    }
+
+    fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
+        self.preimages.borrow().get(payment_hash).copied()
+    }
+}
+
+impl ChannelActorStateStore for DeferredReplayMockStore {
+    fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
+        self.channel_states.borrow().get(id).cloned()
+    }
+
+    fn insert_channel_actor_state(&self, state: ChannelActorState) {
+        self.channel_states.borrow_mut().insert(state.id, state);
+    }
+
+    fn delete_channel_actor_state(&self, id: &Hash256) {
+        self.channel_states.borrow_mut().remove(id);
+    }
+
+    fn get_channel_ids_by_pubkey(&self, _pubkey: &Pubkey) -> Vec<Hash256> {
+        self.channel_states.borrow().keys().copied().collect()
+    }
+
+    fn get_channel_states(&self, _pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)> {
+        vec![]
+    }
+
+    fn get_channel_state_by_outpoint(&self, _id: &OutPoint) -> Option<ChannelActorState> {
+        None
+    }
+
+    fn insert_payment_custom_records(
+        &self,
+        _payment_hash: &Hash256,
+        _custom_records: PaymentCustomRecords,
+    ) {
+    }
+
+    fn get_payment_custom_records(&self, _payment_hash: &Hash256) -> Option<PaymentCustomRecords> {
+        None
+    }
+
+    fn insert_payment_hold_tlc(&self, _payment_hash: Hash256, _hold_tlc: HoldTlc) {}
+
+    fn remove_payment_hold_tlc(
+        &self,
+        _payment_hash: &Hash256,
+        _channel_id: &Hash256,
+        _tlc_id: u64,
+    ) {
+    }
+
+    fn get_payment_hold_tlcs(&self, _payment_hash: Hash256) -> Vec<HoldTlc> {
+        vec![]
+    }
+
+    fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
+        HashMap::default()
+    }
+
+    fn is_tlc_settled(&self, _channel_id: &Hash256, _payment_hash: &Hash256) -> bool {
+        false
+    }
+
+    fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {}
+
+    fn get_pending_commit_diff(&self, _channel_id: &Hash256) -> Option<CommitDiff> {
+        None
+    }
+
+    fn delete_pending_commit_diff(&self, _channel_id: &Hash256) {}
+}
+
+fn create_deferred_replay_test_state(network: ActorRef<NetworkActorMessage>) -> ChannelActorState {
+    let local_private_key = gen_rand_fiber_private_key();
+    let local_pubkey = local_private_key.pubkey();
+    let remote_pubkey = gen_rand_fiber_public_key();
+    let mut state = ChannelActorState::new_outbound_channel(
+        None,
+        false,
+        &[7; 32],
+        local_pubkey,
+        remote_pubkey,
+        1_000_000,
+        0,
+        DEFAULT_COMMITMENT_FEE_RATE,
+        DEFAULT_COMMITMENT_DELAY_EPOCHS,
+        DEFAULT_FEE_RATE,
+        None,
+        Script::default(),
+        DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+        3,
+        ChannelTlcInfo::default(),
+        network,
+        local_private_key,
+    );
+    state.update_state(ChannelState::ChannelReady);
+    state.remote_constraints = ChannelConstraints::new(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, 4);
+    state.defer_peer_tlc_updates = true;
+    state
+}
+
+fn create_deferred_replay_test_add_tlc(channel_id: Hash256, tlc_id: u64) -> AddTlc {
+    AddTlc {
+        channel_id,
+        tlc_id,
+        amount: 1,
+        payment_hash: gen_rand_sha256_hash(),
+        expiry: now_timestamp_as_millis_u64() + 60_000,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        onion_packet: None,
+    }
+}
 
 #[tokio::test]
 // Not supported on wasm: require filesystem access
@@ -6595,6 +6805,65 @@ async fn test_reestablish_bidirectional_pending() {
         state_a_after.get_local_commitment_number(),
         state_b_after.get_remote_commitment_number(),
         "Commitment numbers should remain symmetric"
+    );
+}
+
+#[tokio::test]
+async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
+    let network = Actor::spawn(None, NoopNetworkActor, ())
+        .await
+        .expect("start noop network actor")
+        .0;
+    let myself = Actor::spawn(None, NoopChannelMailboxActor, ())
+        .await
+        .expect("start noop mailbox actor")
+        .0;
+    let store = DeferredReplayMockStore::default();
+
+    let mut state = create_deferred_replay_test_state(network.clone());
+    let actor = ChannelActor::new(
+        state.get_local_pubkey(),
+        state.get_remote_pubkey(),
+        network,
+        store,
+    );
+    let channel_id = state.get_id();
+
+    let max_deferred_updates = state.local_constraints.max_tlc_number_in_flight
+        + state.remote_constraints.max_tlc_number_in_flight;
+
+    for tlc_id in 0..max_deferred_updates {
+        actor
+            .handle_peer_message(
+                &myself,
+                &mut state,
+                FiberChannelMessage::AddTlc(create_deferred_replay_test_add_tlc(
+                    channel_id, tlc_id,
+                )),
+            )
+            .await
+            .expect("updates within channel limits should be deferred");
+    }
+
+    let overflow = actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::AddTlc(create_deferred_replay_test_add_tlc(
+                channel_id,
+                max_deferred_updates,
+            )),
+        )
+        .await;
+
+    assert!(
+        overflow.is_err(),
+        "updates beyond the negotiated TLC limits should be rejected while deferring replay"
+    );
+    assert_eq!(
+        state.deferred_peer_tlc_updates.len(),
+        max_deferred_updates as usize,
+        "deferred replay queue should stop growing once it reaches the negotiated TLC budget"
     );
 }
 
