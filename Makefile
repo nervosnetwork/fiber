@@ -5,7 +5,7 @@ GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
-NATIVE_PACKAGES = -p fnn -p fiber-bin -p fnn-cli
+NATIVE_PACKAGES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-types -p fiber-json-types
 WASM_PACKAGES = -p fiber-wasm -p fiber-wasm-db-worker -p fiber-wasm-db-common
 
 .PHONY: build-metrics-prof
@@ -21,6 +21,7 @@ check:
 	cargo check --locked
 	cargo check --release --locked
 	cargo check --package fnn --no-default-features
+	cargo check --features sqlite $(NATIVE_PACKAGES)
 	rustup target add wasm32-unknown-unknown
 	cargo check --target wasm32-unknown-unknown -p fiber-types --all-features
 	cd migrate && cargo check --locked
@@ -28,6 +29,7 @@ check:
 .PHONY: clippy
 clippy:
 	cargo clippy --all-targets --all-features $(NATIVE_PACKAGES) -- -D warnings
+	cargo clippy --features sqlite $(NATIVE_PACKAGES) -- -D warnings
 	cargo clippy $(WASM_PACKAGES) --target wasm32-unknown-unknown -- -D warnings
 
 .PHONY: bless

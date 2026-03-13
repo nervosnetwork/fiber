@@ -30,6 +30,9 @@ pub use errors::{Error, Result};
 
 pub mod actors;
 
+pub mod event_handler;
+pub use event_handler::ExitMessage;
+
 pub mod tasks;
 
 pub mod utils;

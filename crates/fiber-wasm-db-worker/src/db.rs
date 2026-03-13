@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use fiber_wasm_db_common::DbCommandRequest;
 use fiber_wasm_db_common::DbCommandResponse;
-use fiber_wasm_db_common::IteratorModeOwned;
+use fiber_wasm_db_common::IteratorDirection;
 use idb::CursorDirection;
 use idb::Database;
 use idb::DatabaseEvent;
@@ -12,116 +12,122 @@ use idb::Factory;
 use idb::IndexParams;
 use idb::KeyPath;
 use idb::KeyRange;
+use idb::ManagedCursor;
 use idb::ObjectStore;
 use idb::ObjectStoreParams;
 use idb::TransactionMode;
 use idb::TransactionResult;
 use log::debug;
 
-pub(crate) async fn handle_prefix_iterator<F>(
+/// Open an IDB cursor starting from `start_key_bound` in the given `direction`.
+async fn open_cursor(
     store: &ObjectStore,
-    prefix: &[u8],
-    mode: IteratorModeOwned,
-    skip_while: F,
+    start_key_bound: &[u8],
+    direction: IteratorDirection,
+) -> Result<ManagedCursor, idb::Error> {
+    let cursor_direction = match direction {
+        IteratorDirection::Forward => CursorDirection::Next,
+        IteratorDirection::Reverse => CursorDirection::Prev,
+    };
+
+    let key_range = match direction {
+        IteratorDirection::Forward => KeyRange::lower_bound(
+            &serde_wasm_bindgen::to_value(&start_key_bound).unwrap(),
+            Some(false), // inclusive
+        ),
+        IteratorDirection::Reverse => KeyRange::upper_bound(
+            &serde_wasm_bindgen::to_value(&start_key_bound).unwrap(),
+            Some(false), // inclusive
+        ),
+    }
+    .expect("Unable to create KeyRange");
+
+    store
+        .open_cursor(
+            Some(idb::Query::KeyRange(key_range)),
+            Some(cursor_direction),
+        )?
+        .await?
+        .map(|c| c.into_managed())
+        .ok_or(idb::Error::CursorFinished)
+}
+
+/// Collect key-value pairs from the store, calling `take_while` for each key
+/// via the provided callback. Iteration stops when `take_while` returns `false`
+/// or `limit` entries have been collected.
+pub(crate) async fn collect_iterator<F>(
+    store: &ObjectStore,
+    start: &[u8],
+    direction: IteratorDirection,
+    take_while: F,
+    limit: usize,
 ) -> anyhow::Result<Vec<KV>>
 where
     F: Fn(&[u8]) -> bool,
 {
-    let cursor = match mode {
-        IteratorModeOwned::Start => store.open_cursor(None, Some(idb::CursorDirection::Next)),
-        IteratorModeOwned::End => store.open_cursor(None, Some(idb::CursorDirection::Prev)),
-        IteratorModeOwned::From(items, db_direction) => match db_direction {
-            fiber_wasm_db_common::DbDirection::Forward => store.open_cursor(
-                Some(idb::Query::KeyRange(
-                    KeyRange::lower_bound(
-                        &serde_wasm_bindgen::to_value(&items).unwrap(),
-                        Some(false),
-                    )
-                    .expect("Unable to create keyrange"),
-                )),
-                Some(CursorDirection::Next),
-            ),
-            fiber_wasm_db_common::DbDirection::Reverse => store.open_cursor(
-                Some(idb::Query::KeyRange(
-                    KeyRange::upper_bound(
-                        &serde_wasm_bindgen::to_value(&items).unwrap(),
-                        Some(false),
-                    )
-                    .expect("Unable to create keyrange"),
-                )),
-                Some(CursorDirection::Prev),
-            ),
-        },
-    }
-    .map_err(|e| anyhow!("Unable to create cursor: {}", e))?
-    .await
-    .map_err(|e| anyhow!("Unable to perform cursor requests: {}", e))?;
-    let mut cursor = match cursor {
-        Some(cursor) => cursor.into_managed(),
-        None => {
-            debug!("No records found, returning");
-            return Ok(vec![]);
-        }
+    let mut cursor = match open_cursor(store, start, direction).await {
+        Ok(c) => c,
+        Err(idb::Error::CursorFinished) => return Ok(vec![]),
+        Err(e) => return Err(anyhow!("Failed to open cursor: {e:?}")),
     };
 
-    let mut result = vec![];
+    let mut results = Vec::new();
+
     loop {
-        let key: Vec<u8> = serde_wasm_bindgen::from_value(
-            match cursor
-                .key()
-                .map_err(|e| anyhow!("Unable to read key from cursor: {}", e))?
-            {
-                Some(v) => v,
-                None => {
-                    debug!("Empty cursor encountered, breaking..");
-                    break;
-                }
-            },
-        )
-        .unwrap();
+        // Read current key
+        let key: Vec<u8> = match cursor
+            .key()
+            .map_err(|e| anyhow!("Unable to read key from cursor: {e:?}"))?
+        {
+            Some(v) => serde_wasm_bindgen::from_value(v).unwrap(),
+            None => break,
+        };
+
+        // Read current value
         let value: Vec<u8> = serde_wasm_bindgen::from_value(
             cursor
                 .value()
-                .map_err(|e| anyhow!("Unable to read value from cursor: {}", e))?
-                .expect("Value cursor must exist"),
+                .map_err(|e| anyhow!("Unable to read value from cursor: {e:?}"))?
+                .expect("Value must exist for cursor entry"),
         )
         .unwrap();
-        if skip_while(&key) {
-            debug!("Skip while returns true, skipping");
-        } else if key.starts_with(prefix) {
-            result.push(KV { key, value });
-        } else {
-            debug!("Prefix ended, breaking..");
+
+        // Check take_while via IPC callback
+        if !take_while(&key) {
+            debug!("take_while returned false, stopping iteration");
             break;
         }
+
+        results.push(KV { key, value });
+
+        // Check limit
+        if limit > 0 && results.len() >= limit {
+            break;
+        }
+
+        // Advance cursor
         match cursor.next(None).await {
-            Ok(_) => {
-                debug!("Cursor next..");
-                continue;
-            }
-            Err(idb::Error::CursorFinished) => {
-                debug!("Cursor finished, exiting..");
-                break;
-            }
-            Err(e) => {
-                bail!("Unexpected error when iterating: {}", e);
-            }
+            Ok(_) => continue,
+            Err(idb::Error::CursorFinished) => break,
+            Err(e) => bail!("Unexpected error when iterating: {e}"),
         }
     }
-    Ok(result)
+
+    Ok(results)
 }
+
 pub(crate) async fn handle_db_command<F>(
     db: &Database,
     store_name: &str,
     cmd: DbCommandRequest,
-    invoke_skip_while: F,
+    invoke_take_while: F,
 ) -> anyhow::Result<DbCommandResponse>
 where
     F: Fn(&[u8]) -> bool,
 {
     debug!("Handle command: {:?}", cmd);
     let tx_mode = match cmd {
-        DbCommandRequest::Read { .. } | DbCommandRequest::PrefixIterator { .. } => {
+        DbCommandRequest::Read { .. } | DbCommandRequest::Iterator { .. } => {
             TransactionMode::ReadOnly
         }
         DbCommandRequest::Put { .. } | DbCommandRequest::Delete { .. } => {
@@ -178,12 +184,22 @@ where
             }
             DbCommandResponse::Delete
         }
-        DbCommandRequest::PrefixIterator { prefix, mode } => {
-            let result = handle_prefix_iterator(&store, &prefix, mode, invoke_skip_while)
+        DbCommandRequest::Iterator {
+            start,
+            direction,
+            limit,
+        } => {
+            let kvs = collect_iterator(&store, &start, direction, invoke_take_while, limit)
                 .await
-                .with_context(|| anyhow!("Unable to handle prefix iterator"))?;
-
-            DbCommandResponse::PrefixIterator { data: result }
+                .with_context(|| anyhow!("Unable to handle iterator"))?;
+            debug!(
+                "Called iterator, args=<start={} bytes, {:?}, {:?}>, result_count={}",
+                start.len(),
+                direction,
+                limit,
+                kvs.len()
+            );
+            DbCommandResponse::Iterator { kvs }
         }
     };
     assert_eq!(TransactionResult::Committed, tran.await.unwrap());

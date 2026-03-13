@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [features]
 metrics = ["fnn/metrics"]
+sqlite = ["fnn/sqlite"]
 
 [dependencies]
 fnn = { path = "../fiber-lib" }

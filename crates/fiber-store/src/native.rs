@@ -1,8 +1,11 @@
-pub use rocksdb::Direction as DbDirection;
-pub use rocksdb::IteratorMode;
+use rocksdb::Direction as DbDirection;
+use rocksdb::IteratorMode;
 use rocksdb::{prelude::*, DBCompressionType, WriteBatch, DB};
 use std::path::Path;
 use std::sync::Arc;
+
+use crate::backend::{BatchWriter, StorageBackend, TakeWhileFn};
+use crate::iterator::{IteratorDirection, KVPair};
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -40,38 +43,62 @@ impl Store {
             wb: WriteBatch::default(),
         }
     }
+}
 
-    /// Returns a prefix iterator, using iterator mode `mode`, skipping items until `skip_while`
-    /// returns false, iterating over items prefixed with `prefix`
-    #[allow(clippy::type_complexity)]
-    pub fn prefix_iterator_with_skip_while_and_start<'a>(
-        &'a self,
-        prefix: &'a [u8],
-        mode: IteratorMode<'a>,
-        skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        self.db
-            .get_iter(
-                &{
-                    let mut opts = ReadOptions::default();
-                    opts.set_prefix_same_as_start(true);
-                    opts
-                },
-                mode,
-            )
-            .skip_while(move |(key, _)| skip_while(key))
-            .take_while(move |(col_key, _)| col_key.starts_with(prefix))
+impl StorageBackend for Store {
+    type Batch = Batch;
+
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
+        self.get(key)
     }
 
-    pub fn prefix_iterator<'a>(
-        &'a self,
-        prefix: &'a [u8],
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        self.prefix_iterator_with_skip_while_and_start(
-            prefix,
-            IteratorMode::From(prefix, DbDirection::Forward),
-            Box::new(|_| false),
-        )
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
+        self.put(key, value)
+    }
+
+    fn delete<K: AsRef<[u8]>>(&self, key: K) {
+        self.delete(key)
+    }
+
+    fn batch(&self) -> Self::Batch {
+        self.batch()
+    }
+
+    fn collect_iterator(
+        &self,
+        start: Vec<u8>,
+        direction: IteratorDirection,
+        take_while_fn: TakeWhileFn,
+        limit: usize,
+    ) -> Vec<KVPair> {
+        let db_direction = match direction {
+            IteratorDirection::Forward => DbDirection::Forward,
+            IteratorDirection::Reverse => DbDirection::Reverse,
+        };
+
+        let mode = IteratorMode::From(&start, db_direction);
+
+        let mut opts = ReadOptions::default();
+        opts.set_prefix_same_as_start(true);
+
+        let iter = self.db.get_iter(&opts, mode);
+
+        let mut results = Vec::new();
+        for (key, value) in iter {
+            if !take_while_fn(&key) {
+                break;
+            }
+
+            results.push(KVPair {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
+            if limit > 0 && results.len() >= limit {
+                break;
+            }
+        }
+
+        results
     }
 }
 
@@ -81,13 +108,6 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.db
-            .get(key.as_ref())
-            .map(|v| v.map(|vi| vi.to_vec()))
-            .expect("get should be OK")
-    }
-
     pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
         self.wb.put(key, value).expect("put should be OK")
     }
@@ -97,6 +117,20 @@ impl Batch {
     }
 
     pub fn commit(self) {
+        self.db.write(&self.wb).expect("commit should be OK");
+    }
+}
+
+impl BatchWriter for Batch {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+        self.wb.put(key, value).expect("put should be OK")
+    }
+
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+        self.wb.delete(key.as_ref()).expect("delete should be OK");
+    }
+
+    fn commit(self) {
         self.db.write(&self.wb).expect("commit should be OK");
     }
 }
