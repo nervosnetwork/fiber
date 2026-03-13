@@ -6,6 +6,7 @@ pub mod channel;
 pub mod config;
 #[cfg(debug_assertions)]
 pub mod dev;
+pub mod fee;
 pub mod graph;
 pub mod info;
 pub mod invoice;
@@ -28,6 +29,7 @@ pub mod server {
     pub use crate::rpc::config::RpcConfig;
     #[cfg(debug_assertions)]
     use crate::rpc::dev::{DevRpcServer, DevRpcServerImpl};
+    use crate::rpc::fee::{FeeRpcServer, FeeRpcServerImpl};
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
     use crate::rpc::info::InfoRpcServer;
     use crate::rpc::info::InfoRpcServerImpl;
@@ -41,7 +43,7 @@ pub mod server {
     use crate::{
         cch::CchMessage,
         fiber::{
-            channel::{ChannelActorStateStore, ChannelOpenRecordStore},
+            channel::{ChannelActorStateStore, ChannelOpenRecordStore, ForwardingEventStore},
             graph::{NetworkGraph, NetworkGraphStateStore},
             NetworkActorMessage,
         },
@@ -85,6 +87,7 @@ pub mod server {
         + GossipMessageStore
         + WatchtowerStore
         + PreimageStore
+        + ForwardingEventStore
     {
     }
     #[cfg(feature = "watchtower")]
@@ -96,6 +99,7 @@ pub mod server {
             + GossipMessageStore
             + WatchtowerStore
             + PreimageStore
+            + ForwardingEventStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -105,6 +109,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + ForwardingEventStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -114,6 +119,7 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
+            + ForwardingEventStore
     {
     }
 
@@ -342,6 +348,12 @@ pub mod server {
             if config.is_module_enabled("watchtower") {
                 modules
                     .merge(WatchtowerRpcServerImpl::new(store.clone()).into_rpc())
+                    .unwrap();
+            }
+
+            if config.is_module_enabled("fee") {
+                modules
+                    .merge(FeeRpcServerImpl::new(store.clone()).into_rpc())
                     .unwrap();
             }
 
