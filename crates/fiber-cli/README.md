@@ -19,14 +19,14 @@ fnn-cli
 fnn-cli info
 
 # Connect to a remote node
-fnn-cli -u http://54.178.252.1:8227 info
+fnn-cli -u http://127.0.0.1:8227 info
 
 # Connect with authentication
-fnn-cli -u http://54.178.252.1:8227 --auth-token 'YOUR_TOKEN' info
+fnn-cli -u http://127.0.0.1:8227 --auth-token 'YOUR_TOKEN' info
 
 # Launch the TUI dashboard
 fnn-cli --tui
-fnn-cli -u http://54.178.252.1:8227 --tui
+fnn-cli -u http://127.0.0.1:8227 --tui
 ```
 
 ## Global Options
@@ -68,7 +68,7 @@ fnn-cli info
 Run `fnn-cli` without a subcommand to enter the interactive REPL:
 
 ```
-$ fnn-cli -u http://54.178.252.1:8227
+$ fnn-cli -u http://127.0.0.1:8227
 
   ______ ___ ___  ______ _____
  |  ____|_ _| _ \|  ____|  __ \
@@ -78,7 +78,7 @@ $ fnn-cli -u http://54.178.252.1:8227
  |_|   |___|____/|______|_|  \_\
 
 [  fnn-cli version ]: 0.7.1
-[              url ]: http://54.178.252.1:8227
+[              url ]: http://127.0.0.1:8227
 [    output format ]: yaml
 [           status ]: Connected
 
@@ -231,9 +231,9 @@ Launch a full-screen terminal dashboard with `--tui`:
 
 ```bash
 fnn-cli --tui
-fnn-cli -u http://54.178.252.1:8227 --tui
-fnn-cli -u http://54.178.252.1:8227 --auth-token 'TOKEN' --tui
-fnn-cli -u http://54.178.252.1:8227 --tui --theme dark/light/auto
+fnn-cli -u http://127.0.0.1:8227 --tui
+fnn-cli -u http://127.0.0.1:8227 --auth-token 'TOKEN' --tui
+fnn-cli -u http://127.0.0.1:8227 --tui --theme dark/light/auto
 ```
 
 The TUI provides a real-time overview of your Fiber node with 7 tabs:
