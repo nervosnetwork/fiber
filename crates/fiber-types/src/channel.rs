@@ -34,6 +34,7 @@ bitflags! {
     pub struct ChannelFlags: u8 {
         const PUBLIC = 1;
         const ONE_WAY = 1 << 1;
+        const EXTERNAL_FUNDING = 1 << 2;
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -251,6 +252,10 @@ pub enum ChannelState {
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
+    /// We're waiting for the user to sign and submit the funding transaction externally.
+    ///
+    /// Keep this variant at the end so its bincode discriminant stays stable for persisted data.
+    AwaitingExternalFunding,
 }
 
 impl ChannelState {
@@ -265,6 +270,7 @@ impl ChannelState {
     pub fn can_abort_funding(&self) -> bool {
         match self {
             ChannelState::NegotiatingFunding(_)
+            | ChannelState::AwaitingExternalFunding
             | ChannelState::CollaboratingFundingTx(_)
             | ChannelState::SigningCommitment(_) => true,
             ChannelState::AwaitingTxSignatures(flags)

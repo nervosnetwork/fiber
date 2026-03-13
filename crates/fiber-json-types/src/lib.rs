@@ -54,6 +54,7 @@ pub use invoice::*;
 pub use payment::*;
 pub use peer::*;
 pub use prof::*;
+pub use serde_utils::CellDep;
 pub use serde_utils::Hash256;
 pub use serde_utils::Privkey;
 pub use serde_utils::Pubkey;

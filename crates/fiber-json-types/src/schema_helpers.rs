@@ -39,6 +39,12 @@ pub fn schema_as_integer(_generator: &mut SchemaGenerator) -> Schema {
     })
 }
 
+pub fn schema_as_object(_generator: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "object"
+    })
+}
+
 pub fn schema_as_hex_bytes(generator: &mut SchemaGenerator) -> Schema {
     let mut schema = String::json_schema(generator);
     schema.insert("pattern".into(), "^0x([0-9a-fA-F]{2})*$".into());

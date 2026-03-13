@@ -108,6 +108,9 @@ impl From<InternalChannelState> for JsonChannelState {
             InternalChannelState::NegotiatingFunding(flags) => {
                 JsonChannelState::NegotiatingFunding(flags.bits().into())
             }
+            InternalChannelState::AwaitingExternalFunding => {
+                JsonChannelState::AwaitingExternalFunding
+            }
             InternalChannelState::CollaboratingFundingTx(flags) => {
                 JsonChannelState::CollaboratingFundingTx(flags.bits().into())
             }
@@ -134,6 +137,7 @@ impl JsonChannelState {
     pub fn is_pending(&self) -> bool {
         match self {
             JsonChannelState::NegotiatingFunding(_)
+            | JsonChannelState::AwaitingExternalFunding
             | JsonChannelState::CollaboratingFundingTx(_)
             | JsonChannelState::SigningCommitment(_)
             | JsonChannelState::AwaitingTxSignatures(_)

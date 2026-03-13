@@ -3,29 +3,79 @@ use crate::fiber::{
         ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore,
         ShutdownCommand, UpdateCommand,
     },
-    network::{AcceptChannelCommand, OpenChannelCommand, PendingAcceptChannel},
+    network::{
+        AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
+        PendingAcceptChannel,
+    },
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{handle_actor_call, log_and_error};
+use ckb_jsonrpc_types::CellDep as CkbJsonRpcCellDep;
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
+    packed::{self},
     prelude::{IntoTransactionView, Unpack},
+    H256,
 };
-use fiber_types::Pubkey;
-use fiber_types::{ChannelOpeningStatus, NegotiatingFundingFlags, TLCId};
+use fiber_json_types::serde_utils::CellDep;
+use fiber_types::{ChannelOpeningStatus, Pubkey, TLCId};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 
 use jsonrpsee::types::ErrorObjectOwned;
 use ractor::{call, ActorRef};
+use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 
 pub use fiber_json_types::{
-    AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelState, Htlc,
-    ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
-    ShutdownChannelParams, TlcStatus as JsonTlcStatus, UpdateChannelParams,
+    AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelState, Hash256,
+    Htlc, ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
+    OpenChannelWithExternalFundingParams, ShutdownChannelParams, UpdateChannelParams,
 };
+
+fn rpc_cell_dep_to_packed(dep: CellDep) -> packed::CellDep {
+    CkbJsonRpcCellDep {
+        out_point: dep.out_point,
+        dep_type: dep.dep_type,
+    }
+    .into()
+}
+
+/// Result of opening a channel with external funding.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OpenChannelWithExternalFundingResult {
+    /// The channel ID of the channel being opened.
+    /// Use this ID to submit the signed funding transaction.
+    pub channel_id: Hash256,
+
+    /// The final unsigned funding transaction that needs to be signed.
+    /// The user should sign this transaction with their wallet and submit it
+    /// using `submit_signed_funding_tx` directly, without changing structure.
+    pub unsigned_funding_tx: ckb_jsonrpc_types::Transaction,
+}
+
+/// Parameters for submitting a signed funding transaction for external funding.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SubmitSignedFundingTxParams {
+    /// The channel ID returned from `open_channel_with_external_funding`.
+    pub channel_id: Hash256,
+
+    /// The signed funding transaction. This must be the same final transaction structure
+    /// that was returned from `open_channel_with_external_funding`, with valid
+    /// witnesses (signatures) added, and should be ready for direct broadcast.
+    pub signed_funding_tx: ckb_jsonrpc_types::Transaction,
+}
+
+/// Result of submitting a signed funding transaction.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SubmitSignedFundingTxResult {
+    /// The channel ID.
+    pub channel_id: Hash256,
+
+    /// The hash of the funding transaction that was submitted.
+    pub funding_tx_hash: H256,
+}
 
 /// RPC module for channel management.
 #[cfg(not(target_arch = "wasm32"))]
@@ -65,6 +115,32 @@ trait ChannelRpc {
     /// Updates a channel.
     #[method(name = "update_channel")]
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
+
+    /// Opens a channel with external funding. The node will negotiate the channel with the peer,
+    /// but the user must sign the funding transaction themselves using their own wallet.
+    ///
+    /// This is useful when the user wants to fund a channel from an external wallet
+    /// rather than having the node sign with its internal key.
+    ///
+    /// Returns the final unsigned funding transaction after internal tx collaboration
+    /// has frozen the structure. The user must sign it and submit it with
+    /// `submit_signed_funding_tx` without changing the transaction structure.
+    #[method(name = "open_channel_with_external_funding")]
+    async fn open_channel_with_external_funding(
+        &self,
+        params: OpenChannelWithExternalFundingParams,
+    ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned>;
+
+    /// Submits a signed funding transaction for an externally funded channel.
+    ///
+    /// After calling `open_channel_with_external_funding`, the user signs the returned
+    /// final negotiated unsigned transaction with their wallet and submits it here.
+    /// The signed transaction should be directly broadcastable and will not be structurally modified.
+    #[method(name = "submit_signed_funding_tx")]
+    async fn submit_signed_funding_tx(
+        &self,
+        params: SubmitSignedFundingTxParams,
+    ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned>;
 }
 
 /// Convert a `PendingAcceptChannel` (inbound, not yet accepted) into a minimal `Channel`
@@ -83,7 +159,9 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
         pubkey: pending.pubkey.into(),
         funding_udt_type_script: pending.udt_type_script.map(Into::into),
         // Report as NegotiatingFunding since we're still awaiting local acceptance
-        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty().bits().into()),
+        state: ChannelState::NegotiatingFunding(
+            fiber_json_types::channel::NegotiatingFundingFlags(0),
+        ),
         // The remote peer's funding amount is what they're contributing
         local_balance: 0,
         remote_balance: pending.funding_amount,
@@ -157,6 +235,22 @@ where
     /// Updates a channel.
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
         self.update_channel(params).await
+    }
+
+    /// Opens a channel with external funding.
+    async fn open_channel_with_external_funding(
+        &self,
+        params: OpenChannelWithExternalFundingParams,
+    ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
+        self.open_channel_with_external_funding(params).await
+    }
+
+    /// Submits a signed funding transaction for an externally funded channel.
+    async fn submit_signed_funding_tx(
+        &self,
+        params: SubmitSignedFundingTxParams,
+    ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
+        self.submit_signed_funding_tx(params).await
     }
 }
 impl<S> ChannelRpcServerImpl<S>
@@ -515,5 +609,73 @@ where
             ))
         };
         handle_actor_call!(self.actor, message, params)
+    }
+
+    /// Opens a channel with external funding.
+    pub async fn open_channel_with_external_funding(
+        &self,
+        params: OpenChannelWithExternalFundingParams,
+    ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
+        let pubkey = Pubkey::try_from(params.pubkey).rpc_err(&params)?;
+        let funding_lock_script_cell_deps: Vec<packed::CellDep> = params
+            .funding_lock_script_cell_deps
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(rpc_cell_dep_to_packed)
+            .collect();
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+                OpenChannelWithExternalFundingCommand {
+                    pubkey,
+                    funding_amount: params.funding_amount,
+                    public: params.public.unwrap_or(true),
+                    shutdown_script: params.shutdown_script.clone().into(),
+                    funding_lock_script: params.funding_lock_script.clone().into(),
+                    funding_lock_script_cell_deps: funding_lock_script_cell_deps.clone(),
+                    commitment_delay_epoch: params
+                        .commitment_delay_epoch
+                        .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
+                    funding_udt_type_script: params
+                        .funding_udt_type_script
+                        .clone()
+                        .map(|s| s.into()),
+                    commitment_fee_rate: params.commitment_fee_rate,
+                    funding_fee_rate: params.funding_fee_rate,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
+                    tlc_min_value: params.tlc_min_value,
+                    tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
+                    max_tlc_value_in_flight: params.max_tlc_value_in_flight,
+                    max_tlc_number_in_flight: params.max_tlc_number_in_flight,
+                },
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| {
+            OpenChannelWithExternalFundingResult {
+                channel_id: response.channel_id.into(),
+                unsigned_funding_tx: response.unsigned_funding_tx.into(),
+            }
+        })
+    }
+
+    /// Submits a signed funding transaction for an externally funded channel.
+    pub async fn submit_signed_funding_tx(
+        &self,
+        params: SubmitSignedFundingTxParams,
+    ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
+        let channel_id: fiber_types::Hash256 = params.channel_id.into();
+        let signed_tx: packed::Transaction = params.signed_funding_tx.clone().into();
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+                channel_id,
+                signed_tx: signed_tx.clone(),
+                reply: rpc_reply,
+            })
+        };
+        handle_actor_call!(self.actor, message, params).map(|tx_hash| SubmitSignedFundingTxResult {
+            channel_id: channel_id.into(),
+            funding_tx_hash: tx_hash.into(),
+        })
     }
 }

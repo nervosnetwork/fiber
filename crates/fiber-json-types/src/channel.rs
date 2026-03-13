@@ -2,7 +2,7 @@
 
 use crate::define_rpc_flags;
 use crate::schema_helpers::*;
-use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
+use crate::serde_utils::{CellDep, EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
@@ -174,6 +174,117 @@ pub struct OpenChannelResult {
     pub temporary_channel_id: Hash256,
 }
 
+/// Parameters for opening a channel with external funding.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct OpenChannelWithExternalFundingParams {
+    /// The identity public key of the peer to open a channel with.
+    /// The peer must already be connected through the [connect_peer](#peer-connect_peer) rpc first.
+    pub pubkey: Pubkey,
+
+    /// The amount of CKB or UDT to fund the channel with.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub funding_amount: u128,
+
+    /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+    pub public: Option<bool>,
+
+    /// The type script of the UDT to fund the channel with, an optional parameter.
+    pub funding_udt_type_script: Option<Script>,
+
+    /// The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
+    pub shutdown_script: Script,
+
+    /// The lock script that controls the funding cells. The node will collect cells with this lock script
+    /// to build the funding transaction. The user must be able to sign for this lock script.
+    pub funding_lock_script: Script,
+
+    /// Optional extra cell deps required by `funding_lock_script`.
+    /// This is useful for custom wallet lock scripts whose deps are not part of the genesis defaults.
+    pub funding_lock_script_cell_deps: Option<Vec<CellDep>>,
+
+    /// The delay time for the commitment transaction, must be an
+    /// [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png)
+    /// in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
+
+    /// The fee rate for the commitment transaction, an optional parameter.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub commitment_fee_rate: Option<u64>,
+
+    /// The fee rate for the funding transaction, an optional parameter.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub funding_fee_rate: Option<u64>,
+
+    /// The expiry delta to forward a tlc, in milliseconds, default to 4 hours, which is 4 * 60 * 60 * 1000 milliseconds
+    /// Expect it >= 2/3 commitment_delay_epoch.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub tlc_expiry_delta: Option<u64>,
+
+    /// The minimum value for a TLC our side can send,
+    /// an optional parameter, default is 0, which means we can send any TLC is larger than 0.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub tlc_min_value: Option<u128>,
+
+    /// The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub tlc_fee_proportional_millionths: Option<u128>,
+
+    /// The maximum value in flight for TLCs, an optional parameter.
+    /// This parameter can not be updated after channel is opened.
+    #[serde_as(as = "Option<U128Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub max_tlc_value_in_flight: Option<u128>,
+
+    /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+    /// This parameter can not be updated after channel is opened.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub max_tlc_number_in_flight: Option<u64>,
+}
+
+/// Result of opening a channel with external funding.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct OpenChannelWithExternalFundingResult {
+    /// The channel ID of the channel being opened.
+    pub channel_id: Hash256,
+
+    /// The final unsigned funding transaction that needs to be signed.
+    #[schemars(schema_with = "schema_as_object")]
+    pub unsigned_funding_tx: serde_json::Value,
+}
+
+/// Parameters for submitting a signed funding transaction.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct SubmitSignedFundingTxParams {
+    /// The channel ID returned from `open_channel_with_external_funding`.
+    pub channel_id: Hash256,
+
+    /// The signed funding transaction.
+    #[schemars(schema_with = "schema_as_object")]
+    pub signed_funding_tx: serde_json::Value,
+}
+
+/// Result of submitting a signed funding transaction.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct SubmitSignedFundingTxResult {
+    /// The channel ID.
+    pub channel_id: Hash256,
+
+    /// The hash of the funding transaction that was submitted.
+    pub funding_tx_hash: Hash256,
+}
+
 /// Parameters for abandoning a channel.
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct AbandonChannelParams {
@@ -273,6 +384,8 @@ pub struct ListChannelsResult {
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(#[schemars(schema_with = "schema_as_string")] NegotiatingFundingFlags),
+    /// We're waiting for the user to sign and submit the funding transaction externally.
+    AwaitingExternalFunding,
     /// We're collaborating with the other party on the funding transaction.
     CollaboratingFundingTx(
         #[schemars(schema_with = "schema_as_string")] CollaboratingFundingTxFlags,
