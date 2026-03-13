@@ -115,7 +115,6 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // triggered 10 times per second, plus we also trigger `apply_retryable_tlc_operations` when
 // receiving ACK from peer, so it's a reason number for 20 TPS
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
-const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
 #[cfg(not(any(test, feature = "bench")))]
@@ -5970,11 +5969,10 @@ impl ChannelActorState {
         let channel_id = self.get_id();
         let pubkey = self.get_remote_pubkey();
         self.network()
-            .send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, move || {
-                NetworkActorMessage::new_event(NetworkActorEvent::ChannelReady(
-                    channel_id, pubkey, outpoint,
-                ))
-            });
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelReady(channel_id, pubkey, outpoint),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.on_owned_channel_updated(myself, false);
     }
 

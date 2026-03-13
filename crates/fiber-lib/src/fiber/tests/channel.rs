@@ -4391,6 +4391,71 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
 }
 
 #[tokio::test]
+async fn test_reestablished_channel_ready_notification_is_not_delayed() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 11800000000;
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            true,
+        )
+        .await;
+
+    node_a.restart().await;
+
+    node_a
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
+        )
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let mut saw_reestablished = false;
+    let mut saw_channel_ready = false;
+
+    while tokio::time::Instant::now() < deadline && !(saw_reestablished && saw_channel_ready) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, node_a.event_emitter.recv())
+            .await
+            .expect("timed out while waiting for post-reconnect events")
+            .expect("event emitter unexpectedly stopped");
+
+        match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
+                if message == "Reestablished channel in ChannelReady" =>
+            {
+                saw_reestablished = true;
+            }
+            NetworkServiceEvent::ChannelReady(pubkey, ready_channel_id, _funding_tx_outpoint)
+                if pubkey == node_b.pubkey && ready_channel_id == channel_id =>
+            {
+                saw_channel_ready = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_reestablished,
+        "expected reestablish completion debug event within 1s after reconnect"
+    );
+    assert!(
+        saw_channel_ready,
+        "expected ChannelReady notification within 1s after reconnect completed"
+    );
+
+    node_b
+        .expect_debug_event("Reestablished channel in ChannelReady")
+        .await;
+    assert!(node_a.get_triggered_unexpected_events().await.is_empty());
+    assert!(node_b.get_triggered_unexpected_events().await.is_empty());
+}
+
+#[tokio::test]
 async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
     init_tracing();
 
