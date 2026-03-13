@@ -18,7 +18,7 @@ pub trait BatchWriter {
 
 /// Unified key-value storage backend trait.
 ///
-/// All methods panic on I/O errors, matching the existing cfn-node convention.
+/// All methods panic on I/O errors.
 pub trait StorageBackend: Send + Sync {
     /// The batch type for this backend.
     type Batch: BatchWriter;
