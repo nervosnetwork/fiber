@@ -7600,8 +7600,6 @@ mod tests {
     use ckb_types::packed::{OutPoint, Script};
     use fiber_types::HashAlgorithm;
     use std::cell::RefCell;
-    use tokio::sync::mpsc;
-
     struct NoopNetworkActor;
 
     #[async_trait::async_trait]
@@ -7624,35 +7622,6 @@ mod tests {
             _message: Self::Msg,
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
-            Ok(())
-        }
-    }
-
-    struct RecordingNetworkActor {
-        sender: mpsc::UnboundedSender<NetworkActorMessage>,
-    }
-
-    #[async_trait::async_trait]
-    impl Actor for RecordingNetworkActor {
-        type Msg = NetworkActorMessage;
-        type State = ();
-        type Arguments = mpsc::UnboundedSender<NetworkActorMessage>;
-
-        async fn pre_start(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            _sender: Self::Arguments,
-        ) -> Result<Self::State, ActorProcessingErr> {
-            Ok(())
-        }
-
-        async fn handle(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            message: Self::Msg,
-            _state: &mut Self::State,
-        ) -> Result<(), ActorProcessingErr> {
-            self.sender.send(message).expect("record network message");
             Ok(())
         }
     }
@@ -7831,16 +7800,6 @@ mod tests {
         state
     }
 
-    fn create_ready_test_state(network: ActorRef<NetworkActorMessage>) -> ChannelActorState {
-        let mut state = create_test_state(network);
-        state.defer_peer_tlc_updates = false;
-        state.deferred_peer_tlc_updates.clear();
-        state.funding_tx = Some(Transaction::default());
-        state.funding_tx_confirmed_at =
-            Some((Default::default(), 0, now_timestamp_as_millis_u64()));
-        state
-    }
-
     fn create_test_add_tlc(channel_id: Hash256, tlc_id: u64) -> AddTlc {
         AddTlc {
             channel_id,
@@ -7904,68 +7863,6 @@ mod tests {
             state.deferred_peer_tlc_updates.len(),
             max_deferred_updates as usize,
             "deferred replay queue should stop growing once it reaches the negotiated TLC budget"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_reestablish_does_not_complete_while_waiting_for_peer_revoke_and_ack() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let network = Actor::spawn(None, RecordingNetworkActor { sender: tx.clone() }, tx)
-            .await
-            .expect("start recording network actor")
-            .0;
-        let myself = Actor::spawn(None, NoopChannelMailboxActor, ())
-            .await
-            .expect("start noop mailbox actor")
-            .0;
-        let store = MockStore::default();
-
-        let mut state = create_ready_test_state(network.clone());
-        state.increment_local_commitment_number();
-        state.reestablishing = true;
-
-        let actor = ChannelActor::new(
-            state.get_local_pubkey(),
-            state.get_remote_pubkey(),
-            network,
-            store,
-        );
-        let reestablish = ReestablishChannel {
-            channel_id: state.get_id(),
-            local_commitment_number: state.get_remote_commitment_number(),
-            remote_commitment_number: state.get_remote_commitment_number(),
-        };
-
-        while rx.try_recv().is_ok() {}
-
-        actor
-            .handle_peer_message(
-                &myself,
-                &mut state,
-                FiberChannelMessage::ReestablishChannel(reestablish),
-            )
-            .await
-            .expect("peer reestablish should be processed");
-
-        let mut saw_channel_ready = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
-        while tokio::time::Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let Ok(Some(message)) = tokio::time::timeout(remaining, rx.recv()).await else {
-                break;
-            };
-            if matches!(
-                message,
-                NetworkActorMessage::Event(NetworkActorEvent::ChannelReady(..))
-            ) {
-                saw_channel_ready = true;
-                break;
-            }
-        }
-
-        assert!(
-            !saw_channel_ready,
-            "channel should not emit ChannelReady before the missing revoke_and_ack arrives"
         );
     }
 }

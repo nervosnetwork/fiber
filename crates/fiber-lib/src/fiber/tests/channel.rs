@@ -12,7 +12,8 @@ use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithTarget, PeerDisconnectReason};
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, TlcErr,
+    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, ReestablishChannel,
+    TlcErr,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode};
@@ -6594,6 +6595,61 @@ async fn test_reestablish_bidirectional_pending() {
         state_a_after.get_local_commitment_number(),
         state_b_after.get_remote_commitment_number(),
         "Commitment numbers should remain symmetric"
+    );
+}
+
+#[tokio::test]
+async fn test_reestablish_does_not_complete_while_waiting_for_peer_revoke_and_ack() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    let peer_commitment_number = state.get_remote_commitment_number();
+    state.increment_local_commitment_number();
+    state.reestablishing = true;
+    node_a.update_channel_actor_state(state, None).await;
+
+    while tokio::time::timeout(Duration::from_millis(25), node_a.event_emitter.recv())
+        .await
+        .is_ok()
+    {}
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: peer_commitment_number,
+                    remote_commitment_number: peer_commitment_number,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    let mut saw_channel_ready = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(Some(event)) = tokio::time::timeout(remaining, node_a.event_emitter.recv()).await
+        else {
+            break;
+        };
+        if matches!(
+            event,
+            NetworkServiceEvent::ChannelReady(pubkey, ready_channel_id, _)
+                if pubkey == node_b.pubkey && ready_channel_id == channel_id
+        ) {
+            saw_channel_ready = true;
+            break;
+        }
+    }
+
+    assert!(
+        !saw_channel_ready,
+        "channel should not emit ChannelReady before the missing revoke_and_ack arrives"
     );
 }
 
