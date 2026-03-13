@@ -1455,11 +1455,94 @@ async fn test_to_be_accepted_channels_number_limit() {
             .build(),
     )
     .await;
+    let mut peer1 = NetworkNode::new().await;
+    let mut peer2 = NetworkNode::new().await;
+    let mut peer3 = NetworkNode::new().await;
+    node.connect_to(&mut peer1).await;
+    node.connect_to(&mut peer2).await;
+    node.connect_to(&mut peer3).await;
+
+    let node_pubkey = node.pubkey;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: node_pubkey,
+                public: true,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(peer1.network_actor, message)
+        .expect("peer1 alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &peer1.pubkey);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer2.network_actor, message)
+        .expect("peer2 alive")
+        .expect("open channel");
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &peer2.pubkey);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    call!(peer3.network_actor, message)
+        .expect("peer3 alive")
+        .expect("open channel");
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let pending = call!(node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+    })
+    .expect("node alive")
+    .expect("pending accept channels");
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().any(|channel| channel.pubkey == peer1.pubkey));
+    assert!(pending.iter().any(|channel| channel.pubkey == peer2.pubkey));
+    assert!(!pending.iter().any(|channel| channel.pubkey == peer3.pubkey));
+}
+
+#[tokio::test]
+async fn test_same_peer_second_pending_inbound_channel_is_rejected() {
+    let funding_amount = 9_900_000_000u128;
+    let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.open_channel_auto_accept_min_ckb_funding_amount =
+                    open_channel_auto_accept_min_ckb_funding_amount;
+            })
+            .build(),
+    )
+    .await;
     let mut peer = NetworkNode::new().await;
     node.connect_to(&mut peer).await;
 
     let node_pubkey = node.pubkey;
-
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
@@ -1494,22 +1577,106 @@ async fn test_to_be_accepted_channels_number_limit() {
     })
     .await;
 
+    call!(node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+    })
+    .expect("node alive")
+    .expect("pending accept channels")
+    .iter()
+    .find(|pending| pending.pubkey == peer.pubkey)
+    .expect("first pending channel exists");
+
     call!(peer.network_actor, message)
         .expect("peer alive")
         .expect("open channel");
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let pending = call!(node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+    })
+    .expect("node alive")
+    .expect("pending accept channels");
+    assert_eq!(
+        pending.len(),
+        1,
+        "second pending inbound open from same peer should be rejected"
+    );
+    assert_eq!(pending[0].pubkey, peer.pubkey);
+}
+
+#[tokio::test]
+async fn test_different_peers_can_each_have_one_pending_inbound_channel() {
+    let funding_amount = 9_900_000_000u128;
+    let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.open_channel_auto_accept_min_ckb_funding_amount =
+                    open_channel_auto_accept_min_ckb_funding_amount;
+            })
+            .build(),
+    )
+    .await;
+    let mut peer1 = NetworkNode::new().await;
+    let mut peer2 = NetworkNode::new().await;
+    node.connect_to(&mut peer1).await;
+    node.connect_to(&mut peer2).await;
+
+    let node_pubkey = node.pubkey;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: node_pubkey,
+                public: true,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(peer1.network_actor, message)
+        .expect("peer1 alive")
+        .expect("open channel");
     node.expect_event(|event| match event {
         NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
-            assert_eq!(pubkey, &peer.pubkey);
+            assert_eq!(pubkey, &peer1.pubkey);
             true
         }
         _ => false,
     })
     .await;
 
-    call!(peer.network_actor, message)
-        .expect("peer alive")
+    call!(peer2.network_actor, message)
+        .expect("peer2 alive")
         .expect("open channel");
-    node.expect_debug_event("ChannelPendingToBeRejected").await;
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &peer2.pubkey);
+            true
+        }
+        _ => false,
+    })
+    .await;
+
+    let pending = call!(node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+    })
+    .expect("node alive")
+    .expect("pending accept channels");
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().any(|channel| channel.pubkey == peer1.pubkey));
+    assert!(pending.iter().any(|channel| channel.pubkey == peer2.pubkey));
 }
 
 #[tokio::test]
@@ -1562,8 +1729,12 @@ async fn test_to_be_accepted_channels_bytes_limit() {
             .build(),
     )
     .await;
-    let mut peer = NetworkNode::new().await;
-    node.connect_to(&mut peer).await;
+    let mut peer1 = NetworkNode::new().await;
+    let mut peer2 = NetworkNode::new().await;
+    let mut peer3 = NetworkNode::new().await;
+    node.connect_to(&mut peer1).await;
+    node.connect_to(&mut peer2).await;
+    node.connect_to(&mut peer3).await;
 
     let node_pubkey = node.pubkey;
 
@@ -1589,32 +1760,42 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         ))
     };
 
-    call!(peer.network_actor, message)
-        .expect("peer alive")
+    call!(peer1.network_actor, message)
+        .expect("peer1 alive")
         .expect("open channel");
     node.expect_event(|event| match event {
         NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
-            assert_eq!(pubkey, &peer.pubkey);
+            assert_eq!(pubkey, &peer1.pubkey);
             true
         }
         _ => false,
     })
     .await;
 
-    call!(peer.network_actor, message)
-        .expect("peer alive")
+    call!(peer2.network_actor, message)
+        .expect("peer2 alive")
         .expect("open channel");
     node.expect_event(|event| match event {
         NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
-            assert_eq!(pubkey, &peer.pubkey);
+            assert_eq!(pubkey, &peer2.pubkey);
             true
         }
         _ => false,
     })
     .await;
 
-    call!(peer.network_actor, message)
-        .expect("peer alive")
+    call!(peer3.network_actor, message)
+        .expect("peer3 alive")
         .expect("open channel");
-    node.expect_debug_event("ChannelPendingToBeRejected").await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let pending = call!(node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+    })
+    .expect("node alive")
+    .expect("pending accept channels");
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().any(|channel| channel.pubkey == peer1.pubkey));
+    assert!(pending.iter().any(|channel| channel.pubkey == peer2.pubkey));
+    assert!(!pending.iter().any(|channel| channel.pubkey == peer3.pubkey));
 }
