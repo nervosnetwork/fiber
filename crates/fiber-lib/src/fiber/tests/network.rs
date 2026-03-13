@@ -775,6 +775,92 @@ async fn test_persisting_bootnode() {
 }
 
 #[tokio::test]
+async fn test_exceeding_inbound_peer_budget_evicts_oldest_no_channel_peer_immediately() {
+    init_tracing();
+
+    let mut target = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.max_inbound_peers = Some(1);
+                config.min_outbound_peers = Some(0);
+            })
+            .build(),
+    )
+    .await;
+    let mut peer1 = NetworkNode::new().await;
+    let mut peer2 = NetworkNode::new().await;
+
+    peer1.connect_to(&mut target).await;
+
+    peer2.connect_to(&mut target).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let peers = call!(target.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+    })
+    .expect("target alive")
+    .expect("list peers");
+
+    assert_eq!(
+        peers.len(),
+        1,
+        "target should have already evicted one no-channel inbound peer before maintenance tick",
+    );
+    assert_eq!(
+        peers[0].pubkey, peer2.pubkey,
+        "target should retain the newest inbound no-channel peer"
+    );
+}
+
+#[tokio::test]
+async fn test_inbound_peer_with_channel_does_not_consume_no_channel_peer_budget() {
+    init_tracing();
+
+    let mut target = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.max_inbound_peers = Some(1);
+                config.min_outbound_peers = Some(0);
+            })
+            .build(),
+    )
+    .await;
+    let mut peer_with_channel = NetworkNode::new().await;
+    let mut peer_without_channel = NetworkNode::new().await;
+
+    peer_with_channel.connect_to(&mut target).await;
+    establish_channel_between_nodes(
+        &mut target,
+        &mut peer_with_channel,
+        ChannelParameters::new(100_000_000_000, 11_800_000_000),
+    )
+    .await;
+
+    peer_without_channel.connect_to_nonblocking(&target).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let peers = call!(target.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+    })
+    .expect("target alive")
+    .expect("list peers");
+
+    assert_eq!(
+        peers.len(),
+        2,
+        "a peer with a channel should not consume the no-channel inbound peer budget",
+    );
+    assert!(peers
+        .iter()
+        .any(|peer| peer.pubkey == peer_with_channel.pubkey));
+    assert!(peers
+        .iter()
+        .any(|peer| peer.pubkey == peer_without_channel.pubkey));
+}
+
+#[tokio::test]
 async fn test_persisting_announced_nodes() {
     init_tracing();
 

@@ -235,13 +235,13 @@ pub struct FiberConfig {
     )]
     pub(crate) gossip_network_maintenance_interval_ms: Option<u64>,
 
-    /// Maximal number of inbound connections. The node will disconnect inbound connections
-    /// when the number of inbound connection exceeds this number. [default: 16]
+    /// Maximal number of inbound peers without channels. The node will disconnect the oldest
+    /// inbound peers without channels when their number exceeds this budget. [default: 16]
     #[arg(
         name = "FIBER_MAX_INBOUND_PEERS",
         long = "fiber-max-inbound-peers",
         env,
-        help = "Maximal number of inbound connections. The node will disconnect inbound connections when the number of inbound connection exceeds this number. [default: 16]"
+        help = "Maximal number of inbound peers without channels. The node will disconnect the oldest inbound peers without channels when their number exceeds this budget. [default: 16]"
     )]
     pub(crate) max_inbound_peers: Option<usize>,
 
