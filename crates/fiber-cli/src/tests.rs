@@ -155,6 +155,7 @@ fn test_build_cli_has_expected_subcommands() {
         "channel",
         "invoice",
         "payment",
+        "fee",
         "graph",
         "cch",
         "dev",
@@ -218,6 +219,7 @@ fn test_build_interactive_cli_has_same_commands() {
         "channel",
         "invoice",
         "payment",
+        "fee",
         "graph",
         "cch",
         "dev",
@@ -1177,6 +1179,85 @@ mod prof_cli_tests {
         );
         let params = PprofParams::from_arg_matches(&matches).unwrap();
         assert_eq!(params.duration_secs, Some(30));
+    }
+}
+
+// ── Fee CLI arg tests ────────────────────────────────────────────────
+
+mod fee_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::fee::*;
+
+    #[test]
+    fn test_forwarding_history_no_args() {
+        let matches = parse_args(ForwardingHistoryParams::augment_command, &["test"]);
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert!(params.start_time.is_none());
+        assert!(params.end_time.is_none());
+        assert!(params.limit.is_none());
+        assert!(params.offset.is_none());
+        assert!(params.udt_type_script.is_none());
+    }
+
+    #[test]
+    fn test_forwarding_history_with_time_range() {
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &["test", "--start-time", "1000", "--end-time", "2000"],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.start_time, Some(1000));
+        assert_eq!(params.end_time, Some(2000));
+    }
+
+    #[test]
+    fn test_forwarding_history_with_pagination() {
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &["test", "--limit", "50", "--offset", "10"],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.limit, Some(50));
+        assert_eq!(params.offset, Some(10));
+    }
+
+    #[test]
+    fn test_forwarding_history_with_udt_filter() {
+        let script_json = r#"{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}"#;
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &["test", "--udt-type-script", script_json],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert!(params.udt_type_script.is_some());
+    }
+
+    #[test]
+    fn test_forwarding_history_all_params() {
+        let script_json = r#"{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}"#;
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &[
+                "test",
+                "--start-time",
+                "500",
+                "--end-time",
+                "9000",
+                "--limit",
+                "25",
+                "--offset",
+                "5",
+                "--udt-type-script",
+                script_json,
+            ],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.start_time, Some(500));
+        assert_eq!(params.end_time, Some(9000));
+        assert_eq!(params.limit, Some(25));
+        assert_eq!(params.offset, Some(5));
+        assert!(params.udt_type_script.is_some());
     }
 }
 

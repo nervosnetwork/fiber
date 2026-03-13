@@ -309,6 +309,11 @@ pub mod server {
                 .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
                 .unwrap();
         }
+        if config.is_module_enabled("fee") {
+            modules
+                .merge(FeeRpcServerImpl::new(store.clone()).into_rpc())
+                .unwrap();
+        }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {
                 modules
@@ -348,12 +353,6 @@ pub mod server {
             if config.is_module_enabled("watchtower") {
                 modules
                     .merge(WatchtowerRpcServerImpl::new(store.clone()).into_rpc())
-                    .unwrap();
-            }
-
-            if config.is_module_enabled("fee") {
-                modules
-                    .merge(FeeRpcServerImpl::new(store.clone()).into_rpc())
                     .unwrap();
             }
 
