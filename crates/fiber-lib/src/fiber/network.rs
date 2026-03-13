@@ -5102,7 +5102,7 @@ impl ToBeAcceptedChannels {
         self.map.remove(id)
     }
 
-    // insert and apply single-flight and aggregate throttle control
+    // insert and apply single-flight and per-peer throttle control
     fn try_insert(
         &mut self,
         id: Hash256,
@@ -5133,12 +5133,16 @@ impl ToBeAcceptedChannels {
 
         // The map should be small because of the flow control, so calculate the total number and
         // bytes on the fly.
-        let (total_number, total_bytes) = self.map.values().fold(
-            (1, open_channel.mem_size()),
-            |(count, size), (_, saved_open_channel)| {
-                (count + 1, size + saved_open_channel.mem_size())
-            },
-        );
+        let (total_number, total_bytes) = self
+            .map
+            .values()
+            .filter(|(saved_pubkey, _)| *saved_pubkey == pubkey)
+            .fold(
+                (1, open_channel.mem_size()),
+                |(count, size), (_, saved_open_channel)| {
+                    (count + 1, size + saved_open_channel.mem_size())
+                },
+            );
 
         if total_number > self.total_number_limit {
             return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(

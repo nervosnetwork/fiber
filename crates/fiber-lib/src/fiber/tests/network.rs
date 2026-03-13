@@ -1441,7 +1441,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
 }
 
 #[tokio::test]
-async fn test_to_be_accepted_channels_number_limit() {
+async fn test_to_be_accepted_channels_number_limit_is_per_peer() {
     let funding_amount = 9_900_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
     let mut node = NetworkNode::new_with_config(
@@ -1520,10 +1520,10 @@ async fn test_to_be_accepted_channels_number_limit() {
     })
     .expect("node alive")
     .expect("pending accept channels");
-    assert_eq!(pending.len(), 2);
+    assert_eq!(pending.len(), 3);
     assert!(pending.iter().any(|channel| channel.pubkey == peer1.pubkey));
     assert!(pending.iter().any(|channel| channel.pubkey == peer2.pubkey));
-    assert!(!pending.iter().any(|channel| channel.pubkey == peer3.pubkey));
+    assert!(pending.iter().any(|channel| channel.pubkey == peer3.pubkey));
 }
 
 #[tokio::test]
@@ -1680,7 +1680,7 @@ async fn test_different_peers_can_each_have_one_pending_inbound_channel() {
 }
 
 #[tokio::test]
-async fn test_to_be_accepted_channels_bytes_limit() {
+async fn test_to_be_accepted_channels_bytes_limit_is_per_peer() {
     init_tracing();
 
     let rand_privkey = gen_rand_fiber_private_key();
@@ -1794,8 +1794,8 @@ async fn test_to_be_accepted_channels_bytes_limit() {
     })
     .expect("node alive")
     .expect("pending accept channels");
-    assert_eq!(pending.len(), 2);
+    assert_eq!(pending.len(), 3);
     assert!(pending.iter().any(|channel| channel.pubkey == peer1.pubkey));
     assert!(pending.iter().any(|channel| channel.pubkey == peer2.pubkey));
-    assert!(!pending.iter().any(|channel| channel.pubkey == peer3.pubkey));
+    assert!(pending.iter().any(|channel| channel.pubkey == peer3.pubkey));
 }
