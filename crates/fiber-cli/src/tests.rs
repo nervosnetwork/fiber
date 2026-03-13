@@ -155,7 +155,6 @@ fn test_build_cli_has_expected_subcommands() {
         "channel",
         "invoice",
         "payment",
-        "fee",
         "graph",
         "cch",
         "dev",
@@ -219,7 +218,6 @@ fn test_build_interactive_cli_has_same_commands() {
         "channel",
         "invoice",
         "payment",
-        "fee",
         "graph",
         "cch",
         "dev",
@@ -1182,9 +1180,9 @@ mod prof_cli_tests {
     }
 }
 
-// ── Fee CLI arg tests ────────────────────────────────────────────────
+// ── Info fee CLI arg tests ────────────────────────────────────────────────
 
-mod fee_cli_tests {
+mod info_fee_cli_tests {
     use super::parse_args;
     use crate::cli_generated::CliArgs;
     use fiber_json_types::fee::*;

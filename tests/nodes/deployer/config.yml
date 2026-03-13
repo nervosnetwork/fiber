@@ -17,7 +17,6 @@ rpc:
     - payment
     - graph
     - info
-    - fee
     - invoice
     - peer
     - watchtower

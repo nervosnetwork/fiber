@@ -31,14 +31,13 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `remove_tlc`](#dev-remove_tlc)
         * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
         * [Method `check_channel_shutdown`](#dev-check_channel_shutdown)
-    * [Module Fee](#module-fee)
-        * [Method `fee_report`](#fee-fee_report)
-        * [Method `forwarding_history`](#fee-forwarding_history)
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
         * [Method `graph_channels`](#graph-graph_channels)
     * [Module Info](#module-info)
         * [Method `node_info`](#info-node_info)
+        * [Method `fee_report`](#info-fee_report)
+        * [Method `forwarding_history`](#info-forwarding_history)
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#invoice-new_invoice)
         * [Method `parse_invoice`](#invoice-parse_invoice)
@@ -460,54 +459,6 @@ Manually trigger CheckShutdownTx on all channels
 
 
 
-<a id="fee"></a>
-### Module `Fee`
-RPC module for querying forwarding fees and history.
-
-
-<a id="fee-fee_report"></a>
-#### Method `fee_report`
-
-Returns a summary of forwarding fees earned over day/week/month windows,
- grouped by asset type (CKB and each UDT).
-
-##### Params
-* None
-
-##### Returns
-
-* `asset_reports` - <em>Vec<[AssetFeeReport](#type-assetfeereport)></em>, Fee reports grouped by asset type.
- Each entry corresponds to a different token (CKB or a UDT).
-
----
-
-
-
-<a id="fee-forwarding_history"></a>
-#### Method `forwarding_history`
-
-Returns individual forwarding events with optional time range, asset filter,
- and pagination.
-
-##### Params
-
-* `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive). Default is 0 (the beginning of time).
-* `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive). Default is the current time.
-* `limit` - <em>`Option<u64>`</em>, Maximum number of events to return. Default is 100.
-* `offset` - <em>`Option<u64>`</em>, Number of events to skip (for pagination). Default is 0.
-* `udt_type_script` - <em>`Option<Script>`</em>, Filter by UDT type script. If set, only events for this specific UDT are returned.
- Use `null` or omit to return events for all asset types.
- Use an explicit JSON `null` value with `ckb_only: true` to get only CKB events.
-
-##### Returns
-
-* `events` - <em>Vec<[ForwardingEventInfo](#type-forwardingeventinfo)></em>, The list of forwarding events.
-* `total_count` - <em>`u64`</em>, The total number of forwarding events returned in this result.
-
----
-
-
-
 <a id="graph"></a>
 ### Module `Graph`
 RPC module for graph management.
@@ -584,6 +535,49 @@ Get the node information.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, Configuration information for User-Defined Tokens (UDT) associated with the node.
+
+---
+
+
+
+<a id="info-fee_report"></a>
+#### Method `fee_report`
+
+Returns a summary of forwarding fees earned over day/week/month windows,
+ grouped by asset type (CKB and each UDT).
+
+##### Params
+* None
+
+##### Returns
+
+* `asset_reports` - <em>Vec<[AssetFeeReport](#type-assetfeereport)></em>, Fee reports grouped by asset type.
+ Each entry corresponds to a different token (CKB or a UDT).
+
+---
+
+
+
+<a id="info-forwarding_history"></a>
+#### Method `forwarding_history`
+
+Returns individual forwarding events with optional time range, asset filter,
+ and pagination.
+
+##### Params
+
+* `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive). Default is 0 (the beginning of time).
+* `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive). Default is the current time.
+* `limit` - <em>`Option<u64>`</em>, Maximum number of events to return. Default is 100.
+* `offset` - <em>`Option<u64>`</em>, Number of events to skip (for pagination). Default is 0.
+* `udt_type_script` - <em>`Option<Script>`</em>, Filter by UDT type script. If set, only events for this specific UDT are returned.
+ Use `null` or omit to return events for all asset types.
+ Use an explicit JSON `null` value with `ckb_only: true` to get only CKB events.
+
+##### Returns
+
+* `events` - <em>Vec<[ForwardingEventInfo](#type-forwardingeventinfo)></em>, The list of forwarding events.
+* `total_count` - <em>`u64`</em>, The total number of forwarding events returned in this result.
 
 ---
 

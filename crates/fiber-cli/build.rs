@@ -537,7 +537,6 @@ const GROUP_ORDER: &[&str] = &[
     "channel",
     "invoice",
     "payment",
-    "fee",
     "graph",
     "cch",
     "dev",

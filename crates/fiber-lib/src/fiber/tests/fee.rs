@@ -1,7 +1,9 @@
 use crate::fiber::channel::ForwardingEventStore;
 use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
-use crate::rpc::fee::{FeeRpcServerImpl, ForwardingHistoryParams, MILLIS_PER_DAY};
+use crate::rpc::info::{
+    fee_report_impl, forwarding_history_impl, ForwardingHistoryParams, MILLIS_PER_DAY,
+};
 use ckb_types::packed::Script;
 use fiber_types::ForwardingEvent;
 use std::sync::Mutex;
@@ -77,8 +79,7 @@ fn dummy_udt_script(tag: u8) -> Script {
 #[tokio::test]
 async fn test_fee_report_empty() {
     let store = MockForwardingStore::new();
-    let rpc = FeeRpcServerImpl::new(store);
-    let report = rpc.fee_report().await.unwrap();
+    let report = fee_report_impl(&store).unwrap();
 
     assert!(report.asset_reports.is_empty());
 }
@@ -95,8 +96,7 @@ async fn test_fee_report_ckb_only() {
     // Event within last month but not last week (CKB)
     store.insert_forwarding_event(make_event(now - 15 * MILLIS_PER_DAY, 30));
 
-    let rpc = FeeRpcServerImpl::new(store);
-    let report = rpc.fee_report().await.unwrap();
+    let report = fee_report_impl(&store).unwrap();
 
     assert_eq!(report.asset_reports.len(), 1);
     let ckb = &report.asset_reports[0];
@@ -123,8 +123,7 @@ async fn test_fee_report_multiple_assets() {
     store.insert_forwarding_event(make_event_with_udt(now - 1000, 100, Some(udt_a.clone())));
     store.insert_forwarding_event(make_event_with_udt(now - 2000, 200, Some(udt_a.clone())));
 
-    let rpc = FeeRpcServerImpl::new(store);
-    let report = rpc.fee_report().await.unwrap();
+    let report = fee_report_impl(&store).unwrap();
 
     assert_eq!(report.asset_reports.len(), 2);
 
@@ -157,8 +156,7 @@ async fn test_fee_report_excludes_old_events() {
     // Recent event
     store.insert_forwarding_event(make_event(now - 1000, 5));
 
-    let rpc = FeeRpcServerImpl::new(store);
-    let report = rpc.fee_report().await.unwrap();
+    let report = fee_report_impl(&store).unwrap();
 
     assert_eq!(report.asset_reports.len(), 1);
     let ckb = &report.asset_reports[0];
@@ -174,11 +172,7 @@ async fn test_forwarding_history_defaults() {
     store.insert_forwarding_event(make_event(now - 5000, 1));
     store.insert_forwarding_event(make_event(now - 3000, 2));
 
-    let rpc = FeeRpcServerImpl::new(store);
-    let result = rpc
-        .forwarding_history(ForwardingHistoryParams::default())
-        .await
-        .unwrap();
+    let result = forwarding_history_impl(&store, ForwardingHistoryParams::default()).unwrap();
 
     assert_eq!(result.total_count, 2);
     assert_eq!(result.events.len(), 2);
@@ -196,15 +190,15 @@ async fn test_forwarding_history_time_range() {
     store.insert_forwarding_event(make_event(200, 2));
     store.insert_forwarding_event(make_event(300, 3));
 
-    let rpc = FeeRpcServerImpl::new(store);
-    let result = rpc
-        .forwarding_history(ForwardingHistoryParams {
+    let result = forwarding_history_impl(
+        &store,
+        ForwardingHistoryParams {
             start_time: Some(200),
             end_time: Some(300),
             ..Default::default()
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .unwrap();
 
     assert_eq!(result.total_count, 2);
     assert_eq!(result.events[0].timestamp, 200);
@@ -219,32 +213,32 @@ async fn test_forwarding_history_pagination() {
         store.insert_forwarding_event(make_event(100 + i, i as u128));
     }
 
-    let rpc = FeeRpcServerImpl::new(store);
-
     // First page
-    let result = rpc
-        .forwarding_history(ForwardingHistoryParams {
+    let result = forwarding_history_impl(
+        &store,
+        ForwardingHistoryParams {
             end_time: Some(u64::MAX),
             limit: Some(3),
             offset: Some(0),
             ..Default::default()
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert_eq!(result.total_count, 3);
     assert_eq!(result.events[0].timestamp, 100);
     assert_eq!(result.events[2].timestamp, 102);
 
     // Second page
-    let result = rpc
-        .forwarding_history(ForwardingHistoryParams {
+    let result = forwarding_history_impl(
+        &store,
+        ForwardingHistoryParams {
             end_time: Some(u64::MAX),
             limit: Some(3),
             offset: Some(3),
             ..Default::default()
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert_eq!(result.total_count, 3);
     assert_eq!(result.events[0].timestamp, 103);
     assert_eq!(result.events[2].timestamp, 105);
@@ -253,11 +247,7 @@ async fn test_forwarding_history_pagination() {
 #[tokio::test]
 async fn test_forwarding_history_empty() {
     let store = MockForwardingStore::new();
-    let rpc = FeeRpcServerImpl::new(store);
-    let result = rpc
-        .forwarding_history(ForwardingHistoryParams::default())
-        .await
-        .unwrap();
+    let result = forwarding_history_impl(&store, ForwardingHistoryParams::default()).unwrap();
 
     assert_eq!(result.total_count, 0);
     assert!(result.events.is_empty());
@@ -277,16 +267,15 @@ async fn test_forwarding_history_filter_by_udt() {
     // UDT-B event
     store.insert_forwarding_event(make_event_with_udt(now - 1000, 30, Some(udt_b.clone())));
 
-    let rpc = FeeRpcServerImpl::new(store);
-
     // Filter UDT-A only
-    let result = rpc
-        .forwarding_history(ForwardingHistoryParams {
+    let result = forwarding_history_impl(
+        &store,
+        ForwardingHistoryParams {
             udt_type_script: Some(udt_a.into()),
             ..Default::default()
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert_eq!(result.total_count, 1);
     assert_eq!(result.events[0].fee, 20);
     assert!(result.events[0].udt_type_script.is_some());
@@ -303,11 +292,7 @@ async fn test_forwarding_history_event_fields_mapped() {
     let expected_payment_hash = event.payment_hash;
     store.insert_forwarding_event(event);
 
-    let rpc = FeeRpcServerImpl::new(store);
-    let result = rpc
-        .forwarding_history(ForwardingHistoryParams::default())
-        .await
-        .unwrap();
+    let result = forwarding_history_impl(&store, ForwardingHistoryParams::default()).unwrap();
 
     assert_eq!(result.events.len(), 1);
     let info = &result.events[0];

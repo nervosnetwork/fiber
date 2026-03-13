@@ -6,7 +6,6 @@ pub mod channel;
 pub mod config;
 #[cfg(debug_assertions)]
 pub mod dev;
-pub mod fee;
 pub mod graph;
 pub mod info;
 pub mod invoice;
@@ -29,7 +28,6 @@ pub mod server {
     pub use crate::rpc::config::RpcConfig;
     #[cfg(debug_assertions)]
     use crate::rpc::dev::{DevRpcServer, DevRpcServerImpl};
-    use crate::rpc::fee::{FeeRpcServer, FeeRpcServerImpl};
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
     use crate::rpc::info::InfoRpcServer;
     use crate::rpc::info::InfoRpcServerImpl;
@@ -309,11 +307,6 @@ pub mod server {
                 .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
                 .unwrap();
         }
-        if config.is_module_enabled("fee") {
-            modules
-                .merge(FeeRpcServerImpl::new(store.clone()).into_rpc())
-                .unwrap();
-        }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {
                 modules
@@ -321,6 +314,7 @@ pub mod server {
                         InfoRpcServerImpl::new(
                             network_actor.clone(),
                             ckb_config.clone().expect("ckb config should be set"),
+                            store.clone(),
                         )
                         .into_rpc(),
                     )
