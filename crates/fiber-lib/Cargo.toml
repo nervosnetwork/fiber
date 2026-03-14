@@ -158,3 +158,11 @@ name = "payment_benchmarks"
 [[bench]]
 harness = false
 name = "biscuit_benchmarks"
+
+[[bench]]
+harness = false
+name = "gossip_propagation"
+
+[[bench]]
+harness = false
+name = "gossip_sync_recovery"
