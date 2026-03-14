@@ -53,3 +53,4 @@ pub use watchtower::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CCH_ORDER_PREFIX: u8 = 232;
 pub const FORWARDING_EVENT_PREFIX: u8 = 240;
+pub const PAYMENT_EVENT_PREFIX: u8 = 241;

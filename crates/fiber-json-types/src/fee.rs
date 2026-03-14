@@ -119,3 +119,121 @@ pub struct ForwardingHistoryResult {
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub total_count: u64,
 }
+
+/// Payment amount summary for a single asset type (CKB or a specific UDT).
+///
+/// Used by both `sent_report` and `received_report` RPCs.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct AssetPaymentReport {
+    /// The UDT type script. `None` means native CKB.
+    pub udt_type_script: Option<Script>,
+    /// Total amount in the last 24 hours.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub daily_amount_sum: u128,
+    /// Total amount in the last 7 days.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub weekly_amount_sum: u128,
+    /// Total amount in the last 30 days.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub monthly_amount_sum: u128,
+    /// Total number of payment events in the last 24 hours.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub daily_event_count: u64,
+    /// Total number of payment events in the last 7 days.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub weekly_event_count: u64,
+    /// Total number of payment events in the last 30 days.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub monthly_event_count: u64,
+}
+
+/// Result of the `sent_report` RPC method.
+///
+/// Returns aggregated sent payment amounts over different time windows,
+/// grouped by asset type (CKB and each UDT).
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct SentPaymentReportResult {
+    /// Payment reports grouped by asset type.
+    pub asset_reports: Vec<AssetPaymentReport>,
+}
+
+/// Result of the `received_report` RPC method.
+///
+/// Returns aggregated received payment amounts over different time windows,
+/// grouped by asset type (CKB and each UDT).
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct ReceivedPaymentReportResult {
+    /// Payment reports grouped by asset type.
+    pub asset_reports: Vec<AssetPaymentReport>,
+}
+
+/// Parameters for the `payment_history` RPC method.
+///
+/// Queries individual send/receive payment events with time range and pagination.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
+pub struct PaymentHistoryParams {
+    /// Start time in milliseconds since UNIX epoch (inclusive). Default is 0.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub start_time: Option<u64>,
+    /// End time in milliseconds since UNIX epoch (inclusive). Default is the current time.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub end_time: Option<u64>,
+    /// Maximum number of events to return. Default is 100.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub limit: Option<u64>,
+    /// Number of events to skip (for pagination). Default is 0.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub offset: Option<u64>,
+    /// Filter by UDT type script.
+    pub udt_type_script: Option<Script>,
+}
+
+/// A single payment event as returned by the `payment_history` RPC.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct PaymentEventInfo {
+    /// The type of this event: "Send" or "Receive".
+    pub event_type: String,
+    /// Timestamp when this event was recorded, in milliseconds since UNIX epoch.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub timestamp: u64,
+    /// The channel ID through which the TLC was sent or received.
+    pub channel_id: Hash256,
+    /// The payment amount.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub amount: u128,
+    /// The routing fee (only meaningful for Send events; 0 for Receive).
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub fee: u128,
+    /// The payment hash associated with this TLC.
+    pub payment_hash: Hash256,
+    /// The UDT type script. `None` means native CKB.
+    pub udt_type_script: Option<Script>,
+}
+
+/// Result of the `payment_history` RPC method.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct PaymentHistoryResult {
+    /// The list of payment events.
+    pub events: Vec<PaymentEventInfo>,
+    /// The total number of events returned in this result.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub total_count: u64,
+}

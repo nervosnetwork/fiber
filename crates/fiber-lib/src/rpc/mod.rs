@@ -41,7 +41,7 @@ pub mod server {
     use crate::{
         cch::CchMessage,
         fiber::{
-            channel::{ChannelActorStateStore, ChannelOpenRecordStore, ForwardingEventStore},
+            channel::{ChannelActorStateStore, ChannelEventStore, ChannelOpenRecordStore},
             graph::{NetworkGraph, NetworkGraphStateStore},
             NetworkActorMessage,
         },
@@ -85,7 +85,7 @@ pub mod server {
         + GossipMessageStore
         + WatchtowerStore
         + PreimageStore
-        + ForwardingEventStore
+        + ChannelEventStore
     {
     }
     #[cfg(feature = "watchtower")]
@@ -97,7 +97,7 @@ pub mod server {
             + GossipMessageStore
             + WatchtowerStore
             + PreimageStore
-            + ForwardingEventStore
+            + ChannelEventStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -107,7 +107,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
-        + ForwardingEventStore
+        + ChannelEventStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -117,7 +117,7 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
-            + ForwardingEventStore
+            + ChannelEventStore
     {
     }
 

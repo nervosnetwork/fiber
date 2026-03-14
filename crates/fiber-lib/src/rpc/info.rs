@@ -1,9 +1,10 @@
 use crate::ckb::CkbConfig;
-use crate::fiber::channel::ForwardingEventStore;
+use crate::fiber::channel::ChannelEventStore;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::{handle_actor_call, log_and_error, now_timestamp_as_millis_u64};
 use ckb_jsonrpc_types::Script;
 use ckb_types::prelude::Entity;
+use fiber_types::PaymentEventType;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
@@ -12,11 +13,14 @@ use std::collections::BTreeMap;
 use ractor::{call, ActorRef};
 
 pub use fiber_json_types::{
-    AssetFeeReport, FeeReportResult, ForwardingEventInfo, ForwardingHistoryParams,
-    ForwardingHistoryResult, NodeInfoResult,
+    AssetFeeReport, AssetPaymentReport, FeeReportResult, ForwardingEventInfo,
+    ForwardingHistoryParams, ForwardingHistoryResult, NodeInfoResult, PaymentEventInfo,
+    PaymentHistoryParams, PaymentHistoryResult, ReceivedPaymentReportResult,
+    SentPaymentReportResult,
 };
 
 const DEFAULT_FORWARDING_HISTORY_LIMIT: u64 = 100;
+const DEFAULT_PAYMENT_HISTORY_LIMIT: u64 = 100;
 pub(crate) const MILLIS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 pub(crate) const MILLIS_PER_WEEK: u64 = 7 * MILLIS_PER_DAY;
 pub(crate) const MILLIS_PER_MONTH: u64 = 30 * MILLIS_PER_DAY;
@@ -69,13 +73,33 @@ trait InfoRpc {
         &self,
         params: ForwardingHistoryParams,
     ) -> Result<ForwardingHistoryResult, ErrorObjectOwned>;
+
+    /// Returns a summary of sent payment amounts over day/week/month windows,
+    /// grouped by asset type (CKB and each UDT).
+    #[method(name = "sent_payment_report")]
+    async fn sent_payment_report(&self) -> Result<SentPaymentReportResult, ErrorObjectOwned>;
+
+    /// Returns a summary of received payment amounts over day/week/month windows,
+    /// grouped by asset type (CKB and each UDT).
+    #[method(name = "received_payment_report")]
+    async fn received_payment_report(
+        &self,
+    ) -> Result<ReceivedPaymentReportResult, ErrorObjectOwned>;
+
+    /// Returns individual send/receive payment events with optional time range,
+    /// asset filter, and pagination.
+    #[method(name = "payment_history")]
+    async fn payment_history(
+        &self,
+        params: PaymentHistoryParams,
+    ) -> Result<PaymentHistoryResult, ErrorObjectOwned>;
 }
 
 #[async_trait::async_trait]
 #[cfg(not(target_arch = "wasm32"))]
 impl<S> InfoRpcServer for InfoRpcServerImpl<S>
 where
-    S: ForwardingEventStore + Send + Sync + 'static,
+    S: ChannelEventStore + Send + Sync + 'static,
 {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         self.node_info().await
@@ -91,11 +115,28 @@ where
     ) -> Result<ForwardingHistoryResult, ErrorObjectOwned> {
         self.forwarding_history(params).await
     }
+
+    async fn sent_payment_report(&self) -> Result<SentPaymentReportResult, ErrorObjectOwned> {
+        self.sent_payment_report().await
+    }
+
+    async fn received_payment_report(
+        &self,
+    ) -> Result<ReceivedPaymentReportResult, ErrorObjectOwned> {
+        self.received_payment_report().await
+    }
+
+    async fn payment_history(
+        &self,
+        params: PaymentHistoryParams,
+    ) -> Result<PaymentHistoryResult, ErrorObjectOwned> {
+        self.payment_history(params).await
+    }
 }
 
 impl<S> InfoRpcServerImpl<S>
 where
-    S: ForwardingEventStore + Send + Sync + 'static,
+    S: ChannelEventStore + Send + Sync + 'static,
 {
     pub async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
@@ -136,11 +177,28 @@ where
     ) -> Result<ForwardingHistoryResult, ErrorObjectOwned> {
         forwarding_history_impl(&self.store, params)
     }
+
+    pub async fn sent_payment_report(&self) -> Result<SentPaymentReportResult, ErrorObjectOwned> {
+        sent_payment_report_impl(&self.store)
+    }
+
+    pub async fn received_payment_report(
+        &self,
+    ) -> Result<ReceivedPaymentReportResult, ErrorObjectOwned> {
+        received_payment_report_impl(&self.store)
+    }
+
+    pub async fn payment_history(
+        &self,
+        params: PaymentHistoryParams,
+    ) -> Result<PaymentHistoryResult, ErrorObjectOwned> {
+        payment_history_impl(&self.store, params)
+    }
 }
 
 /// Core fee report logic, usable from both the RPC impl and tests.
 pub fn fee_report_impl(
-    store: &impl ForwardingEventStore,
+    store: &impl ChannelEventStore,
 ) -> Result<FeeReportResult, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
     let day_ago = now.saturating_sub(MILLIS_PER_DAY);
@@ -191,7 +249,7 @@ pub fn fee_report_impl(
 
 /// Core forwarding history logic, usable from both the RPC impl and tests.
 pub fn forwarding_history_impl(
-    store: &impl ForwardingEventStore,
+    store: &impl ChannelEventStore,
     params: ForwardingHistoryParams,
 ) -> Result<ForwardingHistoryResult, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
@@ -238,12 +296,138 @@ pub fn forwarding_history_impl(
     })
 }
 
+/// Core sent payment report logic.
+pub fn sent_payment_report_impl(
+    store: &impl ChannelEventStore,
+) -> Result<SentPaymentReportResult, ErrorObjectOwned> {
+    payment_report_impl(store, PaymentEventType::Send)
+        .map(|asset_reports| SentPaymentReportResult { asset_reports })
+}
+
+/// Core received payment report logic.
+pub fn received_payment_report_impl(
+    store: &impl ChannelEventStore,
+) -> Result<ReceivedPaymentReportResult, ErrorObjectOwned> {
+    payment_report_impl(store, PaymentEventType::Receive)
+        .map(|asset_reports| ReceivedPaymentReportResult { asset_reports })
+}
+
+/// Shared logic for sent/received payment reports.
+fn payment_report_impl(
+    store: &impl ChannelEventStore,
+    event_type: PaymentEventType,
+) -> Result<Vec<AssetPaymentReport>, ErrorObjectOwned> {
+    let now = now_timestamp_as_millis_u64();
+    let day_ago = now.saturating_sub(MILLIS_PER_DAY);
+    let week_ago = now.saturating_sub(MILLIS_PER_WEEK);
+    let month_ago = now.saturating_sub(MILLIS_PER_MONTH);
+
+    let events = store.get_payment_events(month_ago, now, usize::MAX, 0);
+
+    let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, PaymentAccum)> =
+        BTreeMap::new();
+
+    for event in events.iter().filter(|e| e.event_type == event_type) {
+        let key = asset_key(&event.udt_type_script);
+        let entry = accums
+            .entry(key)
+            .or_insert_with(|| (event.udt_type_script.clone(), PaymentAccum::default()));
+        let accum = &mut entry.1;
+
+        accum.monthly_amount_sum = accum.monthly_amount_sum.saturating_add(event.amount);
+        accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
+        if event.timestamp >= week_ago {
+            accum.weekly_amount_sum = accum.weekly_amount_sum.saturating_add(event.amount);
+            accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+        }
+        if event.timestamp >= day_ago {
+            accum.daily_amount_sum = accum.daily_amount_sum.saturating_add(event.amount);
+            accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+        }
+    }
+
+    let asset_reports = accums
+        .into_values()
+        .map(|(udt_type_script, accum)| AssetPaymentReport {
+            udt_type_script: udt_type_script.map(Into::into),
+            daily_amount_sum: accum.daily_amount_sum,
+            weekly_amount_sum: accum.weekly_amount_sum,
+            monthly_amount_sum: accum.monthly_amount_sum,
+            daily_event_count: accum.daily_event_count,
+            weekly_event_count: accum.weekly_event_count,
+            monthly_event_count: accum.monthly_event_count,
+        })
+        .collect();
+
+    Ok(asset_reports)
+}
+
+/// Core payment history logic.
+pub fn payment_history_impl(
+    store: &impl ChannelEventStore,
+    params: PaymentHistoryParams,
+) -> Result<PaymentHistoryResult, ErrorObjectOwned> {
+    let now = now_timestamp_as_millis_u64();
+    let start_time = params.start_time.unwrap_or(0);
+    let end_time = params.end_time.unwrap_or(now);
+    let limit = params.limit.unwrap_or(DEFAULT_PAYMENT_HISTORY_LIMIT) as usize;
+    let offset = params.offset.unwrap_or(0) as usize;
+
+    let udt_filter: Option<Option<ckb_types::packed::Script>> =
+        params.udt_type_script.map(|s| Some(s.into()));
+
+    let events = store.get_payment_events(start_time, end_time, usize::MAX, 0);
+
+    let filtered: Vec<_> = events
+        .into_iter()
+        .filter(|e| match &udt_filter {
+            None => true,
+            Some(script) => &e.udt_type_script == script,
+        })
+        .skip(offset)
+        .take(limit)
+        .collect();
+
+    let total_count = filtered.len() as u64;
+    let events = filtered
+        .into_iter()
+        .map(|e| PaymentEventInfo {
+            event_type: match e.event_type {
+                PaymentEventType::Send => "Send".to_string(),
+                PaymentEventType::Receive => "Receive".to_string(),
+            },
+            timestamp: e.timestamp,
+            channel_id: e.channel_id.into(),
+            amount: e.amount,
+            fee: e.fee,
+            payment_hash: e.payment_hash.into(),
+            udt_type_script: e.udt_type_script.map(Into::into),
+        })
+        .collect();
+
+    Ok(PaymentHistoryResult {
+        events,
+        total_count,
+    })
+}
+
 /// Accumulator for per-asset fee aggregation across time windows.
 #[derive(Default)]
 struct AssetAccum {
     daily_fee_sum: u128,
     weekly_fee_sum: u128,
     monthly_fee_sum: u128,
+    daily_event_count: u64,
+    weekly_event_count: u64,
+    monthly_event_count: u64,
+}
+
+/// Accumulator for per-asset payment amount aggregation across time windows.
+#[derive(Default)]
+struct PaymentAccum {
+    daily_amount_sum: u128,
+    weekly_amount_sum: u128,
+    monthly_amount_sum: u128,
     daily_event_count: u64,
     weekly_event_count: u64,
     monthly_event_count: u64,

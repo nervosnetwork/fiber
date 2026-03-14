@@ -159,6 +159,45 @@ pub struct ForwardingEvent {
     pub udt_type_script: Option<Script>,
 }
 
+/// The type of a payment event: whether this node sent or received the payment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub enum PaymentEventType {
+    /// This node initiated the payment (sender / payer).
+    Send,
+    /// This node received the payment (receiver / payee).
+    Receive,
+}
+
+/// A record of a successfully sent or received payment on this node.
+///
+/// Unlike `ForwardingEvent` (which involves two channels and earns a fee),
+/// a `PaymentEvent` tracks end-user payments:
+/// - **Send**: the outgoing TLC was fulfilled, the sender paid `amount + fee` where
+///   `fee` is the total routing fee paid to intermediate hops.
+/// - **Receive**: an incoming TLC was fulfilled, the receiver got `amount` with no fee.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct PaymentEvent {
+    /// Whether this is a send or receive event.
+    pub event_type: PaymentEventType,
+    /// Timestamp when this event was recorded, in milliseconds since UNIX epoch.
+    pub timestamp: u64,
+    /// The channel through which the TLC was sent or received.
+    pub channel_id: Hash256,
+    /// The payment amount (in shannons or UDT base units).
+    /// For Send: the amount leaving this node on the first hop (includes routing fees).
+    /// For Receive: the amount arriving at this node on the last hop.
+    pub amount: u128,
+    /// The fee paid for routing (only meaningful for Send events; 0 for Receive).
+    pub fee: u128,
+    /// The payment hash associated with this TLC.
+    pub payment_hash: Hash256,
+    /// The UDT type script if this was a UDT channel.
+    /// `None` means native CKB.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
+}
+
 impl From<TLCId> for u64 {
     fn from(id: TLCId) -> u64 {
         match id {
