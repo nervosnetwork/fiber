@@ -1,16 +1,8 @@
 use std::fmt::Debug;
 use std::{cell::RefCell, collections::BTreeMap, path::Path, rc::Rc};
 
-pub enum DbDirection {
-    Forward,
-    Reverse,
-}
-
-pub enum IteratorMode<'a> {
-    Start,
-    End,
-    From(&'a [u8], DbDirection),
-}
+use crate::backend::{BatchWriter, StorageBackend, TakeWhileFn};
+use crate::iterator::{IteratorDirection, KVPair};
 
 #[derive(Clone)]
 pub struct Store {
@@ -62,53 +54,79 @@ impl Store {
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn prefix_iterator_with_skip_while_and_start<'a>(
-        &'a self,
-        prefix: &'a [u8],
-        mode: IteratorMode<'a>,
-        skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
+    /// Helper for collect_iterator: collect matching items from a BTreeMap range
+    fn collect_from_btree(
+        &self,
+        start: Vec<u8>,
+        direction: IteratorDirection,
+        take_while_fn: &TakeWhileFn,
+        limit: usize,
+    ) -> Vec<KVPair> {
         let guard = self.data.borrow();
-        let iter: Box<dyn Iterator<Item = (&Vec<u8>, &Vec<u8>)>> = match mode {
-            IteratorMode::Start => Box::new(guard.iter()),
-            IteratorMode::End => Box::new(guard.iter().rev()),
-            IteratorMode::From(items, db_direction) => match db_direction {
-                DbDirection::Forward => Box::new(
-                    guard
-                        .iter()
-                        .skip_while(move |(key, _)| **key < items.to_vec()),
-                ),
-                DbDirection::Reverse => Box::new(
-                    guard
-                        .iter()
-                        .rev()
-                        .skip_while(move |(key, _)| **key > items.to_vec()),
-                ),
-            },
-        };
-        let mut result = vec![];
-        for (key, value) in iter.skip_while(move |(key, _)| skip_while(key)) {
-            if !key.starts_with(prefix) {
-                break;
+        let mut results = Vec::new();
+
+        match direction {
+            IteratorDirection::Forward => {
+                for (key, value) in guard.range::<Vec<u8>, _>(start..) {
+                    if !take_while_fn(key) {
+                        break;
+                    }
+                    results.push(KVPair {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                    if limit > 0 && results.len() >= limit {
+                        break;
+                    }
+                }
             }
-            result.push((
-                key.clone().into_boxed_slice(),
-                value.clone().into_boxed_slice(),
-            ));
+            IteratorDirection::Reverse => {
+                for (key, value) in guard.range::<Vec<u8>, _>(..=start).rev() {
+                    if !take_while_fn(key) {
+                        break;
+                    }
+                    results.push(KVPair {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                    if limit > 0 && results.len() >= limit {
+                        break;
+                    }
+                }
+            }
         }
-        result.into_iter()
+
+        results
+    }
+}
+
+impl StorageBackend for Store {
+    type Batch = Batch;
+
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
+        self.get(key)
     }
 
-    pub fn prefix_iterator<'a>(
-        &'a self,
-        prefix: &'a [u8],
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        self.prefix_iterator_with_skip_while_and_start(
-            prefix,
-            IteratorMode::From(prefix, DbDirection::Forward),
-            Box::new(|_| false),
-        )
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
+        self.put(key, value)
+    }
+
+    fn delete<K: AsRef<[u8]>>(&self, key: K) {
+        self.delete(key)
+    }
+
+    fn batch(&self) -> Self::Batch {
+        self.batch()
+    }
+
+    fn collect_iterator(
+        &self,
+        start: Vec<u8>,
+        direction: IteratorDirection,
+        take_while_fn: TakeWhileFn,
+        limit: usize,
+    ) -> Vec<KVPair> {
+        self.collect_from_btree(start, direction, &take_while_fn, limit)
     }
 }
 
@@ -124,11 +142,6 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        let guard = self.data.borrow();
-        guard.get(key.as_ref()).cloned()
-    }
-
     pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
         self.puts.push(KV {
             key: key.as_ref().to_vec(),
@@ -141,6 +154,29 @@ impl Batch {
     }
 
     pub fn commit(self) {
+        let mut guard = self.data.borrow_mut();
+        for key in self.delete {
+            guard.remove(&key);
+        }
+        for KV { key, value } in self.puts {
+            guard.insert(key, value);
+        }
+    }
+}
+
+impl BatchWriter for Batch {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+        self.puts.push(KV {
+            key: key.as_ref().to_vec(),
+            value: value.as_ref().to_vec(),
+        });
+    }
+
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+        self.delete.push(key.as_ref().to_vec());
+    }
+
+    fn commit(self) {
         let mut guard = self.data.borrow_mut();
         for key in self.delete {
             guard.remove(&key);

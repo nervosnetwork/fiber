@@ -20,12 +20,11 @@ use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
+use crate::store::open_store;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::store::Store;
 use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -246,7 +245,7 @@ fn test_store_save_node_announcement() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_watchtower() {
     let path = TempDir::new("test-watchtower-store");
-    let store = Store::new(path).expect("created store failed");
+    let store = open_store(path).expect("created store failed");
 
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let channel_id = gen_rand_sha256_hash();
@@ -325,7 +324,7 @@ fn test_store_watchtower() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_watchtower_preimage() {
     let path = TempDir::new("test-watchtower-store");
-    let store = Store::new(path).expect("created store failed");
+    let store = open_store(path).expect("created store failed");
 
     let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
     let preimage_a = gen_rand_sha256_hash();
@@ -389,7 +388,7 @@ fn test_store_watchtower_preimage() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_watchtower_with_wrong_node_id() {
     let path = TempDir::new("test-watchtower-store");
-    let store = Store::new(path).expect("created store failed");
+    let store = open_store(path).expect("created store failed");
 
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let wrong_node_id = NodeId::from_bytes(PeerId::random().into_bytes());
@@ -580,7 +579,7 @@ fn test_channel_actor_state_store() {
 
     let path = TempDir::new("channel_actore_store");
 
-    let store = Store::new(path).expect("create store failed");
+    let store = open_store(path).expect("create store failed");
     assert!(store.get_channel_actor_state(&state.id).is_none());
     store.insert_channel_actor_state(state.clone());
 
@@ -964,21 +963,17 @@ struct StoreChangeSaver {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl crate::store::store_impl::StoreChangeWatcher for StoreChangeSaver {
-    fn on_store_change(&self, change: crate::store::store_impl::StoreChange) {
-        self.changes.write().unwrap().push(change);
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_change_watcher() {
     use crate::store::store_impl::StoreChange;
     use std::sync::Arc;
 
     let (mut store, _dir) = generate_store();
-    let watcher = Arc::new(StoreChangeSaver::default());
-    store.set_watcher(watcher.clone());
+    let saver = Arc::new(StoreChangeSaver::default());
+    let saver_clone = saver.clone();
+    store.set_watcher(Arc::new(move |change: StoreChange| {
+        saver_clone.changes.write().unwrap().push(change);
+    }));
 
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
@@ -994,7 +989,7 @@ fn test_store_change_watcher() {
         .insert_invoice(invoice.clone(), Some(preimage))
         .unwrap();
 
-    let changes = watcher.changes.read().unwrap();
+    let changes = saver.changes.read().unwrap();
     assert!(changes.iter().any(
         |e| matches!(e, StoreChange::PutCkbInvoiceStatus { payment_hash: h, invoice_status: CkbInvoiceStatus::Open } if h == &payment_hash)
     ));
@@ -1010,7 +1005,7 @@ fn test_store_sample_channel_actor_state() {
     assert!(!samples.is_empty());
 
     let path = TempDir::new("sample_channel_actor_state_store");
-    let store = Store::new(path).expect("create store failed");
+    let store = open_store(path).expect("create store failed");
 
     // Insert all samples
     for sample in &samples {
@@ -1078,7 +1073,7 @@ fn test_store_channel_open_record() {
     assert!(!samples.is_empty());
 
     let path = TempDir::new("channel_open_record_store");
-    let store = Store::new(path).expect("create store failed");
+    let store = open_store(path).expect("create store failed");
 
     // Initially no records
     assert!(store.get_channel_open_records().is_empty());

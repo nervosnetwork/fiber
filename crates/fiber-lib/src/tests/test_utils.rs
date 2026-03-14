@@ -81,7 +81,7 @@ use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NodeInfo;
 use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
 use crate::fiber::Privkey;
-use crate::store::Store;
+use crate::store::{open_store, Store};
 use crate::{
     actors::{RootActor, RootActorMessage},
     ckb::tests::test_utils::{
@@ -228,13 +228,13 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
-    let store = Store::new(temp_dir.as_ref());
+    let store = open_store(temp_dir.as_ref());
     (store.expect("create store"), temp_dir)
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn generate_store() -> (Store, ()) {
-    let store = Store::new(&PathBuf::default());
+    let store = open_store(&PathBuf::default());
     (store.expect("create store"), ())
 }
 
@@ -359,7 +359,7 @@ impl NetworkNodeConfigBuilder {
             .map(char::from)
             .collect();
         let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
-        let store = Store::new(rand_db_dir).expect("create store");
+        let store = open_store(rand_db_dir).expect("create store");
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let ckb_config = if self.rpc_config.is_some() {
             let ckb_dir = Path::new(base_dir.to_str()).join("ckb");
