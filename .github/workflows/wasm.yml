@@ -11,7 +11,7 @@ jobs:
     name: Run unit tests in browser
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v6
 
       - name: Install rust
         uses: actions-rs/toolchain@v1

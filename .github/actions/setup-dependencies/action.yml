@@ -18,7 +18,7 @@ runs:
   using: 'composite'
   steps:
     - name: Cache CKB binaries
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: cache-ckb
       with:
         path: ~/.local/bin/ckb*
@@ -28,7 +28,7 @@ runs:
 
     - name: Cache Bitcoin and LND binaries
       if: inputs.install-bitcoin-lnd == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: cache-bitcoin-lnd
       with:
         path: |
