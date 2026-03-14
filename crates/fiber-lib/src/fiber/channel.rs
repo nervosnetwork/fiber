@@ -56,12 +56,13 @@ use fiber_types::{
     ChannelAnnouncement, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
     ChannelOpenRecord, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
     ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
-    EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
-    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
-    PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
-    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr,
-    TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+    EcdsaSignature, ForwardingEvent, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
+    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PaymentEvent,
+    PaymentEventType, PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey,
+    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
+    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -346,7 +347,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + ChannelEventStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -1462,6 +1463,20 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
+            // Record a Receive payment event when this node is the final recipient
+            // of a payment (i.e., the TLC was received, fulfilled, and NOT forwarded).
+            // If forwarding_tlc is Some, this node is an intermediary, not the payee.
+            if tlc_info.is_received() && tlc_info.forwarding_tlc.is_none() {
+                self.store.insert_payment_event(PaymentEvent {
+                    event_type: PaymentEventType::Receive,
+                    timestamp: now_timestamp_as_millis_u64(),
+                    channel_id: state.get_id(),
+                    amount: tlc_info.amount,
+                    fee: 0,
+                    payment_hash: tlc_info.payment_hash,
+                    udt_type_script: state.funding_udt_type_script.clone(),
+                });
+            }
             // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
             // incase watchtower may need preimage to settledown
             if tlc_info.is_received() || tlc_info.forwarding_tlc.is_none() {
@@ -1471,6 +1486,36 @@ where
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
+                // Record forwarding event if this TLC was successfully fulfilled.
+                // This node acted as an intermediary: inbound TLC on previous_channel_id
+                // was forwarded as outbound TLC on this channel.
+                if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+                    let incoming_amount = self
+                        .store
+                        .get_channel_actor_state(&previous_channel_id)
+                        .and_then(|prev_state| {
+                            prev_state
+                                .tlc_state
+                                .get(&TLCId::Received(previous_tlc_id))
+                                .map(|tlc| tlc.amount)
+                        });
+
+                    if let Some(incoming_amount) = incoming_amount {
+                        let outgoing_amount = tlc_info.amount;
+                        let fee = incoming_amount.saturating_sub(outgoing_amount);
+                        self.store.insert_forwarding_event(ForwardingEvent {
+                            timestamp: now_timestamp_as_millis_u64(),
+                            incoming_channel_id: previous_channel_id,
+                            outgoing_channel_id: state.get_id(),
+                            incoming_amount,
+                            outgoing_amount,
+                            fee,
+                            payment_hash: tlc_info.payment_hash,
+                            udt_type_script: state.funding_udt_type_script.clone(),
+                        });
+                    }
+                }
+
                 // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
                 // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
                 // into a new error created with the *outer* shared secret (for this hop).
@@ -1497,6 +1542,19 @@ where
                     remove_reason,
                 );
             } else {
+                // Record a Send payment event when this node is the original sender
+                // and the TLC was successfully fulfilled.
+                if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+                    self.store.insert_payment_event(PaymentEvent {
+                        event_type: PaymentEventType::Send,
+                        timestamp: now_timestamp_as_millis_u64(),
+                        channel_id: state.get_id(),
+                        amount: tlc_info.amount,
+                        fee: 0, // routing fee is not known here; can be computed from PaymentSession
+                        payment_hash: tlc_info.payment_hash,
+                        udt_type_script: state.funding_udt_type_script.clone(),
+                    });
+                }
                 // only the original sender of the TLC should send `TlcRemoveReceived` event
                 // because only the original sender cares about the TLC event to settle the payment
                 self.network
@@ -2538,7 +2596,13 @@ where
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<S> Actor for ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + InvoiceStore
+        + PreimageStore
+        + ChannelEventStore
+        + Send
+        + Sync
+        + 'static,
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;
@@ -7361,6 +7425,41 @@ pub trait ChannelOpenRecordStore {
     fn insert_channel_open_record(&self, record: ChannelOpenRecord);
     /// Delete the record for the given channel ID.
     fn delete_channel_open_record(&self, channel_id: &Hash256);
+}
+
+/// Store trait for persisting and querying forwarding events and payment events.
+///
+/// Forwarding events are recorded when this node successfully relays a TLC
+/// (payment) between two channels, earning a fee. Payment events are recorded
+/// when this node sends or receives a payment as an end user.
+///
+/// Events are keyed by timestamp (big-endian u64 milliseconds) to support
+/// efficient time-range queries.
+pub trait ChannelEventStore {
+    /// Insert a new forwarding event into the store.
+    fn insert_forwarding_event(&self, event: ForwardingEvent);
+    /// Query forwarding events within a time range, with pagination.
+    /// `start_time` and `end_time` are milliseconds since UNIX epoch (inclusive).
+    /// Returns up to `limit` events starting after `offset` events.
+    fn get_forwarding_events(
+        &self,
+        start_time: u64,
+        end_time: u64,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<ForwardingEvent>;
+    /// Insert a new payment event (send or receive) into the store.
+    fn insert_payment_event(&self, event: PaymentEvent);
+    /// Query payment events within a time range, with pagination.
+    /// `start_time` and `end_time` are milliseconds since UNIX epoch (inclusive).
+    /// Returns up to `limit` events starting after `offset` events.
+    fn get_payment_events(
+        &self,
+        start_time: u64,
+        end_time: u64,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<PaymentEvent>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

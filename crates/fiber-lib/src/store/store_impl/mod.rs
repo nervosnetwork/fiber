@@ -25,7 +25,10 @@ use crate::fiber::types::HoldTlc;
 use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff},
+        channel::{
+            ChannelActorState, ChannelActorStateStore, ChannelEventStore, ChannelOpenRecordStore,
+            CommitDiff,
+        },
         graph::NetworkGraphStateStore,
         network::NetworkActorStateStore,
         payment::PaymentSessionExt,
@@ -40,8 +43,8 @@ use fiber_types::schema::*;
 use fiber_types::CchOrder;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
+    Cursor, Direction, ForwardingEvent, Hash256, PaymentCustomRecords, PaymentEvent,
+    PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
 };
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
@@ -179,6 +182,13 @@ impl Store {
                         &mut errors,
                     );
                 }
+                FORWARDING_EVENT_PREFIX => {
+                    check_deserialization::<ForwardingEvent>(
+                        &value,
+                        "FORWARDING_EVENT_PREFIX",
+                        &mut errors,
+                    );
+                }
                 _ => {}
             }
         }
@@ -248,6 +258,8 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
+    ForwardingEvent(ForwardingEvent),
+    PaymentEvent(PaymentEvent),
 }
 
 /// Recorded store changes.
@@ -371,6 +383,18 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
+            KeyValue::ForwardingEvent(event) => [
+                &[FORWARDING_EVENT_PREFIX],
+                &event.timestamp.to_be_bytes()[..],
+                event.payment_hash.as_ref(),
+            ]
+            .concat(),
+            KeyValue::PaymentEvent(event) => [
+                &[PAYMENT_EVENT_PREFIX],
+                &event.timestamp.to_be_bytes()[..],
+                event.payment_hash.as_ref(),
+            ]
+            .concat(),
         }
     }
 
@@ -413,6 +437,8 @@ impl StoreKeyValue for KeyValue {
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
+            KeyValue::ForwardingEvent(event) => serialize_to_vec(event, "ForwardingEvent"),
+            KeyValue::PaymentEvent(event) => serialize_to_vec(event, "PaymentEvent"),
         }
     }
 }
@@ -626,6 +652,61 @@ impl ChannelOpenRecordStore for Store {
     fn delete_channel_open_record(&self, channel_id: &Hash256) {
         let key = [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat();
         self.delete(key);
+    }
+}
+
+impl ChannelEventStore for Store {
+    fn insert_forwarding_event(&self, event: ForwardingEvent) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::ForwardingEvent(event));
+        batch.commit();
+    }
+
+    fn get_forwarding_events(
+        &self,
+        start_time: u64,
+        end_time: u64,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<ForwardingEvent> {
+        let start_key = [&[FORWARDING_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat();
+        // Use prefix_iterator starting from the start_key
+        self.prefix_iterator_with_skip_while_and_start(
+            &[FORWARDING_EVENT_PREFIX],
+            IteratorMode::From(&start_key, DbDirection::Forward),
+            Box::new(|_| false),
+        )
+        .map(|(_key, value)| deserialize_from::<ForwardingEvent>(value.as_ref(), "ForwardingEvent"))
+        .take_while(|event| event.timestamp <= end_time)
+        .skip(offset)
+        .take(limit)
+        .collect()
+    }
+
+    fn insert_payment_event(&self, event: PaymentEvent) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::PaymentEvent(event));
+        batch.commit();
+    }
+
+    fn get_payment_events(
+        &self,
+        start_time: u64,
+        end_time: u64,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<PaymentEvent> {
+        let start_key = [&[PAYMENT_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat();
+        self.prefix_iterator_with_skip_while_and_start(
+            &[PAYMENT_EVENT_PREFIX],
+            IteratorMode::From(&start_key, DbDirection::Forward),
+            Box::new(|_| false),
+        )
+        .map(|(_key, value)| deserialize_from::<PaymentEvent>(value.as_ref(), "PaymentEvent"))
+        .take_while(|event| event.timestamp <= end_time)
+        .skip(offset)
+        .take(limit)
+        .collect()
     }
 }
 

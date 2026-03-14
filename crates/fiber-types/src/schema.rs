@@ -18,6 +18,7 @@
 //! | 224          | Hash256              | ChannelData                 |
 //! | 201          | Hash256              | ChannelOpenRecord           |
 //! | 232          | Payment_hash         | CchOrder                    |
+//! | 240          | Timestamp(BE)        | ForwardingEvent             |
 //! +--------------+----------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -51,3 +52,5 @@ mod watchtower {
 pub use watchtower::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CCH_ORDER_PREFIX: u8 = 232;
+pub const FORWARDING_EVENT_PREFIX: u8 = 240;
+pub const PAYMENT_EVENT_PREFIX: u8 = 241;
