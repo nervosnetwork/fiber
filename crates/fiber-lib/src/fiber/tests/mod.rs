@@ -21,3 +21,5 @@ mod tlc_op;
 mod trampoline;
 mod types;
 mod utils;
+#[cfg(not(target_arch = "wasm32"))]
+mod watchtower_query;

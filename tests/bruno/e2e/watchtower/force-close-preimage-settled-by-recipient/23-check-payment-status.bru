@@ -1,0 +1,40 @@
+meta {
+  name: check payment status is Success
+  type: http
+  seq: 23
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_payment",
+    "params": [
+      {
+        "payment_hash": "{{payment_hash}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  console.log("Payment status: ", res.body.result);
+  if (res.body.result.status != "Success") {
+    throw new Error("Assertion failed: payment status expected to be Success, got " + res.body.result.status);
+  }
+}

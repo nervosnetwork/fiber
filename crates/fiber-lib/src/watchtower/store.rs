@@ -2,7 +2,10 @@ use ckb_sdk::util::blake160;
 use ckb_types::packed::Script;
 use musig2::{secp::Point, KeyAggContext};
 
-use crate::ckb::contracts::{get_script_by_contract, Contract};
+use crate::{
+    ckb::contracts::{get_script_by_contract, Contract},
+    fiber::watchtower_query::TlcWatchtowerStatus,
+};
 use fiber_types::{ChannelData, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
 
 pub trait WatchtowerStore {
@@ -63,6 +66,21 @@ pub trait WatchtowerStore {
 
     /// Mark a tlc as settled on chain
     fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]);
+
+    /// Check if a tlc is settled on chain
+    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool;
+
+    /// Query the status of a TLC, returning both preimage and settlement status
+    fn query_tlc_status(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> TlcWatchtowerStatus {
+        TlcWatchtowerStatus {
+            preimage: self.get_watch_preimage(payment_hash),
+            is_settled: self.is_tlc_settled(channel_id, payment_hash),
+        }
+    }
 }
 
 /// Compute the x-only aggregated public key for a channel.

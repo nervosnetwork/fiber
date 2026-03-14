@@ -62,6 +62,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `update_local_settlement`](#watchtower-update_local_settlement)
         * [Method `create_preimage`](#watchtower-create_preimage)
         * [Method `remove_preimage`](#watchtower-remove_preimage)
+        * [Method `query_tlc_status`](#watchtower-query_tlc_status)
 * [RPC Types](#rpc-types)
 
     * [Type `Attribute`](#type-attribute)
@@ -1085,6 +1086,25 @@ Remove preimage
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="watchtower-query_tlc_status"></a>
+#### Method `query_tlc_status`
+
+Query the status of a TLC
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash
+
+##### Returns
+
+* `preimage` - <em>Option<[Hash256](#type-hash256)></em>, Found preimage when the TLC has been settled on chain with the preimage path.
+* `is_settled` - <em>`bool`</em>, Whether the TLC has been settled on chain
 
 ---
 

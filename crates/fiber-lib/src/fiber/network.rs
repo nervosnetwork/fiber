@@ -60,6 +60,7 @@ use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
 };
+use super::watchtower_query_actor::{WatchtowerQueryActor, WatchtowerQueryActorMessage};
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
     ASSUME_NETWORK_ACTOR_ALIVE,
@@ -378,6 +379,21 @@ pub enum NetworkActorCommand {
     // Get all inbound channel requests that are waiting for `accept_channel`
     GetPendingAcceptChannels(RpcReplyPort<Result<Vec<PendingAcceptChannel>, String>>),
 
+    // Watchtower query result: preimage found for a TLC, settle it immediately.
+    WatchtowerPreimageResult {
+        channel_id: Hash256,
+        tlc_id: u64,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    },
+    // Watchtower query result: TLC is settled on-chain.
+    // The forwarding TLC should be failed with ExpiryTooSoon.
+    WatchtowerSettledResult {
+        forwarding_channel_id: Hash256,
+        forwarding_tlc_id: u64,
+        shared_secret: [u8; 32],
+    },
+
     #[cfg(any(debug_assertions, feature = "bench"))]
     UpdateFeatures(FeatureVector),
 }
@@ -653,6 +669,7 @@ pub struct NetworkActor<S, C> {
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
+    watchtower_querier: Option<Arc<dyn super::WatchtowerQuerier>>,
 }
 
 impl<S, C> NetworkActor<S, C>
@@ -676,6 +693,7 @@ where
         store: S,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
         chain_client: C,
+        watchtower_querier: Option<Arc<dyn super::WatchtowerQuerier>>,
     ) -> Self {
         Self {
             event_sender,
@@ -683,6 +701,7 @@ where
             store: store.clone(),
             network_graph,
             chain_client,
+            watchtower_querier,
         }
     }
 
@@ -1361,15 +1380,6 @@ where
                                         continue;
                                     }
                                 }
-
-                                let Some(payment_preimage) = self.store.get_preimage(&payment_hash)
-                                else {
-                                    continue;
-                                };
-                                debug!(
-                                    "Found payment preimage for channel {:?} tlc {:?}",
-                                    channel_id, id
-                                );
                                 if self
                                     .store
                                     .get_invoice_status(&payment_hash)
@@ -1382,6 +1392,28 @@ where
                                 {
                                     continue;
                                 }
+
+                                let payment_preimage = self.store.get_preimage(&payment_hash);
+                                if payment_preimage.is_none() {
+                                    if let Some(wt_actor) = state.watchtower_query_actor.as_ref() {
+                                        let _ = wt_actor.send_message(
+                                            WatchtowerQueryActorMessage::QueryPreimage {
+                                                channel_id,
+                                                tlc_id: tlc_id.into(),
+                                                payment_hash,
+                                            },
+                                        );
+                                    }
+                                    continue;
+                                }
+                                let Some(payment_preimage) = payment_preimage else {
+                                    continue;
+                                };
+
+                                debug!(
+                                    "Found payment preimage for channel {:?} tlc {:?}",
+                                    channel_id, tlc_id
+                                );
 
                                 let (send, _recv) = oneshot::channel();
                                 let rpc_reply = RpcReplyPort::from(send);
@@ -1537,34 +1569,16 @@ where
                                 shared_secret,
                             ) in expired_tlcs
                             {
-                                if self.store.is_tlc_settled(&channel_id, &payment_hash) {
-                                    let (send, _recv) = oneshot::channel();
-                                    let rpc_reply = RpcReplyPort::from(send);
-                                    if let Err(err) = state
-                                        .send_command_to_channel(
+                                if let Some(wt_actor) = state.watchtower_query_actor.as_ref() {
+                                    let _ = wt_actor.send_message(
+                                        WatchtowerQueryActorMessage::QuerySettled {
+                                            channel_id,
+                                            payment_hash,
                                             forwarding_channel_id,
-                                            ChannelCommand::RemoveTlc(
-                                                RemoveTlcCommand {
-                                                    id: forwarding_tlc_id,
-                                                    reason: RemoveTlcReason::RemoveTlcFail(
-                                                        TlcErrPacket::new(
-                                                            TlcErr::new(
-                                                                TlcErrorCode::ExpiryTooSoon,
-                                                            ),
-                                                            &shared_secret,
-                                                        ),
-                                                    ),
-                                                },
-                                                rpc_reply,
-                                            ),
-                                        )
-                                        .await
-                                    {
-                                        error!(
-                                            "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                                            forwarding_tlc_id, forwarding_channel_id, err
-                                        );
-                                    }
+                                            forwarding_tlc_id,
+                                            shared_secret,
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -1626,6 +1640,90 @@ where
                                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                         }
                     }
+                }
+            }
+            NetworkActorCommand::WatchtowerPreimageResult {
+                channel_id,
+                tlc_id,
+                payment_hash,
+                preimage,
+            } => {
+                self.store.insert_preimage(payment_hash, preimage);
+                debug!(
+                    "Found watchtower preimage for channel {:?} tlc {:?}",
+                    channel_id, tlc_id
+                );
+                if self
+                    .store
+                    .get_invoice_status(&payment_hash)
+                    .is_some_and(|s| {
+                        !matches!(s, CkbInvoiceStatus::Open | CkbInvoiceStatus::Received)
+                    })
+                {
+                    return Ok(());
+                }
+                // Only send RemoveTlc if the channel still has this received TLC (it may have
+                // been removed already, e.g. by a concurrent payment winning the race).
+                let tlc_still_exists =
+                    self.store
+                        .get_channel_actor_state(&channel_id)
+                        .is_some_and(|actor_state| {
+                            actor_state
+                                .get_received_tlc(TLCId::Received(tlc_id))
+                                .is_some()
+                        });
+                if tlc_still_exists {
+                    let (send, _recv) = oneshot::channel();
+                    let rpc_reply = RpcReplyPort::from(send);
+                    if let Err(err) = state
+                        .send_command_to_channel(
+                            channel_id,
+                            ChannelCommand::RemoveTlc(
+                                RemoveTlcCommand {
+                                    id: tlc_id,
+                                    reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                        payment_preimage: preimage,
+                                    }),
+                                },
+                                rpc_reply,
+                            ),
+                        )
+                        .await
+                    {
+                        error!(
+                            "Failed to remove tlc {:?} with preimage for channel {:?}: {}",
+                            tlc_id, channel_id, err
+                        );
+                    }
+                }
+            }
+            NetworkActorCommand::WatchtowerSettledResult {
+                forwarding_channel_id,
+                forwarding_tlc_id,
+                shared_secret,
+            } => {
+                let (send, _recv) = oneshot::channel();
+                let rpc_reply = RpcReplyPort::from(send);
+                if let Err(err) = state
+                    .send_command_to_channel(
+                        forwarding_channel_id,
+                        ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: forwarding_tlc_id,
+                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                    TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                                    &shared_secret,
+                                )),
+                            },
+                            rpc_reply,
+                        ),
+                    )
+                    .await
+                {
+                    error!(
+                        "Failed to remove settled tlc {:?} for channel {:?}: {}",
+                        forwarding_tlc_id, forwarding_channel_id, err
+                    );
                 }
             }
             NetworkActorCommand::SettleHoldTlcSet(payment_hash) => {
@@ -2932,6 +3030,8 @@ pub struct NetworkActorState<S, C> {
 
     // Inflight payment actors
     inflight_payments: HashMap<Hash256, ActorRef<PaymentActorMessage>>,
+    // Actor for querying watchtower TLC status without blocking the network actor.
+    watchtower_query_actor: Option<ActorRef<WatchtowerQueryActorMessage>>,
 }
 
 #[derive(Debug, Clone)]
@@ -4626,6 +4726,20 @@ where
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
 
+        let watchtower_query_actor = if let Some(querier) = self.watchtower_querier.clone() {
+            let actor = WatchtowerQueryActor::new(querier, myself.clone());
+            let (actor_ref, _) = Actor::spawn_linked(
+                Some("watchtower_query".to_string()),
+                actor,
+                (),
+                myself.get_cell(),
+            )
+            .await?;
+            Some(actor_ref)
+        } else {
+            None
+        };
+
         let mut state = NetworkActorState {
             store: self.store.clone(),
             state_to_be_persisted,
@@ -4662,6 +4776,7 @@ where
                 funding_timeout_seconds: config.funding_timeout_seconds,
             },
             inflight_payments: Default::default(),
+            watchtower_query_actor,
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
@@ -4971,6 +5086,7 @@ pub async fn start_network<
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
+    watchtower_querier: Option<Arc<dyn super::WatchtowerQuerier>>,
 ) -> ActorRef<NetworkActorMessage> {
     let my_pubkey = config.public_key();
 
@@ -4982,6 +5098,7 @@ pub async fn start_network<
             store,
             network_graph,
             chain_client,
+            watchtower_querier,
         ),
         NetworkActorStartArguments {
             config,

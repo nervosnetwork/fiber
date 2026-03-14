@@ -576,16 +576,6 @@ impl ChannelActorStateStore for Store {
             })
     }
 
-    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
-        let key = [
-            &[WATCHTOWER_TLC_SETTLED_PREFIX],
-            channel_id.as_ref(),
-            &payment_hash.as_ref()[0..20],
-        ]
-        .concat();
-        self.get(key).is_some()
-    }
-
     fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff) {
         let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
         let value = serialize_to_vec(diff, "CommitDiff");
@@ -1180,6 +1170,33 @@ impl WatchtowerStore for Store {
         .concat();
         batch.put(key, []);
         batch.commit();
+    }
+
+    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
+        let key = [
+            &[WATCHTOWER_TLC_SETTLED_PREFIX],
+            channel_id.as_ref(),
+            &payment_hash.as_ref()[0..20],
+        ]
+        .concat();
+        self.get(key).is_some()
+    }
+}
+
+#[cfg(feature = "watchtower")]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::fiber::WatchtowerQuerier for Store {
+    async fn query_tlc_status(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> Option<crate::fiber::TlcWatchtowerStatus> {
+        Some(WatchtowerStore::query_tlc_status(
+            self,
+            channel_id,
+            payment_hash,
+        ))
     }
 }
 
