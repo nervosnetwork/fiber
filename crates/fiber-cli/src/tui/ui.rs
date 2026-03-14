@@ -401,13 +401,14 @@ fn draw_dashboard_tab(
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
-    // Layout: top stats row + capacity gauge + channel state breakdown + TLC info + fee stats + network overview
+    // Layout: top stats row + capacity gauge + channel state breakdown + TLC info + fee stats + payment stats + network overview
     let chunks = Layout::vertical([
         Constraint::Length(3), // Summary stats row
         Constraint::Length(3), // Capacity utilization gauge
         Constraint::Length(9), // Channel state breakdown
         Constraint::Length(5), // TLC stats
         Constraint::Length(9), // Fee & forwarding stats
+        Constraint::Length(9), // Payment stats (sent/received)
         Constraint::Min(4),    // Network overview (from graph)
     ])
     .split(inner);
@@ -427,8 +428,11 @@ fn draw_dashboard_tab(
     // ── Row 5: Fee & forwarding stats ───────────────────────────────
     draw_dashboard_fee_stats(f, tab, p, chunks[4]);
 
-    // ── Row 6: Network overview (graph nodes & channels) ────────────
-    draw_dashboard_network(f, tab, p, chunks[5]);
+    // ── Row 6: Payment stats (sent/received) ────────────────────────
+    draw_dashboard_payment_stats(f, tab, p, chunks[5]);
+
+    // ── Row 7: Network overview (graph nodes & channels) ────────────
+    draw_dashboard_network(f, tab, p, chunks[6]);
 }
 
 fn draw_dashboard_summary(
@@ -815,6 +819,186 @@ fn draw_recent_forwarding_events(
                 format!("{} -> {}", in_ch, out_ch),
                 Style::default().fg(p.text_secondary),
             ),
+            Span::raw("  "),
+            Span::styled(time_str, Style::default().fg(p.text_secondary)),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, area);
+}
+
+// ── Payment Stats (Sent/Received) ─────────────────────────────────────
+
+fn draw_dashboard_payment_stats(f: &mut Frame, tab: &DashboardTab, p: &ThemePalette, area: Rect) {
+    let pay = &tab.payment_stats;
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Payment Stats ")
+        .border_style(Style::default().fg(p.border))
+        .title_style(Style::default().fg(p.text_primary));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let cols = Layout::horizontal([
+        Constraint::Percentage(30), // Sent report
+        Constraint::Percentage(30), // Received report
+        Constraint::Percentage(40), // Recent payment events
+    ])
+    .split(inner);
+
+    draw_payment_report_column(
+        f,
+        "Sent",
+        &pay.ckb_sent_report,
+        &pay.udt_sent_reports,
+        p,
+        cols[0],
+    );
+    draw_payment_report_column(
+        f,
+        "Received",
+        &pay.ckb_recv_report,
+        &pay.udt_recv_reports,
+        p,
+        cols[1],
+    );
+    draw_recent_payment_events(f, pay, p, cols[2]);
+}
+
+fn draw_payment_report_column(
+    f: &mut Frame,
+    label: &str,
+    ckb_report: &Option<fiber_json_types::AssetPaymentReport>,
+    _udt_reports: &[fiber_json_types::AssetPaymentReport],
+    p: &ThemePalette,
+    area: Rect,
+) {
+    let mut lines = Vec::new();
+
+    if let Some(ckb) = ckb_report {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  CKB {}  ", label),
+                Style::default().fg(p.info).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("24h: ", Style::default().fg(p.label)),
+            Span::styled(
+                format_ckb(ckb.daily_amount_sum),
+                Style::default().fg(if label == "Sent" {
+                    p.warning
+                } else {
+                    p.success
+                }),
+            ),
+            Span::styled(
+                format!(" ({})", ckb.daily_event_count),
+                Style::default().fg(p.text_secondary),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("            "),
+            Span::styled("7d:  ", Style::default().fg(p.label)),
+            Span::styled(
+                format_ckb(ckb.weekly_amount_sum),
+                Style::default().fg(if label == "Sent" {
+                    p.warning
+                } else {
+                    p.success
+                }),
+            ),
+            Span::styled(
+                format!(" ({})", ckb.weekly_event_count),
+                Style::default().fg(p.text_secondary),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("            "),
+            Span::styled("30d: ", Style::default().fg(p.label)),
+            Span::styled(
+                format_ckb(ckb.monthly_amount_sum),
+                Style::default().fg(if label == "Sent" {
+                    p.warning
+                } else {
+                    p.success
+                }),
+            ),
+            Span::styled(
+                format!(" ({})", ckb.monthly_event_count),
+                Style::default().fg(p.text_secondary),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("  No {} data", label.to_lowercase()),
+            Style::default().fg(p.text_secondary),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, area);
+}
+
+fn draw_recent_payment_events(
+    f: &mut Frame,
+    pay: &super::tabs::dashboard::PaymentStats,
+    p: &ThemePalette,
+    area: Rect,
+) {
+    if pay.recent_events.is_empty() {
+        let lines = vec![Line::from(Span::styled(
+            "  No recent payment events",
+            Style::default().fg(p.text_secondary),
+        ))];
+        let paragraph = Paragraph::new(lines);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let header_line = Line::from(vec![
+        Span::styled(
+            format!("  Recent ({} total)  ", pay.total_event_count),
+            Style::default().fg(p.info).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Type", Style::default().fg(p.label)),
+        Span::raw("      "),
+        Span::styled("Amount", Style::default().fg(p.label)),
+        Span::raw("        "),
+        Span::styled("Time", Style::default().fg(p.label)),
+    ]);
+
+    let mut lines = vec![header_line];
+
+    for event in pay
+        .recent_events
+        .iter()
+        .take(area.height.saturating_sub(1) as usize)
+    {
+        let amount_str = if event.udt_type_script.is_none() {
+            format_ckb(event.amount)
+        } else {
+            format!("{}", event.amount)
+        };
+
+        let time_str = format_timestamp_short(event.timestamp);
+
+        let (type_label, type_color) = if event.event_type == "Send" {
+            ("Send", p.warning)
+        } else {
+            ("Recv", p.success)
+        };
+
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{:<4}", type_label),
+                Style::default().fg(type_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(amount_str, Style::default().fg(type_color)),
             Span::raw("  "),
             Span::styled(time_str, Style::default().fg(p.text_secondary)),
         ]));

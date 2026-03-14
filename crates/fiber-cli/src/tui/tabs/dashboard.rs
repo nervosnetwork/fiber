@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use fiber_json_types::{
-    AssetFeeReport, Channel, ChannelInfo, FeeReportResult, ForwardingEventInfo,
-    ForwardingHistoryResult, NodeInfo as GraphNodeInfo, NodeInfoResult,
+    AssetFeeReport, AssetPaymentReport, Channel, ChannelInfo, FeeReportResult, ForwardingEventInfo,
+    ForwardingHistoryResult, NodeInfo as GraphNodeInfo, NodeInfoResult, PaymentEventInfo,
+    PaymentHistoryResult, ReceivedPaymentReportResult, SentPaymentReportResult,
 };
 
 /// Aggregated stats computed client-side from channel data + node info.
@@ -92,11 +93,31 @@ pub struct FeeStats {
     pub total_event_count: u64,
 }
 
+/// Payment statistics derived from sent_payment_report, received_payment_report,
+/// and payment_history RPCs.
+#[derive(Debug, Clone, Default)]
+pub struct PaymentStats {
+    /// CKB sent payment report (daily/weekly/monthly amounts and counts).
+    pub ckb_sent_report: Option<AssetPaymentReport>,
+    /// UDT sent payment reports.
+    pub udt_sent_reports: Vec<AssetPaymentReport>,
+    /// CKB received payment report (daily/weekly/monthly amounts and counts).
+    pub ckb_recv_report: Option<AssetPaymentReport>,
+    /// UDT received payment reports.
+    pub udt_recv_reports: Vec<AssetPaymentReport>,
+    /// Recent payment events (most recent first, capped).
+    pub recent_events: Vec<PaymentEventInfo>,
+    /// Total payment event count from the server.
+    pub total_event_count: u64,
+}
+
 /// Dashboard tab state.
 pub struct DashboardTab {
     pub stats: DashboardStats,
     /// Fee and forwarding statistics.
     pub fee_stats: FeeStats,
+    /// Sent/received payment statistics.
+    pub payment_stats: PaymentStats,
     /// Network-wide stats derived from graph data.
     pub network_stats: NetworkStats,
     /// Label for the self node (empty if not found in graph).
@@ -114,6 +135,7 @@ impl DashboardTab {
         Self {
             stats: DashboardStats::default(),
             fee_stats: FeeStats::default(),
+            payment_stats: PaymentStats::default(),
             network_stats: NetworkStats::default(),
             self_label: String::new(),
             self_degree: 0,
@@ -180,6 +202,43 @@ impl DashboardTab {
         }
 
         self.fee_stats = fee_stats;
+    }
+
+    /// Update payment statistics from sent/received payment report and payment history RPC results.
+    pub fn update_payment_stats(
+        &mut self,
+        sent_report: Option<&SentPaymentReportResult>,
+        recv_report: Option<&ReceivedPaymentReportResult>,
+        payment_history: Option<&PaymentHistoryResult>,
+    ) {
+        let mut stats = PaymentStats::default();
+
+        if let Some(report) = sent_report {
+            for asset_report in &report.asset_reports {
+                if asset_report.udt_type_script.is_none() {
+                    stats.ckb_sent_report = Some(asset_report.clone());
+                } else {
+                    stats.udt_sent_reports.push(asset_report.clone());
+                }
+            }
+        }
+
+        if let Some(report) = recv_report {
+            for asset_report in &report.asset_reports {
+                if asset_report.udt_type_script.is_none() {
+                    stats.ckb_recv_report = Some(asset_report.clone());
+                } else {
+                    stats.udt_recv_reports.push(asset_report.clone());
+                }
+            }
+        }
+
+        if let Some(history) = payment_history {
+            stats.recent_events = history.events.clone();
+            stats.total_event_count = history.total_count;
+        }
+
+        self.payment_stats = stats;
     }
 
     /// Update network-wide stats and adjacency data from graph data.

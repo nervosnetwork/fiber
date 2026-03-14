@@ -10,7 +10,8 @@ use fiber_json_types::{
     ForwardingHistoryResult, GetInvoiceResult, GetPaymentCommandResult, GraphChannelsParams,
     GraphChannelsResult, GraphNodesParams, GraphNodesResult, ListChannelsParams,
     ListChannelsResult, ListInvoicesParams, ListInvoicesResult, ListPaymentsParams,
-    ListPaymentsResult, ListPeersResult, NodeInfo, PaymentStatus, PeerInfo,
+    ListPaymentsResult, ListPeersResult, NodeInfo, PaymentHistoryParams, PaymentHistoryResult,
+    PaymentStatus, PeerInfo, ReceivedPaymentReportResult, SentPaymentReportResult,
 };
 use ratatui::backend::Backend;
 use ratatui::Terminal;
@@ -186,6 +187,9 @@ pub struct FetchResult {
     pub graph_channels: std::result::Result<(Vec<ChannelInfo>, Option<JsonBytes>), String>,
     pub fee_report: std::result::Result<FeeReportResult, String>,
     pub forwarding_history: std::result::Result<ForwardingHistoryResult, String>,
+    pub sent_payment_report: std::result::Result<SentPaymentReportResult, String>,
+    pub received_payment_report: std::result::Result<ReceivedPaymentReportResult, String>,
+    pub payment_history: std::result::Result<PaymentHistoryResult, String>,
 }
 
 /// Perform all RPC fetches in the background. This runs on a spawned task
@@ -298,6 +302,28 @@ async fn fetch_all_rpc(
         .await
         .map_err(|e| e.to_string());
 
+    // sent_payment_report
+    let sent_payment_report = client
+        .call_typed_no_params::<SentPaymentReportResult>("sent_payment_report")
+        .await
+        .map_err(|e| e.to_string());
+
+    // received_payment_report
+    let received_payment_report = client
+        .call_typed_no_params::<ReceivedPaymentReportResult>("received_payment_report")
+        .await
+        .map_err(|e| e.to_string());
+
+    // payment_history (recent 10 events)
+    let ph_params = PaymentHistoryParams {
+        limit: Some(10),
+        ..PaymentHistoryParams::default()
+    };
+    let payment_history = client
+        .call_typed::<_, PaymentHistoryResult>("payment_history", &ph_params)
+        .await
+        .map_err(|e| e.to_string());
+
     FetchResult {
         node_info,
         channels,
@@ -308,6 +334,9 @@ async fn fetch_all_rpc(
         graph_channels,
         fee_report,
         forwarding_history,
+        sent_payment_report,
+        received_payment_report,
+        payment_history,
     }
 }
 
@@ -592,6 +621,13 @@ impl App {
         self.dashboard_tab.update_fee_stats(
             result.fee_report.as_ref().ok(),
             result.forwarding_history.as_ref().ok(),
+        );
+
+        // Update payment stats from sent/received payment reports and payment history
+        self.dashboard_tab.update_payment_stats(
+            result.sent_payment_report.as_ref().ok(),
+            result.received_payment_report.as_ref().ok(),
+            result.payment_history.as_ref().ok(),
         );
 
         // Update peers tab with graph node info (node name, timestamp)
