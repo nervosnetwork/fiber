@@ -20,6 +20,7 @@ jobs:
           - udt
           - reestablish
           - cross-chain-hub
+          - cross-chain-hub-separate
           - router-pay
           - udt-router-pay
           - watchtower/force-close
@@ -77,7 +78,7 @@ jobs:
         uses: ./.github/actions/setup-dependencies
         with:
           ckb-version: ${{ matrix.release }}
-          install-bitcoin-lnd: ${{ matrix.workflow == 'cross-chain-hub' }}
+          install-bitcoin-lnd: ${{ matrix.workflow == 'cross-chain-hub' || matrix.workflow == 'cross-chain-hub-separate' }}
           cache-prefix: 'e2e'
 
       - name: Cache build artifacts

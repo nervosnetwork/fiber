@@ -391,8 +391,8 @@ async fn setup_test_harness_with_config_and_store(
         config,
         tracker: TaskTracker::new(),
         token: CancellationToken::new(),
-        network_actor,
-        node_keypair: crate::fiber::KeyPair::try_from([42u8; 32].as_slice()).unwrap(),
+        network_actor: Some(network_actor),
+        node_keypair: Some(crate::fiber::KeyPair::try_from([42u8; 32].as_slice()).unwrap()),
         store,
         currency: Currency::Fibb,
     };
