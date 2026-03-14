@@ -693,77 +693,90 @@ fn draw_fee_report_summary(
     p: &ThemePalette,
     area: Rect,
 ) {
-    let mut lines = Vec::new();
-
     if let Some(ckb) = &fee.ckb_report {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "  CKB Fees  ",
+        // Pre-format all amounts to find the max width for right-alignment
+        let amounts = [
+            format_ckb(ckb.daily_fee_sum),
+            format_ckb(ckb.weekly_fee_sum),
+            format_ckb(ckb.monthly_fee_sum),
+        ];
+        let max_amount_len = amounts.iter().map(|a| a.len()).max().unwrap_or(0);
+
+        let periods = ["24h:", " 7d:", "30d:"];
+        let counts = [
+            ckb.daily_event_count,
+            ckb.weekly_event_count,
+            ckb.monthly_event_count,
+        ];
+
+        let header = Row::new(vec![
+            Cell::from(Span::styled(
+                "CKB Fees",
                 Style::default().fg(p.info).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("24h: ", Style::default().fg(p.label)),
-            Span::styled(
-                format_ckb(ckb.daily_fee_sum),
-                Style::default().fg(p.success),
-            ),
-            Span::styled(
-                format!(" ({})", ckb.daily_event_count),
-                Style::default().fg(p.text_secondary),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("            "),
-            Span::styled("7d:  ", Style::default().fg(p.label)),
-            Span::styled(
-                format_ckb(ckb.weekly_fee_sum),
-                Style::default().fg(p.success),
-            ),
-            Span::styled(
-                format!(" ({})", ckb.weekly_event_count),
-                Style::default().fg(p.text_secondary),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("            "),
-            Span::styled("30d: ", Style::default().fg(p.label)),
-            Span::styled(
-                format_ckb(ckb.monthly_fee_sum),
-                Style::default().fg(p.success),
-            ),
-            Span::styled(
-                format!(" ({})", ckb.monthly_event_count),
-                Style::default().fg(p.text_secondary),
-            ),
-        ]));
+            )),
+            Cell::from(""),
+            Cell::from(""),
+        ]);
+
+        let mut rows: Vec<Row> = periods
+            .iter()
+            .zip(amounts.iter())
+            .zip(counts.iter())
+            .map(|((period, amount), count)| {
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        (*period).to_string(),
+                        Style::default().fg(p.label),
+                    )),
+                    Cell::from(Span::styled(
+                        format!("{:>width$}", amount, width = max_amount_len),
+                        Style::default().fg(p.success),
+                    )),
+                    Cell::from(Span::styled(
+                        format!("({})", count),
+                        Style::default().fg(p.text_secondary),
+                    )),
+                ])
+            })
+            .collect();
+
+        // Show UDT fee reports if any
+        for udt in &fee.udt_reports {
+            rows.push(Row::new(vec![
+                Cell::from(Span::styled(
+                    "UDT Fees",
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    format_ckb(udt.daily_fee_sum),
+                    Style::default().fg(p.success),
+                )),
+                Cell::from(Span::styled(
+                    format!("({})", udt.daily_event_count),
+                    Style::default().fg(p.text_secondary),
+                )),
+            ]));
+        }
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(5),
+                Constraint::Length(max_amount_len as u16 + 1),
+                Constraint::Min(4),
+            ],
+        )
+        .header(header);
+
+        f.render_widget(table, area);
     } else {
-        lines.push(Line::from(Span::styled(
+        let lines = vec![Line::from(Span::styled(
             "  No fee data",
             Style::default().fg(p.text_secondary),
-        )));
+        ))];
+        let paragraph = Paragraph::new(lines);
+        f.render_widget(paragraph, area);
     }
-
-    // Show UDT fee reports if any
-    for udt in &fee.udt_reports {
-        let udt_label = "UDT";
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {} Fees  ", udt_label),
-                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("24h: ", Style::default().fg(p.label)),
-            Span::styled(
-                format!("{}", udt.daily_fee_sum),
-                Style::default().fg(p.success),
-            ),
-            Span::styled(
-                format!(" ({})", udt.daily_event_count),
-                Style::default().fg(p.text_secondary),
-            ),
-        ]));
-    }
-
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, area);
 }
 
 fn draw_recent_forwarding_events(
@@ -782,50 +795,55 @@ fn draw_recent_forwarding_events(
         return;
     }
 
-    let header_line = Line::from(vec![
-        Span::styled(
-            format!("  Recent Events ({} total)  ", fee.total_event_count),
+    let header = Row::new(vec![
+        Cell::from(Span::styled(
+            format!("Recent ({} total)", fee.total_event_count),
             Style::default().fg(p.info).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Fee", Style::default().fg(p.label)),
-        Span::raw("          "),
-        Span::styled("Time", Style::default().fg(p.label)),
-    ]);
+        )),
+        Cell::from(Span::styled("Route", Style::default().fg(p.label))),
+        Cell::from(Span::styled("Time", Style::default().fg(p.label))),
+    ])
+    .style(Style::default().fg(p.label));
 
-    let mut lines = vec![header_line];
-
-    for event in fee
+    let rows: Vec<Row> = fee
         .recent_events
         .iter()
         .take(area.height.saturating_sub(1) as usize)
-    {
-        let fee_str = if event.udt_type_script.is_none() {
-            format_ckb(event.fee)
-        } else {
-            format!("{}", event.fee)
-        };
+        .map(|event| {
+            let fee_str = if event.udt_type_script.is_none() {
+                format_ckb(event.fee)
+            } else {
+                format!("{}", event.fee)
+            };
+            let time_str = format_timestamp_short(event.timestamp);
+            let in_ch = format_hash_short(&format!("{}", event.incoming_channel_id));
+            let out_ch = format_hash_short(&format!("{}", event.outgoing_channel_id));
 
-        // Format timestamp as relative time or short datetime
-        let time_str = format_timestamp_short(event.timestamp);
+            Row::new(vec![
+                Cell::from(Span::styled(fee_str, Style::default().fg(p.success))),
+                Cell::from(Span::styled(
+                    format!("{} -> {}", in_ch, out_ch),
+                    Style::default().fg(p.text_secondary),
+                )),
+                Cell::from(Span::styled(
+                    time_str,
+                    Style::default().fg(p.text_secondary),
+                )),
+            ])
+        })
+        .collect();
 
-        let in_ch = format_hash_short(&format!("{}", event.incoming_channel_id));
-        let out_ch = format_hash_short(&format!("{}", event.outgoing_channel_id));
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(18),
+            Constraint::Length(24),
+            Constraint::Min(8),
+        ],
+    )
+    .header(header);
 
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(fee_str, Style::default().fg(p.success)),
-            Span::raw("  "),
-            Span::styled(
-                format!("{} -> {}", in_ch, out_ch),
-                Style::default().fg(p.text_secondary),
-            ),
-            Span::raw("  "),
-            Span::styled(time_str, Style::default().fg(p.text_secondary)),
-        ]));
-    }
-
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, area);
+    f.render_widget(table, area);
 }
 
 // ── Payment Stats (Sent/Received) ─────────────────────────────────────
@@ -877,69 +895,78 @@ fn draw_payment_report_column(
     p: &ThemePalette,
     area: Rect,
 ) {
-    let mut lines = Vec::new();
-
     if let Some(ckb) = ckb_report {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  CKB {}  ", label),
+        let amount_color = if label == "Sent" {
+            p.warning
+        } else {
+            p.success
+        };
+
+        // Pre-format all amounts to find the max width for right-alignment
+        let amounts = [
+            format_ckb(ckb.daily_amount_sum),
+            format_ckb(ckb.weekly_amount_sum),
+            format_ckb(ckb.monthly_amount_sum),
+        ];
+        let max_amount_len = amounts.iter().map(|a| a.len()).max().unwrap_or(0);
+
+        let periods = ["24h:", " 7d:", "30d:"];
+        let counts = [
+            ckb.daily_event_count,
+            ckb.weekly_event_count,
+            ckb.monthly_event_count,
+        ];
+
+        let header = Row::new(vec![
+            Cell::from(Span::styled(
+                format!("CKB {}", label),
                 Style::default().fg(p.info).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("24h: ", Style::default().fg(p.label)),
-            Span::styled(
-                format_ckb(ckb.daily_amount_sum),
-                Style::default().fg(if label == "Sent" {
-                    p.warning
-                } else {
-                    p.success
-                }),
-            ),
-            Span::styled(
-                format!(" ({})", ckb.daily_event_count),
-                Style::default().fg(p.text_secondary),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("            "),
-            Span::styled("7d:  ", Style::default().fg(p.label)),
-            Span::styled(
-                format_ckb(ckb.weekly_amount_sum),
-                Style::default().fg(if label == "Sent" {
-                    p.warning
-                } else {
-                    p.success
-                }),
-            ),
-            Span::styled(
-                format!(" ({})", ckb.weekly_event_count),
-                Style::default().fg(p.text_secondary),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("            "),
-            Span::styled("30d: ", Style::default().fg(p.label)),
-            Span::styled(
-                format_ckb(ckb.monthly_amount_sum),
-                Style::default().fg(if label == "Sent" {
-                    p.warning
-                } else {
-                    p.success
-                }),
-            ),
-            Span::styled(
-                format!(" ({})", ckb.monthly_event_count),
-                Style::default().fg(p.text_secondary),
-            ),
-        ]));
+            )),
+            Cell::from(""),
+            Cell::from(""),
+        ]);
+
+        let rows: Vec<Row> = periods
+            .iter()
+            .zip(amounts.iter())
+            .zip(counts.iter())
+            .map(|((period, amount), count)| {
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        (*period).to_string(),
+                        Style::default().fg(p.label),
+                    )),
+                    Cell::from(Span::styled(
+                        format!("{:>width$}", amount, width = max_amount_len),
+                        Style::default().fg(amount_color),
+                    )),
+                    Cell::from(Span::styled(
+                        format!("({})", count),
+                        Style::default().fg(p.text_secondary),
+                    )),
+                ])
+            })
+            .collect();
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(5),
+                Constraint::Length(max_amount_len as u16 + 1),
+                Constraint::Min(4),
+            ],
+        )
+        .header(header);
+
+        f.render_widget(table, area);
     } else {
-        lines.push(Line::from(Span::styled(
+        let lines = vec![Line::from(Span::styled(
             format!("  No {} data", label.to_lowercase()),
             Style::default().fg(p.text_secondary),
-        )));
+        ))];
+        let paragraph = Paragraph::new(lines);
+        f.render_widget(paragraph, area);
     }
-
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, area);
 }
 
 fn draw_recent_payment_events(
@@ -958,54 +985,58 @@ fn draw_recent_payment_events(
         return;
     }
 
-    let header_line = Line::from(vec![
-        Span::styled(
-            format!("  Recent ({} total)  ", pay.total_event_count),
+    let header = Row::new(vec![
+        Cell::from(Span::styled(
+            format!("Recent ({} total)", pay.total_event_count),
             Style::default().fg(p.info).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Type", Style::default().fg(p.label)),
-        Span::raw("      "),
-        Span::styled("Amount", Style::default().fg(p.label)),
-        Span::raw("        "),
-        Span::styled("Time", Style::default().fg(p.label)),
-    ]);
+        )),
+        Cell::from(Span::styled("Amount", Style::default().fg(p.label))),
+        Cell::from(Span::styled("Time", Style::default().fg(p.label))),
+    ])
+    .style(Style::default().fg(p.label));
 
-    let mut lines = vec![header_line];
-
-    for event in pay
+    let rows: Vec<Row> = pay
         .recent_events
         .iter()
         .take(area.height.saturating_sub(1) as usize)
-    {
-        let amount_str = if event.udt_type_script.is_none() {
-            format_ckb(event.amount)
-        } else {
-            format!("{}", event.amount)
-        };
+        .map(|event| {
+            let amount_str = if event.udt_type_script.is_none() {
+                format_ckb(event.amount)
+            } else {
+                format!("{}", event.amount)
+            };
+            let time_str = format_timestamp_short(event.timestamp);
+            let (type_label, type_color) = if event.event_type == "Send" {
+                ("Send", p.warning)
+            } else {
+                ("Recv", p.success)
+            };
 
-        let time_str = format_timestamp_short(event.timestamp);
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    type_label.to_string(),
+                    Style::default().fg(type_color).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(amount_str, Style::default().fg(type_color))),
+                Cell::from(Span::styled(
+                    time_str,
+                    Style::default().fg(p.text_secondary),
+                )),
+            ])
+        })
+        .collect();
 
-        let (type_label, type_color) = if event.event_type == "Send" {
-            ("Send", p.warning)
-        } else {
-            ("Recv", p.success)
-        };
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),
+            Constraint::Length(18),
+            Constraint::Min(8),
+        ],
+    )
+    .header(header);
 
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{:<4}", type_label),
-                Style::default().fg(type_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(amount_str, Style::default().fg(type_color)),
-            Span::raw("  "),
-            Span::styled(time_str, Style::default().fg(p.text_secondary)),
-        ]));
-    }
-
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, area);
+    f.render_widget(table, area);
 }
 
 /// Format a hash to a short display form (first 4 + last 4 hex chars).
