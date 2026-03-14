@@ -238,7 +238,7 @@ fn test_build_interactive_cli_has_same_commands() {
 #[test]
 fn test_completion_tree_has_top_level() {
     let cli = build_interactive_cli(false);
-    let tree = build_completion_tree(&cli);
+    let (tree, _values) = build_completion_tree(&cli);
     let top = tree.get("").expect("should have empty-string key");
     assert!(top.contains(&"channel".to_string()));
     assert!(top.contains(&"payment".to_string()));
@@ -248,7 +248,7 @@ fn test_completion_tree_has_top_level() {
 #[test]
 fn test_completion_tree_has_subcommand_entries() {
     let cli = build_interactive_cli(false);
-    let tree = build_completion_tree(&cli);
+    let (tree, _values) = build_completion_tree(&cli);
     // "channel" should have subcommand entries (open_channel, list_channels, etc.)
     let channel_entries = tree.get("channel").expect("should have 'channel' key");
     assert!(
@@ -266,7 +266,7 @@ fn test_completion_tree_has_subcommand_entries() {
 #[test]
 fn test_completion_tree_subcommand_has_options() {
     let cli = build_interactive_cli(false);
-    let tree = build_completion_tree(&cli);
+    let (tree, _values) = build_completion_tree(&cli);
     // "channel open_channel" should have --flag options
     let key = "channel open_channel".to_string();
     if let Some(options) = tree.get(&key) {
@@ -282,6 +282,42 @@ fn test_completion_tree_subcommand_has_options() {
     }
     // Note: if the key doesn't exist, the completion tree may merge options
     // into the parent level, which is also acceptable behavior.
+}
+
+#[test]
+fn test_completion_tree_has_enum_value_completions() {
+    let cli = build_interactive_cli(false);
+    let (_tree, values) = build_completion_tree(&cli);
+    // "invoice new_invoice --currency" should have possible values
+    let key = "invoice new_invoice --currency".to_string();
+    let currency_values = values
+        .get(&key)
+        .expect("should have value completions for --currency");
+    assert!(
+        currency_values.contains(&"Fibb".to_string()),
+        "currency values should include 'Fibb', got: {:?}",
+        currency_values
+    );
+    assert!(
+        currency_values.contains(&"Fibd".to_string()),
+        "currency values should include 'Fibd', got: {:?}",
+        currency_values
+    );
+    // "invoice new_invoice --hash-algorithm" should have possible values
+    let key = "invoice new_invoice --hash-algorithm".to_string();
+    let hash_values = values
+        .get(&key)
+        .expect("should have value completions for --hash-algorithm");
+    assert!(
+        hash_values.contains(&"ckb_hash".to_string()),
+        "hash_algorithm values should include 'ckb_hash', got: {:?}",
+        hash_values
+    );
+    assert!(
+        hash_values.contains(&"sha256".to_string()),
+        "hash_algorithm values should include 'sha256', got: {:?}",
+        hash_values
+    );
 }
 
 // ── Shared helper for CLI arg tests ─────────────────────────────────
@@ -375,6 +411,149 @@ mod peer_cli_tests {
         let result = DisconnectPeerParams::from_arg_matches(&matches);
         assert!(result.is_err());
     }
+}
+
+// -- Client test ------------------------------------------------------
+mod client_tests {
+    use crate::rpc_client::RpcClient;
+
+    #[test]
+    fn test_new_auto_prepends_http() {
+        let client = RpcClient::new("127.0.0.1:8227", false, None).unwrap();
+        assert_eq!(client.url(), "http://127.0.0.1:8227");
+    }
+
+    #[test]
+    fn test_new_preserves_http_scheme() {
+        let client = RpcClient::new("http://example.com:8227", false, None).unwrap();
+        assert_eq!(client.url(), "http://example.com:8227");
+    }
+
+    #[test]
+    fn test_new_preserves_https_scheme() {
+        let client = RpcClient::new("https://example.com:8227", false, None).unwrap();
+        assert_eq!(client.url(), "https://example.com:8227");
+    }
+
+    #[test]
+    fn test_raw_data_flag() {
+        let client = RpcClient::new("http://localhost", true, None).unwrap();
+        assert!(client.raw_data());
+
+        let client = RpcClient::new("http://localhost", false, None).unwrap();
+        assert!(!client.raw_data());
+    }
+
+    #[test]
+    fn test_has_auth_with_token() {
+        let client = RpcClient::new(
+            "http://localhost",
+            false,
+            Some("my-secret-token".to_string()),
+        )
+        .unwrap();
+        assert!(client.auth_token().is_some());
+        assert_eq!(client.auth_token().unwrap(), "my-secret-token");
+    }
+
+    #[test]
+    fn test_has_auth_without_token() {
+        let client = RpcClient::new("http://localhost", false, None).unwrap();
+        assert!(client.auth_token().is_none());
+    }
+
+    #[test]
+    fn test_clone_preserves_auth() {
+        let client = RpcClient::new(
+            "http://localhost",
+            false,
+            Some("my-secret-token".to_string()),
+        )
+        .unwrap();
+        let cloned = client.clone();
+        assert!(cloned.auth_token().is_some());
+        assert_eq!(cloned.url(), client.url());
+        assert_eq!(cloned.raw_data(), client.raw_data());
+    }
+
+    #[test]
+    fn test_auth_token_trimmed() {
+        let client = RpcClient::new(
+            "http://localhost",
+            false,
+            Some("  my-token  \n".to_string()),
+        )
+        .unwrap();
+        assert_eq!(client.auth_token().unwrap(), "my-token");
+    }
+
+    #[test]
+    fn test_auth_token_strips_internal_whitespace() {
+        // Simulates token pasted with a line break in the middle
+        let client = RpcClient::new(
+            "http://localhost",
+            false,
+            Some("abc123\ndef456".to_string()),
+        )
+        .unwrap();
+        assert_eq!(client.auth_token().unwrap(), "abc123def456");
+    }
+
+    #[test]
+    fn test_auth_token_empty_after_trim() {
+        let client = RpcClient::new("http://localhost", false, Some("  \n".to_string())).unwrap();
+        assert!(client.auth_token().is_none());
+    }
+
+    // ── URL validation tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_duplicate_http_scheme_rejected() {
+        let result = RpcClient::new("http://http://127.0.0.1:8227", false, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate scheme"),
+            "expected 'duplicate scheme' in error: {}",
+            err
+        );
+        assert!(
+            err.contains("http://127.0.0.1:8227"),
+            "expected suggestion in error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_duplicate_https_scheme_rejected() {
+        let result = RpcClient::new("https://http://127.0.0.1:8227", false, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("duplicate scheme"));
+    }
+
+    #[test]
+    fn test_duplicate_scheme_without_initial_scheme_rejected() {
+        // User types "http://127.0.0.1:8227" but accidentally gets auto-prepended
+        // This should still work since "http://http://..." is caught
+        let result = RpcClient::new("http://https://example.com", false, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("duplicate scheme"));
+    }
+
+    #[test]
+    fn test_valid_url_accepted() {
+        let client = RpcClient::new("http://127.0.0.1:8227", false, None).unwrap();
+        assert_eq!(client.url(), "http://127.0.0.1:8227");
+    }
+
+    #[test]
+    fn test_valid_localhost_url_accepted() {
+        let client = RpcClient::new("http://localhost:8227", false, None).unwrap();
+        assert_eq!(client.url(), "http://localhost:8227");
+    }
+    // =================================================================
 }
 
 // ── Channel CLI arg tests ────────────────────────────────────────────
@@ -1180,6 +1359,85 @@ mod prof_cli_tests {
     }
 }
 
+// ── Info fee CLI arg tests ────────────────────────────────────────────────
+
+mod info_fee_cli_tests {
+    use super::parse_args;
+    use crate::cli_generated::CliArgs;
+    use fiber_json_types::fee::*;
+
+    #[test]
+    fn test_forwarding_history_no_args() {
+        let matches = parse_args(ForwardingHistoryParams::augment_command, &["test"]);
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert!(params.start_time.is_none());
+        assert!(params.end_time.is_none());
+        assert!(params.limit.is_none());
+        assert!(params.offset.is_none());
+        assert!(params.udt_type_script.is_none());
+    }
+
+    #[test]
+    fn test_forwarding_history_with_time_range() {
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &["test", "--start-time", "1000", "--end-time", "2000"],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.start_time, Some(1000));
+        assert_eq!(params.end_time, Some(2000));
+    }
+
+    #[test]
+    fn test_forwarding_history_with_pagination() {
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &["test", "--limit", "50", "--offset", "10"],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.limit, Some(50));
+        assert_eq!(params.offset, Some(10));
+    }
+
+    #[test]
+    fn test_forwarding_history_with_udt_filter() {
+        let script_json = r#"{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}"#;
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &["test", "--udt-type-script", script_json],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert!(params.udt_type_script.is_some());
+    }
+
+    #[test]
+    fn test_forwarding_history_all_params() {
+        let script_json = r#"{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}"#;
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &[
+                "test",
+                "--start-time",
+                "500",
+                "--end-time",
+                "9000",
+                "--limit",
+                "25",
+                "--offset",
+                "5",
+                "--udt-type-script",
+                script_json,
+            ],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.start_time, Some(500));
+        assert_eq!(params.end_time, Some(9000));
+        assert_eq!(params.limit, Some(25));
+        assert_eq!(params.offset, Some(5));
+        assert!(params.udt_type_script.is_some());
+    }
+}
+
 // ── CCH CLI arg tests ────────────────────────────────────────────────
 
 mod cch_cli_tests {
@@ -1469,12 +1727,12 @@ mod error_tests {
 
     #[test]
     fn test_invalid_serde_enum() {
-        let matches = parse_args(
-            fiber_json_types::payment::ListPaymentsParams::augment_command,
-            &["test", "--status", "NotAValidStatus"],
+        // With value_parser, clap itself rejects invalid enum values at parse time.
+        let cmd = fiber_json_types::payment::ListPaymentsParams::augment_command(
+            clap::Command::new("test"),
         );
-        let result = fiber_json_types::payment::ListPaymentsParams::from_arg_matches(&matches);
-        assert!(result.is_err());
+        let result = cmd.try_get_matches_from(["test", "--status", "NotAValidStatus"]);
+        assert!(result.is_err(), "clap should reject invalid enum value");
     }
 
     #[test]

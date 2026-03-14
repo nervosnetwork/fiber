@@ -21,6 +21,10 @@ colored = "2"
 indicatif = "0.17"
 fiber-json-types = { path = "../fiber-json-types" , features = ["cch", "watchtower"]}
 ckb-jsonrpc-types = "1"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+chrono = "0.4"
+copypasta = "0.10"
 
 [build-dependencies]
 syn = { version = "2.0", features = ["full", "extra-traits"] }

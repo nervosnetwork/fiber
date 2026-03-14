@@ -50,7 +50,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
-    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
+    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelEventStore,
     ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
     ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
@@ -286,7 +286,11 @@ pub enum NetworkActorCommand {
     ConnectPeer(Multiaddr, bool),
     // Connect to a peer via pubkey, resolving address from local graph/saved state.
     ConnectPeerWithPubkey(Pubkey, RpcReplyPort<Result<(), String>>),
-    DisconnectPeer(Pubkey, PeerDisconnectReason),
+    DisconnectPeer(
+        Pubkey,
+        PeerDisconnectReason,
+        Option<RpcReplyPort<Result<(), String>>>,
+    ),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
     SavePeerAddress(Multiaddr),
@@ -664,6 +668,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + ChannelEventStore
         + Clone
         + Send
         + Sync
@@ -1109,13 +1114,18 @@ where
                     }
                 }
             }
-            NetworkActorCommand::DisconnectPeer(pubkey, reason) => {
+            NetworkActorCommand::DisconnectPeer(pubkey, reason, reply) => {
                 if let Some(session) = state.peer_session_map.get(&pubkey).map(|p| p.session_id) {
                     debug!(
                         "Disconnecting peer {:?} session w {:?}ith reason {:?}",
                         &pubkey, &session, &reason
                     );
                     state.control.disconnect(session).await?;
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Ok(()));
+                    }
+                } else if let Some(reply) = reply {
+                    let _ = reply.send(Err(format!("peer {:?} is not connected", pubkey)));
                 }
             }
             NetworkActorCommand::SavePeerAddress(addr) => {
@@ -1273,6 +1283,7 @@ where
                                 NetworkActorCommand::DisconnectPeer(
                                     pubkey,
                                     PeerDisconnectReason::InitMessageTimeout,
+                                    None,
                                 ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -2968,6 +2979,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + ChannelEventStore
         + Clone
         + Send
         + Sync
@@ -4123,6 +4135,7 @@ where
                     NetworkActorCommand::DisconnectPeer(
                         peer_pubkey,
                         PeerDisconnectReason::ChainHashMismatch,
+                        None,
                     ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -4419,6 +4432,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + ChannelEventStore
         + Clone
         + Send
         + Sync
@@ -4956,6 +4970,7 @@ pub async fn start_network<
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + ChannelEventStore
         + Clone
         + Send
         + Sync

@@ -405,7 +405,11 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2.pubkey, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node2.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
@@ -466,7 +470,11 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node2.pubkey, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node2.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
@@ -4156,7 +4164,11 @@ async fn test_reestablish_channel() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node_b.pubkey, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 

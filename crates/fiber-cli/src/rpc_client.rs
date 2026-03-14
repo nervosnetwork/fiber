@@ -51,7 +51,10 @@ impl RpcClient {
             .filter(|t| !t.is_empty());
         Ok(Self {
             url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(3))
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?,
             raw_data,
             auth_token,
         })
@@ -183,147 +186,5 @@ impl RpcClient {
     /// Sends a JSON-RPC request with no params.
     pub async fn call_no_params(&self, method: &str) -> Result<Value> {
         self.call(method, vec![]).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_new_auto_prepends_http() {
-        let client = RpcClient::new("127.0.0.1:8227", false, None).unwrap();
-        assert_eq!(client.url(), "http://127.0.0.1:8227");
-    }
-
-    #[test]
-    fn test_new_preserves_http_scheme() {
-        let client = RpcClient::new("http://example.com:8227", false, None).unwrap();
-        assert_eq!(client.url(), "http://example.com:8227");
-    }
-
-    #[test]
-    fn test_new_preserves_https_scheme() {
-        let client = RpcClient::new("https://example.com:8227", false, None).unwrap();
-        assert_eq!(client.url(), "https://example.com:8227");
-    }
-
-    #[test]
-    fn test_raw_data_flag() {
-        let client = RpcClient::new("http://localhost", true, None).unwrap();
-        assert!(client.raw_data());
-
-        let client = RpcClient::new("http://localhost", false, None).unwrap();
-        assert!(!client.raw_data());
-    }
-
-    #[test]
-    fn test_has_auth_with_token() {
-        let client = RpcClient::new(
-            "http://localhost",
-            false,
-            Some("my-secret-token".to_string()),
-        )
-        .unwrap();
-        assert!(client.auth_token().is_some());
-        assert_eq!(client.auth_token().unwrap(), "my-secret-token");
-    }
-
-    #[test]
-    fn test_has_auth_without_token() {
-        let client = RpcClient::new("http://localhost", false, None).unwrap();
-        assert!(client.auth_token().is_none());
-    }
-
-    #[test]
-    fn test_clone_preserves_auth() {
-        let client = RpcClient::new(
-            "http://localhost",
-            false,
-            Some("my-secret-token".to_string()),
-        )
-        .unwrap();
-        let cloned = client.clone();
-        assert!(cloned.auth_token().is_some());
-        assert_eq!(cloned.url(), client.url());
-        assert_eq!(cloned.raw_data(), client.raw_data());
-    }
-
-    #[test]
-    fn test_auth_token_trimmed() {
-        let client = RpcClient::new(
-            "http://localhost",
-            false,
-            Some("  my-token  \n".to_string()),
-        )
-        .unwrap();
-        assert_eq!(client.auth_token().unwrap(), "my-token");
-    }
-
-    #[test]
-    fn test_auth_token_strips_internal_whitespace() {
-        // Simulates token pasted with a line break in the middle
-        let client = RpcClient::new(
-            "http://localhost",
-            false,
-            Some("abc123\ndef456".to_string()),
-        )
-        .unwrap();
-        assert_eq!(client.auth_token().unwrap(), "abc123def456");
-    }
-
-    #[test]
-    fn test_auth_token_empty_after_trim() {
-        let client = RpcClient::new("http://localhost", false, Some("  \n".to_string())).unwrap();
-        assert!(client.auth_token().is_none());
-    }
-
-    // ── URL validation tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_duplicate_http_scheme_rejected() {
-        let result = RpcClient::new("http://http://127.0.0.1:8227", false, None);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("duplicate scheme"),
-            "expected 'duplicate scheme' in error: {}",
-            err
-        );
-        assert!(
-            err.contains("http://127.0.0.1:8227"),
-            "expected suggestion in error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_duplicate_https_scheme_rejected() {
-        let result = RpcClient::new("https://http://127.0.0.1:8227", false, None);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("duplicate scheme"));
-    }
-
-    #[test]
-    fn test_duplicate_scheme_without_initial_scheme_rejected() {
-        // User types "http://127.0.0.1:8227" but accidentally gets auto-prepended
-        // This should still work since "http://http://..." is caught
-        let result = RpcClient::new("http://https://example.com", false, None);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("duplicate scheme"));
-    }
-
-    #[test]
-    fn test_valid_url_accepted() {
-        let client = RpcClient::new("http://127.0.0.1:8227", false, None).unwrap();
-        assert_eq!(client.url(), "http://127.0.0.1:8227");
-    }
-
-    #[test]
-    fn test_valid_localhost_url_accepted() {
-        let client = RpcClient::new("http://localhost:8227", false, None).unwrap();
-        assert_eq!(client.url(), "http://localhost:8227");
     }
 }

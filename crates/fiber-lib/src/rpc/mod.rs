@@ -41,7 +41,7 @@ pub mod server {
     use crate::{
         cch::CchMessage,
         fiber::{
-            channel::{ChannelActorStateStore, ChannelOpenRecordStore},
+            channel::{ChannelActorStateStore, ChannelEventStore, ChannelOpenRecordStore},
             graph::{NetworkGraph, NetworkGraphStateStore},
             NetworkActorMessage,
         },
@@ -85,6 +85,7 @@ pub mod server {
         + GossipMessageStore
         + WatchtowerStore
         + PreimageStore
+        + ChannelEventStore
     {
     }
     #[cfg(feature = "watchtower")]
@@ -96,6 +97,7 @@ pub mod server {
             + GossipMessageStore
             + WatchtowerStore
             + PreimageStore
+            + ChannelEventStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -105,6 +107,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + ChannelEventStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -114,6 +117,7 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
+            + ChannelEventStore
     {
     }
 
@@ -310,6 +314,7 @@ pub mod server {
                         InfoRpcServerImpl::new(
                             network_actor.clone(),
                             ckb_config.clone().expect("ckb config should be set"),
+                            store.clone(),
                         )
                         .into_rpc(),
                     )

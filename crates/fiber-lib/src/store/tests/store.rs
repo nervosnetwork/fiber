@@ -1127,3 +1127,486 @@ fn test_store_channel_open_record() {
 fn deterministic_hash256(seed: u64, index: u32) -> fiber_types::Hash256 {
     crate::store::sample::deterministic_hash(seed, index).into()
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn make_forwarding_event(timestamp: u64, fee: u128) -> fiber_types::ForwardingEvent {
+    fiber_types::ForwardingEvent {
+        timestamp,
+        incoming_channel_id: gen_rand_sha256_hash(),
+        outgoing_channel_id: gen_rand_sha256_hash(),
+        incoming_amount: 1000 + fee,
+        outgoing_amount: 1000,
+        fee,
+        payment_hash: gen_rand_sha256_hash(),
+        udt_type_script: None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_forwarding_event_insert_and_query() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Initially empty
+    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    assert!(events.is_empty());
+
+    // Insert a single event
+    let event = make_forwarding_event(1000, 5);
+    store.insert_forwarding_event(event.clone());
+
+    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0], event);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_forwarding_event_time_range() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Insert events at different timestamps
+    let e1 = make_forwarding_event(100, 1);
+    let e2 = make_forwarding_event(200, 2);
+    let e3 = make_forwarding_event(300, 3);
+    let e4 = make_forwarding_event(400, 4);
+
+    store.insert_forwarding_event(e1.clone());
+    store.insert_forwarding_event(e2.clone());
+    store.insert_forwarding_event(e3.clone());
+    store.insert_forwarding_event(e4.clone());
+
+    // Query all
+    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 4);
+
+    // Query with start_time filter (inclusive)
+    let events = store.get_forwarding_events(200, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0], e2);
+    assert_eq!(events[1], e3);
+    assert_eq!(events[2], e4);
+
+    // Query with end_time filter (inclusive)
+    let events = store.get_forwarding_events(0, 300, 100, 0);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0], e1);
+    assert_eq!(events[1], e2);
+    assert_eq!(events[2], e3);
+
+    // Query narrow range
+    let events = store.get_forwarding_events(200, 300, 100, 0);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0], e2);
+    assert_eq!(events[1], e3);
+
+    // Query range that matches nothing
+    let events = store.get_forwarding_events(500, 600, 100, 0);
+    assert!(events.is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_forwarding_event_pagination() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    for i in 0..10 {
+        store.insert_forwarding_event(make_forwarding_event(100 + i, i as u128));
+    }
+
+    // Limit
+    let events = store.get_forwarding_events(0, u64::MAX, 3, 0);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].timestamp, 100);
+    assert_eq!(events[2].timestamp, 102);
+
+    // Offset
+    let events = store.get_forwarding_events(0, u64::MAX, 3, 5);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].timestamp, 105);
+    assert_eq!(events[2].timestamp, 107);
+
+    // Offset past end
+    let events = store.get_forwarding_events(0, u64::MAX, 100, 10);
+    assert!(events.is_empty());
+
+    // Limit larger than remaining
+    let events = store.get_forwarding_events(0, u64::MAX, 100, 8);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].timestamp, 108);
+    assert_eq!(events[1].timestamp, 109);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_forwarding_event_ordering() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Insert out of order — store should still return sorted by timestamp
+    // because keys use big-endian timestamp
+    let e3 = make_forwarding_event(300, 3);
+    let e1 = make_forwarding_event(100, 1);
+    let e2 = make_forwarding_event(200, 2);
+
+    store.insert_forwarding_event(e3.clone());
+    store.insert_forwarding_event(e1.clone());
+    store.insert_forwarding_event(e2.clone());
+
+    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].timestamp, 100);
+    assert_eq!(events[1].timestamp, 200);
+    assert_eq!(events[2].timestamp, 300);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_forwarding_event_same_timestamp_different_hash() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Two events at the same timestamp but different payment_hash
+    // (the key includes payment_hash for uniqueness)
+    let mut e1 = make_forwarding_event(100, 5);
+    let mut e2 = make_forwarding_event(100, 10);
+    // Ensure different payment hashes (already random, but be explicit)
+    e1.payment_hash = gen_rand_sha256_hash();
+    e2.payment_hash = gen_rand_sha256_hash();
+
+    store.insert_forwarding_event(e1.clone());
+    store.insert_forwarding_event(e2.clone());
+
+    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 2);
+    // Both should be present (order within same timestamp depends on payment_hash bytes)
+    assert!(events.contains(&e1));
+    assert!(events.contains(&e2));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_forwarding_event_with_udt() {
+    use crate::fiber::channel::ChannelEventStore;
+    use ckb_types::packed::ScriptBuilder;
+    use ckb_types::prelude::*;
+
+    let (store, _dir) = generate_store();
+
+    let udt_script = ScriptBuilder::default()
+        .code_hash(ckb_types::packed::Byte32::new([0xab; 32]))
+        .hash_type(ckb_types::core::ScriptHashType::Data)
+        .build();
+
+    // CKB event
+    let ckb_event = make_forwarding_event(100, 5);
+
+    // UDT event
+    let udt_event = fiber_types::ForwardingEvent {
+        timestamp: 200,
+        incoming_channel_id: gen_rand_sha256_hash(),
+        outgoing_channel_id: gen_rand_sha256_hash(),
+        incoming_amount: 5000,
+        outgoing_amount: 4900,
+        fee: 100,
+        payment_hash: gen_rand_sha256_hash(),
+        udt_type_script: Some(udt_script.clone()),
+    };
+
+    store.insert_forwarding_event(ckb_event.clone());
+    store.insert_forwarding_event(udt_event.clone());
+
+    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 2);
+
+    // Verify CKB event round-trips correctly
+    let ckb = events.iter().find(|e| e.udt_type_script.is_none()).unwrap();
+    assert_eq!(ckb, &ckb_event);
+
+    // Verify UDT event round-trips correctly with script preserved
+    let udt = events.iter().find(|e| e.udt_type_script.is_some()).unwrap();
+    assert_eq!(udt, &udt_event);
+    assert_eq!(udt.udt_type_script.as_ref().unwrap(), &udt_script);
+}
+
+// ─── PaymentEvent store tests ───────────────────────────────────────────────
+
+#[cfg(not(target_arch = "wasm32"))]
+fn make_payment_event(
+    timestamp: u64,
+    amount: u128,
+    event_type: fiber_types::PaymentEventType,
+) -> fiber_types::PaymentEvent {
+    fiber_types::PaymentEvent {
+        event_type,
+        timestamp,
+        channel_id: gen_rand_sha256_hash(),
+        amount,
+        fee: if matches!(event_type, fiber_types::PaymentEventType::Send) {
+            10
+        } else {
+            0
+        },
+        payment_hash: gen_rand_sha256_hash(),
+        udt_type_script: None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_payment_event_insert_and_query() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Initially empty
+    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    assert!(events.is_empty());
+
+    // Insert a single send event
+    let event = make_payment_event(1000, 500, fiber_types::PaymentEventType::Send);
+    store.insert_payment_event(event.clone());
+
+    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0], event);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_payment_event_time_range() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    let e1 = make_payment_event(100, 100, fiber_types::PaymentEventType::Send);
+    let e2 = make_payment_event(200, 200, fiber_types::PaymentEventType::Receive);
+    let e3 = make_payment_event(300, 300, fiber_types::PaymentEventType::Send);
+    let e4 = make_payment_event(400, 400, fiber_types::PaymentEventType::Receive);
+
+    store.insert_payment_event(e1.clone());
+    store.insert_payment_event(e2.clone());
+    store.insert_payment_event(e3.clone());
+    store.insert_payment_event(e4.clone());
+
+    // Query all
+    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 4);
+
+    // Query with start_time filter (inclusive)
+    let events = store.get_payment_events(200, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0], e2);
+    assert_eq!(events[1], e3);
+    assert_eq!(events[2], e4);
+
+    // Query with end_time filter (inclusive)
+    let events = store.get_payment_events(0, 300, 100, 0);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0], e1);
+    assert_eq!(events[1], e2);
+    assert_eq!(events[2], e3);
+
+    // Query narrow range
+    let events = store.get_payment_events(200, 300, 100, 0);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0], e2);
+    assert_eq!(events[1], e3);
+
+    // Query range that matches nothing
+    let events = store.get_payment_events(500, 600, 100, 0);
+    assert!(events.is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_payment_event_pagination() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    for i in 0..10 {
+        let event_type = if i % 2 == 0 {
+            fiber_types::PaymentEventType::Send
+        } else {
+            fiber_types::PaymentEventType::Receive
+        };
+        store.insert_payment_event(make_payment_event(100 + i, i as u128 * 100, event_type));
+    }
+
+    // Limit
+    let events = store.get_payment_events(0, u64::MAX, 3, 0);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].timestamp, 100);
+    assert_eq!(events[2].timestamp, 102);
+
+    // Offset
+    let events = store.get_payment_events(0, u64::MAX, 3, 5);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].timestamp, 105);
+    assert_eq!(events[2].timestamp, 107);
+
+    // Offset past end
+    let events = store.get_payment_events(0, u64::MAX, 100, 10);
+    assert!(events.is_empty());
+
+    // Limit larger than remaining
+    let events = store.get_payment_events(0, u64::MAX, 100, 8);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].timestamp, 108);
+    assert_eq!(events[1].timestamp, 109);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_payment_event_ordering() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Insert out of order — store should still return sorted by timestamp
+    let e3 = make_payment_event(300, 300, fiber_types::PaymentEventType::Send);
+    let e1 = make_payment_event(100, 100, fiber_types::PaymentEventType::Receive);
+    let e2 = make_payment_event(200, 200, fiber_types::PaymentEventType::Send);
+
+    store.insert_payment_event(e3.clone());
+    store.insert_payment_event(e1.clone());
+    store.insert_payment_event(e2.clone());
+
+    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].timestamp, 100);
+    assert_eq!(events[1].timestamp, 200);
+    assert_eq!(events[2].timestamp, 300);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_payment_event_same_timestamp_different_hash() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Two events at the same timestamp but different payment_hash
+    let mut e1 = make_payment_event(100, 500, fiber_types::PaymentEventType::Send);
+    let mut e2 = make_payment_event(100, 600, fiber_types::PaymentEventType::Receive);
+    e1.payment_hash = gen_rand_sha256_hash();
+    e2.payment_hash = gen_rand_sha256_hash();
+
+    store.insert_payment_event(e1.clone());
+    store.insert_payment_event(e2.clone());
+
+    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 2);
+    assert!(events.contains(&e1));
+    assert!(events.contains(&e2));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_payment_event_with_udt() {
+    use crate::fiber::channel::ChannelEventStore;
+    use ckb_types::packed::ScriptBuilder;
+    use ckb_types::prelude::*;
+
+    let (store, _dir) = generate_store();
+
+    let udt_script = ScriptBuilder::default()
+        .code_hash(ckb_types::packed::Byte32::new([0xcd; 32]))
+        .hash_type(ckb_types::core::ScriptHashType::Data)
+        .build();
+
+    // CKB payment event
+    let ckb_event = make_payment_event(100, 500, fiber_types::PaymentEventType::Send);
+
+    // UDT payment event
+    let udt_event = fiber_types::PaymentEvent {
+        event_type: fiber_types::PaymentEventType::Receive,
+        timestamp: 200,
+        channel_id: gen_rand_sha256_hash(),
+        amount: 5000,
+        fee: 0,
+        payment_hash: gen_rand_sha256_hash(),
+        udt_type_script: Some(udt_script.clone()),
+    };
+
+    store.insert_payment_event(ckb_event.clone());
+    store.insert_payment_event(udt_event.clone());
+
+    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 2);
+
+    // Verify CKB event round-trips correctly
+    let ckb = events.iter().find(|e| e.udt_type_script.is_none()).unwrap();
+    assert_eq!(ckb, &ckb_event);
+
+    // Verify UDT event round-trips correctly with script preserved
+    let udt = events.iter().find(|e| e.udt_type_script.is_some()).unwrap();
+    assert_eq!(udt, &udt_event);
+    assert_eq!(udt.udt_type_script.as_ref().unwrap(), &udt_script);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_payment_event_mixed_types() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Insert both send and receive events
+    let send_event = make_payment_event(100, 1000, fiber_types::PaymentEventType::Send);
+    let recv_event = make_payment_event(200, 2000, fiber_types::PaymentEventType::Receive);
+
+    store.insert_payment_event(send_event.clone());
+    store.insert_payment_event(recv_event.clone());
+
+    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(events.len(), 2);
+
+    // get_payment_events returns all types; filtering is done at the RPC layer
+    let send = events
+        .iter()
+        .find(|e| e.event_type == fiber_types::PaymentEventType::Send)
+        .unwrap();
+    assert_eq!(send.amount, 1000);
+    assert_eq!(send.fee, 10); // Send events have fee
+
+    let recv = events
+        .iter()
+        .find(|e| e.event_type == fiber_types::PaymentEventType::Receive)
+        .unwrap();
+    assert_eq!(recv.amount, 2000);
+    assert_eq!(recv.fee, 0); // Receive events have 0 fee
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_payment_event_independent_of_forwarding_events() {
+    use crate::fiber::channel::ChannelEventStore;
+
+    let (store, _dir) = generate_store();
+
+    // Insert a forwarding event
+    let fwd = make_forwarding_event(100, 5);
+    store.insert_forwarding_event(fwd);
+
+    // Insert a payment event
+    let pay = make_payment_event(100, 500, fiber_types::PaymentEventType::Send);
+    store.insert_payment_event(pay.clone());
+
+    // They should be in separate namespaces
+    let fwd_events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    assert_eq!(fwd_events.len(), 1);
+
+    let pay_events = store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(pay_events.len(), 1);
+    assert_eq!(pay_events[0], pay);
+}

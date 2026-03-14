@@ -19,10 +19,14 @@ fnn-cli
 fnn-cli info
 
 # Connect to a remote node
-fnn-cli -u http://54.178.252.1:8227 info
+fnn-cli -u http://127.0.0.1:8227 info
 
 # Connect with authentication
-fnn-cli -u http://54.178.252.1:8227 --auth-token 'YOUR_TOKEN' info
+fnn-cli -u http://127.0.0.1:8227 --auth-token 'YOUR_TOKEN' info
+
+# Launch the TUI dashboard
+fnn-cli --tui
+fnn-cli -u http://127.0.0.1:8227 --tui
 ```
 
 ## Global Options
@@ -36,6 +40,7 @@ fnn-cli -u http://54.178.252.1:8227 --auth-token 'YOUR_TOKEN' info
 | `--raw-data` | | | Output raw JSON-RPC response data |
 | `--color` | | `auto` | Color output: `auto`, `always`, or `never` |
 | `--no-banner` | | | Suppress the banner in interactive mode |
+| `--tui` | | | Launch the Terminal User Interface dashboard |
 
 The auth token can also be set via the `FNN_AUTH_TOKEN` environment variable.
 
@@ -63,7 +68,7 @@ fnn-cli info
 Run `fnn-cli` without a subcommand to enter the interactive REPL:
 
 ```
-$ fnn-cli -u http://54.178.252.1:8227
+$ fnn-cli -u http://127.0.0.1:8227
 
   ______ ___ ___  ______ _____
  |  ____|_ _| _ \|  ____|  __ \
@@ -73,7 +78,7 @@ $ fnn-cli -u http://54.178.252.1:8227
  |_|   |___|____/|______|_|  \_\
 
 [  fnn-cli version ]: 0.7.1
-[              url ]: http://54.178.252.1:8227
+[              url ]: http://127.0.0.1:8227
 [    output format ]: yaml
 [           status ]: Connected
 
@@ -219,6 +224,71 @@ fnn-cli cch get_cch_order --payment-hash 0xabc...
 ```bash
 fnn-cli prof pprof --duration-secs 30
 ```
+
+## TUI Dashboard
+
+Launch a full-screen terminal dashboard with `--tui`:
+
+```bash
+fnn-cli --tui
+fnn-cli -u http://127.0.0.1:8227 --tui
+fnn-cli -u http://127.0.0.1:8227 --auth-token 'TOKEN' --tui
+fnn-cli -u http://127.0.0.1:8227 --tui --theme dark/light/auto
+```
+
+The TUI provides a real-time overview of your Fiber node with 7 tabs:
+
+| # | Tab | Description |
+|---|-----|-------------|
+| 1 | **Dashboard** | Summary stats, capacity gauge, channel state breakdown, network topology |
+| 2 | **Channels** | List/open/update/shutdown/abandon channels |
+| 3 | **Payments** | List/send payments with pagination and status filters |
+| 4 | **Peers** | List/connect/disconnect peers with search |
+| 5 | **Invoices** | Create/list/lookup/cancel/parse invoices |
+| 6 | **Graph** | Browse network graph nodes and channels |
+| 7 | **Logs** | Persistent activity log (saved to `~/.fnn-cli/tui.log`) |
+
+### Keyboard Shortcuts
+
+**Global:**
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit |
+| `?` / `F1` | Toggle help overlay |
+| `1`-`7` | Jump to tab |
+| `Tab` / `Shift+Tab` | Next / previous tab |
+| `r` | Refresh data |
+| `y` | Copy selected item to clipboard |
+| `Ctrl+C` | Force quit |
+
+**Navigation:**
+
+| Key | Action |
+|-----|--------|
+| `j` / `Down` | Move down |
+| `k` / `Up` | Move up |
+| `g` / `Home` | Go to top |
+| `G` / `End` | Go to bottom |
+| `Enter` | Open detail popup |
+| `Esc` | Back / close |
+| `]` / `[` | Next / previous page |
+| `/` | Search (Peers tab) |
+
+**Tab-specific actions** are shown in each tab's header (e.g., `n` to create, `d` to delete, `u` to update).
+
+**Forms:** Use `Tab`/`Down` and `Shift+Tab`/`Up` to navigate fields, `Enter` to submit, `Esc` to cancel. Optional fields can be left blank.
+
+### Features
+
+- **Non-blocking UI** -- the interface stays responsive even when the RPC endpoint is slow or unreachable. Data is fetched in a background task.
+- **Auto-refresh** -- data refreshes every 5 seconds automatically.
+- **Connection status** -- the footer shows a live connection indicator (`Connected` / `Disconnected` / `Connecting...`) and the last update timestamp.
+- **Flash messages** -- success/error feedback appears in the footer after mutations (open channel, send payment, etc.) and fades after 5 seconds.
+- **Detail popups** -- press `Enter` on any item to see full details with word-wrapped values. Press `y` inside the popup to copy individual fields.
+- **Confirmation dialogs** -- destructive actions (shutdown/abandon channel, disconnect peer) require confirmation.
+- **Persistent logs** -- all activity is logged to `~/.fnn-cli/tui.log` and survives across sessions (last 2000 entries).
+- **Network topology** -- the Dashboard tab shows an adjacency-list view of your node's peer connections and channel states.
 
 ## Getting Help
 

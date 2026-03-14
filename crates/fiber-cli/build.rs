@@ -17,7 +17,7 @@
 //!   - `Hash256` / `Pubkey` / `Privkey` / `PeerId` → from_str
 //!   - Everything else                   → json (safe default)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -121,6 +121,107 @@ fn collect_serde_enums(syntax: &syn::File) -> HashSet<String> {
     enums
 }
 
+/// Convert a PascalCase identifier to snake_case.
+fn pascal_to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(ch.to_lowercase().next().unwrap());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Extract `rename_all = "..."` strategy from `#[serde(...)]` attributes.
+fn extract_serde_rename_all(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if attr.path().is_ident("serde") {
+            if let Meta::List(ml) = &attr.meta {
+                let tokens_str = ml.tokens.to_string();
+                if let Some(pos) = tokens_str.find("rename_all") {
+                    let rest = &tokens_str[pos..];
+                    if let Some(start) = rest.find('"') {
+                        if let Some(end) = rest[start + 1..].find('"') {
+                            return Some(rest[start + 1..start + 1 + end].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Apply a serde `rename_all` strategy to a variant name.
+fn apply_rename_all(variant: &str, strategy: &str) -> String {
+    match strategy {
+        "snake_case" => pascal_to_snake_case(variant),
+        "camelCase" => {
+            let snake = pascal_to_snake_case(variant);
+            let mut result = String::new();
+            let mut capitalize_next = false;
+            for ch in snake.chars() {
+                if ch == '_' {
+                    capitalize_next = true;
+                } else if capitalize_next {
+                    result.push(ch.to_uppercase().next().unwrap());
+                    capitalize_next = false;
+                } else {
+                    result.push(ch);
+                }
+            }
+            result
+        }
+        "lowercase" => variant.to_lowercase(),
+        "UPPERCASE" => variant.to_uppercase(),
+        "SCREAMING_SNAKE_CASE" => pascal_to_snake_case(variant).to_uppercase(),
+        "kebab-case" => pascal_to_snake_case(variant).replace('_', "-"),
+        // PascalCase — no change (already PascalCase)
+        _ => variant.to_string(),
+    }
+}
+
+/// Collect enum variants for all serde enums (unit-variant only).
+/// Returns a map of enum name → list of serialized variant names.
+/// Only includes enums where ALL variants are unit variants (no data).
+fn collect_enum_variants(syntax: &syn::File) -> HashMap<String, Vec<String>> {
+    let mut map = HashMap::new();
+    for item in &syntax.items {
+        if let syn::Item::Enum(e) = item {
+            if !has_derive(&e.attrs, "Deserialize") || has_serde_untagged(&e.attrs) {
+                continue;
+            }
+            // Check that all variants are unit variants (no fields)
+            let all_unit = e.variants.iter().all(|v| matches!(v.fields, Fields::Unit));
+            if !all_unit {
+                continue;
+            }
+
+            let rename_all = extract_serde_rename_all(&e.attrs);
+
+            let variants: Vec<String> = e
+                .variants
+                .iter()
+                .map(|v| {
+                    let name = v.ident.to_string();
+                    match &rename_all {
+                        Some(strategy) => apply_rename_all(&name, strategy),
+                        None => name,
+                    }
+                })
+                .collect();
+
+            map.insert(e.ident.to_string(), variants);
+        }
+    }
+    map
+}
+
 /// Infer the parse mode from the type name.
 ///
 /// The inference is designed so that **no external config file** is needed.
@@ -203,6 +304,8 @@ struct FieldInfo {
     parse_mode: String,
     bool_default: Option<bool>,
     required: bool,
+    /// For serde_enum fields: the list of serialized variant names.
+    enum_values: Vec<String>,
 }
 
 fn gen_arg_tokens(f: &FieldInfo) -> proc_macro2::TokenStream {
@@ -215,6 +318,14 @@ fn gen_arg_tokens(f: &FieldInfo) -> proc_macro2::TokenStream {
     };
 
     let required = f.required;
+
+    // For serde_enum fields with known variants, add value_parser with possible values.
+    let value_parser_clause = if f.parse_mode == "serde_enum" && !f.enum_values.is_empty() {
+        let values: Vec<&str> = f.enum_values.iter().map(|s| s.as_str()).collect();
+        quote! { .value_parser([#(#values),*]) }
+    } else {
+        quote! {}
+    };
 
     if f.parse_mode == "bool_flag" {
         let default_val = if f.bool_default.unwrap_or(false) {
@@ -251,6 +362,7 @@ fn gen_arg_tokens(f: &FieldInfo) -> proc_macro2::TokenStream {
                     .long(#long_name)
                     .required(true)
                     .help(#help)
+                    #value_parser_clause
             )
         }
     } else {
@@ -259,6 +371,7 @@ fn gen_arg_tokens(f: &FieldInfo) -> proc_macro2::TokenStream {
                 ::clap::Arg::new(#field_name_str)
                     .long(#long_name)
                     .help(#help)
+                    #value_parser_clause
             )
         }
     }
@@ -404,6 +517,7 @@ fn should_generate_for(struct_name: &str) -> bool {
 fn process_source_file(
     path: &Path,
     serde_enums: &HashSet<String>,
+    enum_variants: &HashMap<String, Vec<String>>,
 ) -> Vec<proc_macro2::TokenStream> {
     let content = fs::read_to_string(path).unwrap_or_else(|e| {
         panic!("Failed to read {}: {}", path.display(), e);
@@ -458,6 +572,15 @@ fn process_source_file(
             let ty_tokens = quote! { #ty };
             let inner_ty_tokens = quote! { #inner_ty };
 
+            let enum_values = if parse_mode == "serde_enum" {
+                enum_variants
+                    .get(&inner_type_name)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
             field_infos.push(FieldInfo {
                 name: fname,
                 ty_tokens,
@@ -467,6 +590,7 @@ fn process_source_file(
                 parse_mode,
                 bool_default,
                 required,
+                enum_values,
             });
         }
 
@@ -1180,6 +1304,7 @@ fn main() {
     // First pass: collect all enum types with Deserialize across all source files.
     // This lets us auto-detect serde_enum fields without any config.
     let mut serde_enums = HashSet::new();
+    let mut enum_variants: HashMap<String, Vec<String>> = HashMap::new();
     for source_path in &source_files {
         let content = fs::read_to_string(source_path).unwrap_or_else(|e| {
             panic!("Failed to read {}: {}", source_path.display(), e);
@@ -1188,13 +1313,14 @@ fn main() {
             panic!("Failed to parse {}: {}", source_path.display(), e);
         });
         serde_enums.extend(collect_serde_enums(&syntax));
+        enum_variants.extend(collect_enum_variants(&syntax));
     }
 
     // Second pass: generate CLI impls for all Params structs.
     let mut all_impls: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for source_path in &source_files {
-        let impls = process_source_file(source_path, &serde_enums);
+        let impls = process_source_file(source_path, &serde_enums, &enum_variants);
         all_impls.extend(impls);
     }
 

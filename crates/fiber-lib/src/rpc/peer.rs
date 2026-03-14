@@ -61,6 +61,12 @@ impl PeerRpcServer for PeerRpcServerImpl {
 impl PeerRpcServerImpl {
     pub async fn connect_peer(&self, params: ConnectPeerParams) -> Result<(), ErrorObjectOwned> {
         if let Some(address_str) = params.address.as_ref() {
+            if address_str.is_empty() {
+                return Err(rpc_error(
+                    "address must not be empty, expected a multiaddr like /ip4/1.2.3.4/tcp/8080",
+                    &params,
+                ));
+            }
             let address = address_str.parse::<Multiaddr>().rpc_err(&params)?;
             let save = params.save.unwrap_or(true);
             let message =
@@ -89,11 +95,14 @@ impl PeerRpcServerImpl {
         params: DisconnectPeerParams,
     ) -> Result<(), ErrorObjectOwned> {
         let pubkey = Pubkey::try_from(params.pubkey).rpc_err(&params)?;
-        let message = NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
-            pubkey,
-            PeerDisconnectReason::Requested,
-        ));
-        crate::handle_actor_cast!(self.actor, message, params)
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+                pubkey,
+                PeerDisconnectReason::Requested,
+                Some(rpc_reply),
+            ))
+        };
+        crate::handle_actor_call!(self.actor, message, params)
     }
 
     pub async fn list_peers(&self) -> Result<ListPeersResult, ErrorObjectOwned> {

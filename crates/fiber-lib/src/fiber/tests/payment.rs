@@ -186,6 +186,27 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
     assert_eq!(source_node.get_inflight_payment_count().await, 0);
+
+    // Verify PaymentEvent records were created
+    let send_events = source_node.store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(send_events.len(), 1);
+    assert_eq!(
+        send_events[0].event_type,
+        fiber_types::PaymentEventType::Send
+    );
+    assert_eq!(send_events[0].payment_hash, payment_hash);
+    assert_eq!(send_events[0].channel_id, channel);
+
+    let recv_events = node_1.store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(recv_events.len(), 1);
+    assert_eq!(
+        recv_events[0].event_type,
+        fiber_types::PaymentEventType::Receive
+    );
+    assert_eq!(recv_events[0].payment_hash, payment_hash);
+    assert_eq!(recv_events[0].amount, 10000000000);
+    assert_eq!(recv_events[0].fee, 0); // Receive events have no fee
+    assert_eq!(recv_events[0].channel_id, channel);
 }
 
 #[tokio::test]
@@ -236,7 +257,7 @@ async fn test_send_payment_prefer_newer_channels() {
 async fn test_send_payment_keysend_without_max_fee() {
     init_tracing();
 
-    let (nodes, _channels) = create_n_nodes_network(
+    let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
             ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
@@ -244,7 +265,7 @@ async fn test_send_payment_keysend_without_max_fee() {
         3,
     )
     .await;
-    let [mut node_0, _node_1, node_2] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1, node_2] = nodes.try_into().expect("2 nodes");
     let source_node = &mut node_0;
     let target_pubkey = node_2.pubkey;
 
@@ -277,6 +298,40 @@ async fn test_send_payment_keysend_without_max_fee() {
     let payment = source_node.get_payment_result(payment_hash).await;
 
     eprintln!("payment info: {:?}", payment);
+
+    // Verify PaymentEvent records for 3-node path: node_0 (Send) -> node_1 (Forward) -> node_2 (Receive)
+    // Node 0: should have a Send PaymentEvent
+    let send_events = source_node.store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(send_events.len(), 1);
+    assert_eq!(
+        send_events[0].event_type,
+        fiber_types::PaymentEventType::Send
+    );
+    assert_eq!(send_events[0].payment_hash, payment_hash);
+    assert_eq!(send_events[0].channel_id, channels[0]); // first hop channel
+
+    // Node 1: should have a ForwardingEvent (not a PaymentEvent)
+    let node_1_payment_events = node_1.store.get_payment_events(0, u64::MAX, 100, 0);
+    assert!(
+        node_1_payment_events.is_empty(),
+        "Intermediate node should not have PaymentEvents"
+    );
+    let fwd_events = node_1.store.get_forwarding_events(0, u64::MAX, 100, 0);
+    assert_eq!(fwd_events.len(), 1);
+    assert_eq!(fwd_events[0].payment_hash, payment_hash);
+    assert_eq!(fwd_events[0].fee, 10000); // routing fee
+
+    // Node 2: should have a Receive PaymentEvent
+    let recv_events = node_2.store.get_payment_events(0, u64::MAX, 100, 0);
+    assert_eq!(recv_events.len(), 1);
+    assert_eq!(
+        recv_events[0].event_type,
+        fiber_types::PaymentEventType::Receive
+    );
+    assert_eq!(recv_events[0].payment_hash, payment_hash);
+    assert_eq!(recv_events[0].amount, 10000000);
+    assert_eq!(recv_events[0].fee, 0);
+    assert_eq!(recv_events[0].channel_id, channels[1]); // last hop channel
 }
 
 #[tokio::test]
@@ -5048,7 +5103,11 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node1_pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
@@ -5146,7 +5205,11 @@ async fn test_send_payment_send_each_other_reestablishing() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node1_pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
@@ -5781,7 +5844,11 @@ async fn test_send_payment_with_reconnect_two_times() {
         node0
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::DisconnectPeer(node1_pubkey, PeerDisconnectReason::Requested),
+                NetworkActorCommand::DisconnectPeer(
+                    node1_pubkey,
+                    PeerDisconnectReason::Requested,
+                    None,
+                ),
             ))
             .expect("node_a alive");
 
