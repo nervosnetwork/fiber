@@ -3878,7 +3878,7 @@ async fn test_revoke_old_commitment_transaction() {
         .send_message(NetworkActorMessage::Command(
             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: new_channel_id,
-                command: ChannelCommand::CommitmentSigned(),
+                command: ChannelCommand::CommitmentSigned(None),
             }),
         ))
         .expect("node_a alive");
