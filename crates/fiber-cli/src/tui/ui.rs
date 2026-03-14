@@ -401,14 +401,13 @@ fn draw_dashboard_tab(
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
-    // Layout: top stats row + capacity gauge + channel state breakdown + TLC info + fee stats + payment stats + network overview
+    // Layout: top stats row + capacity gauge + channel states & TLC + payment stats + fee stats + network overview
     let chunks = Layout::vertical([
         Constraint::Length(3), // Summary stats row
         Constraint::Length(3), // Capacity utilization gauge
-        Constraint::Length(9), // Channel state breakdown
-        Constraint::Length(5), // TLC stats
-        Constraint::Length(9), // Fee & forwarding stats
+        Constraint::Length(9), // Channel states (left) + TLC activity (right)
         Constraint::Length(9), // Payment stats (sent/received)
+        Constraint::Length(9), // Fee & forwarding stats
         Constraint::Min(4),    // Network overview (from graph)
     ])
     .split(inner);
@@ -419,20 +418,17 @@ fn draw_dashboard_tab(
     // ── Row 2: Capacity utilization gauge ───────────────────────────
     draw_dashboard_capacity_gauge(f, tab, p, chunks[1]);
 
-    // ── Row 3: Channel state breakdown ──────────────────────────────
-    draw_dashboard_channel_states(f, tab, p, chunks[2]);
+    // ── Row 3: Channel states + TLC activity ────────────────────────
+    draw_dashboard_channel_and_tlc(f, tab, p, chunks[2]);
 
-    // ── Row 4: TLC stats ────────────────────────────────────────────
-    draw_dashboard_tlc_stats(f, tab, p, chunks[3]);
+    // ── Row 4: Payment stats (sent/received) ────────────────────────
+    draw_dashboard_payment_stats(f, tab, p, chunks[3]);
 
     // ── Row 5: Fee & forwarding stats ───────────────────────────────
     draw_dashboard_fee_stats(f, tab, p, chunks[4]);
 
-    // ── Row 6: Payment stats (sent/received) ────────────────────────
-    draw_dashboard_payment_stats(f, tab, p, chunks[5]);
-
-    // ── Row 7: Network overview (graph nodes & channels) ────────────
-    draw_dashboard_network(f, tab, p, chunks[6]);
+    // ── Row 6: Network overview (graph nodes & channels) ────────────
+    draw_dashboard_network(f, tab, p, chunks[5]);
 }
 
 fn draw_dashboard_summary(
@@ -512,13 +508,29 @@ fn draw_dashboard_capacity_gauge(f: &mut Frame, tab: &DashboardTab, p: &ThemePal
     f.render_widget(gauge, area);
 }
 
-fn draw_dashboard_channel_states(f: &mut Frame, tab: &DashboardTab, p: &ThemePalette, area: Rect) {
+fn draw_dashboard_channel_and_tlc(f: &mut Frame, tab: &DashboardTab, p: &ThemePalette, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Channel States & TLC ")
+        .border_style(Style::default().fg(p.border))
+        .title_style(Style::default().fg(p.text_primary));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let cols = Layout::horizontal([
+        Constraint::Percentage(55), // Channel states
+        Constraint::Percentage(45), // TLC activity
+    ])
+    .split(inner);
+
+    // ── Left: Channel states ────────────────────────────────────────
     let stats = &tab.stats;
 
-    let lines = vec![
-        Line::from(""),
+    let mut left_lines = vec![
         Line::from(vec![
-            Span::styled("  Ready:        ", Style::default().fg(p.label)),
+            Span::styled("  Ready:         ", Style::default().fg(p.label)),
             Span::styled(
                 format!("{}", stats.ready_count),
                 Style::default().fg(p.success).add_modifier(Modifier::BOLD),
@@ -536,7 +548,7 @@ fn draw_dashboard_channel_states(f: &mut Frame, tab: &DashboardTab, p: &ThemePal
             Span::raw(")"),
         ]),
         Line::from(vec![
-            Span::styled("  Pending:      ", Style::default().fg(p.label)),
+            Span::styled("  Pending:       ", Style::default().fg(p.label)),
             Span::styled(
                 format!("{}", stats.pending_count),
                 Style::default().fg(p.info),
@@ -550,7 +562,7 @@ fn draw_dashboard_channel_states(f: &mut Frame, tab: &DashboardTab, p: &ThemePal
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Closed:       ", Style::default().fg(p.label)),
+            Span::styled("  Closed:        ", Style::default().fg(p.label)),
             Span::styled(
                 format!("{}", stats.closed_count),
                 Style::default().fg(p.error),
@@ -560,15 +572,42 @@ fn draw_dashboard_channel_states(f: &mut Frame, tab: &DashboardTab, p: &ThemePal
         draw_state_bar(stats, p),
     ];
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Channel States ")
-        .border_style(Style::default().fg(p.border))
-        .title_style(Style::default().fg(p.text_primary));
+    // Pad to fill available height
+    while left_lines.len() < inner.height as usize {
+        left_lines.push(Line::from(""));
+    }
 
-    let paragraph = Paragraph::new(lines).block(block);
-    f.render_widget(paragraph, area);
+    let left_paragraph = Paragraph::new(left_lines);
+    f.render_widget(left_paragraph, cols[0]);
+
+    // ── Right: TLC activity ─────────────────────────────────────────
+    let right_lines = vec![
+        Line::from(vec![
+            Span::styled("  Pending TLCs: ", Style::default().fg(p.label)),
+            Span::styled(
+                format!("{}", stats.total_pending_tlcs),
+                Style::default().fg(p.info),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Offered:  ", Style::default().fg(p.label)),
+            Span::styled(
+                format_ckb(stats.total_offered_tlc),
+                Style::default().fg(p.success),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Received: ", Style::default().fg(p.label)),
+            Span::styled(
+                format_ckb(stats.total_received_tlc),
+                Style::default().fg(p.accent),
+            ),
+        ]),
+    ];
+
+    let right_paragraph = Paragraph::new(right_lines);
+    f.render_widget(right_paragraph, cols[1]);
 }
 
 /// Draw a simple text-based bar chart showing channel state distribution.
@@ -623,43 +662,6 @@ fn draw_state_bar(
     Line::from(spans)
 }
 
-fn draw_dashboard_tlc_stats(f: &mut Frame, tab: &DashboardTab, p: &ThemePalette, area: Rect) {
-    let stats = &tab.stats;
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Pending TLCs: ", Style::default().fg(p.label)),
-            Span::styled(
-                format!("{}", stats.total_pending_tlcs),
-                Style::default().fg(p.info),
-            ),
-            Span::raw("   "),
-            Span::styled("Offered: ", Style::default().fg(p.label)),
-            Span::styled(
-                format_ckb(stats.total_offered_tlc),
-                Style::default().fg(p.success),
-            ),
-            Span::raw("   "),
-            Span::styled("Received: ", Style::default().fg(p.label)),
-            Span::styled(
-                format_ckb(stats.total_received_tlc),
-                Style::default().fg(p.accent),
-            ),
-        ]),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" TLC Activity ")
-        .border_style(Style::default().fg(p.border))
-        .title_style(Style::default().fg(p.text_primary));
-
-    let paragraph = Paragraph::new(lines).block(block);
-    f.render_widget(paragraph, area);
-}
-
 fn draw_dashboard_fee_stats(f: &mut Frame, tab: &DashboardTab, p: &ThemePalette, area: Rect) {
     let fee = &tab.fee_stats;
 
@@ -711,7 +713,7 @@ fn draw_fee_report_summary(
 
         let header = Row::new(vec![
             Cell::from(Span::styled(
-                "CKB Fees",
+                "CKB",
                 Style::default().fg(p.info).add_modifier(Modifier::BOLD),
             )),
             Cell::from(""),
@@ -744,7 +746,7 @@ fn draw_fee_report_summary(
         for udt in &fee.udt_reports {
             rows.push(Row::new(vec![
                 Cell::from(Span::styled(
-                    "UDT Fees",
+                    "UDT",
                     Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
@@ -891,17 +893,17 @@ fn draw_payment_report_column(
     f: &mut Frame,
     label: &str,
     ckb_report: &Option<fiber_json_types::AssetPaymentReport>,
-    _udt_reports: &[fiber_json_types::AssetPaymentReport],
+    udt_reports: &[fiber_json_types::AssetPaymentReport],
     p: &ThemePalette,
     area: Rect,
 ) {
-    if let Some(ckb) = ckb_report {
-        let amount_color = if label == "Sent" {
-            p.warning
-        } else {
-            p.success
-        };
+    let amount_color = if label == "Sent" {
+        p.warning
+    } else {
+        p.success
+    };
 
+    if let Some(ckb) = ckb_report {
         // Pre-format all amounts to find the max width for right-alignment
         let amounts = [
             format_ckb(ckb.daily_amount_sum),
@@ -926,7 +928,7 @@ fn draw_payment_report_column(
             Cell::from(""),
         ]);
 
-        let rows: Vec<Row> = periods
+        let mut rows: Vec<Row> = periods
             .iter()
             .zip(amounts.iter())
             .zip(counts.iter())
@@ -948,11 +950,68 @@ fn draw_payment_report_column(
             })
             .collect();
 
+        // Show UDT payment reports if any
+        for udt in udt_reports {
+            rows.push(Row::new(vec![
+                Cell::from(Span::styled(
+                    format!("UDT {}", label),
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    format!("{}", udt.daily_amount_sum),
+                    Style::default().fg(amount_color),
+                )),
+                Cell::from(Span::styled(
+                    format!("({})", udt.daily_event_count),
+                    Style::default().fg(p.text_secondary),
+                )),
+            ]));
+        }
+
         let table = Table::new(
             rows,
             [
-                Constraint::Length(5),
+                Constraint::Length(11),
                 Constraint::Length(max_amount_len as u16 + 1),
+                Constraint::Min(4),
+            ],
+        )
+        .header(header);
+
+        f.render_widget(table, area);
+    } else if !udt_reports.is_empty() {
+        // No CKB data but have UDT data
+        let header = Row::new(vec![
+            Cell::from(Span::styled(
+                format!("UDT {}", label),
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(""),
+            Cell::from(""),
+        ]);
+
+        let rows: Vec<Row> = udt_reports
+            .iter()
+            .map(|udt| {
+                Row::new(vec![
+                    Cell::from(Span::styled("24h:", Style::default().fg(p.label))),
+                    Cell::from(Span::styled(
+                        format!("{}", udt.daily_amount_sum),
+                        Style::default().fg(amount_color),
+                    )),
+                    Cell::from(Span::styled(
+                        format!("({})", udt.daily_event_count),
+                        Style::default().fg(p.text_secondary),
+                    )),
+                ])
+            })
+            .collect();
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(11),
+                Constraint::Length(16),
                 Constraint::Min(4),
             ],
         )
