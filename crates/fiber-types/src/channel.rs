@@ -129,6 +129,36 @@ pub enum TLCId {
     Received(u64),
 }
 
+/// A record of a successfully forwarded TLC (payment) through this node.
+///
+/// When this node acts as an intermediary in a multi-hop payment, it earns a
+/// forwarding fee. This struct captures the details of each such event for
+/// later aggregation and reporting (e.g., via `fee_report` / `forwarding_history` RPC).
+///
+/// Inspired by LND's `ForwardingEvent` in `channeldb/forwarding_log.go`.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ForwardingEvent {
+    /// Timestamp when this forwarding event was recorded, in milliseconds since UNIX epoch.
+    pub timestamp: u64,
+    /// The channel through which the inbound TLC arrived.
+    pub incoming_channel_id: Hash256,
+    /// The channel through which the outbound TLC was sent.
+    pub outgoing_channel_id: Hash256,
+    /// The amount received on the incoming channel (in shannons or UDT base units).
+    pub incoming_amount: u128,
+    /// The amount forwarded on the outgoing channel.
+    pub outgoing_amount: u128,
+    /// The fee earned for this forwarding event (`incoming_amount - outgoing_amount`).
+    pub fee: u128,
+    /// The payment hash associated with this forwarded TLC.
+    pub payment_hash: Hash256,
+    /// The UDT type script if this forwarding was for a UDT channel.
+    /// `None` means native CKB.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
+}
+
 impl From<TLCId> for u64 {
     fn from(id: TLCId) -> u64 {
         match id {

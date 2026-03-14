@@ -56,7 +56,7 @@ use fiber_types::{
     ChannelAnnouncement, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
     ChannelOpenRecord, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
     ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
-    EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
+    EcdsaSignature, ForwardingEvent, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
     NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
     PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
     RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
@@ -346,7 +346,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + ForwardingEventStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -1471,6 +1471,36 @@ where
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
+                // Record forwarding event if this TLC was successfully fulfilled.
+                // This node acted as an intermediary: inbound TLC on previous_channel_id
+                // was forwarded as outbound TLC on this channel.
+                if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+                    let incoming_amount = self
+                        .store
+                        .get_channel_actor_state(&previous_channel_id)
+                        .and_then(|prev_state| {
+                            prev_state
+                                .tlc_state
+                                .get(&TLCId::Received(previous_tlc_id))
+                                .map(|tlc| tlc.amount)
+                        });
+
+                    if let Some(incoming_amount) = incoming_amount {
+                        let outgoing_amount = tlc_info.amount;
+                        let fee = incoming_amount.saturating_sub(outgoing_amount);
+                        self.store.insert_forwarding_event(ForwardingEvent {
+                            timestamp: now_timestamp_as_millis_u64(),
+                            incoming_channel_id: previous_channel_id,
+                            outgoing_channel_id: state.get_id(),
+                            incoming_amount,
+                            outgoing_amount,
+                            fee,
+                            payment_hash: tlc_info.payment_hash,
+                            udt_type_script: state.funding_udt_type_script.clone(),
+                        });
+                    }
+                }
+
                 // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
                 // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
                 // into a new error created with the *outer* shared secret (for this hop).
@@ -2538,7 +2568,13 @@ where
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<S> Actor for ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + InvoiceStore
+        + PreimageStore
+        + ForwardingEventStore
+        + Send
+        + Sync
+        + 'static,
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;
@@ -7361,6 +7397,26 @@ pub trait ChannelOpenRecordStore {
     fn insert_channel_open_record(&self, record: ChannelOpenRecord);
     /// Delete the record for the given channel ID.
     fn delete_channel_open_record(&self, channel_id: &Hash256);
+}
+
+/// Store trait for persisting and querying forwarding events.
+///
+/// Forwarding events are recorded when this node successfully relays a TLC
+/// (payment) between two channels, earning a fee. Events are keyed by
+/// timestamp (big-endian u64 milliseconds) to support efficient time-range queries.
+pub trait ForwardingEventStore {
+    /// Insert a new forwarding event into the store.
+    fn insert_forwarding_event(&self, event: ForwardingEvent);
+    /// Query forwarding events within a time range, with pagination.
+    /// `start_time` and `end_time` are milliseconds since UNIX epoch (inclusive).
+    /// Returns up to `limit` events starting after `offset` events.
+    fn get_forwarding_events(
+        &self,
+        start_time: u64,
+        end_time: u64,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<ForwardingEvent>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

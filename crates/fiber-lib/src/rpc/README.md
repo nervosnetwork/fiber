@@ -36,6 +36,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `graph_channels`](#graph-graph_channels)
     * [Module Info](#module-info)
         * [Method `node_info`](#info-node_info)
+        * [Method `fee_report`](#info-fee_report)
+        * [Method `forwarding_history`](#info-forwarding_history)
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#invoice-new_invoice)
         * [Method `parse_invoice`](#invoice-parse_invoice)
@@ -65,6 +67,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `remove_preimage`](#watchtower-remove_preimage)
 * [RPC Types](#rpc-types)
 
+    * [Type `AssetFeeReport`](#type-assetfeereport)
     * [Type `Attribute`](#type-attribute)
     * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
@@ -75,6 +78,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
     * [Type `Currency`](#type-currency)
+    * [Type `ForwardingEventInfo`](#type-forwardingeventinfo)
     * [Type `GetInvoiceResult`](#type-getinvoiceresult)
     * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
@@ -533,6 +537,49 @@ Get the node information.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, Configuration information for User-Defined Tokens (UDT) associated with the node.
+
+---
+
+
+
+<a id="info-fee_report"></a>
+#### Method `fee_report`
+
+Returns a summary of forwarding fees earned over day/week/month windows,
+ grouped by asset type (CKB and each UDT).
+
+##### Params
+* None
+
+##### Returns
+
+* `asset_reports` - <em>Vec<[AssetFeeReport](#type-assetfeereport)></em>, Fee reports grouped by asset type.
+ Each entry corresponds to a different token (CKB or a UDT).
+
+---
+
+
+
+<a id="info-forwarding_history"></a>
+#### Method `forwarding_history`
+
+Returns individual forwarding events with optional time range, asset filter,
+ and pagination.
+
+##### Params
+
+* `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive). Default is 0 (the beginning of time).
+* `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive). Default is the current time.
+* `limit` - <em>`Option<u64>`</em>, Maximum number of events to return. Default is 100.
+* `offset` - <em>`Option<u64>`</em>, Number of events to skip (for pagination). Default is 0.
+* `udt_type_script` - <em>`Option<Script>`</em>, Filter by UDT type script. If set, only events for this specific UDT are returned.
+ Use `null` or omit to return events for all asset types.
+ Use an explicit JSON `null` value with `ckb_only: true` to get only CKB events.
+
+##### Returns
+
+* `events` - <em>Vec<[ForwardingEventInfo](#type-forwardingeventinfo)></em>, The list of forwarding events.
+* `total_count` - <em>`u64`</em>, The total number of forwarding events returned in this result.
 
 ---
 
@@ -1116,6 +1163,23 @@ Remove preimage
 ## RPC Types
 
 
+<a id="#type-assetfeereport"></a>
+### Type `AssetFeeReport`
+
+Fee summary for a single asset type (CKB or a specific UDT).
+
+
+#### Fields
+
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script. `None` means native CKB.
+* `daily_fee_sum` - <em>`u128`</em>, Total fees earned in the last 24 hours.
+* `weekly_fee_sum` - <em>`u128`</em>, Total fees earned in the last 7 days.
+* `monthly_fee_sum` - <em>`u128`</em>, Total fees earned in the last 30 days.
+* `daily_event_count` - <em>`u64`</em>, Total number of forwarding events in the last 24 hours.
+* `weekly_event_count` - <em>`u64`</em>, Total number of forwarding events in the last 7 days.
+* `monthly_event_count` - <em>`u64`</em>, Total number of forwarding events in the last 30 days.
+---
+
 <a id="#type-attribute"></a>
 ### Type `Attribute`
 
@@ -1314,6 +1378,24 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Fibb` - The mainnet currency of CKB.
 * `Fibt` - The testnet currency of the CKB network.
 * `Fibd` - The devnet currency of the CKB network.
+---
+
+<a id="#type-forwardingeventinfo"></a>
+### Type `ForwardingEventInfo`
+
+A single forwarding event as returned by the `forwarding_history` RPC.
+
+
+#### Fields
+
+* `timestamp` - <em>`u64`</em>, Timestamp when this event was recorded, in milliseconds since UNIX epoch.
+* `incoming_channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID through which the inbound TLC arrived.
+* `outgoing_channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID through which the outbound TLC was sent.
+* `incoming_amount` - <em>`u128`</em>, The amount received on the incoming channel.
+* `outgoing_amount` - <em>`u128`</em>, The amount forwarded on the outgoing channel.
+* `fee` - <em>`u128`</em>, The fee earned for this forwarding event.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash associated with this forwarded TLC.
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script. `None` means native CKB.
 ---
 
 <a id="#type-getinvoiceresult"></a>
