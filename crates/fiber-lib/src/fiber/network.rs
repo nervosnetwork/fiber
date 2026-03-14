@@ -1147,35 +1147,31 @@ where
                     }
                 }
 
-                let mut inbound_peer_sessions = state.inbound_peer_sessions();
-                let num_inbound_peers = inbound_peer_sessions.len();
+                let inbound_no_channel_peers = state.inbound_no_channel_peers_in_connected_order();
+                let num_inbound_no_channel_peers = inbound_no_channel_peers.len();
                 let num_outbound_peers = state.num_of_outbound_peers();
 
-                debug!("Maintaining network connections ticked: current num inbound peers {}, current num outbound peers {}", num_inbound_peers, num_outbound_peers);
+                debug!(
+                    "Maintaining network connections ticked: current num inbound no-channel peers {}, current num outbound peers {}",
+                    num_inbound_no_channel_peers, num_outbound_peers
+                );
 
-                if num_inbound_peers > state.max_inbound_peers {
+                if num_inbound_no_channel_peers > state.max_inbound_peers {
                     debug!(
-                                "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
-                                num_inbound_peers, state.max_inbound_peers
-                            );
-                    inbound_peer_sessions.retain(|k| !state.session_channels_map.contains_key(k));
-                    let sessions_to_disconnect = if inbound_peer_sessions.len()
-                        < num_inbound_peers - state.max_inbound_peers
-                    {
-                        warn!(
-                                    "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
-                                    num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
-                                );
-                        &inbound_peer_sessions[..]
-                    } else {
-                        &inbound_peer_sessions[..num_inbound_peers - state.max_inbound_peers]
-                    };
+                        "Already connected to {} inbound no-channel peers, only wants {} peers, disconnecting some",
+                        num_inbound_no_channel_peers, state.max_inbound_peers
+                    );
+                    let sessions_to_disconnect = inbound_no_channel_peers
+                        .iter()
+                        .take(num_inbound_no_channel_peers - state.max_inbound_peers)
+                        .map(|(_, session_id)| *session_id)
+                        .collect::<Vec<_>>();
                     debug!(
-                        "Disconnecting inbound peer sessions {:?}",
+                        "Disconnecting inbound no-channel peer sessions {:?}",
                         sessions_to_disconnect
                     );
                     for session in sessions_to_disconnect {
-                        if let Err(err) = state.control.disconnect(*session).await {
+                        if let Err(err) = state.control.disconnect(session).await {
                             error!("Failed to disconnect session: {}", err);
                         }
                     }
@@ -2926,6 +2922,7 @@ pub struct NetworkActorState<S, C> {
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+    next_connected_peer_order: u64,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     channel_ephemeral_config: ChannelEphemeralConfig,
@@ -2938,6 +2935,7 @@ pub struct NetworkActorState<S, C> {
 pub struct ConnectedPeer {
     pub session_id: SessionId,
     pub session_type: SessionType,
+    pub connected_order: u64,
     pub address: Multiaddr,
     pub features: Option<FeatureVector>,
 }
@@ -3578,11 +3576,53 @@ where
         return Ok(());
     }
 
-    fn inbound_peer_sessions(&self) -> Vec<SessionId> {
-        self.peer_session_map
-            .values()
-            .filter_map(|s| (s.session_type == SessionType::Inbound).then_some(s.session_id))
+    fn inbound_no_channel_peers_in_connected_order(&self) -> Vec<(Pubkey, SessionId)> {
+        let mut peers = self
+            .peer_session_map
+            .iter()
+            .filter_map(|(pubkey, peer)| {
+                (peer.session_type == SessionType::Inbound
+                    && !self.session_channels_map.contains_key(&peer.session_id))
+                .then_some((peer.connected_order, *pubkey, peer.session_id))
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by_key(|(connected_order, _, _)| *connected_order);
+        peers
+            .into_iter()
+            .map(|(_, pubkey, session_id)| (pubkey, session_id))
             .collect()
+    }
+
+    async fn enforce_inbound_peer_budget(&mut self) {
+        let inbound_no_channel_peers = self.inbound_no_channel_peers_in_connected_order();
+        if inbound_no_channel_peers.len() <= self.max_inbound_peers {
+            return;
+        }
+        let excess_peers = inbound_no_channel_peers.len() - self.max_inbound_peers;
+
+        for (pubkey, session_id) in inbound_no_channel_peers.into_iter().take(excess_peers) {
+            debug!(
+                "Disconnecting inbound no-channel peer {:?} on session {:?} immediately after connect",
+                pubkey, session_id
+            );
+            match self.control.disconnect(session_id).await {
+                Ok(()) => {
+                    if matches!(
+                        self.peer_session_map.get(&pubkey),
+                        Some(peer) if peer.session_id == session_id
+                    ) {
+                        self.peer_session_map.remove(&pubkey);
+                    }
+                    self.session_channels_map.remove(&session_id);
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to disconnect inbound no-channel peer {:?} on session {:?}: {}",
+                        pubkey, session_id, err
+                    );
+                }
+            }
+        }
     }
 
     fn num_of_outbound_peers(&self) -> usize {
@@ -3833,11 +3873,14 @@ where
 
     async fn on_peer_connected(&mut self, remote_pubkey: Pubkey, session: &SessionContext) {
         debug!("Peer {:?} connected", remote_pubkey);
+        let connected_order = self.next_connected_peer_order;
+        self.next_connected_peer_order = self.next_connected_peer_order.saturating_add(1);
         self.peer_session_map.insert(
             remote_pubkey,
             ConnectedPeer {
                 session_id: session.id,
                 session_type: session.ty,
+                connected_order,
                 address: session.address.clone(),
                 features: None,
             },
@@ -3854,6 +3897,18 @@ where
             if changed {
                 self.persist_state();
             }
+        }
+
+        self.enforce_inbound_peer_budget().await;
+        if !matches!(
+            self.peer_session_map.get(&remote_pubkey),
+            Some(peer) if peer.session_id == session.id
+        ) {
+            debug!(
+                "Peer {:?} session {:?} was disconnected by inbound peer admission control",
+                remote_pubkey, session.id
+            );
+            return;
         }
 
         if self.auto_announce {
@@ -4657,6 +4712,7 @@ where
             gossip_actor,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            next_connected_peer_order: 0,
             features,
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
@@ -5046,7 +5102,7 @@ impl ToBeAcceptedChannels {
         self.map.remove(id)
     }
 
-    // insert and apply throttle control
+    // insert and apply single-flight and per-peer throttle control
     fn try_insert(
         &mut self,
         id: Hash256,
@@ -5060,6 +5116,19 @@ impl ToBeAcceptedChannels {
             );
             warn!("{}: {:?}", err_message, existing_value);
             return Err(ProcessingChannelError::RepeatedProcessing(err_message));
+        }
+
+        if let Some((existing_channel_id, _)) = self
+            .map
+            .iter()
+            .find(|(_, (saved_pubkey, _))| *saved_pubkey == pubkey)
+        {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!(
+                    "Peer {:?} already has a pending inbound channel awaiting acceptance: {:?}",
+                    pubkey, existing_channel_id
+                ),
+            ));
         }
 
         // The map should be small because of the flow control, so calculate the total number and

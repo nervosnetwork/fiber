@@ -235,13 +235,13 @@ pub struct FiberConfig {
     )]
     pub(crate) gossip_network_maintenance_interval_ms: Option<u64>,
 
-    /// Maximal number of inbound connections. The node will disconnect inbound connections
-    /// when the number of inbound connection exceeds this number. [default: 16]
+    /// Maximal number of inbound peers without channels. The node will disconnect the oldest
+    /// inbound peers without channels when their number exceeds this budget. [default: 16]
     #[arg(
         name = "FIBER_MAX_INBOUND_PEERS",
         long = "fiber-max-inbound-peers",
         env,
-        help = "Maximal number of inbound connections. The node will disconnect inbound connections when the number of inbound connection exceeds this number. [default: 16]"
+        help = "Maximal number of inbound peers without channels. The node will disconnect the oldest inbound peers without channels when their number exceeds this budget. [default: 16]"
     )]
     pub(crate) max_inbound_peers: Option<usize>,
 
@@ -341,21 +341,21 @@ pub struct FiberConfig {
     #[arg(skip)]
     pub wasm_key_pair: Option<KeyPair>,
 
-    /// Max allowed number of channels to be accepted from one peer. [default: 20]
+    /// Max allowed number of pending inbound channels awaiting acceptance from one peer. [default: 20]
     #[arg(
         name = "FIBER_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT",
         long = "fiber-to-be-accepted-channels-number-limit",
         env,
-        help = "Max allowed number of channels to be accepted from one peer. [default: 20]"
+        help = "Max allowed number of pending inbound channels awaiting acceptance from one peer. [default: 20]"
     )]
     pub to_be_accepted_channels_number_limit: Option<usize>,
 
-    /// Max allowed storage bytes of channels to be accepted from one peer. [default: 50KB]
+    /// Max allowed storage bytes of pending inbound channels awaiting acceptance from one peer. [default: 50KB]
     #[arg(
         name = "FIBER_TO_BE_ACCEPTED_CHANNELS_BYTESS_LIMIT",
         long = "fiber-to-be-accepted-channels-bytes-limit",
         env,
-        help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
+        help = "Max allowed bytes of pending inbound channels awaiting acceptance from one peer. [default: 50KB]"
     )]
     pub to_be_accepted_channels_bytes_limit: Option<usize>,
 
