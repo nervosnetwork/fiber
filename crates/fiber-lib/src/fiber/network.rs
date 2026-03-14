@@ -50,10 +50,10 @@ use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
-    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelOpenRecordStore, ForwardingEventStore,
-    OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand,
-    StopReason, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelEventStore,
+    ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
+    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
@@ -664,7 +664,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
-        + ForwardingEventStore
+        + ChannelEventStore
         + Clone
         + Send
         + Sync
@@ -2969,7 +2969,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
-        + ForwardingEventStore
+        + ChannelEventStore
         + Clone
         + Send
         + Sync
@@ -4421,7 +4421,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
-        + ForwardingEventStore
+        + ChannelEventStore
         + Clone
         + Send
         + Sync
@@ -4959,7 +4959,7 @@ pub async fn start_network<
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
-        + ForwardingEventStore
+        + ChannelEventStore
         + Clone
         + Send
         + Sync
