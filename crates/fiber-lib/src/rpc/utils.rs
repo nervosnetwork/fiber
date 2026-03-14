@@ -82,13 +82,3 @@ macro_rules! handle_actor_call {
         }
     };
 }
-
-#[macro_export]
-macro_rules! handle_actor_cast {
-    ($actor:expr, $message:expr, $params:expr) => {
-        match $actor.cast($message) {
-            Ok(_) => Ok(()),
-            Err(err) => log_and_error!($params, format!("{}", err)),
-        }
-    };
-}
