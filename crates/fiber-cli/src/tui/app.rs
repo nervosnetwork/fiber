@@ -6,10 +6,11 @@ use anyhow::Result;
 use ckb_jsonrpc_types::JsonBytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fiber_json_types::{
-    Channel, ChannelInfo, CkbInvoiceStatus, GetInvoiceResult, GetPaymentCommandResult,
-    GraphChannelsParams, GraphChannelsResult, GraphNodesParams, GraphNodesResult,
-    ListChannelsParams, ListChannelsResult, ListInvoicesParams, ListInvoicesResult,
-    ListPaymentsParams, ListPaymentsResult, ListPeersResult, NodeInfo, PaymentStatus, PeerInfo,
+    Channel, ChannelInfo, CkbInvoiceStatus, FeeReportResult, ForwardingHistoryParams,
+    ForwardingHistoryResult, GetInvoiceResult, GetPaymentCommandResult, GraphChannelsParams,
+    GraphChannelsResult, GraphNodesParams, GraphNodesResult, ListChannelsParams,
+    ListChannelsResult, ListInvoicesParams, ListInvoicesResult, ListPaymentsParams,
+    ListPaymentsResult, ListPeersResult, NodeInfo, PaymentStatus, PeerInfo,
 };
 use ratatui::backend::Backend;
 use ratatui::Terminal;
@@ -183,6 +184,8 @@ pub struct FetchResult {
     pub peers: std::result::Result<Vec<PeerInfo>, String>,
     pub graph_nodes: std::result::Result<(Vec<NodeInfo>, Option<JsonBytes>), String>,
     pub graph_channels: std::result::Result<(Vec<ChannelInfo>, Option<JsonBytes>), String>,
+    pub fee_report: std::result::Result<FeeReportResult, String>,
+    pub forwarding_history: std::result::Result<ForwardingHistoryResult, String>,
 }
 
 /// Perform all RPC fetches in the background. This runs on a spawned task
@@ -279,6 +282,22 @@ async fn fetch_all_rpc(
         })
         .map_err(|e| e.to_string());
 
+    // fee_report
+    let fee_report = client
+        .call_typed_no_params::<FeeReportResult>("fee_report")
+        .await
+        .map_err(|e| e.to_string());
+
+    // forwarding_history (recent 10 events)
+    let fh_params = ForwardingHistoryParams {
+        limit: Some(10),
+        ..ForwardingHistoryParams::default()
+    };
+    let forwarding_history = client
+        .call_typed::<_, ForwardingHistoryResult>("forwarding_history", &fh_params)
+        .await
+        .map_err(|e| e.to_string());
+
     FetchResult {
         node_info,
         channels,
@@ -287,6 +306,8 @@ async fn fetch_all_rpc(
         peers,
         graph_nodes,
         graph_channels,
+        fee_report,
+        forwarding_history,
     }
 }
 
@@ -566,6 +587,15 @@ impl App {
             &self.graph_tab.channels,
             own_pubkey.as_deref(),
         );
+
+        // Update fee stats from fee_report and forwarding_history
+        self.dashboard_tab.update_fee_stats(
+            result.fee_report.as_ref().ok(),
+            result.forwarding_history.as_ref().ok(),
+        );
+
+        // Update peers tab with graph node info (node name, timestamp)
+        self.peers_tab.update_node_extra(&self.graph_tab.nodes);
     }
 
     /// Handle a key event.

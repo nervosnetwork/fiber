@@ -1,7 +1,11 @@
 //! Peers tab: list connected peers, connect/disconnect actions.
 
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent};
-use fiber_json_types::{DisconnectPeerParams, ListPeersResult, PeerInfo, Pubkey};
+use fiber_json_types::{
+    DisconnectPeerParams, ListPeersResult, NodeInfo as GraphNodeInfo, PeerInfo, Pubkey,
+};
 use ratatui::widgets::TableState;
 
 use super::TabKind;
@@ -14,6 +18,15 @@ pub enum PeerView {
     ConnectForm,
 }
 
+/// Extra info about a peer node resolved from the network graph.
+#[derive(Debug, Clone, Default)]
+pub struct PeerNodeExtra {
+    /// Node name from graph announcement (empty if unknown).
+    pub node_name: String,
+    /// Timestamp of the latest node announcement (milliseconds).
+    pub timestamp: u64,
+}
+
 /// Peers tab state.
 pub struct PeersTab {
     pub all_peers: Vec<PeerInfo>,
@@ -23,7 +36,10 @@ pub struct PeersTab {
     pub view: PeerView,
     pub status_message: Option<String>,
 
-    // Search filter (client-side substring match on pubkey/address)
+    /// Map from pubkey hex string to extra graph info (node name, timestamp).
+    pub node_extra: HashMap<String, PeerNodeExtra>,
+
+    // Search filter (client-side substring match on pubkey/address/node_name)
     pub search_query: String,
     pub searching: bool,
 
@@ -45,6 +61,7 @@ impl PeersTab {
             table_state: TableState::default(),
             view: PeerView::List,
             status_message: None,
+            node_extra: HashMap::new(),
             search_query: String::new(),
             searching: false,
             pending_disconnect: None,
@@ -65,7 +82,12 @@ impl PeersTab {
                 .filter(|p| {
                     let pubkey = format!("{}", p.pubkey).to_lowercase();
                     let addr = p.address.to_lowercase();
-                    pubkey.contains(&query) || addr.contains(&query)
+                    let name = self
+                        .node_extra
+                        .get(&format!("{}", p.pubkey))
+                        .map(|e| e.node_name.to_lowercase())
+                        .unwrap_or_default();
+                    pubkey.contains(&query) || addr.contains(&query) || name.contains(&query)
                 })
                 .cloned()
                 .collect();
@@ -75,6 +97,21 @@ impl PeersTab {
             self.table_state.select(Some(0));
         } else {
             self.table_state.select(None);
+        }
+    }
+
+    /// Update the node_extra map from graph node data.
+    pub fn update_node_extra(&mut self, graph_nodes: &[GraphNodeInfo]) {
+        self.node_extra.clear();
+        for node in graph_nodes {
+            let pk = format!("{}", node.pubkey);
+            self.node_extra.insert(
+                pk,
+                PeerNodeExtra {
+                    node_name: node.node_name.clone(),
+                    timestamp: node.timestamp,
+                },
+            );
         }
     }
 

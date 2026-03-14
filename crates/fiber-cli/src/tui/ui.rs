@@ -61,8 +61,15 @@ pub fn format_ckb_pub(shannons: u128) -> String {
 fn truncate_hex(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
+    } else if max_len < 5 {
+        // Too short to show ellipsis meaningfully
+        s[..max_len].to_string()
     } else {
-        format!("{}...{}", &s[..max_len / 2], &s[s.len() - max_len / 2..])
+        // Ensure the total output length is exactly max_len.
+        // Format: <prefix>..<suffix>, where ".." is 2 chars.
+        let prefix_len = (max_len - 2) / 2;
+        let suffix_len = max_len - 2 - prefix_len;
+        format!("{}..{}", &s[..prefix_len], &s[s.len() - suffix_len..])
     }
 }
 
@@ -394,12 +401,13 @@ fn draw_dashboard_tab(
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
-    // Layout: top stats row + capacity gauge + channel state breakdown + TLC info + network overview
+    // Layout: top stats row + capacity gauge + channel state breakdown + TLC info + fee stats + network overview
     let chunks = Layout::vertical([
         Constraint::Length(3), // Summary stats row
         Constraint::Length(3), // Capacity utilization gauge
         Constraint::Length(9), // Channel state breakdown
         Constraint::Length(5), // TLC stats
+        Constraint::Length(9), // Fee & forwarding stats
         Constraint::Min(4),    // Network overview (from graph)
     ])
     .split(inner);
@@ -416,8 +424,11 @@ fn draw_dashboard_tab(
     // ── Row 4: TLC stats ────────────────────────────────────────────
     draw_dashboard_tlc_stats(f, tab, p, chunks[3]);
 
-    // ── Row 5: Network overview (graph nodes & channels) ────────────
-    draw_dashboard_network(f, tab, p, chunks[4]);
+    // ── Row 5: Fee & forwarding stats ───────────────────────────────
+    draw_dashboard_fee_stats(f, tab, p, chunks[4]);
+
+    // ── Row 6: Network overview (graph nodes & channels) ────────────
+    draw_dashboard_network(f, tab, p, chunks[5]);
 }
 
 fn draw_dashboard_summary(
@@ -643,6 +654,206 @@ fn draw_dashboard_tlc_stats(f: &mut Frame, tab: &DashboardTab, p: &ThemePalette,
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
+}
+
+fn draw_dashboard_fee_stats(f: &mut Frame, tab: &DashboardTab, p: &ThemePalette, area: Rect) {
+    let fee = &tab.fee_stats;
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Fee & Forwarding ")
+        .border_style(Style::default().fg(p.border))
+        .title_style(Style::default().fg(p.text_primary));
+
+    // Split into left (fee report summary) and right (recent events)
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let cols = Layout::horizontal([
+        Constraint::Percentage(45), // Fee report summary
+        Constraint::Percentage(55), // Recent forwarding events
+    ])
+    .split(inner);
+
+    // ── Left: Fee report summary ────────────────────────────────────
+    draw_fee_report_summary(f, fee, p, cols[0]);
+
+    // ── Right: Recent forwarding events ─────────────────────────────
+    draw_recent_forwarding_events(f, fee, p, cols[1]);
+}
+
+fn draw_fee_report_summary(
+    f: &mut Frame,
+    fee: &super::tabs::dashboard::FeeStats,
+    p: &ThemePalette,
+    area: Rect,
+) {
+    let mut lines = Vec::new();
+
+    if let Some(ckb) = &fee.ckb_report {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  CKB Fees  ",
+                Style::default().fg(p.info).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("24h: ", Style::default().fg(p.label)),
+            Span::styled(
+                format_ckb(ckb.daily_fee_sum),
+                Style::default().fg(p.success),
+            ),
+            Span::styled(
+                format!(" ({})", ckb.daily_event_count),
+                Style::default().fg(p.text_secondary),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("            "),
+            Span::styled("7d:  ", Style::default().fg(p.label)),
+            Span::styled(
+                format_ckb(ckb.weekly_fee_sum),
+                Style::default().fg(p.success),
+            ),
+            Span::styled(
+                format!(" ({})", ckb.weekly_event_count),
+                Style::default().fg(p.text_secondary),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("            "),
+            Span::styled("30d: ", Style::default().fg(p.label)),
+            Span::styled(
+                format_ckb(ckb.monthly_fee_sum),
+                Style::default().fg(p.success),
+            ),
+            Span::styled(
+                format!(" ({})", ckb.monthly_event_count),
+                Style::default().fg(p.text_secondary),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  No fee data",
+            Style::default().fg(p.text_secondary),
+        )));
+    }
+
+    // Show UDT fee reports if any
+    for udt in &fee.udt_reports {
+        let udt_label = "UDT";
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {} Fees  ", udt_label),
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("24h: ", Style::default().fg(p.label)),
+            Span::styled(
+                format!("{}", udt.daily_fee_sum),
+                Style::default().fg(p.success),
+            ),
+            Span::styled(
+                format!(" ({})", udt.daily_event_count),
+                Style::default().fg(p.text_secondary),
+            ),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, area);
+}
+
+fn draw_recent_forwarding_events(
+    f: &mut Frame,
+    fee: &super::tabs::dashboard::FeeStats,
+    p: &ThemePalette,
+    area: Rect,
+) {
+    if fee.recent_events.is_empty() {
+        let lines = vec![Line::from(Span::styled(
+            "  No recent forwarding events",
+            Style::default().fg(p.text_secondary),
+        ))];
+        let paragraph = Paragraph::new(lines);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let header_line = Line::from(vec![
+        Span::styled(
+            format!("  Recent Events ({} total)  ", fee.total_event_count),
+            Style::default().fg(p.info).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Fee", Style::default().fg(p.label)),
+        Span::raw("          "),
+        Span::styled("Time", Style::default().fg(p.label)),
+    ]);
+
+    let mut lines = vec![header_line];
+
+    for event in fee
+        .recent_events
+        .iter()
+        .take(area.height.saturating_sub(1) as usize)
+    {
+        let fee_str = if event.udt_type_script.is_none() {
+            format_ckb(event.fee)
+        } else {
+            format!("{}", event.fee)
+        };
+
+        // Format timestamp as relative time or short datetime
+        let time_str = format_timestamp_short(event.timestamp);
+
+        let in_ch = format_hash_short(&format!("{}", event.incoming_channel_id));
+        let out_ch = format_hash_short(&format!("{}", event.outgoing_channel_id));
+
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(fee_str, Style::default().fg(p.success)),
+            Span::raw("  "),
+            Span::styled(
+                format!("{} -> {}", in_ch, out_ch),
+                Style::default().fg(p.text_secondary),
+            ),
+            Span::raw("  "),
+            Span::styled(time_str, Style::default().fg(p.text_secondary)),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, area);
+}
+
+/// Format a hash to a short display form (first 4 + last 4 hex chars).
+fn format_hash_short(hash: &str) -> String {
+    if hash.len() <= 10 {
+        hash.to_string()
+    } else {
+        format!("{}..{}", &hash[..6], &hash[hash.len() - 4..])
+    }
+}
+
+/// Format a millisecond timestamp to a short datetime string.
+fn format_timestamp_short(timestamp_ms: u64) -> String {
+    use chrono::{DateTime, Utc};
+    let secs = (timestamp_ms / 1000) as i64;
+    let nanos = ((timestamp_ms % 1000) * 1_000_000) as u32;
+    match DateTime::from_timestamp(secs, nanos) {
+        Some(dt) => {
+            let now = Utc::now();
+            let diff = now.signed_duration_since(dt);
+            if diff.num_minutes() < 1 {
+                "just now".to_string()
+            } else if diff.num_hours() < 1 {
+                format!("{}m ago", diff.num_minutes())
+            } else if diff.num_hours() < 24 {
+                format!("{}h ago", diff.num_hours())
+            } else {
+                format!("{}d ago", diff.num_days())
+            }
+        }
+        None => "N/A".to_string(),
+    }
 }
 
 fn draw_dashboard_network(f: &mut Frame, tab: &DashboardTab, p: &ThemePalette, area: Rect) {
@@ -1090,16 +1301,43 @@ fn draw_peers_list(f: &mut Frame, tab: &mut PeersTab, p: &ThemePalette, area: Re
         (area, None)
     };
 
-    let header = Row::new(vec![Cell::from("Pubkey"), Cell::from("Address")])
-        .style(Style::default().fg(p.label).add_modifier(Modifier::BOLD));
+    let header = Row::new(vec![
+        Cell::from("Node Name"),
+        Cell::from("Pubkey"),
+        Cell::from("Address"),
+        Cell::from("Last Seen"),
+    ])
+    .style(Style::default().fg(p.label).add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = tab
         .peers
         .iter()
         .map(|peer| {
+            let pk = format!("{}", peer.pubkey);
+            let extra = tab.node_extra.get(&pk);
+            let node_name = extra
+                .map(|e| {
+                    if e.node_name.is_empty() {
+                        "-".to_string()
+                    } else {
+                        e.node_name.clone()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let last_seen = extra
+                .map(|e| {
+                    if e.timestamp == 0 {
+                        "-".to_string()
+                    } else {
+                        format_timestamp(e.timestamp)
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
             Row::new(vec![
-                Cell::from(truncate_hex(&format!("{}", peer.pubkey), 24)),
+                Cell::from(node_name),
+                Cell::from(truncate_hex(&pk, 20)),
                 Cell::from(peer.address.clone()),
+                Cell::from(last_seen),
             ])
         })
         .collect();
@@ -1117,17 +1355,25 @@ fn draw_peers_list(f: &mut Frame, tab: &mut PeersTab, p: &ThemePalette, area: Re
         search_label,
     );
 
-    let table = Table::new(rows, [Constraint::Length(26), Constraint::Min(30)])
-        .header(header)
-        .row_highlight_style(highlight_style(p))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(title)
-                .border_style(Style::default().fg(p.border))
-                .title_style(Style::default().fg(p.text_primary)),
-        );
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(14), // Node Name
+            Constraint::Length(22), // Pubkey
+            Constraint::Min(30),    // Address
+            Constraint::Length(21), // Last Seen
+        ],
+    )
+    .header(header)
+    .row_highlight_style(highlight_style(p))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(title)
+            .border_style(Style::default().fg(p.border))
+            .title_style(Style::default().fg(p.text_primary)),
+    );
 
     f.render_stateful_widget(table, table_area, &mut tab.table_state);
 

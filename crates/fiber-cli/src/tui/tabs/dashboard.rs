@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use fiber_json_types::{Channel, ChannelInfo, NodeInfo as GraphNodeInfo, NodeInfoResult};
+use fiber_json_types::{
+    AssetFeeReport, Channel, ChannelInfo, FeeReportResult, ForwardingEventInfo,
+    ForwardingHistoryResult, NodeInfo as GraphNodeInfo, NodeInfoResult,
+};
 
 /// Aggregated stats computed client-side from channel data + node info.
 #[derive(Debug, Clone, Default)]
@@ -76,9 +79,24 @@ pub struct OtherConnection {
     pub active_count: usize,
 }
 
+/// Fee statistics derived from the fee_report and forwarding_history RPCs.
+#[derive(Debug, Clone, Default)]
+pub struct FeeStats {
+    /// CKB fee report (daily/weekly/monthly sums and event counts).
+    pub ckb_report: Option<AssetFeeReport>,
+    /// UDT fee reports (one per UDT asset type).
+    pub udt_reports: Vec<AssetFeeReport>,
+    /// Recent forwarding events (most recent first, capped).
+    pub recent_events: Vec<ForwardingEventInfo>,
+    /// Total forwarding event count from the server.
+    pub total_event_count: u64,
+}
+
 /// Dashboard tab state.
 pub struct DashboardTab {
     pub stats: DashboardStats,
+    /// Fee and forwarding statistics.
+    pub fee_stats: FeeStats,
     /// Network-wide stats derived from graph data.
     pub network_stats: NetworkStats,
     /// Label for the self node (empty if not found in graph).
@@ -95,6 +113,7 @@ impl DashboardTab {
     pub fn new() -> Self {
         Self {
             stats: DashboardStats::default(),
+            fee_stats: FeeStats::default(),
             network_stats: NetworkStats::default(),
             self_label: String::new(),
             self_degree: 0,
@@ -135,6 +154,32 @@ impl DashboardTab {
 
         stats.total_capacity = stats.total_local_balance + stats.total_remote_balance;
         self.stats = stats;
+    }
+
+    /// Update fee statistics from fee_report and forwarding_history RPC results.
+    pub fn update_fee_stats(
+        &mut self,
+        fee_report: Option<&FeeReportResult>,
+        forwarding_history: Option<&ForwardingHistoryResult>,
+    ) {
+        let mut fee_stats = FeeStats::default();
+
+        if let Some(report) = fee_report {
+            for asset_report in &report.asset_reports {
+                if asset_report.udt_type_script.is_none() {
+                    fee_stats.ckb_report = Some(asset_report.clone());
+                } else {
+                    fee_stats.udt_reports.push(asset_report.clone());
+                }
+            }
+        }
+
+        if let Some(history) = forwarding_history {
+            fee_stats.recent_events = history.events.clone();
+            fee_stats.total_event_count = history.total_count;
+        }
+
+        self.fee_stats = fee_stats;
     }
 
     /// Update network-wide stats and adjacency data from graph data.
