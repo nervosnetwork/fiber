@@ -19,6 +19,7 @@ rustyline = { version = "15", features = ["derive"] }
 anyhow = "1.0"
 colored = "2"
 indicatif = "0.17"
+toml = "0.8"
 fiber-json-types = { path = "../fiber-json-types" , features = ["cch", "watchtower"]}
 ckb-jsonrpc-types = "1"
 ratatui = "0.29"

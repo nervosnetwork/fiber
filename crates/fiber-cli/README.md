@@ -41,6 +41,37 @@ fnn-cli -u http://127.0.0.1:8227 --tui
 | `--color` | | `auto` | Color output: `auto`, `always`, or `never` |
 | `--no-banner` | | | Suppress the banner in interactive mode |
 | `--tui` | | | Launch the Terminal User Interface dashboard |
+| `--config` | | `~/.fnn/config.toml` | Path to config file |
+
+### Configuration Priority
+
+Configuration values are resolved in the following priority order (highest to lowest):
+
+```
+CLI flag > Environment variable > Config file > Default value
+```
+
+### Configuration File
+
+Create `~/.fnn/config.toml` to store default values:
+
+```toml
+url = "http://192.168.1.100:8227"
+auth_token = "your-token-here"
+output_format = "yaml"
+```
+
+Supported config options:
+- `url` - RPC endpoint URL (without `http://` prefix is also accepted)
+- `auth_token` - Bearer token for RPC authentication
+- `output_format` - Output format (`yaml` or `json`)
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `FNN_RPC_URL` | RPC endpoint URL |
+| `FNN_AUTH_TOKEN` | Bearer token for RPC authentication |
 
 The auth token can also be set via the `FNN_AUTH_TOKEN` environment variable.
 
@@ -89,7 +120,7 @@ FNN> exit
 
 Features:
 - **Tab completion** for commands, subcommands, and `--flags`
-- **Command history** persisted to `~/.fnn_cli_history`
+- **Command history** persisted to `~/.fnn/history`
 - **Colored output** with syntax highlighting for JSON/YAML responses
 - **Shell-like quoting** — supports single quotes, double quotes, and backslash escaping
 
@@ -246,7 +277,7 @@ The TUI provides a real-time overview of your Fiber node with 7 tabs:
 | 4 | **Peers** | List/connect/disconnect peers with search |
 | 5 | **Invoices** | Create/list/lookup/cancel/parse invoices |
 | 6 | **Graph** | Browse network graph nodes and channels |
-| 7 | **Logs** | Persistent activity log (saved to `~/.fnn-cli/tui.log`) |
+| 7 | **Logs** | Persistent activity log (saved to `~/.fnn/tui.log`) |
 
 ### Keyboard Shortcuts
 
@@ -287,7 +318,7 @@ The TUI provides a real-time overview of your Fiber node with 7 tabs:
 - **Flash messages** -- success/error feedback appears in the footer after mutations (open channel, send payment, etc.) and fades after 5 seconds.
 - **Detail popups** -- press `Enter` on any item to see full details with word-wrapped values. Press `y` inside the popup to copy individual fields.
 - **Confirmation dialogs** -- destructive actions (shutdown/abandon channel, disconnect peer) require confirmation.
-- **Persistent logs** -- all activity is logged to `~/.fnn-cli/tui.log` and survives across sessions (last 2000 entries).
+- **Persistent logs** -- all activity is logged to `~/.fnn/tui.log` and survives across sessions (last 2000 entries).
 - **Network topology** -- the Dashboard tab shows an adjacency-list view of your node's peer connections and channel states.
 
 ## Getting Help

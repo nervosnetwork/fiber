@@ -34,6 +34,29 @@ use rustyline::{Context, Editor, Helper};
 const FNN_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8227";
 
+#[derive(Debug, Default, serde::Deserialize)]
+struct ConfigFile {
+    url: Option<String>,
+    auth_token: Option<String>,
+    output_format: Option<String>,
+}
+
+fn default_config_dir() -> std::path::PathBuf {
+    dirs_home_inner()
+        .map(|h| h.join(".fnn"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".fnn"))
+}
+
+fn default_config_path() -> std::path::PathBuf {
+    default_config_dir().join("config.toml")
+}
+
+fn load_config_file(path: &std::path::Path) -> Result<ConfigFile, anyhow::Error> {
+    let content = std::fs::read_to_string(path)?;
+    let config: ConfigFile = toml::from_str(&content)?;
+    Ok(config)
+}
+
 const BANNER_LINES: &[&str] = &[
     r"  ╔═╗╦╔╗ ╔═╗╦═╗  ╔╗╔╔═╗╔╦╗╦ ╦╔═╗╦═╗╦╔═ ",
     r"  ╠╣ ║╠╩╗║╣ ╠╦╝  ║║║║╣  ║ ║║║║ ║╠╦╝╠╩╗ ",
@@ -57,12 +80,18 @@ fn build_cli() -> Command {
         .version(FNN_CLI_VERSION)
         .styles(cli_styles())
         .arg(
+            Arg::new("config")
+                .long("config")
+                .global(true)
+                .value_name("FILE")
+                .help("Path to config file (default: ~/.fnn/config.toml)"),
+        )
+        .arg(
             Arg::new("url")
                 .long("url")
                 .short('u')
                 .global(true)
-                .default_value(DEFAULT_RPC_URL)
-                .help("The RPC endpoint URL"),
+                .help("The RPC endpoint URL (default: http://127.0.0.1:8227, can also set via FNN_RPC_URL env or config file)"),
         )
         .arg(
             Arg::new("raw_data")
@@ -76,8 +105,7 @@ fn build_cli() -> Command {
                 .long("output-format")
                 .short('o')
                 .global(true)
-                .default_value("yaml")
-                .help("Output format: json or yaml"),
+                .help("Output format: json or yaml (default: yaml, can also set via config file)"),
         )
         .arg(
             Arg::new("no_banner")
@@ -404,7 +432,7 @@ async fn run_interactive(
         .build();
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(helper));
-    let history_path = dirs_home().join(".fnn_cli_history");
+    let history_path = default_config_dir().join("history");
     let _ = rl.load_history(&history_path);
 
     loop {
@@ -513,10 +541,6 @@ fn shell_words(input: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
-fn dirs_home() -> std::path::PathBuf {
-    dirs_home_inner().unwrap_or_else(|| std::path::PathBuf::from("."))
-}
-
 fn dirs_home_inner() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -533,14 +557,61 @@ async fn main() -> Result<()> {
     let cli = build_cli();
     let matches = cli.get_matches();
 
-    let url = matches.get_one::<String>("url").unwrap().clone();
-    let raw_data = matches.get_flag("raw_data");
-    let output_format = matches.get_one::<String>("output_format").unwrap().clone();
-    let no_banner = matches.get_flag("no_banner");
-    let color_mode = matches.get_one::<String>("color").unwrap().clone();
+    // Load config file if exists (default: ~/.fnn/config.toml)
+    // Priority: CLI arg > env > config file > default
+    let config_file_path = matches
+        .get_one::<String>("config")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(default_config_path);
 
-    // Resolve auth token: --auth-token > --auth-token-file > FNN_AUTH_TOKEN env
-    let auth_token = match matches.get_one::<String>("auth_token").cloned() {
+    let config_file = match load_config_file(&config_file_path) {
+        Ok(cfg) => Some(cfg),
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .map(|e| e.kind() == std::io::ErrorKind::NotFound)
+                .unwrap_or(false) =>
+        {
+            // Config file not found - this is fine, use defaults
+            None
+        }
+        Err(e) => {
+            eprintln!("[config] Failed to load from {:?}: {}", config_file_path, e);
+            None
+        }
+    };
+
+    // Resolve URL: CLI > env > config file > default
+    let url = matches
+        .get_one::<String>("url")
+        .cloned()
+        .or_else(|| std::env::var("FNN_RPC_URL").ok())
+        .or_else(|| config_file.as_ref()?.url.clone())
+        .unwrap_or_else(|| DEFAULT_RPC_URL.to_string());
+
+    // Ensure URL has http:// prefix
+    let url = if url.starts_with("http://") || url.starts_with("https://") {
+        url
+    } else {
+        format!("http://{}", url)
+    };
+
+    let raw_data = matches.get_flag("raw_data");
+
+    // Resolve output_format: CLI > config file > default
+    let output_format = matches
+        .get_one::<String>("output_format")
+        .cloned()
+        .or_else(|| config_file.as_ref().and_then(|c| c.output_format.clone()))
+        .unwrap_or_else(|| "yaml".to_string());
+
+    let no_banner = matches.get_flag("no_banner");
+    let color_mode = matches.get_one::<String>("color").cloned().unwrap();
+
+    // Resolve auth token: CLI > env > config file
+    // Priority: --auth-token > --auth-token-file > FNN_AUTH_TOKEN env > config file
+    let auth_token_from_cli = matches.get_one::<String>("auth_token").cloned();
+    let auth_token_from_file = config_file.as_ref().and_then(|c| c.auth_token.clone());
+    let auth_token = match auth_token_from_cli {
         Some(token) => Some(token),
         None => match matches.get_one::<String>("auth_token_file") {
             Some(path) => {
@@ -549,7 +620,7 @@ async fn main() -> Result<()> {
                 })?;
                 Some(content)
             }
-            None => None,
+            None => auth_token_from_file,
         },
     };
 

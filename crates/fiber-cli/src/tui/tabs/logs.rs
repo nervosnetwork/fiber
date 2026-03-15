@@ -1,6 +1,6 @@
 //! Logs/Events tab: displays a scrollable event log.
 //!
-//! Logs are persisted to a file (`~/.fnn-cli/tui.log`) so that they survive
+//! Logs are persisted to a file (`~/.fnn/tui.log`) so that they survive
 //! across TUI sessions.  Previous entries are loaded on startup and new ones
 //! are appended in real time.
 
@@ -71,13 +71,13 @@ impl LogsTab {
         tab
     }
 
-    /// Resolve the log file path: `~/.fnn-cli/tui.log`.
+    /// Resolve the log file path: `~/.fnn/tui.log`.
     fn resolve_log_path() -> Option<PathBuf> {
         let home = std::env::var("HOME")
             .ok()
             .map(PathBuf::from)
             .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))?;
-        let dir = home.join(".fnn-cli");
+        let dir = home.join(".fnn");
         if !dir.exists() {
             fs::create_dir_all(&dir).ok()?;
         }
@@ -114,7 +114,7 @@ impl LogsTab {
         }
     }
 
-    /// Parse a single persisted log line back into a `LogEntry`.
+    /// Parse a single persisted log line back into a `LogEntry`
     fn parse_log_line(line: &str) -> Option<LogEntry> {
         // Expected: "HH:MM:SS LEVEL rest of message"
         let timestamp = line.get(..8)?;
