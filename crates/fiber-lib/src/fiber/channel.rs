@@ -177,6 +177,8 @@ pub enum ChannelCommand {
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     NotifyEvent(ChannelEvent),
     #[cfg(any(test, feature = "bench"))]
+    SetDeferPeerTlcUpdates(bool),
+    #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
 }
 
@@ -192,6 +194,10 @@ impl Display for ChannelCommand {
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::NotifyEvent(event) => write!(f, "NotifyEvent [{:?}]", event),
+            #[cfg(any(test, feature = "bench"))]
+            ChannelCommand::SetDeferPeerTlcUpdates(enabled) => {
+                write!(f, "SetDeferPeerTlcUpdates [{enabled}]")
+            }
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -2339,6 +2345,15 @@ where
                 Ok(())
             }
             ChannelCommand::NotifyEvent(event) => self.handle_event(myself, state, event).await,
+            #[cfg(any(test, feature = "bench"))]
+            ChannelCommand::SetDeferPeerTlcUpdates(enabled) => {
+                if enabled {
+                    state.start_defer_peer_tlc_updates();
+                } else {
+                    state.stop_defer_peer_tlc_updates();
+                }
+                Ok(())
+            }
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(reload_params) => {
                 let private_key = state.private_key.clone();
