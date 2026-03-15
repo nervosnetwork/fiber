@@ -6537,6 +6537,14 @@ async fn test_reestablish_restores_send_nonce() {
         "  Verify Nonce: {:?}",
         state.remote_revocation_nonce_for_verify.is_some()
     );
+    assert!(
+        state.remote_revocation_nonce_for_send.is_some(),
+        "node_b should restore send nonce after reestablish"
+    );
+    assert!(
+        state.remote_revocation_nonce_for_verify.is_some(),
+        "node_b should retain verify nonce after reestablish"
+    );
 
     let state_a = node_a.get_channel_actor_state(channel_id);
     println!("Node A State:");
@@ -6556,16 +6564,25 @@ async fn test_reestablish_restores_send_nonce() {
         "  Verify Nonce: {:?}",
         state_a.remote_revocation_nonce_for_verify.is_some()
     );
+    assert!(
+        state_a.remote_revocation_nonce_for_send.is_some(),
+        "node_a should have a send nonce after reestablish completes"
+    );
+    assert!(
+        state_a.remote_revocation_nonce_for_verify.is_some(),
+        "node_a should have a verify nonce after reestablish completes"
+    );
 
     // Further verification: A can send another payment.
-    // Use a new payment to differentiate.
-    let res = node_a.send_payment_keysend(&node_b, 2000, false).await;
-    let err_string = res.unwrap_err().to_string();
-    println!("err: {err_string}");
-    // check error string
-    assert!(err_string.contains(
-        "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
-    ));
+    let second_payment_hash = node_a
+        .send_payment_keysend(&node_b, 2000, false)
+        .await
+        .expect("send should succeed after send nonce is restored")
+        .payment_hash;
+    node_a.wait_until_success(second_payment_hash).await;
+    node_a
+        .assert_payment_status(second_payment_hash, PaymentStatus::Success, None)
+        .await;
 }
 
 /// Bidirectional pending operations during reestablish.
