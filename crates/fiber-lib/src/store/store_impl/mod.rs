@@ -1,7 +1,7 @@
 #[cfg(feature = "watchtower")]
 use ckb_types::packed::Script;
 
-use crate::store::store_trait::FiberStore;
+use crate::store::store_trait::{FiberStore, PrefixIterOptions};
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
 
@@ -162,7 +162,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         }
     }
 
-    for KVPair { key, value } in store.prefix_iterator(&[]) {
+    for KVPair { key, value } in store.prefix_iter(&[]) {
         if key.is_empty() {
             errors.insert("Encountered empty key".to_string());
             continue;
@@ -544,7 +544,7 @@ impl ChannelActorStateStore for Store {
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
         let pubkey_bytes = pubkey.serialize();
         let prefix = [&[PUBKEY_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..]].concat();
-        let iter = self.prefix_iterator(&prefix);
+        let iter = self.prefix_iter(&prefix);
         iter.into_iter()
             .map(|kv| {
                 let channel_id: [u8; 32] = kv.key[prefix.len()..]
@@ -563,7 +563,7 @@ impl ChannelActorStateStore for Store {
             }
             None => vec![PUBKEY_CHANNEL_ID_PREFIX],
         };
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .map(|kv| {
                 let key_len = kv.key.len();
@@ -627,7 +627,7 @@ impl ChannelActorStateStore for Store {
 
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc> {
         let prefix = [&[HOLD_TLC_PREFIX], payment_hash.as_ref()].concat();
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .map(|kv| {
                 let (_, hold_tlc) = parse_hold_tlc(&kv.key, &kv.value);
@@ -638,7 +638,7 @@ impl ChannelActorStateStore for Store {
 
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>> {
         let prefix = [HOLD_TLC_PREFIX];
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .map(|kv| parse_hold_tlc(&kv.key, &kv.value))
             .fold(
@@ -680,7 +680,7 @@ impl ChannelActorStateStore for Store {
 impl ChannelOpenRecordStore for Store {
     fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord> {
         let prefix = [CHANNEL_OPEN_RECORD_PREFIX];
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelOpenRecord"))
             .collect()
@@ -794,7 +794,8 @@ impl PreimageStore for Store {
             // Try to get the preimage from watchtower store
             .or_else(|| {
                 let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
-                let iter = self.prefix_iterator_with_limit(prefix.as_slice(), 1);
+                let iter =
+                    self.prefix_iter_with(prefix.as_slice(), PrefixIterOptions::new().limit(1));
                 iter.into_iter()
                     .next()
                     .map(|kv| deserialize_from(kv.value.as_ref(), "Watchtower Preimage"))
@@ -819,7 +820,7 @@ impl NetworkGraphStateStore for Store {
 
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
@@ -830,7 +831,7 @@ impl NetworkGraphStateStore for Store {
 
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .filter_map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
@@ -855,14 +856,14 @@ impl NetworkGraphStateStore for Store {
                 let start_key = [&[PAYMENT_SESSION_PREFIX], after_hash.as_ref()].concat();
                 // Start from the `after` key and skip it (exclusive cursor)
                 let after_hash_owned = after_hash;
-                self.prefix_iterator_with_skip_while_and_start(
+                self.prefix_iter_with(
                     &prefix,
-                    Some(&start_key),
-                    IteratorDirection::Forward,
-                    Box::new(move |key| {
-                        // Skip the cursor key itself (keys are [prefix][hash])
-                        key.len() > 1 && key[1..] == *after_hash_owned.as_ref()
-                    }),
+                    PrefixIterOptions::new()
+                        .start_key(&start_key)
+                        .skip_while(Box::new(move |key| {
+                            // Skip the cursor key itself (keys are [prefix][hash])
+                            key.len() > 1 && key[1..] == *after_hash_owned.as_ref()
+                        })),
                 )
                 .into_iter()
                 .filter_map(|kv| {
@@ -877,7 +878,7 @@ impl NetworkGraphStateStore for Store {
                 .collect()
             }
             None => self
-                .prefix_iterator(&prefix)
+                .prefix_iter(&prefix)
                 .into_iter()
                 .filter_map(|kv| {
                     let session: PaymentSession =
@@ -942,7 +943,7 @@ impl NetworkGraphStateStore for Store {
 
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
             .collect()
@@ -954,7 +955,7 @@ impl NetworkGraphStateStore for Store {
 
         // Get attempts to find their channel index entries
         let attempts: Vec<_> = self
-            .prefix_iterator(&prefix)
+            .prefix_iter(&prefix)
             .into_iter()
             .map(|kv| {
                 (
@@ -988,7 +989,7 @@ impl NetworkGraphStateStore for Store {
 
         // Get attempts to find their channel index entries
         let attempts: Vec<Attempt> = self
-            .prefix_iterator(&prefix)
+            .prefix_iter(&prefix)
             .into_iter()
             .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
             .collect();
@@ -1016,7 +1017,7 @@ impl NetworkGraphStateStore for Store {
     ) -> Vec<Attempt> {
         let prefix = [&[ATTEMPT_CHANNEL_INDEX_PREFIX], channel_outpoint.as_slice()].concat();
 
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .filter_map(|kv| {
                 // Key format: [PREFIX, channel_outpoint(36 bytes), payment_hash(32 bytes), attempt_id(8 bytes)]
@@ -1076,7 +1077,7 @@ impl NetworkGraphStateStore for Store {
         ]
         .concat();
         let mut batch = self.batch();
-        for kv in self.prefix_iterator(&prefix) {
+        for kv in self.prefix_iter(&prefix) {
             batch.delete(kv.key);
         }
         batch.commit();
@@ -1084,7 +1085,7 @@ impl NetworkGraphStateStore for Store {
 
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)> {
         let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
-        let iter = self.prefix_iterator(&prefix);
+        let iter = self.prefix_iter(&prefix);
         iter.into_iter()
             .map(|kv| {
                 let channel_outpoint: OutPoint = OutPoint::from_slice(&kv.key[1..=36])
@@ -1101,7 +1102,7 @@ impl NetworkGraphStateStore for Store {
 impl WatchtowerStore for Store {
     fn get_watch_channels(&self) -> Vec<ChannelData> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
-        self.prefix_iterator(&prefix)
+        self.prefix_iter(&prefix)
             .into_iter()
             .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelData"))
             .collect()
@@ -1261,7 +1262,7 @@ impl WatchtowerStore for Store {
     fn get_watch_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
         // The preimage is verified before insert_watch_preimage, so we can just pick one.
         let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
-        let iter = self.prefix_iterator_with_limit(prefix.as_slice(), 1);
+        let iter = self.prefix_iter_with(prefix.as_slice(), PrefixIterOptions::new().limit(1));
         iter.into_iter()
             .next()
             .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
@@ -1269,7 +1270,7 @@ impl WatchtowerStore for Store {
 
     fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
         let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash_prefix].concat();
-        let iter = self.prefix_iterator_with_limit(prefix.as_slice(), 1);
+        let iter = self.prefix_iter_with(prefix.as_slice(), PrefixIterOptions::new().limit(1));
         iter.into_iter()
             .next()
             .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
@@ -1298,11 +1299,11 @@ impl GossipMessageStore for Store {
         let start = [&prefix, cursor.as_slice()].concat();
         let start_cloned = start.clone();
         // We should skip the value with the same cursor (after_cursor is exclusive).
-        self.prefix_iterator_with_skip_while_and_start(
+        self.prefix_iter_with(
             &prefix,
-            Some(&start),
-            IteratorDirection::Forward,
-            Box::new(move |key: &[u8]| key == start_cloned),
+            PrefixIterOptions::new()
+                .start_key(&start)
+                .skip_while(Box::new(move |key: &[u8]| key == start_cloned)),
         )
         .into_iter()
         .map(|kv| {
@@ -1329,19 +1330,13 @@ impl GossipMessageStore for Store {
 
     fn get_latest_broadcast_message_cursor(&self) -> Option<Cursor> {
         let prefix = vec![BROADCAST_MESSAGE_PREFIX];
-        self.prefix_iterator_with_skip_while_and_start_and_limit(
-            &prefix,
-            None,
-            IteratorDirection::Reverse,
-            Box::new(|_| false),
-            1,
-        )
-        .into_iter()
-        .next()
-        .map(|kv| {
-            let last_key = kv.key.to_vec();
-            Cursor::from_bytes(&last_key[1..]).expect("deserialize Cursor should be OK")
-        })
+        self.prefix_iter_with(&prefix, PrefixIterOptions::new().reverse().limit(1))
+            .into_iter()
+            .next()
+            .map(|kv| {
+                let last_key = kv.key.to_vec();
+                Cursor::from_bytes(&last_key[1..]).expect("deserialize Cursor should be OK")
+            })
     }
 
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64> {
@@ -1540,7 +1535,7 @@ impl GossipMessageStore for Store {
     fn get_channel_timestamps_iter(&self) -> impl IntoIterator<Item = (OutPoint, [u64; 3])> {
         // 0 is used to get timestamps for channels instead of node announcements.
         const PREFIX: [u8; 2] = [BROADCAST_MESSAGE_TIMESTAMP_PREFIX, 0];
-        self.prefix_iterator(&PREFIX).into_iter().map(|kv| {
+        self.prefix_iter(&PREFIX).into_iter().map(|kv| {
             let outpoint =
                 OutPoint::from_slice(&kv.key[2..]).expect("deserialize OutPoint should be OK");
             assert_eq!(kv.value.len(), 24);
@@ -1592,7 +1587,7 @@ impl CchOrderStore for Store {
     fn get_cch_order_keys_iter(&self) -> impl IntoIterator<Item = Hash256> {
         const PREFIX_LEN: usize = 1;
         const PREFIX: [u8; PREFIX_LEN] = [CCH_ORDER_PREFIX];
-        self.prefix_iterator(&PREFIX).into_iter().map(|kv| {
+        self.prefix_iter(&PREFIX).into_iter().map(|kv| {
             Hash256::try_from(&kv.key[PREFIX_LEN..]).expect("CchOrder key must be Hash256")
         })
     }

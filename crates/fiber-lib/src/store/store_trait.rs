@@ -1,8 +1,76 @@
 use fiber_store::backend::StorageBackend;
 use fiber_store::iterator::{IteratorDirection, KVPair};
 
-/// Type alias for the `skip_while` predicate used by `prefix_iterator_with_skip_while_and_start`.
+/// Type alias for the `skip_while` predicate used by [`PrefixIterOptions`].
 pub type SkipWhileFn = Box<dyn Fn(&[u8]) -> bool + Send + 'static>;
+
+/// Builder for prefix iteration options, modelled after `std::fs::OpenOptions`.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Limit to 1 result:
+/// self.prefix_iter_with(&prefix, PrefixIterOptions::new().limit(1))
+///
+/// // Reverse scan with limit:
+/// self.prefix_iter_with(&prefix, PrefixIterOptions::new().reverse().limit(1))
+///
+/// // Paginated forward scan, skipping the cursor key:
+/// let start = cursor_key.clone();
+/// self.prefix_iter_with(&prefix, PrefixIterOptions::new()
+///     .start_key(&cursor_key)
+///     .skip_while(Box::new(move |key| key == start)))
+/// ```
+pub struct PrefixIterOptions<'a> {
+    pub(crate) direction: IteratorDirection,
+    pub(crate) start_key: Option<&'a [u8]>,
+    pub(crate) skip_while: Option<SkipWhileFn>,
+    pub(crate) limit: usize,
+}
+
+impl<'a> PrefixIterOptions<'a> {
+    /// Create options with defaults: forward direction, no start key,
+    /// no skip_while, no limit.
+    pub fn new() -> Self {
+        Self {
+            direction: IteratorDirection::Forward,
+            start_key: None,
+            skip_while: None,
+            limit: 0,
+        }
+    }
+
+    /// Set the iteration direction to reverse.
+    pub fn reverse(mut self) -> Self {
+        self.direction = IteratorDirection::Reverse;
+        self
+    }
+
+    /// Start iteration from the given key instead of the prefix boundary.
+    pub fn start_key(mut self, key: &'a [u8]) -> Self {
+        self.start_key = Some(key);
+        self
+    }
+
+    /// Skip entries at the start while the predicate returns true.
+    /// Once a key fails the predicate, all subsequent entries are kept.
+    pub fn skip_while(mut self, f: SkipWhileFn) -> Self {
+        self.skip_while = Some(f);
+        self
+    }
+
+    /// Cap the number of entries returned. 0 means no limit (the default).
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = n;
+        self
+    }
+}
+
+impl Default for PrefixIterOptions<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Trait that extends `StorageBackend` with convenience iterator methods
 /// used by the domain store trait implementations.
@@ -13,57 +81,31 @@ pub type SkipWhileFn = Box<dyn Fn(&[u8]) -> bool + Send + 'static>;
 /// in terms of these convenience methods.
 pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
     /// Collect all entries whose key starts with `prefix`, in forward order.
-    fn prefix_iterator(&self, prefix: &[u8]) -> Vec<KVPair> {
-        self.prefix_iterator_with_limit(prefix, 0)
-    }
-
-    /// Like `prefix_iterator`, but caps the number of entries returned.
-    ///
-    /// `limit` = 0 means no limit.
-    fn prefix_iterator_with_limit(&self, prefix: &[u8], limit: usize) -> Vec<KVPair> {
+    fn prefix_iter(&self, prefix: &[u8]) -> Vec<KVPair> {
         let prefix_owned = prefix.to_vec();
         self.collect_iterator(
             prefix.to_vec(),
             IteratorDirection::Forward,
             Box::new(move |key| key.starts_with(&prefix_owned)),
-            limit,
+            0,
         )
     }
 
-    /// Collect entries with `prefix`, starting from `start_key` in the given `direction`,
-    /// skipping entries while `skip_while` returns true.
+    /// Collect entries whose key starts with `prefix`, governed by `options`.
     ///
     /// `start_key` and `direction` semantics:
-    /// - `start_key = None, direction = Forward` → iterate from prefix start
-    /// - `start_key = None, direction = Reverse` → iterate from prefix end (last entry first)
-    /// - `start_key = Some(key), direction = Forward` → iterate forward from key
-    /// - `start_key = Some(key), direction = Reverse` → iterate backward from key
-    fn prefix_iterator_with_skip_while_and_start(
-        &self,
-        prefix: &[u8],
-        start_key: Option<&[u8]>,
-        direction: IteratorDirection,
-        skip_while: SkipWhileFn,
-    ) -> Vec<KVPair> {
-        self.prefix_iterator_with_skip_while_and_start_and_limit(
-            prefix, start_key, direction, skip_while, 0,
-        )
-    }
+    /// - `start_key = None, Forward` → iterate from prefix start
+    /// - `start_key = None, Reverse` → iterate from prefix end (last entry first)
+    /// - `start_key = Some(key), Forward` → iterate forward from key
+    /// - `start_key = Some(key), Reverse` → iterate backward from key
+    fn prefix_iter_with(&self, prefix: &[u8], options: PrefixIterOptions<'_>) -> Vec<KVPair> {
+        let PrefixIterOptions {
+            direction,
+            start_key,
+            skip_while,
+            limit,
+        } = options;
 
-    /// Like `prefix_iterator_with_skip_while_and_start`, but caps the number
-    /// of entries collected from the backend *before* `skip_while` filtering.
-    ///
-    /// `limit` = 0 means no limit. When the caller knows both a `skip_while`
-    /// predicate and a result-count cap, pass the sum of the two as the limit
-    /// for an upper bound, or 0 to be safe.
-    fn prefix_iterator_with_skip_while_and_start_and_limit(
-        &self,
-        prefix: &[u8],
-        start_key: Option<&[u8]>,
-        direction: IteratorDirection,
-        skip_while: SkipWhileFn,
-        limit: usize,
-    ) -> Vec<KVPair> {
         let prefix_owned = prefix.to_vec();
 
         let start = match (start_key, direction) {
@@ -99,20 +141,25 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
             limit,
         );
 
-        // Apply skip_while post-collection.
-        let mut skipping = true;
-        results
-            .into_iter()
-            .filter(move |kv| {
-                if skipping {
-                    if skip_while(&kv.key) {
-                        return false;
-                    }
-                    skipping = false;
-                }
-                true
-            })
-            .collect()
+        // Apply skip_while post-collection, if provided.
+        match skip_while {
+            None => results,
+            Some(predicate) => {
+                let mut skipping = true;
+                results
+                    .into_iter()
+                    .filter(move |kv| {
+                        if skipping {
+                            if predicate(&kv.key) {
+                                return false;
+                            }
+                            skipping = false;
+                        }
+                        true
+                    })
+                    .collect()
+            }
+        }
     }
 }
 
