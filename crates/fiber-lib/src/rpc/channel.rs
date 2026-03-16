@@ -16,7 +16,6 @@ use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
     packed::{self},
     prelude::{IntoTransactionView, Unpack},
-    H256,
 };
 use fiber_json_types::serde_utils::CellDep;
 use fiber_types::{ChannelOpeningStatus, Pubkey, TLCId};
@@ -25,13 +24,14 @@ use jsonrpsee::proc_macros::rpc;
 
 use jsonrpsee::types::ErrorObjectOwned;
 use ractor::{call, ActorRef};
-use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 
 pub use fiber_json_types::{
     AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelState, Hash256,
     Htlc, ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
-    OpenChannelWithExternalFundingParams, ShutdownChannelParams, UpdateChannelParams,
+    OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
+    ShutdownChannelParams, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+    UpdateChannelParams,
 };
 
 fn rpc_cell_dep_to_packed(dep: CellDep) -> packed::CellDep {
@@ -40,41 +40,6 @@ fn rpc_cell_dep_to_packed(dep: CellDep) -> packed::CellDep {
         dep_type: dep.dep_type,
     }
     .into()
-}
-
-/// Result of opening a channel with external funding.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct OpenChannelWithExternalFundingResult {
-    /// The channel ID of the channel being opened.
-    /// Use this ID to submit the signed funding transaction.
-    pub channel_id: Hash256,
-
-    /// The final unsigned funding transaction that needs to be signed.
-    /// The user should sign this transaction with their wallet and submit it
-    /// using `submit_signed_funding_tx` directly, without changing structure.
-    pub unsigned_funding_tx: ckb_jsonrpc_types::Transaction,
-}
-
-/// Parameters for submitting a signed funding transaction for external funding.
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SubmitSignedFundingTxParams {
-    /// The channel ID returned from `open_channel_with_external_funding`.
-    pub channel_id: Hash256,
-
-    /// The signed funding transaction. This must be the same final transaction structure
-    /// that was returned from `open_channel_with_external_funding`, with valid
-    /// witnesses (signatures) added, and should be ready for direct broadcast.
-    pub signed_funding_tx: ckb_jsonrpc_types::Transaction,
-}
-
-/// Result of submitting a signed funding transaction.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SubmitSignedFundingTxResult {
-    /// The channel ID.
-    pub channel_id: Hash256,
-
-    /// The hash of the funding transaction that was submitted.
-    pub funding_tx_hash: H256,
 }
 
 /// RPC module for channel management.
@@ -654,7 +619,10 @@ where
         handle_actor_call!(self.actor, message, params).map(|response| {
             OpenChannelWithExternalFundingResult {
                 channel_id: response.channel_id.into(),
-                unsigned_funding_tx: response.unsigned_funding_tx.into(),
+                unsigned_funding_tx: serde_json::to_value(ckb_jsonrpc_types::Transaction::from(
+                    response.unsigned_funding_tx,
+                ))
+                .expect("serialize funding transaction to json value"),
             }
         })
     }
@@ -665,7 +633,10 @@ where
         params: SubmitSignedFundingTxParams,
     ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
-        let signed_tx: packed::Transaction = params.signed_funding_tx.clone().into();
+        let signed_tx_json: ckb_jsonrpc_types::Transaction =
+            serde_json::from_value(params.signed_funding_tx.clone())
+                .map_err(|err| rpc_error(err.to_string(), Some(params.clone())))?;
+        let signed_tx: packed::Transaction = signed_tx_json.into();
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
                 channel_id,
