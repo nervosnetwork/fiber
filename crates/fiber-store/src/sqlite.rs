@@ -168,23 +168,23 @@ impl BatchWriter for Batch {
     }
 
     fn commit(self) {
-        let conn = self.conn.lock().expect("lock poisoned");
-        conn.execute_batch("BEGIN").expect("begin transaction");
+        let mut conn = self.conn.lock().expect("lock poisoned");
+        let tx = conn.transaction().expect("begin transaction");
         for op in &self.operations {
             match op {
                 BatchOp::Put { key, value } => {
-                    conn.execute(
+                    tx.execute(
                         "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?1, ?2)",
                         rusqlite::params![key, value],
                     )
                     .expect("put should be ok");
                 }
                 BatchOp::Delete { key } => {
-                    conn.execute("DELETE FROM kv_store WHERE key = ?1", [key.as_slice()])
+                    tx.execute("DELETE FROM kv_store WHERE key = ?1", [key.as_slice()])
                         .expect("delete should be ok");
                 }
             }
         }
-        conn.execute_batch("COMMIT").expect("commit transaction");
+        tx.commit().expect("commit transaction");
     }
 }

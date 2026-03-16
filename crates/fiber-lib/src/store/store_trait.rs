@@ -12,21 +12,15 @@ pub type SkipWhileFn = Box<dyn Fn(&[u8]) -> bool + Send + 'static>;
 /// implementations (`ChannelActorStateStore`, `InvoiceStore`, etc.) are written
 /// in terms of these convenience methods.
 pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
-    /// Iterate all entries whose key starts with `prefix`, in forward order.
-    ///
-    /// Returns an owned iterator that does not borrow any input parameters.
-    fn prefix_iterator(&self, prefix: &[u8]) -> std::vec::IntoIter<KVPair> {
+    /// Collect all entries whose key starts with `prefix`, in forward order.
+    fn prefix_iterator(&self, prefix: &[u8]) -> Vec<KVPair> {
         self.prefix_iterator_with_limit(prefix, 0)
     }
 
     /// Like `prefix_iterator`, but caps the number of entries returned.
     ///
     /// `limit` = 0 means no limit.
-    fn prefix_iterator_with_limit(
-        &self,
-        prefix: &[u8],
-        limit: usize,
-    ) -> std::vec::IntoIter<KVPair> {
+    fn prefix_iterator_with_limit(&self, prefix: &[u8], limit: usize) -> Vec<KVPair> {
         let prefix_owned = prefix.to_vec();
         self.collect_iterator(
             prefix.to_vec(),
@@ -34,10 +28,9 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
             Box::new(move |key| key.starts_with(&prefix_owned)),
             limit,
         )
-        .into_iter()
     }
 
-    /// Iterate entries with `prefix`, starting from `start_key` in the given `direction`,
+    /// Collect entries with `prefix`, starting from `start_key` in the given `direction`,
     /// skipping entries while `skip_while` returns true.
     ///
     /// `start_key` and `direction` semantics:
@@ -45,15 +38,13 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
     /// - `start_key = None, direction = Reverse` → iterate from prefix end (last entry first)
     /// - `start_key = Some(key), direction = Forward` → iterate forward from key
     /// - `start_key = Some(key), direction = Reverse` → iterate backward from key
-    ///
-    /// Returns an owned iterator that does not borrow any input parameters.
     fn prefix_iterator_with_skip_while_and_start(
         &self,
         prefix: &[u8],
         start_key: Option<&[u8]>,
         direction: IteratorDirection,
         skip_while: SkipWhileFn,
-    ) -> std::vec::IntoIter<KVPair> {
+    ) -> Vec<KVPair> {
         self.prefix_iterator_with_skip_while_and_start_and_limit(
             prefix, start_key, direction, skip_while, 0,
         )
@@ -72,7 +63,7 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
         direction: IteratorDirection,
         skip_while: SkipWhileFn,
         limit: usize,
-    ) -> std::vec::IntoIter<KVPair> {
+    ) -> Vec<KVPair> {
         let prefix_owned = prefix.to_vec();
 
         let start = match (start_key, direction) {
@@ -121,8 +112,7 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
                 }
                 true
             })
-            .collect::<Vec<_>>()
-            .into_iter()
+            .collect()
     }
 }
 
