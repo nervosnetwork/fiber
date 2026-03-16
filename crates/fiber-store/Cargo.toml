@@ -22,7 +22,7 @@ rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 console = "0.16.0"
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
   "lz4",
-], default-features = false }
+], default-features = false, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 anyhow = "1.0.81"

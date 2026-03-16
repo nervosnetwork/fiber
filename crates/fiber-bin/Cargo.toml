@@ -8,6 +8,7 @@ name = "fnn"
 path = "src/main.rs"
 
 [features]
+default = ["fnn/rocksdb"]
 metrics = ["fnn/metrics"]
 sqlite = ["fnn/sqlite"]
 

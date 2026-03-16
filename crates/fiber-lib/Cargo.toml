@@ -24,7 +24,7 @@ clap-serde-derive = "0.2.1"
 either = "1.15.0"
 fiber-sphinx = "2.3"
 fiber-json-types = { path = "../fiber-json-types", features = ["all"] }
-fiber-store = { path = "../fiber-store" }
+fiber-store = { path = "../fiber-store", default-features = false }
 fiber-types = { path = "../fiber-types", features = ["cch", "watchtower"] }
 futures = "0.3.30"
 getrandom = "0.3"
@@ -112,6 +112,7 @@ web-time = { version = "1.1.0", features = ["serde"] }
 bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
 portable = ["fiber-store/portable"]
+rocksdb = ["fiber-store/rocksdb"]
 sample = ["fiber-types/sample"]
 sqlite = ["fiber-store/sqlite"]
 watchtower = []

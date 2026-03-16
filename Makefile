@@ -20,8 +20,8 @@ test:
 check:
 	cargo check --locked
 	cargo check --release --locked
-	cargo check --package fnn --no-default-features
-	cargo check --features sqlite $(NATIVE_PACKAGES)
+	cargo check --package fnn --no-default-features --features rocksdb
+	cargo check --no-default-features --features sqlite $(NATIVE_PACKAGES)
 	rustup target add wasm32-unknown-unknown
 	cargo check --target wasm32-unknown-unknown -p fiber-types --all-features
 	cd migrate && cargo check --locked
@@ -29,7 +29,7 @@ check:
 .PHONY: clippy
 clippy:
 	cargo clippy --all-targets --all-features $(NATIVE_PACKAGES) -- -D warnings
-	cargo clippy --features sqlite $(NATIVE_PACKAGES) -- -D warnings
+	cargo clippy --no-default-features --features sqlite $(NATIVE_PACKAGES) -- -D warnings
 	cargo clippy $(WASM_PACKAGES) --target wasm32-unknown-unknown -- -D warnings
 
 .PHONY: bless

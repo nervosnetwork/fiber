@@ -1,16 +1,28 @@
 pub mod backend;
-pub mod db_migrate;
 mod error;
 pub mod iterator;
-pub mod migration;
 
 pub use backend::{BatchWriter, StorageBackend};
 pub use error::StoreError;
 pub use iterator::{IteratorDirection, KVPair};
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "sqlite")))]
+// db_migrate and migration require a concrete Store backend
+#[cfg(any(feature = "rocksdb", feature = "sqlite", target_arch = "wasm32"))]
+pub mod db_migrate;
+#[cfg(any(feature = "rocksdb", feature = "sqlite", target_arch = "wasm32"))]
+pub mod migration;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "rocksdb",
+    not(feature = "sqlite")
+))]
 mod native;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "sqlite")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "rocksdb",
+    not(feature = "sqlite")
+))]
 pub use native::{Batch, Store};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
