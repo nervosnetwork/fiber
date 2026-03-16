@@ -1,6 +1,6 @@
 pub use rocksdb::Direction as DbDirection;
 pub use rocksdb::IteratorMode;
-use rocksdb::{prelude::*, DBCompressionType, WriteBatch, DB};
+use rocksdb::{checkpoint::Checkpoint, prelude::*, DBCompressionType, WriteBatch, DB};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -72,6 +72,10 @@ impl Store {
             IteratorMode::From(prefix, DbDirection::Forward),
             Box::new(|_| false),
         )
+    }
+
+    pub fn get_checkpoint(&self) -> Result<Checkpoint<'_>, Error> {
+        Checkpoint::new(&self.db)
     }
 }
 
