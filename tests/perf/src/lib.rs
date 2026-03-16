@@ -1250,6 +1250,32 @@ fn sum_gossip_metrics(snapshots: &[GossipMetricsSnapshot]) -> GossipMetricsSnaps
     total
 }
 
+fn now_timestamp_millis_u64() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn should_wait_for_next_channel_update_millis(last_sent_ms: Option<u64>, now_ms: u64) -> bool {
+    matches!(last_sent_ms, Some(last) if now_ms <= last)
+}
+
+async fn wait_for_monotonic_channel_update_timestamp(
+    channel_id: &str,
+    last_update_ms_by_channel: &mut HashMap<String, u64>,
+) {
+    // Gossip currently keys channel updates by `(channel_outpoint, timestamp)` cursor.
+    // If we emit multiple updates for the same channel within one millisecond, they can
+    // share the same cursor and be treated as conflicting/rejected updates.
+    // So in burst mode we enforce per-channel millisecond monotonicity here.
+    let last_sent_ms = last_update_ms_by_channel.get(channel_id).copied();
+    while should_wait_for_next_channel_update_millis(last_sent_ms, now_timestamp_millis_u64()) {
+        sleep(Duration::from_millis(1)).await;
+    }
+    last_update_ms_by_channel.insert(channel_id.to_string(), now_timestamp_millis_u64());
+}
+
 async fn build_gossip_workload_channels(
     ctx: &TestContext,
 ) -> TestResult<Vec<GossipWorkloadChannelResult>> {
@@ -1287,10 +1313,12 @@ async fn trigger_next_gossip_update(
     ctx: &TestContext,
     workload_channels: &mut [GossipWorkloadChannelResult],
     next_fee_by_channel: &mut HashMap<String, u128>,
+    last_update_ms_by_channel: &mut HashMap<String, u64>,
     workload_channel_index: &mut usize,
 ) -> TestResult<()> {
     let channel_index = *workload_channel_index % workload_channels.len();
     let channel_id = workload_channels[channel_index].channel_id.clone();
+    wait_for_monotonic_channel_update_timestamp(&channel_id, last_update_ms_by_channel).await;
     let next_fee = {
         let fee = next_fee_by_channel.get_mut(&channel_id).ok_or_else(|| {
             TestError::Assertion(format!("Missing fee tracker for channel {}", channel_id))
@@ -1369,6 +1397,8 @@ pub async fn run_gossip_benchmark_test(
         .iter()
         .map(|channel| (channel.channel_id.clone(), GOSSIP_UPDATE_FEE_BASE))
         .collect();
+    let mut last_update_ms_by_channel: HashMap<String, u64> =
+        HashMap::with_capacity(workload_channels.len());
     let mut workload_channel_index = 0usize;
 
     let mut total_updates = 0u64;
@@ -1386,6 +1416,7 @@ pub async fn run_gossip_benchmark_test(
                     &ctx,
                     &mut workload_channels,
                     &mut next_fee_by_channel,
+                    &mut last_update_ms_by_channel,
                     &mut workload_channel_index,
                 )
                 .await?;
@@ -1415,6 +1446,7 @@ pub async fn run_gossip_benchmark_test(
                 &ctx,
                 &mut workload_channels,
                 &mut next_fee_by_channel,
+                &mut last_update_ms_by_channel,
                 &mut workload_channel_index,
             )
             .await?;
@@ -2170,5 +2202,18 @@ fiber_gossip_propagation_applied_latency_ms_count{message_type="channel_update"}
         assert_f64_close(histogram.coverage_percent_le(50.0), 20.0, 1e-9);
         assert_f64_close(histogram.coverage_percent_le(200.0), 80.0, 1e-9);
         assert_f64_close(histogram.coverage_percent_le(500.0), 100.0, 1e-9);
+    }
+
+    #[test]
+    fn test_should_wait_for_next_channel_update_millis_when_timestamp_not_advanced() {
+        assert!(should_wait_for_next_channel_update_millis(Some(1_000), 1_000));
+        assert!(should_wait_for_next_channel_update_millis(Some(1_000), 999));
+        assert!(!should_wait_for_next_channel_update_millis(Some(1_000), 1_001));
+    }
+
+    #[test]
+    fn test_should_not_wait_for_first_channel_update_millis() {
+        assert!(!should_wait_for_next_channel_update_millis(None, 0));
+        assert!(!should_wait_for_next_channel_update_millis(None, 1_000));
     }
 }

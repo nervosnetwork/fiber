@@ -22,10 +22,10 @@ const GOSSIP_BENCH_NETWORK_INTERVAL_MS_ENV: &str = "GOSSIP_BENCH_NETWORK_INTERVA
 const GOSSIP_BENCH_STORE_INTERVAL_MS_ENV: &str = "GOSSIP_BENCH_STORE_INTERVAL_MS";
 const GOSSIP_BENCH_PROPAGATION_ROUNDS_ENV: &str = "GOSSIP_BENCH_PROPAGATION_ROUNDS";
 const GOSSIP_BENCH_WAIT_TIMEOUT_SECS_ENV: &str = "GOSSIP_BENCH_WAIT_TIMEOUT_SECS";
-// Benchmark default follows bench/test profile cadence (50ms/50ms).
-// Use env overrides to run production-like values (e.g. 60s/20s).
-const DEFAULT_GOSSIP_NETWORK_INTERVAL_MS: u64 = 50;
-const DEFAULT_GOSSIP_STORE_INTERVAL_MS: u64 = 50;
+// Benchmark defaults follow production gossip maintenance intervals (60s/20s).
+// Use env overrides for faster local iteration when needed.
+const DEFAULT_GOSSIP_NETWORK_INTERVAL_MS: u64 = 60_000;
+const DEFAULT_GOSSIP_STORE_INTERVAL_MS: u64 = 20_000;
 const DEFAULT_WAIT_TIMEOUT_SECS: u64 = 180;
 
 fn make_update_command(fee_rate: u64) -> UpdateCommand {
