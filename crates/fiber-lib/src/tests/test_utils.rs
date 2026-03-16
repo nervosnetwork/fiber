@@ -1795,7 +1795,7 @@ impl NetworkNode {
 
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ConnectPeer(peer_addr.clone(), false),
+                NetworkActorCommand::ConnectPeer(peer_addr.clone(), false, None),
             ))
             .expect("self alive");
     }

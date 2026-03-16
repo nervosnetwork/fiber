@@ -171,7 +171,7 @@ pub struct TlcNotification {
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
     FundingTxSigned(Transaction),
-    CommitmentSigned(),
+    CommitmentSigned(Option<RpcReplyPort<Result<(), String>>>),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<ProcessingChannelResult>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
@@ -187,7 +187,7 @@ impl Display for ChannelCommand {
         match self {
             ChannelCommand::TxCollaborationCommand(_) => write!(f, "TxCollaborationCommand"),
             ChannelCommand::FundingTxSigned(_) => write!(f, "FundingTxSigned"),
-            ChannelCommand::CommitmentSigned() => write!(f, "CommitmentSigned"),
+            ChannelCommand::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
             ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
@@ -203,6 +203,7 @@ impl Display for ChannelCommand {
 impl ChannelCommand {
     pub fn rpc_reply_port(self) -> Option<RpcReplyPort<Result<(), String>>> {
         match self {
+            ChannelCommand::CommitmentSigned(Some(port)) => Some(port),
             ChannelCommand::Shutdown(_, port) => Some(port),
             ChannelCommand::Update(_, port) => Some(port),
             _ => None,
@@ -2316,8 +2317,12 @@ where
                 }
                 Ok(())
             }
-            ChannelCommand::CommitmentSigned() => {
-                self.handle_commitment_signed_command(myself, state).await
+            ChannelCommand::CommitmentSigned(rpc_reply) => {
+                let result = self.handle_commitment_signed_command(myself, state).await;
+                if let Some(reply) = rpc_reply {
+                    let _ = reply.send(result.clone().map_err(|e| e.to_string()));
+                }
+                result
             }
             ChannelCommand::AddTlc(command, reply) => {
                 let res = self.handle_add_tlc_command(myself, state, &command).await;
@@ -6512,7 +6517,7 @@ impl ChannelActorState {
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                         channel_id: self.get_id(),
-                        command: ChannelCommand::CommitmentSigned(),
+                        command: ChannelCommand::CommitmentSigned(None),
                     }),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
