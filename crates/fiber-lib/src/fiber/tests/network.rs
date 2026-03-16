@@ -861,6 +861,88 @@ async fn test_inbound_peer_with_channel_does_not_consume_no_channel_peer_budget(
 }
 
 #[tokio::test]
+async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channel_peer() {
+    init_tracing();
+
+    let funding_amount = 9_900_000_000u128;
+    let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
+
+    let mut target = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.max_inbound_peers = Some(1);
+                config.min_outbound_peers = Some(0);
+                config.open_channel_auto_accept_min_ckb_funding_amount =
+                    open_channel_auto_accept_min_ckb_funding_amount;
+            })
+            .build(),
+    )
+    .await;
+    let mut old_peer = NetworkNode::new().await;
+    let mut new_peer = NetworkNode::new().await;
+
+    old_peer.connect_to(&mut target).await;
+    new_peer.connect_to(&mut target).await;
+
+    old_peer
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _reason) if id == &target.pubkey),
+        )
+        .await;
+
+    let peers = call!(target.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+    })
+    .expect("target alive")
+    .expect("list peers");
+    assert_eq!(
+        peers.len(),
+        1,
+        "target should only retain the newest inbound no-channel peer",
+    );
+    assert_eq!(
+        peers[0].pubkey, new_peer.pubkey,
+        "target should retain the new inbound peer after evicting the oldest no-channel peer",
+    );
+
+    let target_pubkey = target.pubkey;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: target_pubkey,
+                public: true,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(new_peer.network_actor, message)
+        .expect("new peer alive")
+        .expect("open channel");
+    target
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+                assert_eq!(pubkey, &new_peer.pubkey);
+                true
+            }
+            _ => false,
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn test_persisting_announced_nodes() {
     init_tracing();
 
