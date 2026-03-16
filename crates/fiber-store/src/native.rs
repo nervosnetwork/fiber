@@ -21,47 +21,31 @@ impl Store {
         let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
         Ok(Self { db })
     }
-
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.db
-            .get(key.as_ref())
-            .map(|v| v.map(|vi| vi.to_vec()))
-            .expect("get should be OK")
-    }
-
-    pub fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.db.delete(key).expect("Unexpected error from delete");
-    }
-
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        self.db.put(key, value).expect("put should be ok");
-    }
-
-    pub fn batch(&self) -> Batch {
-        Batch {
-            db: Arc::clone(&self.db),
-            wb: WriteBatch::default(),
-        }
-    }
 }
 
 impl StorageBackend for Store {
     type Batch = Batch;
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.get(key)
+        self.db
+            .get(key.as_ref())
+            .map(|v| v.map(|vi| vi.to_vec()))
+            .expect("get should be OK")
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        self.put(key, value)
+        self.db.put(key, value).expect("put should be ok");
     }
 
     fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.delete(key)
+        self.db.delete(key).expect("Unexpected error from delete");
     }
 
     fn batch(&self) -> Self::Batch {
-        self.batch()
+        Batch {
+            db: Arc::clone(&self.db),
+            wb: WriteBatch::default(),
+        }
     }
 
     fn collect_iterator(
@@ -105,20 +89,6 @@ impl StorageBackend for Store {
 pub struct Batch {
     db: Arc<DB>,
     wb: WriteBatch,
-}
-
-impl Batch {
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.wb.put(key, value).expect("put should be OK")
-    }
-
-    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
-        self.wb.delete(key.as_ref()).expect("delete should be OK");
-    }
-
-    pub fn commit(self) {
-        self.db.write(&self.wb).expect("commit should be OK");
-    }
 }
 
 impl BatchWriter for Batch {

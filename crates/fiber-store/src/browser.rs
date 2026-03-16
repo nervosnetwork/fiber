@@ -59,56 +59,6 @@ impl Store {
         Ok(Self { chan })
     }
 
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        return match self
-            .chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Read {
-                keys: vec![key.as_ref().to_vec()],
-            })
-            .unwrap()
-        {
-            DbCommandResponse::Read { mut values } => values.remove(0),
-            _ => unreachable!(),
-        };
-    }
-
-    pub fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        match self
-            .chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Delete {
-                keys: vec![key.as_ref().to_vec()],
-            })
-            .unwrap()
-        {
-            DbCommandResponse::Delete => {}
-            _ => unreachable!(),
-        };
-    }
-
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        match self
-            .chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Put {
-                kvs: vec![KV {
-                    key: key.as_ref().to_vec(),
-                    value: value.as_ref().to_vec(),
-                }],
-            })
-            .unwrap()
-        {
-            DbCommandResponse::Put => {}
-            _ => unreachable!(),
-        };
-    }
-
-    pub fn batch(&self) -> Batch {
-        Batch {
-            chan: self.chan.clone(),
-            delete: vec![],
-            puts: vec![],
-        }
-    }
-
     pub fn shutdown(self) {
         info!("Shutting down database Store..");
         let CommunicationChannel {
@@ -132,19 +82,53 @@ impl StorageBackend for Store {
     type Batch = Batch;
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.get(key)
+        return match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Read {
+                keys: vec![key.as_ref().to_vec()],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Read { mut values } => values.remove(0),
+            _ => unreachable!(),
+        };
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        self.put(key, value)
+        match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Put {
+                kvs: vec![KV {
+                    key: key.as_ref().to_vec(),
+                    value: value.as_ref().to_vec(),
+                }],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Put => {}
+            _ => unreachable!(),
+        };
     }
 
     fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.delete(key)
+        match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Delete {
+                keys: vec![key.as_ref().to_vec()],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Delete => {}
+            _ => unreachable!(),
+        };
     }
 
     fn batch(&self) -> Self::Batch {
-        self.batch()
+        Batch {
+            chan: self.chan.clone(),
+            delete: vec![],
+            puts: vec![],
+        }
     }
 
     fn collect_iterator(
@@ -189,28 +173,6 @@ pub struct Batch {
     chan: CommunicationChannel,
     puts: Vec<KV>,
     delete: Vec<Vec<u8>>,
-}
-
-impl Batch {
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.puts.push(KV {
-            key: key.as_ref().to_vec(),
-            value: value.as_ref().to_vec(),
-        });
-    }
-
-    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
-        self.delete.push(key.as_ref().to_vec());
-    }
-
-    pub fn commit(self) {
-        self.chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Delete { keys: self.delete })
-            .expect("Failed to delete batch");
-        self.chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Put { kvs: self.puts })
-            .expect("Failed to put batch");
-    }
 }
 
 impl BatchWriter for Batch {

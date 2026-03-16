@@ -2,7 +2,7 @@
 use ckb_types::packed::Script;
 
 use crate::store::store_trait::FiberStore;
-use fiber_store::backend::{StorageBackend, TakeWhileFn};
+use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
 
 use std::path::Path;

@@ -34,13 +34,14 @@ impl Store {
         .map_err(|e| e.to_string())?;
 
         // Create the key-value table.
-        // Note: PRIMARY KEY on `key` already creates an implicit B-tree index,
-        // so no additional index is needed for prefix/range scans on `key`.
+        // WITHOUT ROWID: stores rows directly in the PRIMARY KEY B-tree,
+        // eliminating the hidden rowid column and its separate B-tree.
+        // This is ideal for a key-value table where the key is always a BLOB.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS kv_store (
                  key BLOB PRIMARY KEY NOT NULL,
                  value BLOB NOT NULL
-             );",
+             ) WITHOUT ROWID;",
         )
         .map_err(|e| e.to_string())?;
 
@@ -48,8 +49,12 @@ impl Store {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+}
 
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
+impl StorageBackend for Store {
+    type Batch = Batch;
+
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
         let conn = self.conn.lock().expect("lock poisoned");
         match conn.query_row(
             "SELECT value FROM kv_store WHERE key = ?1",
@@ -62,7 +67,7 @@ impl Store {
         }
     }
 
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
         let conn = self.conn.lock().expect("lock poisoned");
         conn.execute(
             "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?1, ?2)",
@@ -71,37 +76,17 @@ impl Store {
         .expect("put should be ok");
     }
 
-    pub fn delete<K: AsRef<[u8]>>(&self, key: K) {
+    fn delete<K: AsRef<[u8]>>(&self, key: K) {
         let conn = self.conn.lock().expect("lock poisoned");
         conn.execute("DELETE FROM kv_store WHERE key = ?1", [key.as_ref()])
             .expect("delete should be ok");
     }
 
-    pub fn batch(&self) -> Batch {
+    fn batch(&self) -> Self::Batch {
         Batch {
             conn: Arc::clone(&self.conn),
             operations: Vec::new(),
         }
-    }
-}
-
-impl StorageBackend for Store {
-    type Batch = Batch;
-
-    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.get(key)
-    }
-
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        self.put(key, value)
-    }
-
-    fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.delete(key)
-    }
-
-    fn batch(&self) -> Self::Batch {
-        self.batch()
     }
 
     fn collect_iterator(
@@ -166,42 +151,6 @@ enum BatchOp {
 pub struct Batch {
     conn: Arc<Mutex<Connection>>,
     operations: Vec<BatchOp>,
-}
-
-impl Batch {
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.operations.push(BatchOp::Put {
-            key: key.as_ref().to_vec(),
-            value: value.as_ref().to_vec(),
-        });
-    }
-
-    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
-        self.operations.push(BatchOp::Delete {
-            key: key.as_ref().to_vec(),
-        });
-    }
-
-    pub fn commit(self) {
-        let conn = self.conn.lock().expect("lock poisoned");
-        conn.execute_batch("BEGIN").expect("begin transaction");
-        for op in &self.operations {
-            match op {
-                BatchOp::Put { key, value } => {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?1, ?2)",
-                        rusqlite::params![key, value],
-                    )
-                    .expect("put should be ok");
-                }
-                BatchOp::Delete { key } => {
-                    conn.execute("DELETE FROM kv_store WHERE key = ?1", [key.as_slice()])
-                        .expect("delete should be ok");
-                }
-            }
-        }
-        conn.execute_batch("COMMIT").expect("commit transaction");
-    }
 }
 
 impl BatchWriter for Batch {

@@ -80,14 +80,22 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
             (None, IteratorDirection::Forward) => prefix.to_vec(),
             (None, IteratorDirection::Reverse) => {
                 // For reverse iteration, start past the prefix range.
+                // Compute prefix + 1 (big-endian increment with carry).
                 let mut end_key = prefix.to_vec();
-                let last = end_key
-                    .last_mut()
-                    .expect("empty prefix with Reverse is not supported");
-                if *last < 0xFF {
-                    *last += 1;
-                } else {
-                    end_key.push(0xFF);
+                let mut carried = true;
+                for byte in end_key.iter_mut().rev() {
+                    if *byte < 0xFF {
+                        *byte += 1;
+                        carried = false;
+                        break;
+                    } else {
+                        *byte = 0x00;
+                    }
+                }
+                if carried {
+                    // Prefix was all 0xFF — use a key that sorts after
+                    // every possible extension of the prefix.
+                    end_key = vec![0xFF; prefix.len() + 1];
                 }
                 end_key
             }

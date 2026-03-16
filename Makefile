@@ -15,6 +15,7 @@ build-metrics-prof:
 .PHONY: test
 test:
 	RUST_LOG=off cargo nextest run --no-fail-fast $(NATIVE_PACKAGES)
+	RUST_LOG=off cargo nextest run --no-fail-fast --no-default-features --features sqlite $(NATIVE_PACKAGES)
 
 .PHONY: check
 check:
