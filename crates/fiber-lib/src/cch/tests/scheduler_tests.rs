@@ -184,12 +184,12 @@ async fn test_expiry_skips_final_orders() {
     let expiry_delta_seconds = 3600;
     let created_at = current_time - expiry_delta_seconds - 100;
 
-    // Create a final order (already succeeded)
+    // Create a final order (already success)
     let order = create_test_order(
         payment_hash,
         created_at,
         expiry_delta_seconds,
-        CchOrderStatus::Succeeded,
+        CchOrderStatus::Success,
     );
     store.insert_cch_order(order.clone()).unwrap();
 
@@ -204,9 +204,9 @@ async fn test_expiry_skips_final_orders() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Verify order status unchanged (still Succeeded)
+    // Verify order status unchanged (still Success)
     let order_after = store.get_cch_order(&payment_hash).unwrap();
-    assert_eq!(order_after.status, CchOrderStatus::Succeeded);
+    assert_eq!(order_after.status, CchOrderStatus::Success);
 }
 
 #[tokio::test]
@@ -226,7 +226,7 @@ async fn test_schedule_prune_job() {
         payment_hash,
         created_at,
         expiry_delta_seconds,
-        CchOrderStatus::Succeeded,
+        CchOrderStatus::Success,
     );
     store.insert_cch_order(order).unwrap();
 

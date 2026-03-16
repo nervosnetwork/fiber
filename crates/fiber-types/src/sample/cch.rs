@@ -16,7 +16,7 @@ impl StoreSample for CchOrderStatus {
             CchOrderStatus::IncomingAccepted,
             CchOrderStatus::OutgoingInFlight,
             CchOrderStatus::OutgoingSucceeded,
-            CchOrderStatus::Succeeded,
+            CchOrderStatus::Success,
             CchOrderStatus::Failed,
         ]
     }

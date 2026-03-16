@@ -78,7 +78,7 @@ impl ActionDispatcher {
             ],
             CchOrderStatus::OutgoingInFlight => vec![CchOrderAction::TrackOutgoingPayment],
             CchOrderStatus::OutgoingSucceeded => vec![CchOrderAction::SettleIncomingInvoice],
-            CchOrderStatus::Succeeded => vec![],
+            CchOrderStatus::Success => vec![],
             CchOrderStatus::Failed => vec![],
         }
     }

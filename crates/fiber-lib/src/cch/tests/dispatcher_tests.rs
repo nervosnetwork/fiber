@@ -142,8 +142,8 @@ fn test_on_entering_outgoing_succeeded_returns_settle_invoice() {
 }
 
 #[test]
-fn test_on_entering_succeeded_returns_empty() {
-    let order = create_order_with_lightning_invoice(CchOrderStatus::Succeeded);
+fn test_on_entering_success_returns_empty() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::Success);
     let actions = ActionDispatcher::on_entering(&order);
     assert!(actions.is_empty());
 }
@@ -216,8 +216,8 @@ fn test_send_outgoing_payment_should_not_dispatch_when_outgoing_in_flight() {
 }
 
 #[test]
-fn test_send_outgoing_payment_should_not_dispatch_when_succeeded() {
-    let order = create_order_with_lightning_invoice(CchOrderStatus::Succeeded);
+fn test_send_outgoing_payment_should_not_dispatch_when_success() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::Success);
     assert!(!SendOutgoingPaymentDispatcher::should_dispatch(&order));
 }
 
@@ -250,8 +250,8 @@ fn test_settle_incoming_invoice_should_not_dispatch_when_outgoing_in_flight() {
 }
 
 #[test]
-fn test_settle_incoming_invoice_should_not_dispatch_when_succeeded() {
-    let order = create_order_with_lightning_invoice(CchOrderStatus::Succeeded);
+fn test_settle_incoming_invoice_should_not_dispatch_when_success() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::Success);
     assert!(!SettleIncomingInvoiceDispatcher::should_dispatch(&order));
 }
 
@@ -284,8 +284,8 @@ fn test_track_incoming_invoice_should_dispatch_when_outgoing_succeeded() {
 }
 
 #[test]
-fn test_track_incoming_invoice_should_not_dispatch_when_succeeded() {
-    let order = create_order_with_lightning_invoice(CchOrderStatus::Succeeded);
+fn test_track_incoming_invoice_should_not_dispatch_when_success() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::Success);
     assert!(!TrackIncomingInvoiceDispatcher::should_dispatch(&order));
 }
 

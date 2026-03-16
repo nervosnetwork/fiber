@@ -20,7 +20,7 @@ pub enum CchOrderStatus {
     /// The outgoing payment is settled and preimage has been obtained.
     OutgoingSucceeded,
     /// Both payments are settled and the order succeeds.
-    Succeeded,
+    Success,
     /// Order is failed.
     Failed,
 }
