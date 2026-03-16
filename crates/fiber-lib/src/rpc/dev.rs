@@ -1,13 +1,10 @@
 // #[cfg(not(target_arch = "wasm32"))]
 // use crate::watchtower::WatchtowerStore;
-use crate::rpc::utils::rpc_error;
-use crate::{
-    fiber::{
-        channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
-        NetworkActorCommand, NetworkActorMessage,
-    },
-    handle_actor_cast,
+use crate::fiber::{
+    channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
+    NetworkActorCommand, NetworkActorMessage,
 };
+use crate::rpc::utils::rpc_error;
 use ckb_types::core::TransactionView;
 use ckb_types::prelude::Entity;
 use fiber_json_types::serde_utils::Hash256 as JsonHash256;
@@ -134,13 +131,15 @@ impl DevRpcServerImpl {
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id,
-                command: ChannelCommand::CommitmentSigned(),
-            },
-        ));
-        handle_actor_cast!(self.network_actor, message, params)
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::CommitmentSigned(Some(rpc_reply)),
+                },
+            ))
+        };
+        handle_actor_call!(self.network_actor, message, params)
     }
 
     pub async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
@@ -263,9 +262,12 @@ impl DevRpcServerImpl {
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
-        let message =
-            NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(channel_id));
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(
+                channel_id, rpc_reply,
+            ))
+        };
 
-        handle_actor_cast!(self.network_actor, message, params)
+        handle_actor_call!(self.network_actor, message, params)
     }
 }
