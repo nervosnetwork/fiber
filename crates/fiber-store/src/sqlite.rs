@@ -98,34 +98,28 @@ impl StorageBackend for Store {
     ) -> Vec<KVPair> {
         let conn = self.conn.lock().expect("lock poisoned");
 
-        // Build SQL with optional LIMIT clause so SQLite can stop scanning early.
-        // The take_while predicate may stop iteration before the SQL limit is
-        // reached, but having the SQL limit prevents unbounded scans when the
-        // caller already knows how many rows it needs.
-        let sql = match (direction, limit) {
-            (IteratorDirection::Forward, 0) => {
-                "SELECT key, value FROM kv_store WHERE key >= ?1 ORDER BY key ASC".to_string()
+        // Use LIMIT ?2 as a bind parameter so SQLite can cache the prepared
+        // statement across calls with different limit values.  A limit of -1
+        // means "no limit" in SQLite, so we map 0 (our "unlimited" sentinel)
+        // to -1.
+        let sql = match direction {
+            IteratorDirection::Forward => {
+                "SELECT key, value FROM kv_store WHERE key >= ?1 ORDER BY key ASC LIMIT ?2"
             }
-            (IteratorDirection::Forward, n) => {
-                format!(
-                    "SELECT key, value FROM kv_store WHERE key >= ?1 ORDER BY key ASC LIMIT {n}"
-                )
-            }
-            (IteratorDirection::Reverse, 0) => {
-                "SELECT key, value FROM kv_store WHERE key <= ?1 ORDER BY key DESC".to_string()
-            }
-            (IteratorDirection::Reverse, n) => {
-                format!(
-                    "SELECT key, value FROM kv_store WHERE key <= ?1 ORDER BY key DESC LIMIT {n}"
-                )
+            IteratorDirection::Reverse => {
+                "SELECT key, value FROM kv_store WHERE key <= ?1 ORDER BY key DESC LIMIT ?2"
             }
         };
+        let sql_limit: i64 = if limit == 0 { -1 } else { limit as i64 };
 
-        let mut stmt = conn.prepare(&sql).expect("prepare should be ok");
-        let mut rows = stmt.query([start.as_slice()]).expect("query should be ok");
+        let mut stmt = conn.prepare(sql).expect("prepare should be ok");
+        let mut rows = stmt
+            .query(rusqlite::params![start.as_slice(), sql_limit])
+            .expect("query should be ok");
 
-        // Consume rows lazily — take_while and limit are applied as we iterate,
-        // so we never materialize more rows than needed.
+        // Consume rows lazily — take_while is applied as we iterate and
+        // LIMIT is enforced by SQLite, so we never materialize more rows
+        // than needed.
         let mut results = Vec::new();
         while let Some(row) = rows.next().expect("row read failed") {
             let key: Vec<u8> = row.get(0).expect("get key failed");
@@ -134,9 +128,6 @@ impl StorageBackend for Store {
             }
             let value: Vec<u8> = row.get(1).expect("get value failed");
             results.push(KVPair { key, value });
-            if limit > 0 && results.len() >= limit {
-                break;
-            }
         }
         results
     }
