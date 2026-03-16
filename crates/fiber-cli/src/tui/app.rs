@@ -180,6 +180,8 @@ const FLASH_DURATION_SECS: u64 = 5;
 pub struct FetchResult {
     pub node_info: std::result::Result<NodeInfoResult, String>,
     pub channels: std::result::Result<Vec<Channel>, String>,
+    /// All channels including closed ones, for dashboard stats.
+    pub all_channels: std::result::Result<Vec<Channel>, String>,
     pub payments: std::result::Result<(Vec<GetPaymentCommandResult>, Option<Hash256>), String>,
     pub invoices: std::result::Result<(Vec<GetInvoiceResult>, Option<Hash256>), String>,
     pub peers: std::result::Result<Vec<PeerInfo>, String>,
@@ -207,7 +209,7 @@ async fn fetch_all_rpc(
         .await
         .map_err(|e| e.to_string());
 
-    // channels
+    // channels (filtered view for channels tab)
     let ch_params = ListChannelsParams {
         pubkey: None,
         include_closed: if include_closed { Some(true) } else { None },
@@ -215,6 +217,18 @@ async fn fetch_all_rpc(
     };
     let channels = client
         .call_typed::<_, ListChannelsResult>("list_channels", &ch_params)
+        .await
+        .map(|r| r.channels)
+        .map_err(|e| e.to_string());
+
+    // all channels including closed (for dashboard stats)
+    let all_ch_params = ListChannelsParams {
+        pubkey: None,
+        include_closed: Some(true),
+        only_pending: None,
+    };
+    let all_channels = client
+        .call_typed::<_, ListChannelsResult>("list_channels", &all_ch_params)
         .await
         .map(|r| r.channels)
         .map_err(|e| e.to_string());
@@ -327,6 +341,7 @@ async fn fetch_all_rpc(
     FetchResult {
         node_info,
         channels,
+        all_channels,
         payments,
         invoices,
         peers,
@@ -604,9 +619,18 @@ impl App {
             }
         }
 
-        // Update dashboard aggregate stats from fetched data
-        self.dashboard_tab
-            .update_stats(&self.channels_tab.channels, self.node_info.as_ref());
+        // Update dashboard aggregate stats from all channels (including closed)
+        match &result.all_channels {
+            Ok(all_channels) => {
+                self.dashboard_tab
+                    .update_stats(all_channels, self.node_info.as_ref());
+            }
+            Err(_) => {
+                // Fallback to filtered channels if all_channels fetch failed
+                self.dashboard_tab
+                    .update_stats(&self.channels_tab.channels, self.node_info.as_ref());
+            }
+        }
         let own_pubkey = self
             .node_info
             .as_ref()
