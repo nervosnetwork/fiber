@@ -193,7 +193,7 @@ fn test_payment_status_inflight_maps_to_outgoing_in_flight() {
 #[test]
 fn test_payment_status_success_maps_to_outgoing_succeeded() {
     let order_status: CchOrderStatus = PaymentStatus::Success.into();
-    assert_eq!(order_status, CchOrderStatus::OutgoingSucceeded);
+    assert_eq!(order_status, CchOrderStatus::OutgoingSuccess);
 }
 
 #[test]

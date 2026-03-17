@@ -136,7 +136,7 @@ fn test_on_entering_outgoing_in_flight_returns_track_payment() {
 
 #[test]
 fn test_on_entering_outgoing_succeeded_returns_settle_invoice() {
-    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingSucceeded);
+    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingSuccess);
     let actions = ActionDispatcher::on_entering(&order);
     assert_eq!(actions, vec![CchOrderAction::SettleIncomingInvoice]);
 }
@@ -233,7 +233,7 @@ fn test_send_outgoing_payment_should_not_dispatch_when_failed() {
 
 #[test]
 fn test_settle_incoming_invoice_should_dispatch_when_outgoing_succeeded() {
-    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingSucceeded);
+    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingSuccess);
     assert!(SettleIncomingInvoiceDispatcher::should_dispatch(&order));
 }
 
@@ -279,7 +279,7 @@ fn test_track_incoming_invoice_should_dispatch_when_outgoing_in_flight() {
 
 #[test]
 fn test_track_incoming_invoice_should_dispatch_when_outgoing_succeeded() {
-    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingSucceeded);
+    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingSuccess);
     assert!(TrackIncomingInvoiceDispatcher::should_dispatch(&order));
 }
 

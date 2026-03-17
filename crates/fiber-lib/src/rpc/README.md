@@ -1143,7 +1143,7 @@ The status of a cross-chain hub order, will update as the order progresses.
 * `Pending` - Order is created and waiting for the incoming invoice to collect enough TLCs.
 * `IncomingAccepted` - The incoming invoice collected the required TLCs and is ready to send outgoing payment to obtain the preimage.
 * `OutgoingInFlight` - The outgoing payment is in flight.
-* `OutgoingSucceeded` - The outgoing payment is settled and preimage has been obtained.
+* `OutgoingSuccess` - The outgoing payment is settled and preimage has been obtained.
 * `Success` - Both payments are settled and the order succeeds.
 * `Failed` - Order is failed.
 ---

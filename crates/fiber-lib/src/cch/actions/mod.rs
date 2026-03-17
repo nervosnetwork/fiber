@@ -59,7 +59,7 @@ impl ActionDispatcher {
         match order.status {
             CchOrderStatus::IncomingAccepted
             | CchOrderStatus::OutgoingInFlight
-            | CchOrderStatus::OutgoingSucceeded => {
+            | CchOrderStatus::OutgoingSuccess => {
                 // Ensure start incoming invoice tracking.
                 actions.push(CchOrderAction::TrackIncomingInvoice);
             }
@@ -77,7 +77,7 @@ impl ActionDispatcher {
                 CchOrderAction::TrackOutgoingPayment,
             ],
             CchOrderStatus::OutgoingInFlight => vec![CchOrderAction::TrackOutgoingPayment],
-            CchOrderStatus::OutgoingSucceeded => vec![CchOrderAction::SettleIncomingInvoice],
+            CchOrderStatus::OutgoingSuccess => vec![CchOrderAction::SettleIncomingInvoice],
             CchOrderStatus::Success => vec![],
             CchOrderStatus::Failed => vec![],
         }
