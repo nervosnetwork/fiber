@@ -10,14 +10,14 @@ pub type SkipWhileFn = Box<dyn Fn(&[u8]) -> bool + Send + 'static>;
 ///
 /// ```ignore
 /// // Limit to 1 result:
-/// self.prefix_iter_with(&prefix, PrefixIterOptions::new().limit(1))
+/// self.collect_by_prefix_with(&prefix, PrefixIterOptions::new().limit(1))
 ///
 /// // Reverse scan with limit:
-/// self.prefix_iter_with(&prefix, PrefixIterOptions::new().reverse().limit(1))
+/// self.collect_by_prefix_with(&prefix, PrefixIterOptions::new().reverse().limit(1))
 ///
 /// // Paginated forward scan, skipping the cursor key:
 /// let start = cursor_key.clone();
-/// self.prefix_iter_with(&prefix, PrefixIterOptions::new()
+/// self.collect_by_prefix_with(&prefix, PrefixIterOptions::new()
 ///     .start_key(&cursor_key)
 ///     .skip_while(Box::new(move |key| key == start)))
 /// ```
@@ -81,7 +81,7 @@ impl Default for PrefixIterOptions<'_> {
 /// in terms of these convenience methods.
 pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
     /// Collect all entries whose key starts with `prefix`, in forward order.
-    fn prefix_iter(&self, prefix: &[u8]) -> Vec<KVPair> {
+    fn collect_by_prefix(&self, prefix: &[u8]) -> Vec<KVPair> {
         let prefix_owned = prefix.to_vec();
         self.collect_iterator(
             prefix.to_vec(),
@@ -98,7 +98,7 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
     /// - `start_key = None, Reverse` → iterate from prefix end (last entry first)
     /// - `start_key = Some(key), Forward` → iterate forward from key
     /// - `start_key = Some(key), Reverse` → iterate backward from key
-    fn prefix_iter_with(&self, prefix: &[u8], options: PrefixIterOptions<'_>) -> Vec<KVPair> {
+    fn collect_by_prefix_with(&self, prefix: &[u8], options: PrefixIterOptions<'_>) -> Vec<KVPair> {
         let PrefixIterOptions {
             direction,
             start_key,
