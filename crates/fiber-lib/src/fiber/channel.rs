@@ -348,7 +348,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore + ChannelEventStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + PaymentEventStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -1543,19 +1543,6 @@ where
                     remove_reason,
                 );
             } else {
-                // Record a Send payment event when this node is the original sender
-                // and the TLC was successfully fulfilled.
-                if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
-                    self.store.insert_payment_event(PaymentEvent {
-                        event_type: PaymentEventType::Send,
-                        timestamp: now_timestamp_as_millis_u64(),
-                        channel_id: state.get_id(),
-                        amount: tlc_info.amount,
-                        fee: 0, // routing fee is not known here; can be computed from PaymentSession
-                        payment_hash: tlc_info.payment_hash,
-                        udt_type_script: state.funding_udt_type_script.clone(),
-                    });
-                }
                 // only the original sender of the TLC should send `TlcRemoveReceived` event
                 // because only the original sender cares about the TLC event to settle the payment
                 self.network
@@ -2604,7 +2591,7 @@ where
     S: ChannelActorStateStore
         + InvoiceStore
         + PreimageStore
-        + ChannelEventStore
+        + PaymentEventStore
         + Send
         + Sync
         + 'static,
@@ -7440,7 +7427,7 @@ pub trait ChannelOpenRecordStore {
 ///
 /// Events are keyed by timestamp (big-endian u64 milliseconds) to support
 /// efficient time-range queries.
-pub trait ChannelEventStore {
+pub trait PaymentEventStore {
     /// Insert a new forwarding event into the store.
     fn insert_forwarding_event(&self, event: ForwardingEvent);
     /// Query forwarding events within a time range, with pagination.

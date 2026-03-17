@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use fnn::{
     fiber::{
-        channel::{ChannelActorStateStore, ChannelEventStore},
+        channel::{ChannelActorStateStore, PaymentEventStore},
         gossip::GossipMessageStore,
         graph::NetworkGraphStateStore,
     },
@@ -28,7 +28,7 @@ pub(crate) struct FiberWasm<
         + Send
         + Sync
         + 'static,
-    InfoStoreType: ChannelEventStore + Send + Sync + 'static,
+    InfoStoreType: PaymentEventStore + Send + Sync + 'static,
     InvoiceStoreType: InvoiceStore + Send + Sync + 'static,
     PaymentStoreType: ChannelActorStateStore + Send + Sync + 'static,
 > {

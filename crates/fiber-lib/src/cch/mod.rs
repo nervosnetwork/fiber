@@ -4,7 +4,7 @@ pub use actor::{CchActor, CchArgs, CchMessage, ReceiveBTC, SendBTC};
 mod error;
 pub use error::{CchError, CchResult, CchStoreError};
 
-mod trackers;
+pub mod trackers;
 pub use trackers::CchFiberStoreWatcher;
 
 mod config;

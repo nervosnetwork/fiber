@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
 use super::types::BroadcastMessageWithTimestamp;
-use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
+use crate::fiber::channel::{ChannelActorStateStore, PaymentEventStore, ProcessingChannelError};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
     PAYMENT_MAX_PARTS_LIMIT,
@@ -30,9 +30,10 @@ pub use fiber_types::PaymentSession;
 pub use fiber_types::SendPaymentData;
 use fiber_types::{
     Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, PaymentCustomRecords,
-    PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey, RemoveTlcReason,
-    RouterHop, TlcErr, TlcErrData, TlcErrorCode, TrampolineContext, DEFAULT_MAX_PARTS,
-    DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
+    PaymentEvent, PaymentEventType, PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket,
+    Privkey, Pubkey, RemoveTlcReason, RouterHop, TlcErr, TlcErrData, TlcErrorCode,
+    TrampolineContext, DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT,
+    USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
@@ -806,6 +807,7 @@ impl<S> Actor for PaymentActor<S>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + PaymentEventStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore
@@ -888,6 +890,7 @@ impl<S> PaymentActor<S>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
+        + PaymentEventStore
         + NetworkGraphStateStore
         + GossipMessageStore
         + PreimageStore
@@ -1708,6 +1711,10 @@ where
 
         match reason {
             RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
+                debug_assert!(
+                    !session.is_dry_run(),
+                    "Dry run payment should not be fulfilled"
+                );
                 self.network_graph
                     .write()
                     .await
@@ -1716,14 +1723,31 @@ where
                 attempt.preimage = Some(fulfill.payment_preimage);
                 self.store.insert_attempt(attempt.clone());
 
-                session.update_with_attempt(attempt);
-                if !session.is_dry_run() {
-                    self.store.insert_payment_session(session.clone());
-                    // Clean up channel index to prevent retries on channel ready
-                    if session.status.is_final() {
-                        self.store
-                            .clear_attempts_channel_index(session.payment_hash());
+                let first_hop_channel_outpoint = attempt.first_hop_channel_outpoint();
+                // Record Send payment event with routing fee.
+                if let Some(channel_outpoint) = first_hop_channel_outpoint {
+                    if let Some(channel_state) =
+                        self.store.get_channel_state_by_outpoint(channel_outpoint)
+                    {
+                        let fee = session.fee_paid();
+                        self.store.insert_payment_event(PaymentEvent {
+                            event_type: PaymentEventType::Send,
+                            timestamp: now_timestamp_as_millis_u64(),
+                            channel_id: channel_state.get_id(),
+                            amount: session.request.amount,
+                            fee,
+                            payment_hash,
+                            udt_type_script: session.request.udt_type_script.clone(),
+                        });
                     }
+                }
+                session.update_with_attempt(attempt);
+
+                self.store.insert_payment_session(session.clone());
+                // Clean up channel index to prevent retries on channel ready
+                if session.status.is_final() {
+                    self.store
+                        .clear_attempts_channel_index(session.payment_hash());
                 }
             }
             RemoveTlcReason::RemoveTlcFail(reason) => {

@@ -554,7 +554,15 @@ Returns a summary of forwarding fees earned over day/week/month windows,
  grouped by asset type (CKB and each UDT).
 
 ##### Params
-* None
+
+* `days` - <em>`Option<u64>`</em>, Number of days to include in the report (starting from now).
+ Default is 30. This is used when start_time is not specified.
+ Mutually exclusive with start_time/end_time.
+* `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive).
+ Mutually exclusive with days.
+ Default is (end_time - days * 24h) or 30 days ago if end_time is also not specified.
+* `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive).
+ Default is current time.
 
 ##### Returns
 
@@ -579,7 +587,6 @@ Returns individual forwarding events with optional time range, asset filter,
 * `offset` - <em>`Option<u64>`</em>, Number of events to skip (for pagination). Default is 0.
 * `udt_type_script` - <em>`Option<Script>`</em>, Filter by UDT type script. If set, only events for this specific UDT are returned.
  Use `null` or omit to return events for all asset types.
- Use an explicit JSON `null` value with `ckb_only: true` to get only CKB events.
 
 ##### Returns
 
@@ -1247,7 +1254,7 @@ Fee summary for a single asset type (CKB or a specific UDT).
 
 Payment amount summary for a single asset type (CKB or a specific UDT).
 
- Used by both `sent_report` and `received_report` RPCs.
+ Used by both `sent_payment_report` and `received_payment_report` RPCs.
 
 
 #### Fields

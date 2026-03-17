@@ -1,5 +1,5 @@
 use crate::ckb::CkbConfig;
-use crate::fiber::channel::ChannelEventStore;
+use crate::fiber::channel::PaymentEventStore;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::{handle_actor_call, log_and_error, now_timestamp_as_millis_u64};
 use ckb_jsonrpc_types::Script;
@@ -7,13 +7,14 @@ use ckb_types::prelude::Entity;
 use fiber_types::PaymentEventType;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::error::INVALID_PARAMS_CODE;
 use jsonrpsee::types::ErrorObjectOwned;
 use std::collections::BTreeMap;
 
 use ractor::{call, ActorRef};
 
 pub use fiber_json_types::{
-    AssetFeeReport, AssetPaymentReport, FeeReportResult, ForwardingEventInfo,
+    AssetFeeReport, AssetPaymentReport, FeeReportParams, FeeReportResult, ForwardingEventInfo,
     ForwardingHistoryParams, ForwardingHistoryResult, NodeInfoResult, PaymentEventInfo,
     PaymentHistoryParams, PaymentHistoryResult, ReceivedPaymentReportResult,
     SentPaymentReportResult,
@@ -21,6 +22,8 @@ pub use fiber_json_types::{
 
 const DEFAULT_FORWARDING_HISTORY_LIMIT: u64 = 100;
 const DEFAULT_PAYMENT_HISTORY_LIMIT: u64 = 100;
+const MAX_FORWARDING_HISTORY_LIMIT: u64 = 10000;
+const MAX_PAYMENT_HISTORY_LIMIT: u64 = 10000;
 pub(crate) const MILLIS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 pub(crate) const MILLIS_PER_WEEK: u64 = 7 * MILLIS_PER_DAY;
 pub(crate) const MILLIS_PER_MONTH: u64 = 30 * MILLIS_PER_DAY;
@@ -64,7 +67,10 @@ trait InfoRpc {
     /// Returns a summary of forwarding fees earned over day/week/month windows,
     /// grouped by asset type (CKB and each UDT).
     #[method(name = "fee_report")]
-    async fn fee_report(&self) -> Result<FeeReportResult, ErrorObjectOwned>;
+    async fn fee_report(
+        &self,
+        params: FeeReportParams,
+    ) -> Result<FeeReportResult, ErrorObjectOwned>;
 
     /// Returns individual forwarding events with optional time range, asset filter,
     /// and pagination.
@@ -99,14 +105,17 @@ trait InfoRpc {
 #[cfg(not(target_arch = "wasm32"))]
 impl<S> InfoRpcServer for InfoRpcServerImpl<S>
 where
-    S: ChannelEventStore + Send + Sync + 'static,
+    S: PaymentEventStore + Send + Sync + 'static,
 {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         self.node_info().await
     }
 
-    async fn fee_report(&self) -> Result<FeeReportResult, ErrorObjectOwned> {
-        self.fee_report().await
+    async fn fee_report(
+        &self,
+        params: FeeReportParams,
+    ) -> Result<FeeReportResult, ErrorObjectOwned> {
+        self.fee_report(params).await
     }
 
     async fn forwarding_history(
@@ -136,7 +145,7 @@ where
 
 impl<S> InfoRpcServerImpl<S>
 where
-    S: ChannelEventStore + Send + Sync + 'static,
+    S: PaymentEventStore + Send + Sync + 'static,
 {
     pub async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
@@ -167,8 +176,11 @@ where
         })
     }
 
-    pub async fn fee_report(&self) -> Result<FeeReportResult, ErrorObjectOwned> {
-        fee_report_impl(&self.store)
+    pub async fn fee_report(
+        &self,
+        params: FeeReportParams,
+    ) -> Result<FeeReportResult, ErrorObjectOwned> {
+        fee_report_impl(&self.store, params)
     }
 
     pub async fn forwarding_history(
@@ -198,15 +210,29 @@ where
 
 /// Core fee report logic, usable from both the RPC impl and tests.
 pub fn fee_report_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
+    params: FeeReportParams,
 ) -> Result<FeeReportResult, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
+
+    let days = params.days.unwrap_or(30);
+    if days > 90 {
+        return Err(ErrorObjectOwned::owned(
+            INVALID_PARAMS_CODE,
+            "days parameter exceeds maximum allowed value (90). Use a shorter time range.",
+            Option::<()>::None,
+        ));
+    }
+
+    let start_time = params
+        .start_time
+        .unwrap_or(now.saturating_sub(days * MILLIS_PER_DAY));
+    let end_time = params.end_time.unwrap_or(now);
+
     let day_ago = now.saturating_sub(MILLIS_PER_DAY);
     let week_ago = now.saturating_sub(MILLIS_PER_WEEK);
-    let month_ago = now.saturating_sub(MILLIS_PER_MONTH);
 
-    // Fetch the last 30 days of events (superset of daily/weekly)
-    let events = store.get_forwarding_events(month_ago, now, usize::MAX, 0);
+    let events = store.get_forwarding_events(start_time, end_time, usize::MAX, 0);
 
     // Group by asset type
     let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, AssetAccum)> =
@@ -249,7 +275,7 @@ pub fn fee_report_impl(
 
 /// Core forwarding history logic, usable from both the RPC impl and tests.
 pub fn forwarding_history_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
     params: ForwardingHistoryParams,
 ) -> Result<ForwardingHistoryResult, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
@@ -258,13 +284,25 @@ pub fn forwarding_history_impl(
     let limit = params.limit.unwrap_or(DEFAULT_FORWARDING_HISTORY_LIMIT) as usize;
     let offset = params.offset.unwrap_or(0) as usize;
 
+    if limit > MAX_FORWARDING_HISTORY_LIMIT as usize {
+        return Err(ErrorObjectOwned::owned(
+            INVALID_PARAMS_CODE,
+            format!(
+                "limit exceeds maximum allowed value ({}). \
+                Use a smaller limit or use start_time/end_time to narrow the time range.",
+                MAX_FORWARDING_HISTORY_LIMIT
+            ),
+            Option::<()>::None,
+        ));
+    }
+
     // Convert the optional RPC Script filter to packed::Script for comparison
     let udt_filter: Option<Option<ckb_types::packed::Script>> =
         params.udt_type_script.map(|s| Some(s.into()));
 
-    let events = store.get_forwarding_events(start_time, end_time, usize::MAX, 0);
-
-    // Apply asset filter, then pagination
+    // Fetch enough events to cover offset + limit
+    let fetch_limit = offset.saturating_add(limit);
+    let events = store.get_forwarding_events(start_time, end_time, fetch_limit, 0);
     let filtered: Vec<_> = events
         .into_iter()
         .filter(|e| match &udt_filter {
@@ -298,7 +336,7 @@ pub fn forwarding_history_impl(
 
 /// Core sent payment report logic.
 pub fn sent_payment_report_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
 ) -> Result<SentPaymentReportResult, ErrorObjectOwned> {
     payment_report_impl(store, PaymentEventType::Send)
         .map(|asset_reports| SentPaymentReportResult { asset_reports })
@@ -306,7 +344,7 @@ pub fn sent_payment_report_impl(
 
 /// Core received payment report logic.
 pub fn received_payment_report_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
 ) -> Result<ReceivedPaymentReportResult, ErrorObjectOwned> {
     payment_report_impl(store, PaymentEventType::Receive)
         .map(|asset_reports| ReceivedPaymentReportResult { asset_reports })
@@ -314,7 +352,7 @@ pub fn received_payment_report_impl(
 
 /// Shared logic for sent/received payment reports.
 fn payment_report_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
     event_type: PaymentEventType,
 ) -> Result<Vec<AssetPaymentReport>, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
@@ -364,7 +402,7 @@ fn payment_report_impl(
 
 /// Core payment history logic.
 pub fn payment_history_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
     params: PaymentHistoryParams,
 ) -> Result<PaymentHistoryResult, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
@@ -373,10 +411,24 @@ pub fn payment_history_impl(
     let limit = params.limit.unwrap_or(DEFAULT_PAYMENT_HISTORY_LIMIT) as usize;
     let offset = params.offset.unwrap_or(0) as usize;
 
+    if limit > MAX_PAYMENT_HISTORY_LIMIT as usize {
+        return Err(ErrorObjectOwned::owned(
+            INVALID_PARAMS_CODE,
+            format!(
+                "limit exceeds maximum allowed value ({}). \
+                Use a smaller limit or use start_time/end_time to narrow the time range.",
+                MAX_PAYMENT_HISTORY_LIMIT
+            ),
+            Option::<()>::None,
+        ));
+    }
+
     let udt_filter: Option<Option<ckb_types::packed::Script>> =
         params.udt_type_script.map(|s| Some(s.into()));
 
-    let events = store.get_payment_events(start_time, end_time, usize::MAX, 0);
+    // Fetch enough events to cover offset + limit
+    let fetch_limit = offset.saturating_add(limit);
+    let events = store.get_payment_events(start_time, end_time, fetch_limit, 0);
 
     let filtered: Vec<_> = events
         .into_iter()

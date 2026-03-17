@@ -50,6 +50,27 @@ pub struct FeeReportResult {
     pub asset_reports: Vec<AssetFeeReport>,
 }
 
+/// Parameters for the `fee_report` RPC method.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
+pub struct FeeReportParams {
+    /// Number of days to include in the report (starting from now).
+    /// Default is 30. This is used when start_time is not specified.
+    /// Mutually exclusive with start_time/end_time.
+    pub days: Option<u64>,
+    /// Start time in milliseconds since UNIX epoch (inclusive).
+    /// Mutually exclusive with days.
+    /// Default is (end_time - days * 24h) or 30 days ago if end_time is also not specified.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub start_time: Option<u64>,
+    /// End time in milliseconds since UNIX epoch (inclusive).
+    /// Default is current time.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub end_time: Option<u64>,
+}
+
 /// Parameters for the `forwarding_history` RPC method.
 ///
 /// Queries individual forwarding events with time range and pagination.
@@ -74,7 +95,6 @@ pub struct ForwardingHistoryParams {
     pub offset: Option<u64>,
     /// Filter by UDT type script. If set, only events for this specific UDT are returned.
     /// Use `null` or omit to return events for all asset types.
-    /// Use an explicit JSON `null` value with `ckb_only: true` to get only CKB events.
     pub udt_type_script: Option<Script>,
 }
 
@@ -122,7 +142,7 @@ pub struct ForwardingHistoryResult {
 
 /// Payment amount summary for a single asset type (CKB or a specific UDT).
 ///
-/// Used by both `sent_report` and `received_report` RPCs.
+/// Used by both `sent_payment_report` and `received_payment_report` RPCs.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct AssetPaymentReport {
