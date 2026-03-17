@@ -328,9 +328,9 @@ async fn fetch_all_rpc(
         .await
         .map_err(|e| e.to_string());
 
-    // payment_history (recent 10 events)
+    // payment_history (recent 50 events)
     let ph_params = PaymentHistoryParams {
-        limit: Some(10),
+        limit: Some(50),
         ..PaymentHistoryParams::default()
     };
     let payment_history = client
@@ -556,9 +556,9 @@ impl App {
                 self.invoices_tab.cursor_stack.clear();
                 self.invoices_tab.current_page = 1;
                 if !invoices.is_empty() {
-                    self.invoices_tab.list_state.select(Some(0));
+                    self.invoices_tab.table_state.select(Some(0));
                 } else {
-                    self.invoices_tab.list_state.select(None);
+                    self.invoices_tab.table_state.select(None);
                 }
                 self.invoices_tab.invoices = invoices;
                 self.invoices_tab.last_cursor = last_cursor;
@@ -1060,7 +1060,7 @@ impl App {
                 if self.invoices_tab.view != InvoiceView::Main {
                     return false;
                 }
-                let sel = match self.invoices_tab.list_state.selected() {
+                let sel = match self.invoices_tab.table_state.selected() {
                     Some(s) => s,
                     None => return false,
                 };
@@ -1408,7 +1408,7 @@ impl App {
             }
             ActiveTab::Invoices => match self.invoices_tab.view {
                 InvoiceView::Main => {
-                    let sel = self.invoices_tab.list_state.selected()?;
+                    let sel = self.invoices_tab.table_state.selected()?;
                     let inv = self.invoices_tab.invoices.get(sel)?;
                     Some(inv.invoice_address.clone())
                 }

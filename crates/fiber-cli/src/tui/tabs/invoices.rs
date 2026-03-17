@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use fiber_json_types::{
     CkbInvoiceStatus, GetInvoiceResult, Hash256, ListInvoicesParams, ListInvoicesResult,
 };
-use ratatui::widgets::ListState;
+use ratatui::widgets::TableState;
 
 use super::TabKind;
 use crate::rpc_client::RpcClient;
@@ -56,7 +56,7 @@ pub struct InvoicesTab {
     pub form_fields: Vec<(String, String)>,
     pub form_selected: usize,
     pub form_editing: bool,
-    pub list_state: ListState,
+    pub table_state: TableState,
 }
 
 impl InvoicesTab {
@@ -78,7 +78,7 @@ impl InvoicesTab {
             form_fields: Vec::new(),
             form_selected: 0,
             form_editing: false,
-            list_state: ListState::default(),
+            table_state: TableState::default(),
         }
     }
 
@@ -105,9 +105,9 @@ impl InvoicesTab {
                 self.error = None;
                 // Reset selection to top of new page
                 if !self.invoices.is_empty() {
-                    self.list_state.select(Some(0));
+                    self.table_state.select(Some(0));
                 } else {
-                    self.list_state.select(None);
+                    self.table_state.select(None);
                 }
             }
             Err(e) => {
@@ -199,24 +199,24 @@ impl InvoicesTab {
                 return Some(TabKind::EnterEditing);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.list_state.select_previous();
+                self.table_state.select_previous();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if !self.invoices.is_empty() {
-                    self.list_state.select_next();
-                    if let Some(sel) = self.list_state.selected() {
+                    self.table_state.select_next();
+                    if let Some(sel) = self.table_state.selected() {
                         if sel >= self.invoices.len() {
-                            self.list_state.select(Some(self.invoices.len() - 1));
+                            self.table_state.select(Some(self.invoices.len() - 1));
                         }
                     }
                 }
             }
-            KeyCode::Char(']') => {
-                // Next page
+            KeyCode::Char('N') => {
+                // Next page (Shift+N)
                 self.fetch_next_page(client).await;
             }
-            KeyCode::Char('[') => {
-                // Previous page
+            KeyCode::Char('P') => {
+                // Previous page (Shift+P)
                 if self.current_page > 1 {
                     self.fetch_prev_page(client).await;
                 }

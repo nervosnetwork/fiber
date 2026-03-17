@@ -19,6 +19,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 use ractor::{call, ActorRef};
 use rand::Rng;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
+use std::cmp::Reverse;
 use std::time::Duration;
 use tentacle::secio::SecioKeyPair;
 
@@ -418,7 +419,7 @@ where
 
         let results = self.store.get_invoices_with_limit(limit, after, status);
 
-        let invoices: Vec<GetInvoiceResult> = results
+        let mut invoices: Vec<GetInvoiceResult> = results
             .into_iter()
             .map(|(invoice, status)| GetInvoiceResult {
                 invoice_address: invoice.to_string(),
@@ -428,6 +429,7 @@ where
             .collect();
 
         let last_cursor = invoices.last().map(|i| i.invoice.data.payment_hash);
+        invoices.sort_by_key(|i| Reverse(i.invoice.data.timestamp));
 
         Ok(ListInvoicesResult {
             invoices,

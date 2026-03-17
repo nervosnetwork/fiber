@@ -57,6 +57,31 @@ pub fn format_ckb_pub(shannons: u128) -> String {
     format_ckb(shannons)
 }
 
+/// Format balance for display, handling both CKB and UDT channels.
+/// For CKB channels, shows formatted CKB amount.
+/// For UDT channels, shows raw amount (since UDT decimals are unknown).
+fn format_balance(balance: u128, is_udt: bool) -> String {
+    if is_udt {
+        format!("{}", balance)
+    } else {
+        format_ckb(balance)
+    }
+}
+
+/// Get a short display label for UDT type script.
+/// Returns "UDT:XXXXXX" with code_hash prefix if a UDT type script is present, "CKB" otherwise.
+fn get_token_label(funding_udt_type_script: &Option<ckb_jsonrpc_types::Script>) -> String {
+    match funding_udt_type_script {
+        Some(script) => {
+            // Use first 6 chars of code_hash as short identifier
+            let code_hash_str = format!("{}", script.code_hash);
+            let short_id = &code_hash_str[..code_hash_str.len().min(6)];
+            format!("UDT:{}", short_id)
+        }
+        None => "CKB".to_string(),
+    }
+}
+
 /// Truncate a hex string for display.
 fn truncate_hex(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
@@ -1049,6 +1074,8 @@ fn draw_recent_payment_events(
             format!("Recent ({} total)", pay.total_event_count),
             Style::default().fg(p.info).add_modifier(Modifier::BOLD),
         )),
+        Cell::from(Span::styled("Type", Style::default().fg(p.label))),
+        Cell::from(Span::styled("Channel", Style::default().fg(p.label))),
         Cell::from(Span::styled("Amount", Style::default().fg(p.label))),
         Cell::from(Span::styled("Time", Style::default().fg(p.label))),
     ])
@@ -1070,11 +1097,25 @@ fn draw_recent_payment_events(
             } else {
                 ("Recv", p.success)
             };
+            let token_label = if event.udt_type_script.is_none() {
+                "CKB"
+            } else {
+                "UDT"
+            };
+            let channel_short = format_hash_short(&format!("{}", event.channel_id));
 
             Row::new(vec![
                 Cell::from(Span::styled(
                     type_label.to_string(),
                     Style::default().fg(type_color).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    token_label,
+                    Style::default().fg(p.text_secondary),
+                )),
+                Cell::from(Span::styled(
+                    channel_short,
+                    Style::default().fg(p.text_secondary),
                 )),
                 Cell::from(Span::styled(amount_str, Style::default().fg(type_color))),
                 Cell::from(Span::styled(
@@ -1089,6 +1130,8 @@ fn draw_recent_payment_events(
         rows,
         [
             Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Length(12),
             Constraint::Length(18),
             Constraint::Min(8),
         ],
@@ -1107,7 +1150,7 @@ fn format_hash_short(hash: &str) -> String {
     }
 }
 
-/// Format a millisecond timestamp to a short datetime string.
+/// Format a millisecond timestamp to a short datetime string (relative).
 fn format_timestamp_short(timestamp_ms: u64) -> String {
     use chrono::{DateTime, Utc};
     let secs = (timestamp_ms / 1000) as i64;
@@ -1127,6 +1170,15 @@ fn format_timestamp_short(timestamp_ms: u64) -> String {
             }
         }
         None => "N/A".to_string(),
+    }
+}
+
+/// Format a millisecond timestamp to a short datetime string (absolute).
+fn format_timestamp_compact(ms: u64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_millis_opt(ms as i64) {
+        chrono::LocalResult::Single(dt) => dt.format("%m-%d %H:%M").to_string(),
+        _ => format!("{}ms", ms),
     }
 }
 
@@ -1362,25 +1414,30 @@ fn draw_channels_list(f: &mut Frame, tab: &mut ChannelsTab, p: &ThemePalette, ar
         Cell::from("Channel ID"),
         Cell::from("State"),
         Cell::from("Peer"),
+        Cell::from("Type"),
         Cell::from("Local Balance"),
         Cell::from("Remote Balance"),
         Cell::from("Public"),
     ])
     .style(Style::default().fg(p.label).add_modifier(Modifier::BOLD));
 
-    let rows: Vec<Row> = tab
-        .channels
+    // Get paginated channels
+    let paginated_channels = tab.get_paginated_channels();
+
+    let rows: Vec<Row> = paginated_channels
         .iter()
         .map(|ch| {
             let state = ChannelsTab::state_name(ch);
             let state_color = channel_state_color(state, p);
+            let is_udt = ch.funding_udt_type_script.is_some();
 
             Row::new(vec![
                 Cell::from(truncate_hex(&format!("{}", ch.channel_id), 16)),
                 Cell::from(Span::styled(state, Style::default().fg(state_color))),
                 Cell::from(truncate_hex(&format!("{}", ch.pubkey), 16)),
-                Cell::from(format_ckb(ch.local_balance)),
-                Cell::from(format_ckb(ch.remote_balance)),
+                Cell::from(get_token_label(&ch.funding_udt_type_script)),
+                Cell::from(format_balance(ch.local_balance, is_udt)),
+                Cell::from(format_balance(ch.remote_balance, is_udt)),
                 Cell::from(if ch.is_public { "yes" } else { "no" }),
             ])
         })
@@ -1394,10 +1451,13 @@ fn draw_channels_list(f: &mut Frame, tab: &mut ChannelsTab, p: &ThemePalette, ar
         ""
     };
 
+    let page_indicator = format!("  pg {}/{}", tab.current_page, tab.total_pages());
+
     let title = format!(
-         " Channels ({}){}  [o:Open  u:Update  s:Shutdown  a:Abandon  c:Closed  p:Pending  Enter:Detail] ",
-        tab.channels.len(),
+         " Channels ({}){}{}  [o:Open  u:Update  s:Shutdown  a:Abandon  c:Closed  P:Pending  N:Next  P:Prev  Enter:Detail] ",
+        paginated_channels.len(),
         filter_label,
+        page_indicator,
     );
 
     let table = Table::new(
@@ -1406,6 +1466,7 @@ fn draw_channels_list(f: &mut Frame, tab: &mut ChannelsTab, p: &ThemePalette, ar
             Constraint::Length(18),
             Constraint::Length(14),
             Constraint::Length(18),
+            Constraint::Length(10),
             Constraint::Length(18),
             Constraint::Length(18),
             Constraint::Length(6),
@@ -1494,14 +1555,10 @@ fn draw_payments_list(f: &mut Frame, tab: &mut PaymentsTab, p: &ThemePalette, ar
         String::new()
     };
 
-    let page_indicator = if tab.last_cursor.is_some() || tab.current_page > 1 {
-        format!("  pg {}  []:Prev/Next", tab.current_page)
-    } else {
-        String::new()
-    };
+    let page_indicator = format!("  pg {}", tab.current_page);
 
     let title = format!(
-        " Payments ({}){}{}  [n:Send  f:Filter  Enter:Detail] ",
+        " Payments ({}){}{}  [n:Send  f:Filter  N:Next  P:Prev  Enter:Detail] ",
         tab.payments.len(),
         filter_label,
         page_indicator,
@@ -1634,8 +1691,8 @@ fn draw_peers_list(f: &mut Frame, tab: &mut PeersTab, p: &ThemePalette, area: Re
         [
             Constraint::Length(14), // Node Name
             Constraint::Length(22), // Pubkey
-            Constraint::Min(30),    // Address
-            Constraint::Length(21), // Last Seen
+            Constraint::Length(40), // Address
+            Constraint::Length(20), // Last Seen
         ],
     )
     .header(header)
@@ -1725,7 +1782,7 @@ fn draw_invoices_tab(f: &mut Frame, tab: &mut InvoicesTab, p: &ThemePalette, are
 
 fn draw_invoices_main(f: &mut Frame, tab: &mut InvoicesTab, p: &ThemePalette, area: Rect) {
     let filter_info = format!(
-        " Invoices  [n:New  l:Lookup  c:Cancel  p:Parse  f:Filter({})  ]/[:Page]  Pg {} ",
+        " Invoices  [n:New  l:Lookup  c:Cancel  p:Parse  f:Filter({})  N:Next  P:Prev  Pg {}] ",
         tab.filter_label(),
         tab.current_page
     );
@@ -1748,15 +1805,52 @@ fn draw_invoices_main(f: &mut Frame, tab: &mut InvoicesTab, p: &ThemePalette, ar
             .style(Style::default().fg(p.text_secondary));
         f.render_widget(text, area);
     } else {
-        let items: Vec<ListItem> = tab
+        let header = Row::new(vec![
+            Cell::from(Span::styled(
+                "Status",
+                Style::default().fg(p.label).add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Type",
+                Style::default().fg(p.label).add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Amount",
+                Style::default().fg(p.label).add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Invoice Address",
+                Style::default().fg(p.label).add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Created",
+                Style::default().fg(p.label).add_modifier(Modifier::BOLD),
+            )),
+        ]);
+
+        let rows: Vec<Row> = tab
             .invoices
             .iter()
             .map(|inv| {
-                let amount = inv
+                // Check if invoice has UDT type script in attributes
+                let is_udt = inv
                     .invoice
-                    .amount
-                    .map(format_ckb)
-                    .unwrap_or_else(|| "N/A".to_string());
+                    .data
+                    .attrs
+                    .iter()
+                    .any(|attr| matches!(attr, fiber_json_types::Attribute::UdtScript(_)));
+                let amount = if is_udt {
+                    inv.invoice
+                        .amount
+                        .map(|a| format!("{}", a))
+                        .unwrap_or_else(|| "N/A".to_string())
+                } else {
+                    inv.invoice
+                        .amount
+                        .map(format_ckb)
+                        .unwrap_or_else(|| "N/A".to_string())
+                };
+                let token_label = if is_udt { "UDT" } else { "CKB" };
                 let status_str = InvoicesTab::status_name(&inv.status);
                 let status_color = match inv.status {
                     fiber_json_types::CkbInvoiceStatus::Open => p.success,
@@ -1765,23 +1859,42 @@ fn draw_invoices_main(f: &mut Frame, tab: &mut InvoicesTab, p: &ThemePalette, ar
                     fiber_json_types::CkbInvoiceStatus::Expired => p.text_muted,
                     fiber_json_types::CkbInvoiceStatus::Received => p.warning,
                 };
+                let created_time = format_timestamp_compact(inv.invoice.data.timestamp as u64);
                 let addr_short = truncate_hex(&inv.invoice_address, 30);
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("[{}] ", status_str),
-                        Style::default().fg(status_color),
-                    ),
-                    Span::styled(format!("{}: ", amount), Style::default().fg(p.info)),
-                    Span::raw(addr_short),
-                ]))
+                Row::new(vec![
+                    Cell::from(Span::styled(status_str, Style::default().fg(status_color))),
+                    Cell::from(Span::styled(
+                        token_label,
+                        Style::default().fg(p.text_secondary),
+                    )),
+                    Cell::from(Span::styled(amount, Style::default().fg(p.info))),
+                    Cell::from(Span::styled(
+                        addr_short,
+                        Style::default().fg(p.text_primary),
+                    )),
+                    Cell::from(Span::styled(
+                        created_time,
+                        Style::default().fg(p.text_secondary),
+                    )),
+                ])
             })
             .collect();
 
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(highlight_style(p));
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Length(5),
+                Constraint::Length(18),
+                Constraint::Min(20),
+                Constraint::Length(12),
+            ],
+        )
+        .header(header)
+        .block(block)
+        .row_highlight_style(highlight_style(p));
 
-        f.render_stateful_widget(list, area, &mut tab.list_state);
+        f.render_stateful_widget(table, area, &mut tab.table_state);
     }
 }
 

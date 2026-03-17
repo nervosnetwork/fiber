@@ -152,12 +152,12 @@ impl PaymentsTab {
                 self.view = PaymentView::SendForm;
                 return Some(TabKind::EnterEditing);
             }
-            KeyCode::Char(']') => {
-                // Next page
+            KeyCode::Char('N') => {
+                // Next page (Shift+N)
                 self.fetch_next_page(client).await;
             }
-            KeyCode::Char('[') => {
-                // Previous page
+            KeyCode::Char('P') => {
+                // Previous page (Shift+P)
                 if self.current_page > 1 {
                     self.fetch_prev_page(client).await;
                 }

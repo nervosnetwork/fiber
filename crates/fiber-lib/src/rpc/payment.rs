@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
@@ -335,7 +337,7 @@ where
             .collect();
 
         let last_cursor = payments.last().map(|p| p.payment_hash);
-        payments.sort_by_key(|p| p.created_at);
+        payments.sort_by_key(|p| Reverse(p.created_at));
 
         Ok(ListPaymentsResult {
             payments,

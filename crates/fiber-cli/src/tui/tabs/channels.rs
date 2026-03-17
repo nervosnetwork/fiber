@@ -40,6 +40,10 @@ pub struct ChannelsTab {
     pub status_message: Option<String>,
     pub pending_action: Option<ChannelPendingAction>,
 
+    // Pagination
+    pub current_page: usize,
+    pub items_per_page: usize,
+
     // Open channel form fields
     pub form_fields: Vec<(String, String)>,
     pub form_selected: usize,
@@ -57,6 +61,8 @@ impl ChannelsTab {
             only_pending: false,
             status_message: None,
             pending_action: None,
+            current_page: 1,
+            items_per_page: 20,
             form_fields: Vec::new(),
             form_selected: 0,
             form_editing: false,
@@ -80,16 +86,52 @@ impl ChannelsTab {
             Ok(result) => {
                 self.channels = result.channels;
                 self.error = None;
+                self.current_page = 1;
                 // Clamp selection if out of bounds
                 if let Some(sel) = self.table_state.selected() {
-                    if sel >= self.channels.len() && !self.channels.is_empty() {
-                        self.table_state.select(Some(self.channels.len() - 1));
+                    if sel >= self.get_paginated_channels().len()
+                        && !self.get_paginated_channels().is_empty()
+                    {
+                        self.table_state
+                            .select(Some(self.get_paginated_channels().len() - 1));
                     }
                 }
             }
             Err(e) => {
                 self.error = Some(e.to_string());
             }
+        }
+    }
+
+    /// Get channels for the current page.
+    pub fn get_paginated_channels(&self) -> Vec<&Channel> {
+        let start = (self.current_page - 1) * self.items_per_page;
+        let end = (start + self.items_per_page).min(self.channels.len());
+        self.channels[start..end].iter().collect()
+    }
+
+    /// Get total number of pages.
+    pub fn total_pages(&self) -> usize {
+        if self.channels.is_empty() {
+            1
+        } else {
+            self.channels.len().div_ceil(self.items_per_page)
+        }
+    }
+
+    /// Go to next page.
+    pub fn next_page(&mut self) {
+        if self.current_page < self.total_pages() {
+            self.current_page += 1;
+            self.table_state.select(Some(0));
+        }
+    }
+
+    /// Go to previous page.
+    pub fn prev_page(&mut self) {
+        if self.current_page > 1 {
+            self.current_page -= 1;
+            self.table_state.select(Some(0));
         }
     }
 
@@ -106,12 +148,13 @@ impl ChannelsTab {
                 self.table_state.select_previous();
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if !self.channels.is_empty() {
+                let paginated_count = self.get_paginated_channels().len();
+                if paginated_count > 0 {
                     self.table_state.select_next();
                     // Clamp to last item
                     if let Some(sel) = self.table_state.selected() {
-                        if sel >= self.channels.len() {
-                            self.table_state.select(Some(self.channels.len() - 1));
+                        if sel >= paginated_count {
+                            self.table_state.select(Some(paginated_count - 1));
                         }
                     }
                 }
@@ -120,8 +163,21 @@ impl ChannelsTab {
                 self.table_state.select_first();
             }
             KeyCode::End | KeyCode::Char('G') => {
-                if !self.channels.is_empty() {
-                    self.table_state.select_last();
+                let paginated_count = self.get_paginated_channels().len();
+                if paginated_count > 0 {
+                    self.table_state.select(Some(paginated_count - 1));
+                }
+            }
+            KeyCode::Char('N') => {
+                // Next page (Shift+N)
+                if self.current_page < self.total_pages() {
+                    self.next_page();
+                }
+            }
+            KeyCode::Char('P') => {
+                // Previous page (Shift+P)
+                if self.current_page > 1 {
+                    self.prev_page();
                 }
             }
             KeyCode::Char('c') => {

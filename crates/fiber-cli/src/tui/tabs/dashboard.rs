@@ -234,7 +234,10 @@ impl DashboardTab {
         }
 
         if let Some(history) = payment_history {
-            stats.recent_events = history.events.clone();
+            let mut events = history.events.clone();
+            // Sort by timestamp descending (newest first)
+            events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            stats.recent_events = events;
             stats.total_event_count = history.total_count;
         }
 
