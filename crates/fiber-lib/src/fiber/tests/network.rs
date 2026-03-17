@@ -861,6 +861,60 @@ async fn test_inbound_peer_with_channel_does_not_consume_no_channel_peer_budget(
 }
 
 #[tokio::test]
+async fn test_inbound_peer_with_only_closed_channels_consumes_no_channel_peer_budget() {
+    init_tracing();
+
+    let mut target = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.max_inbound_peers = Some(1);
+                config.min_outbound_peers = Some(0);
+            })
+            .build(),
+    )
+    .await;
+    let mut peer_with_closed_channel = NetworkNode::new().await;
+    let mut new_peer = NetworkNode::new().await;
+
+    peer_with_closed_channel.connect_to(&mut target).await;
+    let (channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut target,
+        &mut peer_with_closed_channel,
+        ChannelParameters::new(100_000_000_000, 11_800_000_000),
+    )
+    .await;
+
+    target
+        .send_shutdown(channel_id, true)
+        .await
+        .expect("force shutdown channel");
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    target
+        .send_channel_shutdown_tx_confirmed_event(peer_with_closed_channel.pubkey, channel_id, true)
+        .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    new_peer.connect_to_nonblocking(&target).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let peers = call!(target.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+    })
+    .expect("target alive")
+    .expect("list peers");
+
+    assert_eq!(
+        peers.len(),
+        1,
+        "a peer whose last channel is closed should count as a no-channel peer and be evicted when over budget",
+    );
+    assert_eq!(
+        peers[0].pubkey, new_peer.pubkey,
+        "target should retain the newest inbound no-channel peer after the old peer's last channel closes",
+    );
+}
+
+#[tokio::test]
 async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channel_peer() {
     init_tracing();
 

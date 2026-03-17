@@ -3576,13 +3576,19 @@ where
         return Ok(());
     }
 
+    fn session_has_channels(&self, session_id: &SessionId) -> bool {
+        self.session_channels_map
+            .get(session_id)
+            .is_some_and(|channels| !channels.is_empty())
+    }
+
     fn inbound_no_channel_peers_in_connected_order(&self) -> Vec<(Pubkey, SessionId)> {
         let mut peers = self
             .peer_session_map
             .iter()
             .filter_map(|(pubkey, peer)| {
                 (peer.session_type == SessionType::Inbound
-                    && !self.session_channels_map.contains_key(&peer.session_id))
+                    && !self.session_has_channels(&peer.session_id))
                 .then_some((peer.connected_order, *pubkey, peer.session_id))
             })
             .collect::<Vec<_>>();
