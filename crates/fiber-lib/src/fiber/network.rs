@@ -5102,7 +5102,7 @@ impl ToBeAcceptedChannels {
         self.map.remove(id)
     }
 
-    // insert and apply single-flight and per-peer throttle control
+    // insert and apply throttle control
     fn try_insert(
         &mut self,
         id: Hash256,
@@ -5116,19 +5116,6 @@ impl ToBeAcceptedChannels {
             );
             warn!("{}: {:?}", err_message, existing_value);
             return Err(ProcessingChannelError::RepeatedProcessing(err_message));
-        }
-
-        if let Some((existing_channel_id, _)) = self
-            .map
-            .iter()
-            .find(|(_, (saved_pubkey, _))| *saved_pubkey == pubkey)
-        {
-            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
-                format!(
-                    "Peer {:?} already has a pending inbound channel awaiting acceptance: {:?}",
-                    pubkey, existing_channel_id
-                ),
-            ));
         }
 
         // The map should be small because of the flow control, so calculate the total number and
