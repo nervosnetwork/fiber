@@ -3,7 +3,8 @@ use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use crate::rpc::info::{
     fee_report_impl, forwarding_history_impl, payment_history_impl, received_payment_report_impl,
-    sent_payment_report_impl, ForwardingHistoryParams, PaymentHistoryParams, MILLIS_PER_DAY,
+    sent_payment_report_impl, FeeReportParams, ForwardingHistoryParams, PaymentHistoryParams,
+    MILLIS_PER_DAY,
 };
 use ckb_types::packed::Script;
 use fiber_types::{ForwardingEvent, PaymentEvent, PaymentEventType};
@@ -103,7 +104,7 @@ fn dummy_udt_script(tag: u8) -> Script {
 #[tokio::test]
 async fn test_fee_report_empty() {
     let store = MockForwardingStore::new();
-    let report = fee_report_impl(&store).unwrap();
+    let report = fee_report_impl(&store, FeeReportParams::default()).unwrap();
 
     assert!(report.asset_reports.is_empty());
 }
@@ -120,7 +121,7 @@ async fn test_fee_report_ckb_only() {
     // Event within last month but not last week (CKB)
     store.insert_forwarding_event(make_event(now - 15 * MILLIS_PER_DAY, 30));
 
-    let report = fee_report_impl(&store).unwrap();
+    let report = fee_report_impl(&store, FeeReportParams::default()).unwrap();
 
     assert_eq!(report.asset_reports.len(), 1);
     let ckb = &report.asset_reports[0];
@@ -147,7 +148,7 @@ async fn test_fee_report_multiple_assets() {
     store.insert_forwarding_event(make_event_with_udt(now - 1000, 100, Some(udt_a.clone())));
     store.insert_forwarding_event(make_event_with_udt(now - 2000, 200, Some(udt_a.clone())));
 
-    let report = fee_report_impl(&store).unwrap();
+    let report = fee_report_impl(&store, FeeReportParams::default()).unwrap();
 
     assert_eq!(report.asset_reports.len(), 2);
 
@@ -180,7 +181,7 @@ async fn test_fee_report_excludes_old_events() {
     // Recent event
     store.insert_forwarding_event(make_event(now - 1000, 5));
 
-    let report = fee_report_impl(&store).unwrap();
+    let report = fee_report_impl(&store, FeeReportParams::default()).unwrap();
 
     assert_eq!(report.asset_reports.len(), 1);
     let ckb = &report.asset_reports[0];

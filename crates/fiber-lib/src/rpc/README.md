@@ -552,7 +552,15 @@ Returns a summary of forwarding fees earned over day/week/month windows,
  grouped by asset type (CKB and each UDT).
 
 ##### Params
-* None
+
+* `days` - <em>`Option<u64>`</em>, Number of days to include in the report (starting from now).
+ Default is 30. This is used when start_time is not specified.
+ Mutually exclusive with start_time/end_time.
+* `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive).
+ Mutually exclusive with days.
+ Default is (end_time - days * 24h) or 30 days ago if end_time is also not specified.
+* `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive).
+ Default is current time.
 
 ##### Returns
 

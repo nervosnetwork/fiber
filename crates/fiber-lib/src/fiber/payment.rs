@@ -1736,7 +1736,7 @@ where
                             channel_id: channel_state.get_id(),
                             amount: session.request.amount,
                             fee,
-                            payment_hash: session.payment_hash(),
+                            payment_hash,
                             udt_type_script: session.request.udt_type_script.clone(),
                         });
                     }
