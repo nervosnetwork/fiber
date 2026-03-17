@@ -9,35 +9,26 @@ use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use fnn::fiber::network::init_chain_hash;
 use fnn::{
-    Config, NetworkServiceEvent,
+    Config,
     actors::RootActor,
     ckb::{
         CkbChainActor,
         client::CkbRpcClient,
         contracts::{TypeIDResolver, try_init_contracts_context},
     },
+    event_handler::{ExitMessage, forward_event_to_client},
     fiber::{KeyPair, graph::NetworkGraph},
     rpc::{
-        channel::ChannelRpcServerImpl,
-        graph::GraphRpcServerImpl,
-        info::InfoRpcServerImpl,
-        invoice::InvoiceRpcServerImpl,
-        payment::PaymentRpcServerImpl,
-        peer::PeerRpcServerImpl,
-        watchtower::{
-            CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams,
-            RemoveWatchChannelParams, UpdateLocalSettlementParams,
-            UpdatePendingRemoteSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
-        },
+        channel::ChannelRpcServerImpl, graph::GraphRpcServerImpl, info::InfoRpcServerImpl,
+        invoice::InvoiceRpcServerImpl, payment::PaymentRpcServerImpl, peer::PeerRpcServerImpl,
     },
     start_network,
-    store::Store,
+    store::open_store,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
 };
 use jsonrpsee::wasm_client::WasmClientBuilder;
 use ractor::{Actor, ActorRef};
 use secp256k1::{SECP256K1, SecretKey};
-use std::fmt::Debug;
 use tokio::{
     select,
     sync::{RwLock, mpsc},
@@ -47,22 +38,14 @@ use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 
 pub mod api;
 
-pub struct ExitMessage(String);
-impl Debug for ExitMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Exit because {}", self.0)
-    }
+/// Convert an [`ExitMessage`] to a [`JsValue`].
+fn exit_to_js(e: ExitMessage) -> JsValue {
+    JsValue::from_str(&e.0)
 }
 
-impl ExitMessage {
-    pub fn err(message: String) -> Result<(), ExitMessage> {
-        Err(ExitMessage(message))
-    }
-}
-impl From<ExitMessage> for JsValue {
-    fn from(val: ExitMessage) -> Self {
-        JsValue::from_str(&val.0)
-    }
+/// Convenience: create an `Err(JsValue)` from a string message.
+fn js_err(msg: String) -> Result<(), JsValue> {
+    Err(JsValue::from_str(&msg))
 }
 
 const FIBER_STATE_BEFORE_STARTING: u8 = 0;
@@ -73,12 +56,11 @@ static FIBER_STATE: AtomicU8 = AtomicU8::new(FIBER_STATE_BEFORE_STARTING);
 static ROOT_ACTOR: OnceLock<ActorRef<String>> = OnceLock::new();
 pub(crate) fn check_state() -> Result<(), JsValue> {
     match FIBER_STATE.load(std::sync::atomic::Ordering::SeqCst) {
-        FIBER_STATE_BEFORE_STARTING => ExitMessage::err("Fiber not started!".to_string()),
+        FIBER_STATE_BEFORE_STARTING => js_err("Fiber not started!".to_string()),
         FIBER_STATE_STARTED => Ok(()),
-        FIBER_STATE_PANICKED => ExitMessage::err("Fiber panicked, please refresh page".to_string()),
-        s => ExitMessage::err(format!("Invalid FIBER_STATE: {}", s)),
+        FIBER_STATE_PANICKED => js_err("Fiber panicked, please refresh page".to_string()),
+        s => js_err(format!("Invalid FIBER_STATE: {}", s)),
     }
-    .map_err(|e| e.into())
 }
 
 #[wasm_bindgen]
@@ -89,7 +71,7 @@ pub async fn fiber(
     fiber_key_pair: Option<Vec<u8>>,
     ckb_secret_key: Option<Vec<u8>>,
     database_prefix: Option<String>,
-) -> Result<(), ExitMessage> {
+) -> Result<(), JsValue> {
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
         FIBER_STATE.store(FIBER_STATE_PANICKED, std::sync::atomic::Ordering::SeqCst);
@@ -134,10 +116,14 @@ pub async fn fiber(
     let store_path = config
         .fiber
         .as_ref()
-        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
+        .ok_or_else(|| {
+            exit_to_js(ExitMessage(
+                "fiber config is required but absent".to_string(),
+            ))
+        })?
         .store_path();
 
-    let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let store = open_store(store_path).map_err(|err| exit_to_js(ExitMessage(err.to_string())))?;
     debug!("Store initialized");
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
@@ -150,10 +136,10 @@ pub async fn fiber(
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
             let ckb_config = config.ckb.clone().ok_or_else(|| {
-                ExitMessage(
+                exit_to_js(ExitMessage(
                     "service fiber requires service ckb which is not enabled in the config file"
                         .to_string(),
-                )
+                ))
             })?;
             let node_public_key = fiber_config.public_key();
 
@@ -165,9 +151,14 @@ pub async fn fiber(
                     spec.expect("spec must be provided if chain is not mainnet nor testnet"),
                 ),
             })
-            .map_err(|err| ExitMessage(format!("failed to load chain spec: {}", err)))?;
+            .map_err(|err| {
+                exit_to_js(ExitMessage(format!("failed to load chain spec: {}", err)))
+            })?;
             let genesis_block = chain_spec.build_genesis().map_err(|err| {
-                ExitMessage(format!("failed to build ckb genesis block: {}", err))
+                exit_to_js(ExitMessage(format!(
+                    "failed to build ckb genesis block: {}",
+                    err
+                )))
             })?;
 
             init_chain_hash(genesis_block.hash().into());
@@ -179,7 +170,12 @@ pub async fn fiber(
                 Some(type_id_resolver),
             )
             .await
-            .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
+            .map_err(|err| {
+                exit_to_js(ExitMessage(format!(
+                    "failed to init contracts context: {}",
+                    err
+                )))
+            })?;
 
             let ckb_chain_actor = Actor::spawn_linked(
                 Some("ckb".to_string()),
@@ -188,7 +184,7 @@ pub async fn fiber(
                 root_actor.get_cell(),
             )
             .await
-            .map_err(|err| ExitMessage(format!("failed to start ckb actor: {}", err)))?
+            .map_err(|err| exit_to_js(ExitMessage(format!("failed to start ckb actor: {}", err))))?
             .0;
             let chain_client = CkbRpcClient::new(&ckb_config);
 
@@ -223,7 +219,7 @@ pub async fn fiber(
             if fiber_config.standalone_watchtower_rpc_url.is_none()
                 && fiber_config.disable_built_in_watchtower.unwrap_or_default()
             {
-                return ExitMessage::err(
+                return js_err(
                     "fiber config requires standalone watchtower rpc url or built-in watchtower to be enabled"
                         .to_string(),
                 );
@@ -235,7 +231,10 @@ pub async fn fiber(
                         .build(url)
                         .await
                         .map_err(|err| {
-                            ExitMessage(format!("failed to create watchtower rpc client: {}", err))
+                            exit_to_js(ExitMessage(format!(
+                                "failed to create watchtower rpc client: {}",
+                                err
+                            )))
                         })?;
                 Some(watchtower_client)
             } else {
@@ -300,104 +299,4 @@ pub async fn fiber(
     }
     FIBER_STATE.store(FIBER_STATE_STARTED, std::sync::atomic::Ordering::SeqCst);
     Ok(())
-}
-
-const ASSUME_WATCHTOWER_CLIENT_CALL_OK: &str = "watchtower client call should be ok";
-
-async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
-    event: NetworkServiceEvent,
-    watchtower_client: &T,
-) {
-    match event {
-        NetworkServiceEvent::RemoteTxComplete(
-            _peer_id,
-            channel_id,
-            funding_udt_type_script,
-            local_settlement_key,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .create_watch_channel(CreateWatchChannelParams {
-                    channel_id: channel_id.into(),
-                    funding_udt_type_script: funding_udt_type_script.map(Into::into),
-                    local_settlement_key: local_settlement_key.0.secret_bytes().into(),
-                    remote_settlement_key: remote_settlement_key.into(),
-                    local_funding_pubkey: local_funding_pubkey.into(),
-                    remote_funding_pubkey: remote_funding_pubkey.into(),
-                    settlement_data: settlement_data.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::ChannelClosed(_, channel_id, _)
-        | NetworkServiceEvent::ChannelAbandon(channel_id) => {
-            watchtower_client
-                .remove_watch_channel(RemoveWatchChannelParams {
-                    channel_id: channel_id.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::RevokeAndAckReceived(
-            _peer_id,
-            channel_id,
-            revocation_data,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .update_revocation(UpdateRevocationParams {
-                    channel_id: channel_id.into(),
-                    revocation_data: revocation_data.into(),
-                    settlement_data: settlement_data.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::RemoteCommitmentSigned(
-            _peer_id,
-            channel_id,
-            _commitment_tx,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .update_local_settlement(UpdateLocalSettlementParams {
-                    channel_id: channel_id.into(),
-                    settlement_data: settlement_data.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
-            watchtower_client
-                .update_pending_remote_settlement(UpdatePendingRemoteSettlementParams {
-                    channel_id: channel_id.into(),
-                    settlement_data: settlement_data.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
-            watchtower_client
-                .create_preimage(CreatePreimageParams {
-                    payment_hash: payment_hash.into(),
-                    preimage: preimage.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
-            watchtower_client
-                .remove_preimage(RemovePreimageParams {
-                    payment_hash: payment_hash.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        _ => {
-            // ignore other non-watchtower related events
-        }
-    }
 }

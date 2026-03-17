@@ -1,20 +1,41 @@
-pub mod db_migrate;
+pub mod backend;
 mod error;
+pub mod iterator;
+
+pub use backend::{BatchWriter, StorageBackend};
+pub use error::StoreError;
+pub use iterator::{IteratorDirection, KVPair};
+
+// db_migrate and migration require a concrete Store backend
+#[cfg(any(feature = "rocksdb", feature = "sqlite", target_arch = "wasm32"))]
+pub mod db_migrate;
+#[cfg(any(feature = "rocksdb", feature = "sqlite", target_arch = "wasm32"))]
 pub mod migration;
 
-pub use error::StoreError;
-
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "rocksdb",
+    not(feature = "sqlite")
+))]
 mod native;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::{Batch, DbDirection, IteratorMode, Store};
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "rocksdb",
+    not(feature = "sqlite")
+))]
+pub use native::{Batch, Store};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+mod sqlite;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+pub use sqlite::{Batch, Store};
 
 #[cfg(all(target_arch = "wasm32", not(feature = "browser-test")))]
 mod browser;
 #[cfg(all(target_arch = "wasm32", not(feature = "browser-test")))]
-pub use browser::{Batch, DbDirection, IteratorMode, Store};
+pub use browser::{Batch, Store};
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-test"))]
 mod browser_test;
 #[cfg(all(target_arch = "wasm32", feature = "browser-test"))]
-pub use browser_test::{Batch, DbDirection, IteratorMode, Store};
+pub use browser_test::{Batch, Store};

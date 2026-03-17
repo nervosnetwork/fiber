@@ -8,27 +8,23 @@ use fnn::ckb::contracts::TypeIDResolver;
 #[cfg(debug_assertions)]
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
+use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
 use fnn::rpc::server::start_rpc;
-use fnn::rpc::watchtower::{
-    CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
-    UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
-    WatchtowerRpcClient,
-};
-use fnn::store::Store;
+use fnn::store::open_store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use fnn::watchtower::{
     WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS,
 };
+use fnn::ExitMessage;
 use fnn::{start_network, CchActor, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,9 +36,6 @@ use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
-const ASSUME_WATCHTOWER_CLIENT_CALL_OK: &str = "watchtower client call should be ok";
-
-pub struct ExitMessage(String);
 
 #[tokio::main]
 pub async fn main() -> Result<(), ExitMessage> {
@@ -86,14 +79,24 @@ pub async fn main() -> Result<(), ExitMessage> {
         .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
         .store_path();
 
-    let mut store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
-    let cch_fiber_store_event_port = config.cch.is_some().then(|| {
-        let port = Arc::new(OutputPort::default());
-        let store_watcher = CchFiberStoreWatcher::new(store.clone(), port.clone());
-        store.set_watcher(Arc::new(store_watcher));
-        port
-    });
+    let raw_store = open_store(store_path).map_err(|err| ExitMessage(err.to_string()))?;
 
+    if config.cch.is_some() {
+        let port = Arc::new(OutputPort::default());
+        let watcher = CchFiberStoreWatcher::build_watcher(raw_store.clone(), port.clone());
+        let mut store = raw_store;
+        store.set_watcher(watcher);
+        run_node(store, Some(port), config).await
+    } else {
+        run_node(raw_store, None, config).await
+    }
+}
+
+async fn run_node(
+    store: fnn::store::Store,
+    cch_fiber_store_event_port: Option<Arc<OutputPort<fnn::cch::trackers::CchTrackingEvent>>>,
+    config: Config,
+) -> Result<(), ExitMessage> {
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
@@ -492,116 +495,6 @@ fn forward_event_to_actor(
         _ => {
             // ignore other non-watchtower related events
         }
-    }
-}
-
-async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
-    event: NetworkServiceEvent,
-    watchtower_client: &T,
-) {
-    match event {
-        NetworkServiceEvent::RemoteTxComplete(
-            _peer_id,
-            channel_id,
-            funding_udt_type_script,
-            local_settlement_key,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .create_watch_channel(CreateWatchChannelParams {
-                    channel_id: channel_id.into(),
-                    funding_udt_type_script: funding_udt_type_script.map(Into::into),
-                    local_settlement_key: local_settlement_key.0.secret_bytes().into(),
-                    remote_settlement_key: remote_settlement_key.into(),
-                    local_funding_pubkey: local_funding_pubkey.into(),
-                    remote_funding_pubkey: remote_funding_pubkey.into(),
-                    settlement_data: settlement_data.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::ChannelClosed(_, channel_id, _)
-        | NetworkServiceEvent::ChannelAbandon(channel_id) => {
-            watchtower_client
-                .remove_watch_channel(RemoveWatchChannelParams {
-                    channel_id: channel_id.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::RevokeAndAckReceived(
-            _peer_id,
-            channel_id,
-            revocation_data,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .update_revocation(UpdateRevocationParams {
-                    channel_id: channel_id.into(),
-                    revocation_data: revocation_data.into(),
-                    settlement_data: settlement_data.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::RemoteCommitmentSigned(
-            _peer_id,
-            channel_id,
-            _commitment_tx,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .update_local_settlement(UpdateLocalSettlementParams {
-                    channel_id: channel_id.into(),
-                    settlement_data: settlement_data.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
-            watchtower_client
-                .update_pending_remote_settlement(UpdatePendingRemoteSettlementParams {
-                    channel_id: channel_id.into(),
-                    settlement_data: settlement_data.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
-            watchtower_client
-                .create_preimage(CreatePreimageParams {
-                    payment_hash: payment_hash.into(),
-                    preimage: preimage.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
-            watchtower_client
-                .remove_preimage(RemovePreimageParams {
-                    payment_hash: payment_hash.into(),
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        _ => {
-            // ignore other non-watchtower related events
-        }
-    }
-}
-
-impl Debug for ExitMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Exit because {}", self.0)
-    }
-}
-
-impl ExitMessage {
-    pub fn err(message: String) -> Result<(), ExitMessage> {
-        Err(ExitMessage(message))
     }
 }
 

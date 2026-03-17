@@ -4,7 +4,7 @@ name = "openrpc-json-generator"
 version = "0.1.0"
 
 [dependencies]
-fnn = {path = "../crates/fiber-lib"}
+fnn = {path = "../crates/fiber-lib", features = ["rocksdb"]}
 openrpsee = {path = "./openrpsee-0.1.0"}
 phf = {version = "0.13.1", features = ["macros"]}
 serde_json = "1"
