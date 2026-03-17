@@ -577,7 +577,6 @@ Returns individual forwarding events with optional time range, asset filter,
 * `offset` - <em>`Option<u64>`</em>, Number of events to skip (for pagination). Default is 0.
 * `udt_type_script` - <em>`Option<Script>`</em>, Filter by UDT type script. If set, only events for this specific UDT are returned.
  Use `null` or omit to return events for all asset types.
- Use an explicit JSON `null` value with `ckb_only: true` to get only CKB events.
 
 ##### Returns
 
@@ -1225,7 +1224,7 @@ Fee summary for a single asset type (CKB or a specific UDT).
 
 Payment amount summary for a single asset type (CKB or a specific UDT).
 
- Used by both `sent_report` and `received_report` RPCs.
+ Used by both `sent_payment_report` and `received_payment_report` RPCs.
 
 
 #### Fields

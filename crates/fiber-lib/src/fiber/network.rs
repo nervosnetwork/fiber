@@ -283,10 +283,14 @@ pub struct SendOnionPacketCommand {
 pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
-    ConnectPeer(Multiaddr, bool),
+    ConnectPeer(Multiaddr, bool, Option<RpcReplyPort<Result<(), String>>>),
     // Connect to a peer via pubkey, resolving address from local graph/saved state.
     ConnectPeerWithPubkey(Pubkey, RpcReplyPort<Result<(), String>>),
-    DisconnectPeer(Pubkey, PeerDisconnectReason),
+    DisconnectPeer(
+        Pubkey,
+        PeerDisconnectReason,
+        Option<RpcReplyPort<Result<(), String>>>,
+    ),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
     SavePeerAddress(Multiaddr),
@@ -335,7 +339,7 @@ pub enum NetworkActorCommand {
     SignFundingTx(Pubkey, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     NotifyFundingTx(Transaction),
     CheckChannelsShutdown,
-    CheckChannelShutdown(Hash256),
+    CheckChannelShutdown(Hash256, RpcReplyPort<Result<(), String>>),
     RemoteForceShutdownChannel(Hash256, Option<GetShutdownTxResponse>),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
@@ -1080,13 +1084,25 @@ where
             NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget { target, message }) => {
                 state.send_fiber_message_to_pubkey(&target, message).await?;
             }
-            NetworkActorCommand::ConnectPeer(addr, save) => {
+            NetworkActorCommand::ConnectPeer(addr, save, rpc_reply) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
                 if save {
                     state.enqueue_peer_address_to_save(addr.clone());
                 }
-                state.control.dial(addr, TargetProtocol::All).await?;
+                match state.control.dial(addr, TargetProtocol::All).await {
+                    Ok(()) => {
+                        if let Some(reply) = rpc_reply {
+                            let _ = reply.send(Ok(()));
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(reply) = rpc_reply {
+                            let _ = reply.send(Err(err.to_string()));
+                        }
+                        return Err(err.into());
+                    }
+                }
 
                 // TODO: note that the dial function does not return error immediately even if dial fails.
                 // Tentacle sends an event by calling handle_error function instead, which
@@ -1110,13 +1126,18 @@ where
                     }
                 }
             }
-            NetworkActorCommand::DisconnectPeer(pubkey, reason) => {
+            NetworkActorCommand::DisconnectPeer(pubkey, reason, reply) => {
                 if let Some(session) = state.peer_session_map.get(&pubkey).map(|p| p.session_id) {
                     debug!(
                         "Disconnecting peer {:?} session w {:?}ith reason {:?}",
                         &pubkey, &session, &reason
                     );
                     state.control.disconnect(session).await?;
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Ok(()));
+                    }
+                } else if let Some(reply) = reply {
+                    let _ = reply.send(Err(format!("peer {:?} is not connected", pubkey)));
                 }
             }
             NetworkActorCommand::SavePeerAddress(addr) => {
@@ -1142,7 +1163,7 @@ where
                     if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
                         myself
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.to_owned(), false),
+                                NetworkActorCommand::ConnectPeer(addr.to_owned(), false, None),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1235,7 +1256,7 @@ where
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.clone(), false),
+                                NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1256,7 +1277,7 @@ where
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.clone(), false),
+                                NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1274,6 +1295,7 @@ where
                                 NetworkActorCommand::DisconnectPeer(
                                     pubkey,
                                     PeerDisconnectReason::InitMessageTimeout,
+                                    None,
                                 ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -1905,7 +1927,7 @@ where
                     ))
                     .expect("network actor alive");
             }
-            NetworkActorCommand::CheckChannelShutdown(channel_id) => {
+            NetworkActorCommand::CheckChannelShutdown(channel_id, rpc_reply) => {
                 if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
                     let funding_lock_script =
                         state.get_cached_channel_funding_lock_script(channel_id, &channel_state);
@@ -1921,10 +1943,12 @@ where
                         )
                         .await;
                     });
+                    let _ = rpc_reply.send(Ok(()));
                 } else {
                     tracing::debug!(
                         "stop check channel shutdown, can't find {channel_id:?} actor state"
                     );
+                    let _ = rpc_reply.send(Err(format!("Channel not found: {:?}", channel_id)));
                 }
             }
             NetworkActorCommand::RemoteForceShutdownChannel(channel_id, response) => {
@@ -4125,6 +4149,7 @@ where
                     NetworkActorCommand::DisconnectPeer(
                         peer_pubkey,
                         PeerDisconnectReason::ChainHashMismatch,
+                        None,
                     ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -4689,7 +4714,7 @@ where
                 Ok(addr) => {
                     myself
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ConnectPeer(addr, false),
+                            NetworkActorCommand::ConnectPeer(addr, false, None),
                         ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }

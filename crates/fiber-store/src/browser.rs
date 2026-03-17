@@ -5,10 +5,7 @@ use fiber_wasm_db_common::read_command_payload;
 use fiber_wasm_db_common::write_command_with_payload;
 use fiber_wasm_db_common::DbCommandRequest;
 use fiber_wasm_db_common::DbCommandResponse;
-pub use fiber_wasm_db_common::DbDirection;
 use fiber_wasm_db_common::InputCommand;
-pub use fiber_wasm_db_common::IteratorMode;
-use fiber_wasm_db_common::IteratorModeOwned;
 use fiber_wasm_db_common::OutputCommand;
 use fiber_wasm_db_common::KV;
 use std::cell::RefCell;
@@ -25,6 +22,11 @@ use web_sys::js_sys::Atomics;
 use web_sys::js_sys::Int32Array;
 use web_sys::js_sys::SharedArrayBuffer;
 use web_sys::js_sys::Uint8Array;
+
+use crate::backend::{BatchWriter, StorageBackend, TakeWhileFn};
+use crate::iterator::{IteratorDirection, KVPair};
+
+type TakeWhileCallback = Box<dyn Fn(&[u8]) -> bool + 'static>;
 
 unsafe impl Send for Store {}
 unsafe impl Sync for Store {}
@@ -57,90 +59,6 @@ impl Store {
         Ok(Self { chan })
     }
 
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        return match self
-            .chan
-            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Read {
-                keys: vec![key.as_ref().to_vec()],
-            })
-            .unwrap()
-        {
-            DbCommandResponse::Read { mut values } => values.remove(0),
-            _ => unreachable!(),
-        };
-    }
-
-    pub fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        match self
-            .chan
-            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Delete {
-                keys: vec![key.as_ref().to_vec()],
-            })
-            .unwrap()
-        {
-            DbCommandResponse::Delete => {}
-            _ => unreachable!(),
-        };
-    }
-
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        match self
-            .chan
-            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Put {
-                kvs: vec![KV {
-                    key: key.as_ref().to_vec(),
-                    value: value.as_ref().to_vec(),
-                }],
-            })
-            .unwrap()
-        {
-            DbCommandResponse::Put => {}
-            _ => unreachable!(),
-        };
-    }
-
-    pub fn batch(&self) -> Batch {
-        Batch {
-            chan: self.chan.clone(),
-            delete: vec![],
-            puts: vec![],
-        }
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn prefix_iterator_with_skip_while_and_start<'a>(
-        &'a self,
-        prefix: &'a [u8],
-        mode: IteratorMode<'a>,
-        skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        match self
-            .chan
-            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::PrefixIterator {
-                prefix: prefix.to_vec(),
-                mode: mode.to_owned(),
-                skip_while,
-            })
-            .unwrap()
-        {
-            DbCommandResponse::PrefixIterator { data } => data
-                .into_iter()
-                .map(|kv| (kv.key.into_boxed_slice(), kv.value.into_boxed_slice())),
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn prefix_iterator<'a>(
-        &'a self,
-        prefix: &'a [u8],
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        self.prefix_iterator_with_skip_while_and_start(
-            prefix,
-            IteratorMode::From(prefix, DbDirection::Forward),
-            Box::new(|_| false),
-        )
-    }
-
     pub fn shutdown(self) {
         info!("Shutting down database Store..");
         let CommunicationChannel {
@@ -160,17 +78,13 @@ impl Store {
     }
 }
 
-pub struct Batch {
-    chan: CommunicationChannel,
-    puts: Vec<KV>,
-    delete: Vec<Vec<u8>>,
-}
+impl StorageBackend for Store {
+    type Batch = Batch;
 
-impl Batch {
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
         return match self
             .chan
-            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Read {
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Read {
                 keys: vec![key.as_ref().to_vec()],
             })
             .unwrap()
@@ -180,25 +94,105 @@ impl Batch {
         };
     }
 
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
+        match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Put {
+                kvs: vec![KV {
+                    key: key.as_ref().to_vec(),
+                    value: value.as_ref().to_vec(),
+                }],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Put => {}
+            _ => unreachable!(),
+        };
+    }
+
+    fn delete<K: AsRef<[u8]>>(&self, key: K) {
+        match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Delete {
+                keys: vec![key.as_ref().to_vec()],
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Delete => {}
+            _ => unreachable!(),
+        };
+    }
+
+    fn batch(&self) -> Self::Batch {
+        Batch {
+            chan: self.chan.clone(),
+            delete: vec![],
+            puts: vec![],
+        }
+    }
+
+    fn collect_iterator(
+        &self,
+        start: Vec<u8>,
+        direction: IteratorDirection,
+        take_while_fn: TakeWhileFn,
+        limit: usize,
+    ) -> Vec<KVPair> {
+        let ipc_direction = match direction {
+            IteratorDirection::Forward => fiber_wasm_db_common::IteratorDirection::Forward,
+            IteratorDirection::Reverse => fiber_wasm_db_common::IteratorDirection::Reverse,
+        };
+
+        // Wrap the take_while_fn into a boxed callback for IPC
+        let take_while: TakeWhileCallback = Box::new(move |key: &[u8]| take_while_fn(key));
+
+        let kvs = match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Iterator {
+                start,
+                direction: ipc_direction,
+                limit,
+                take_while,
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Iterator { kvs } => kvs,
+            _ => unreachable!(),
+        };
+
+        kvs.into_iter()
+            .map(|kv| KVPair {
+                key: kv.key,
+                value: kv.value,
+            })
+            .collect()
+    }
+}
+
+pub struct Batch {
+    chan: CommunicationChannel,
+    puts: Vec<KV>,
+    delete: Vec<Vec<u8>>,
+}
+
+impl BatchWriter for Batch {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
         self.puts.push(KV {
             key: key.as_ref().to_vec(),
             value: value.as_ref().to_vec(),
         });
     }
 
-    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
         self.delete.push(key.as_ref().to_vec());
     }
 
-    pub fn commit(self) {
+    fn commit(self) {
         self.chan
-            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Delete {
-                keys: self.delete,
-            })
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Delete { keys: self.delete })
             .expect("Failed to delete batch");
         self.chan
-            .dispatch_database_command(DbCommandRequestWithSkipWhileFunc::Put { kvs: self.puts })
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Put { kvs: self.puts })
             .expect("Failed to put batch");
     }
 }
@@ -281,7 +275,7 @@ impl CommunicationChannel {
                 "{}",
                 read_command_payload::<String>(output_i32_arr, output_u8_arr).unwrap()
             ),
-            OutputCommand::PrefixIteratorRequestForNextEntry
+            OutputCommand::RequestTakeWhile
             | OutputCommand::Waiting
             | OutputCommand::DbResponse => {
                 unreachable!()
@@ -289,29 +283,36 @@ impl CommunicationChannel {
         }
     }
 
-    /// Execute a database command, retrieving the response (or error)
+    /// Execute a database command, retrieving the response (or error).
+    ///
+    /// For `Iterator` commands, this handles the `RequestTakeWhile` IPC callback
+    /// loop: the worker sends each key for evaluation, and this method responds
+    /// with the result of `take_while`.
     fn dispatch_database_command(
         &self,
-        cmd: DbCommandRequestWithSkipWhileFunc,
+        cmd: DbCommandRequestWithTakeWhile,
     ) -> anyhow::Result<DbCommandResponse> {
-        let (new_cmd, skip_while) = match cmd {
-            DbCommandRequestWithSkipWhileFunc::Read { keys } => {
-                (DbCommandRequest::Read { keys }, None)
-            }
-            DbCommandRequestWithSkipWhileFunc::Put { kvs } => (DbCommandRequest::Put { kvs }, None),
-            DbCommandRequestWithSkipWhileFunc::Delete { keys } => {
+        let (ipc_cmd, take_while) = match cmd {
+            DbCommandRequestWithTakeWhile::Read { keys } => (DbCommandRequest::Read { keys }, None),
+            DbCommandRequestWithTakeWhile::Put { kvs } => (DbCommandRequest::Put { kvs }, None),
+            DbCommandRequestWithTakeWhile::Delete { keys } => {
                 (DbCommandRequest::Delete { keys }, None)
             }
-            DbCommandRequestWithSkipWhileFunc::PrefixIterator {
-                prefix,
-                mode,
-                skip_while,
+            DbCommandRequestWithTakeWhile::Iterator {
+                start,
+                direction,
+                limit,
+                take_while,
             } => (
-                DbCommandRequest::PrefixIterator { prefix, mode },
-                Some(skip_while),
+                DbCommandRequest::Iterator {
+                    start,
+                    direction,
+                    limit,
+                },
+                Some(take_while),
             ),
         };
-        trace!("Dispatching database command: {:?}", new_cmd);
+        trace!("Dispatching database command: {:?}", ipc_cmd);
         let CommunicationChannel {
             input_i32_arr,
             input_u8_arr,
@@ -321,7 +322,7 @@ impl CommunicationChannel {
         output_i32_arr.set_index(0, InputCommand::Waiting as i32);
         write_command_with_payload(
             InputCommand::DbRequest as i32,
-            new_cmd,
+            ipc_cmd,
             input_i32_arr,
             input_u8_arr,
         )
@@ -332,18 +333,21 @@ impl CommunicationChannel {
             output_i32_arr.set_index(0, 0);
             match output_cmd {
                 OutputCommand::OpenDatabaseResponse | OutputCommand::Waiting => unreachable!(),
-                OutputCommand::PrefixIteratorRequestForNextEntry => {
-                    let arg = read_command_payload::<Vec<u8>>(output_i32_arr, output_u8_arr)?;
-                    let ok = skip_while.as_ref().unwrap()(&arg);
+                OutputCommand::RequestTakeWhile => {
+                    // Worker is asking us to evaluate take_while for a key
+                    let key = read_command_payload::<Vec<u8>>(output_i32_arr, output_u8_arr)?;
+                    let result = take_while.as_ref().expect(
+                        "Received RequestTakeWhile but no take_while callback was provided",
+                    )(&key);
 
                     trace!(
-                        "Received take while request with args {:?}, result {}",
-                        arg,
-                        ok
+                        "Received take_while request for key {:?}, result {}",
+                        key,
+                        result
                     );
                     write_command_with_payload(
-                        InputCommand::PrefixIteratorResponse as i32,
-                        ok,
+                        InputCommand::ResponseTakeWhile as i32,
+                        result,
                         input_i32_arr,
                         input_u8_arr,
                     )?;
@@ -364,7 +368,11 @@ impl CommunicationChannel {
     }
 }
 
-pub enum DbCommandRequestWithSkipWhileFunc {
+/// Client-side wrapper around `DbCommandRequest` that carries a non-serializable
+/// `take_while` callback for `Iterator` commands. The callback is extracted by
+/// `dispatch_database_command` and used to respond to `RequestTakeWhile` IPC
+/// messages from the worker.
+pub enum DbCommandRequestWithTakeWhile {
     Read {
         keys: Vec<Vec<u8>>,
     },
@@ -374,10 +382,11 @@ pub enum DbCommandRequestWithSkipWhileFunc {
     Delete {
         keys: Vec<Vec<u8>>,
     },
-    PrefixIterator {
-        prefix: Vec<u8>,
-        mode: IteratorModeOwned,
+    Iterator {
+        start: Vec<u8>,
+        direction: fiber_wasm_db_common::IteratorDirection,
+        limit: usize,
         #[allow(clippy::type_complexity)]
-        skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
+        take_while: TakeWhileCallback,
     },
 }

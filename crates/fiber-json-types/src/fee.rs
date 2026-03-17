@@ -74,7 +74,6 @@ pub struct ForwardingHistoryParams {
     pub offset: Option<u64>,
     /// Filter by UDT type script. If set, only events for this specific UDT are returned.
     /// Use `null` or omit to return events for all asset types.
-    /// Use an explicit JSON `null` value with `ckb_only: true` to get only CKB events.
     pub udt_type_script: Option<Script>,
 }
 
@@ -122,7 +121,7 @@ pub struct ForwardingHistoryResult {
 
 /// Payment amount summary for a single asset type (CKB or a specific UDT).
 ///
-/// Used by both `sent_report` and `received_report` RPCs.
+/// Used by both `sent_payment_report` and `received_payment_report` RPCs.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct AssetPaymentReport {

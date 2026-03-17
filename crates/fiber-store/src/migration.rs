@@ -1,3 +1,4 @@
+use crate::backend::StorageBackend;
 use crate::StoreError;
 #[cfg(not(target_arch = "wasm32"))]
 use console::Term;

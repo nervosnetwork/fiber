@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
 use super::types::BroadcastMessageWithTimestamp;
-use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
+use crate::fiber::channel::{ChannelActorStateStore, ChannelEventStore, ProcessingChannelError};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
     PAYMENT_MAX_PARTS_LIMIT,
@@ -30,9 +30,9 @@ pub use fiber_types::PaymentSession;
 pub use fiber_types::SendPaymentData;
 use fiber_types::{
     Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, PaymentCustomRecords,
-    PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey, RemoveTlcReason,
-    RouterHop, TlcErr, TlcErrData, TlcErrorCode, TrampolineContext, DEFAULT_MAX_PARTS,
-    DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
+    PaymentEvent, PaymentEventType, PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey,
+    Pubkey, RemoveTlcReason, RouterHop, TlcErr, TlcErrData, TlcErrorCode, TrampolineContext,
+    DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
