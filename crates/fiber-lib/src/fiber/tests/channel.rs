@@ -14,6 +14,7 @@ use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
     AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, TlcErr,
 };
+use crate::fiber::ChannelConnectivityState;
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode};
 use crate::tests::test_utils::*;
@@ -6964,5 +6965,37 @@ async fn test_legacy_fallback_single_owed_no_commit_diff() {
     assert!(
         res.is_ok(),
         "Payment should succeed after legacy single-owed reestablish"
+    );
+}
+/// Reproducer: 4-node ring (A-B-C-D-A), all nodes send 100 self-payments
+/// through the ring, then restart A and D.
+/// Expected: all TLCs settle, channel balances conserved (only routing fees change).
+#[tokio::test]
+async fn test_stop_marks_local_ready_channel_offline_before_restart() {
+    init_tracing();
+
+    let (mut node_a, _node_b, channel_id, _funding_tx) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let state_before_stop = node_a.get_channel_actor_state(channel_id);
+    assert!(!state_before_stop.reestablishing);
+    assert_eq!(
+        state_before_stop.connectivity_state,
+        ChannelConnectivityState::Online
+    );
+
+    node_a.stop().await;
+
+    let state_after_stop = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        state_after_stop.reestablishing,
+        "stopped local channel should enter reestablishing state, got connectivity={:?}",
+        state_after_stop.connectivity_state
+    );
+    assert_eq!(
+        state_after_stop.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "stopped local ready channel should be persisted as Offline"
     );
 }

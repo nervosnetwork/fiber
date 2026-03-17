@@ -551,6 +551,7 @@ fn test_channel_actor_state_store() {
             local_constraints: ChannelConstraints::default(),
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
+            connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![TlcReplayUpdate::Add(AddTlc {
                 channel_id,
@@ -693,6 +694,7 @@ fn test_serde_channel_actor_state_ciborium() {
             local_constraints: ChannelConstraints::default(),
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
+            connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,

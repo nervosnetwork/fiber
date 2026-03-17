@@ -1077,6 +1077,34 @@ where
         self.source
     }
 
+    #[cfg(any(test, feature = "bench"))]
+    pub fn debug_history_result(
+        &self,
+        channel_outpoint: &OutPoint,
+        from: Pubkey,
+        to: Pubkey,
+    ) -> Option<TimedResult> {
+        let (direction, _) = super::history::output_direction(from, to);
+        self.history
+            .get_result(channel_outpoint, direction)
+            .copied()
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub fn debug_history_probability(
+        &self,
+        channel_outpoint: &OutPoint,
+        from: Pubkey,
+        to: Pubkey,
+        amount: u128,
+    ) -> Option<f64> {
+        let channel = self.get_channel(channel_outpoint)?;
+        Some(
+            self.history
+                .eval_probability(from, to, channel_outpoint, amount, channel.capacity()),
+        )
+    }
+
     pub(crate) fn mark_channel_failed(&mut self, channel_outpoint: &OutPoint) {
         if let Some(channel) = self.channels.get_mut(channel_outpoint) {
             if let Some(info) = channel.update_of_node2.as_mut() {
@@ -1142,11 +1170,13 @@ where
         &mut self,
         attempt: &Attempt,
         tlc_err: TlcErr,
-        first_hop_error: bool,
+        _first_hop_error: bool,
     ) -> bool {
-        if !first_hop_error {
-            self.untrack_attempt_router(attempt);
-        }
+        // Always drop the runtime reservation for a failed attempt. This is safe
+        // even if the attempt was never tracked because untrack uses saturating
+        // arithmetic, and without it reconnect/retry flows can leak channel_stats
+        // reservations until process restart.
+        self.untrack_attempt_router(attempt);
         let mut internal_result = InternalResult::default();
         let nodes = &attempt.route.nodes;
         let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
@@ -1877,14 +1907,14 @@ where
         nodes_heap: &mut NodeHeap,
         channel_stats: &GraphChannelStat,
     ) {
-        let mut probability = cur_probability
-            * self.history.eval_probability(
-                from,
-                target,
-                channel_outpoint,
-                next_hop_received_amount,
-                channel_capacity,
-            );
+        let edge_probability = self.history.eval_probability(
+            from,
+            target,
+            channel_outpoint,
+            next_hop_received_amount,
+            channel_capacity,
+        );
+        let mut probability = cur_probability * edge_probability;
 
         let pending_count = channel_stats.get_channel_count(channel_outpoint) + cur_pending_count;
 
@@ -1893,7 +1923,18 @@ where
         }
 
         if probability < DEFAULT_MIN_PROBABILITY {
-            debug!("probability is too low: {:?}", probability);
+            debug!(
+                "skip edge due to low probability channel={:?} from={:?} target={:?} amount={} channel_capacity={} edge_probability={} cur_probability={} pending_count={} final_probability={}",
+                channel_outpoint,
+                from,
+                target,
+                next_hop_received_amount,
+                channel_capacity,
+                edge_probability,
+                cur_probability,
+                pending_count,
+                probability,
+            );
             return;
         }
 
