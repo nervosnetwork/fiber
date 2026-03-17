@@ -17,8 +17,8 @@ use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
         channel::{
-            ChannelActorState, ChannelActorStateStore, ChannelEventStore, ChannelOpenRecordStore,
-            CommitDiff,
+            ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff,
+            PaymentEventStore,
         },
         graph::NetworkGraphStateStore,
         network::NetworkActorStateStore,
@@ -730,7 +730,7 @@ impl ChannelOpenRecordStore for Store {
     }
 }
 
-impl ChannelEventStore for Store {
+impl PaymentEventStore for Store {
     fn insert_forwarding_event(&self, event: ForwardingEvent) {
         let mut batch = self.batch();
         let kv = KeyValue::ForwardingEvent(event);

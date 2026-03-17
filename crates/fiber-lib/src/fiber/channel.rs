@@ -348,7 +348,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore + ChannelEventStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + PaymentEventStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -2591,7 +2591,7 @@ where
     S: ChannelActorStateStore
         + InvoiceStore
         + PreimageStore
-        + ChannelEventStore
+        + PaymentEventStore
         + Send
         + Sync
         + 'static,
@@ -7427,7 +7427,7 @@ pub trait ChannelOpenRecordStore {
 ///
 /// Events are keyed by timestamp (big-endian u64 milliseconds) to support
 /// efficient time-range queries.
-pub trait ChannelEventStore {
+pub trait PaymentEventStore {
     /// Insert a new forwarding event into the store.
     fn insert_forwarding_event(&self, event: ForwardingEvent);
     /// Query forwarding events within a time range, with pagination.

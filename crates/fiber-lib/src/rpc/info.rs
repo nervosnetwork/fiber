@@ -1,5 +1,5 @@
 use crate::ckb::CkbConfig;
-use crate::fiber::channel::ChannelEventStore;
+use crate::fiber::channel::PaymentEventStore;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::{handle_actor_call, log_and_error, now_timestamp_as_millis_u64};
 use ckb_jsonrpc_types::Script;
@@ -99,7 +99,7 @@ trait InfoRpc {
 #[cfg(not(target_arch = "wasm32"))]
 impl<S> InfoRpcServer for InfoRpcServerImpl<S>
 where
-    S: ChannelEventStore + Send + Sync + 'static,
+    S: PaymentEventStore + Send + Sync + 'static,
 {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         self.node_info().await
@@ -136,7 +136,7 @@ where
 
 impl<S> InfoRpcServerImpl<S>
 where
-    S: ChannelEventStore + Send + Sync + 'static,
+    S: PaymentEventStore + Send + Sync + 'static,
 {
     pub async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
@@ -198,7 +198,7 @@ where
 
 /// Core fee report logic, usable from both the RPC impl and tests.
 pub fn fee_report_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
 ) -> Result<FeeReportResult, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
     let day_ago = now.saturating_sub(MILLIS_PER_DAY);
@@ -249,7 +249,7 @@ pub fn fee_report_impl(
 
 /// Core forwarding history logic, usable from both the RPC impl and tests.
 pub fn forwarding_history_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
     params: ForwardingHistoryParams,
 ) -> Result<ForwardingHistoryResult, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
@@ -298,7 +298,7 @@ pub fn forwarding_history_impl(
 
 /// Core sent payment report logic.
 pub fn sent_payment_report_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
 ) -> Result<SentPaymentReportResult, ErrorObjectOwned> {
     payment_report_impl(store, PaymentEventType::Send)
         .map(|asset_reports| SentPaymentReportResult { asset_reports })
@@ -306,7 +306,7 @@ pub fn sent_payment_report_impl(
 
 /// Core received payment report logic.
 pub fn received_payment_report_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
 ) -> Result<ReceivedPaymentReportResult, ErrorObjectOwned> {
     payment_report_impl(store, PaymentEventType::Receive)
         .map(|asset_reports| ReceivedPaymentReportResult { asset_reports })
@@ -314,7 +314,7 @@ pub fn received_payment_report_impl(
 
 /// Shared logic for sent/received payment reports.
 fn payment_report_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
     event_type: PaymentEventType,
 ) -> Result<Vec<AssetPaymentReport>, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();
@@ -364,7 +364,7 @@ fn payment_report_impl(
 
 /// Core payment history logic.
 pub fn payment_history_impl(
-    store: &impl ChannelEventStore,
+    store: &impl PaymentEventStore,
     params: PaymentHistoryParams,
 ) -> Result<PaymentHistoryResult, ErrorObjectOwned> {
     let now = now_timestamp_as_millis_u64();

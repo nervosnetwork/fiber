@@ -1140,7 +1140,7 @@ fn make_forwarding_event(timestamp: u64, fee: u128) -> fiber_types::ForwardingEv
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_forwarding_event_insert_and_query() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1160,7 +1160,7 @@ fn test_store_forwarding_event_insert_and_query() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_forwarding_event_time_range() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1207,7 +1207,7 @@ fn test_store_forwarding_event_time_range() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_forwarding_event_pagination() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1241,7 +1241,7 @@ fn test_store_forwarding_event_pagination() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_forwarding_event_ordering() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1265,7 +1265,7 @@ fn test_store_forwarding_event_ordering() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_forwarding_event_same_timestamp_different_hash() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1290,7 +1290,7 @@ fn test_store_forwarding_event_same_timestamp_different_hash() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_forwarding_event_with_udt() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
     use ckb_types::packed::ScriptBuilder;
     use ckb_types::prelude::*;
 
@@ -1358,7 +1358,7 @@ fn make_payment_event(
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_event_insert_and_query() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1378,7 +1378,7 @@ fn test_store_payment_event_insert_and_query() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_event_time_range() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1424,7 +1424,7 @@ fn test_store_payment_event_time_range() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_event_pagination() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1463,7 +1463,7 @@ fn test_store_payment_event_pagination() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_event_ordering() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1486,7 +1486,7 @@ fn test_store_payment_event_ordering() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_event_same_timestamp_different_hash() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1508,7 +1508,7 @@ fn test_store_payment_event_same_timestamp_different_hash() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_event_with_udt() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
     use ckb_types::packed::ScriptBuilder;
     use ckb_types::prelude::*;
 
@@ -1552,7 +1552,7 @@ fn test_store_payment_event_with_udt() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_event_mixed_types() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 
@@ -1585,7 +1585,7 @@ fn test_store_payment_event_mixed_types() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_payment_event_independent_of_forwarding_events() {
-    use crate::fiber::channel::ChannelEventStore;
+    use crate::fiber::channel::PaymentEventStore;
 
     let (store, _dir) = generate_store();
 

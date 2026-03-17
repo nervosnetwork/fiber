@@ -1,4 +1,4 @@
-use crate::fiber::channel::ChannelEventStore;
+use crate::fiber::channel::PaymentEventStore;
 use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use crate::rpc::info::{
@@ -25,7 +25,7 @@ impl MockForwardingStore {
     }
 }
 
-impl ChannelEventStore for MockForwardingStore {
+impl PaymentEventStore for MockForwardingStore {
     fn insert_forwarding_event(&self, event: ForwardingEvent) {
         self.events.lock().unwrap().push(event);
     }
