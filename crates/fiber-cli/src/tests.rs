@@ -1180,8 +1180,6 @@ mod prof_cli_tests {
     }
 }
 
-// ── Info fee CLI arg tests ────────────────────────────────────────────────
-
 mod info_fee_cli_tests {
     use super::parse_args;
     use crate::cli_generated::CliArgs;

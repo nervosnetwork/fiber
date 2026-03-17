@@ -255,6 +255,9 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
+            PAYMENT_EVENT_PREFIX => {
+                check_deserialization::<PaymentEvent>(&value, "PAYMENT_EVENT_PREFIX", &mut errors);
+            }
             _ => {}
         }
     }
@@ -450,12 +453,14 @@ impl StoreKeyValue for KeyValue {
                 &[FORWARDING_EVENT_PREFIX],
                 &event.timestamp.to_be_bytes()[..],
                 event.payment_hash.as_ref(),
+                event.incoming_channel_id.as_ref(),
             ]
             .concat(),
             KeyValue::PaymentEvent(event) => [
                 &[PAYMENT_EVENT_PREFIX],
                 &event.timestamp.to_be_bytes()[..],
                 event.payment_hash.as_ref(),
+                event.channel_id.as_ref(),
             ]
             .concat(),
         }
