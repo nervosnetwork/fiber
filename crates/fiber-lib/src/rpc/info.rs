@@ -23,6 +23,7 @@ pub use fiber_json_types::{
 const DEFAULT_FORWARDING_HISTORY_LIMIT: u64 = 100;
 const DEFAULT_PAYMENT_HISTORY_LIMIT: u64 = 100;
 const MAX_FORWARDING_HISTORY_LIMIT: u64 = 10000;
+const MAX_PAYMENT_HISTORY_LIMIT: u64 = 10000;
 pub(crate) const MILLIS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 pub(crate) const MILLIS_PER_WEEK: u64 = 7 * MILLIS_PER_DAY;
 pub(crate) const MILLIS_PER_MONTH: u64 = 30 * MILLIS_PER_DAY;
@@ -299,7 +300,9 @@ pub fn forwarding_history_impl(
     let udt_filter: Option<Option<ckb_types::packed::Script>> =
         params.udt_type_script.map(|s| Some(s.into()));
 
-    let events = store.get_forwarding_events(start_time, end_time, limit, offset);
+    // Fetch enough events to cover offset + limit
+    let fetch_limit = offset.saturating_add(limit);
+    let events = store.get_forwarding_events(start_time, end_time, fetch_limit, 0);
     let filtered: Vec<_> = events
         .into_iter()
         .filter(|e| match &udt_filter {
@@ -408,10 +411,24 @@ pub fn payment_history_impl(
     let limit = params.limit.unwrap_or(DEFAULT_PAYMENT_HISTORY_LIMIT) as usize;
     let offset = params.offset.unwrap_or(0) as usize;
 
+    if limit > MAX_PAYMENT_HISTORY_LIMIT as usize {
+        return Err(ErrorObjectOwned::owned(
+            INVALID_PARAMS_CODE,
+            format!(
+                "limit exceeds maximum allowed value ({}). \
+                Use a smaller limit or use start_time/end_time to narrow the time range.",
+                MAX_PAYMENT_HISTORY_LIMIT
+            ),
+            Option::<()>::None,
+        ));
+    }
+
     let udt_filter: Option<Option<ckb_types::packed::Script>> =
         params.udt_type_script.map(|s| Some(s.into()));
 
-    let events = store.get_payment_events(start_time, end_time, usize::MAX, 0);
+    // Fetch enough events to cover offset + limit
+    let fetch_limit = offset.saturating_add(limit);
+    let events = store.get_payment_events(start_time, end_time, fetch_limit, 0);
 
     let filtered: Vec<_> = events
         .into_iter()
