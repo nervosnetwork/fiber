@@ -148,6 +148,12 @@ const CHECK_CHANNELS_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
 // The duration for which we will check peer init messages.
 const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 
+#[cfg(debug_assertions)]
+const PEER_RECONNECT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+#[cfg(not(debug_assertions))]
+const PEER_RECONNECT_BACKOFF_BASE: Duration = Duration::from_secs(2);
+const PEER_RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
 // While creating a network graph from the gossip messages, we will load current gossip messages
 // in the store and process them. We will load all current messages and get the latest cursor.
 // The problem is that we can't guarantee that the messages are in order, that is to say it is
@@ -178,6 +184,15 @@ pub(crate) fn check_chain_hash(chain_hash: &Hash256) -> Result<(), Error> {
     }
 }
 
+fn compute_peer_reconnect_delay(attempt: u32) -> Duration {
+    let shift = attempt.min(10);
+    let factor = 1u32 << shift;
+    PEER_RECONNECT_BACKOFF_BASE
+        .checked_mul(factor)
+        .unwrap_or(PEER_RECONNECT_BACKOFF_MAX)
+        .min(PEER_RECONNECT_BACKOFF_MAX)
+}
+
 #[derive(Debug)]
 pub enum PeerDisconnectReason {
     /// User request disconnection.
@@ -186,6 +201,12 @@ pub enum PeerDisconnectReason {
     InitMessageTimeout,
     /// Chain hash mismatch.
     ChainHashMismatch,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PeerReconnectTrigger {
+    Disconnected,
+    DialError,
 }
 
 #[derive(Debug)]
@@ -291,6 +312,8 @@ pub enum NetworkActorCommand {
         PeerDisconnectReason,
         Option<RpcReplyPort<Result<(), String>>>,
     ),
+    SeedPeerReconnectBackoff(PeerId, PeerReconnectTrigger),
+    PeerReconnectBackoffTick(PeerId, u32),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
     SavePeerAddress(Multiaddr),
@@ -1126,9 +1149,22 @@ where
                 }
             }
             NetworkActorCommand::DisconnectPeer(pubkey, reason, reply) => {
-                if let Some(session) = state.peer_session_map.get(&pubkey).map(|p| p.session_id) {
+                let peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
+                let session = state
+                    .peer_session_map
+                    .get(&pubkey)
+                    .map(|peer| peer.session_id);
+                if matches!(reason, PeerDisconnectReason::Requested) {
+                    state.peer_reconnect_backoff_attempts.remove(&peer_id);
+                    if session.is_some() {
+                        state.requested_disconnect_peers.insert(peer_id.clone());
+                    } else {
+                        state.requested_disconnect_peers.remove(&peer_id);
+                    }
+                }
+                if let Some(session) = session {
                     debug!(
-                        "Disconnecting peer {:?} session w {:?}ith reason {:?}",
+                        "Disconnecting peer {:?} session {:?} with reason {:?}",
                         &pubkey, &session, &reason
                     );
                     state.control.disconnect(session).await?;
@@ -1138,6 +1174,58 @@ where
                 } else if let Some(reply) = reply {
                     let _ = reply.send(Err(format!("peer {:?} is not connected", pubkey)));
                 }
+            }
+            NetworkActorCommand::SeedPeerReconnectBackoff(peer_id, trigger) => {
+                state.seed_peer_reconnect_backoff_if_needed(&peer_id, trigger);
+            }
+            NetworkActorCommand::PeerReconnectBackoffTick(peer_id, attempt) => {
+                if state.is_connected(&peer_id) {
+                    state.peer_reconnect_backoff_attempts.remove(&peer_id);
+                    return Ok(());
+                }
+
+                if state.requested_disconnect_peers.contains(&peer_id) {
+                    state.peer_reconnect_backoff_attempts.remove(&peer_id);
+                    debug_event!(myself, "PeerReconnectBackoffSkippedRequested");
+                    return Ok(());
+                }
+
+                if !state.has_direct_active_channel(&peer_id) {
+                    state.peer_reconnect_backoff_attempts.remove(&peer_id);
+                    debug_event!(myself, "PeerReconnectBackoffSkippedNoDirectChannel");
+                    return Ok(());
+                }
+
+                let Some(current_attempt) =
+                    state.peer_reconnect_backoff_attempts.get(&peer_id).copied()
+                else {
+                    return Ok(());
+                };
+                if current_attempt != attempt {
+                    return Ok(());
+                }
+
+                debug_event!(myself, "PeerReconnectBackoffAttempt");
+
+                let addresses = state.get_peer_addresses_by_peer_id(&peer_id);
+                if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
+                        ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                } else {
+                    debug!(
+                        "No known address to reconnect peer {:?} on backoff attempt {}",
+                        peer_id, current_attempt
+                    );
+                }
+
+                let next_attempt = current_attempt.saturating_add(1);
+                state
+                    .peer_reconnect_backoff_attempts
+                    .insert(peer_id.clone(), next_attempt);
+                state.schedule_peer_reconnect_backoff(peer_id, next_attempt);
             }
             NetworkActorCommand::SavePeerAddress(addr) => {
                 state.enqueue_peer_address_to_save(addr);
@@ -2950,6 +3038,8 @@ pub struct NetworkActorState<S, C> {
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+    peer_reconnect_backoff_attempts: HashMap<PeerId, u32>,
+    requested_disconnect_peers: HashSet<PeerId>,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     channel_ephemeral_config: ChannelEphemeralConfig,
@@ -3648,6 +3738,82 @@ where
         }
     }
 
+    fn resolve_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
+        self.get_connected_peer_pubkey(peer_id).or_else(|| {
+            self.store
+                .get_channel_states(None)
+                .into_iter()
+                .find_map(|(pubkey, _, _)| {
+                    let id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
+                    (id == *peer_id).then_some(pubkey)
+                })
+        })
+    }
+
+    fn is_connected(&self, peer_id: &PeerId) -> bool {
+        self.get_connected_peer_pubkey(peer_id).is_some()
+    }
+
+    fn has_direct_active_channel(&self, peer_id: &PeerId) -> bool {
+        self.resolve_peer_pubkey(peer_id)
+            .map(|pubkey| {
+                !self
+                    .store
+                    .get_active_channel_ids_by_pubkey(&pubkey)
+                    .is_empty()
+            })
+            .unwrap_or(false)
+    }
+
+    fn get_peer_addresses_by_peer_id(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
+        self.resolve_peer_pubkey(peer_id)
+            .map(|pubkey| self.get_peer_addresses_by_pubkey(&pubkey))
+            .unwrap_or_default()
+    }
+
+    fn schedule_peer_reconnect_backoff(&self, peer_id: PeerId, attempt: u32) {
+        let delay = compute_peer_reconnect_delay(attempt);
+        debug_event!(self.network, "PeerReconnectBackoffScheduled");
+        self.network.send_after(delay, move || {
+            NetworkActorMessage::new_command(NetworkActorCommand::PeerReconnectBackoffTick(
+                peer_id, attempt,
+            ))
+        });
+    }
+
+    fn seed_peer_reconnect_backoff_if_needed(
+        &mut self,
+        peer_id: &PeerId,
+        trigger: PeerReconnectTrigger,
+    ) {
+        if self.requested_disconnect_peers.contains(peer_id) {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedRequested");
+            return;
+        }
+        if self.is_connected(peer_id) {
+            return;
+        }
+        if !self.has_direct_active_channel(peer_id) {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedNoDirectChannel");
+            return;
+        }
+        if self.peer_reconnect_backoff_attempts.contains_key(peer_id) {
+            return;
+        }
+
+        self.peer_reconnect_backoff_attempts
+            .insert(peer_id.clone(), 0);
+        match trigger {
+            PeerReconnectTrigger::Disconnected => {
+                debug_event!(self.network, "PeerReconnectBackoffSeededByDisconnect");
+            }
+            PeerReconnectTrigger::DialError => {
+                debug_event!(self.network, "PeerReconnectBackoffSeededByDialError");
+            }
+        }
+        self.schedule_peer_reconnect_backoff(peer_id.clone(), 0);
+    }
+
     pub fn get_n_peer_sessions(&self, n: usize) -> Vec<SessionId> {
         self.peer_session_map
             .values()
@@ -3868,6 +4034,8 @@ where
         );
         let remote_peer_id =
             PeerId::from_public_key(&super::types::pubkey_to_tentacle(remote_pubkey));
+        self.peer_reconnect_backoff_attempts.remove(&remote_peer_id);
+        self.requested_disconnect_peers.remove(&remote_peer_id);
         if let Some(addresses) = self.pending_save_peer_addresses.remove(&remote_peer_id) {
             let mut changed = false;
             for address in addresses {
@@ -3949,6 +4117,13 @@ where
             }
             self.to_be_accepted_channels.remove(&channel_id);
         }
+
+        let peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
+        if self.requested_disconnect_peers.remove(&peer_id) {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedRequested");
+            return;
+        }
+        self.seed_peer_reconnect_backoff_if_needed(&peer_id, PeerReconnectTrigger::Disconnected);
     }
 
     pub(crate) fn get_peer_addresses_by_pubkey(&self, pubkey: &Pubkey) -> HashSet<Multiaddr> {
@@ -4682,6 +4857,8 @@ where
             gossip_actor,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            peer_reconnect_backoff_attempts: Default::default(),
+            requested_disconnect_peers: Default::default(),
             features,
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
@@ -4945,13 +5122,31 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
 impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
         debug!("Service error: {:?}", error);
-        if let ServiceError::DialerError { address, .. } = &error {
+        if let ServiceError::DialerError { address, error } = &error {
             if let Some(peer_id) = extract_peer_id(address) {
                 try_send_actor_message(
                     &self.actor,
                     NetworkActorMessage::new_command(
-                        NetworkActorCommand::RemovePendingSavePeerAddress(peer_id),
+                        NetworkActorCommand::RemovePendingSavePeerAddress(peer_id.clone()),
                     ),
+                );
+                debug!(
+                    "DialerError for peer {:?} address {:?}: {:?}",
+                    peer_id, address, error
+                );
+                try_send_actor_message(
+                    &self.actor,
+                    NetworkActorMessage::new_command(
+                        NetworkActorCommand::SeedPeerReconnectBackoff(
+                            peer_id,
+                            PeerReconnectTrigger::DialError,
+                        ),
+                    ),
+                );
+            } else {
+                debug!(
+                    "DialerError on address {:?} without peer id: {:?}",
+                    address, error
                 );
             }
         }

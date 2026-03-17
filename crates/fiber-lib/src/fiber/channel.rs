@@ -1899,8 +1899,29 @@ where
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) {
+        self.persist_retryable_remove_tlc_preimage(state, tlc_id, &reason);
         let remove_tlc = RetryableTlcOperation::RemoveTlc(tlc_id, reason);
         self.register_retryable_tlc_operation(myself, state, remove_tlc);
+    }
+
+    fn persist_retryable_remove_tlc_preimage(
+        &self,
+        state: &ChannelActorState,
+        tlc_id: TLCId,
+        reason: &RemoveTlcReason,
+    ) {
+        let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) = reason
+        else {
+            return;
+        };
+
+        if state.check_remove_tlc_with_reason(tlc_id, reason).is_err() {
+            return;
+        }
+
+        if let Some(tlc) = state.tlc_state.get(&tlc_id) {
+            self.store_preimage(tlc.payment_hash, *payment_preimage);
+        }
     }
 
     pub fn register_retryable_tlc_add(
