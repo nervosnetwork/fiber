@@ -57,7 +57,7 @@ The wrapper script will:
 - connect node3 to node1;
 - call `open_channel_with_external_funding`;
 - sign the returned unsigned funding tx with node2 key (`tests/nodes/2/ckb/plain_key`);
-- run the Bruno collection with injected env vars (`EXTERNAL_FUNDING_SIGNED_TX`, preopen channel/tx).
+- run the Bruno collection with injected env vars (`EXTERNAL_FUNDING_AMOUNT`, `EXTERNAL_FUNDING_SIGNED_TX`, preopen channel/tx).
 
 By default, the wrapper auto-tries multiple funding amounts (from higher to lower)
 until `open_channel_with_external_funding` succeeds.

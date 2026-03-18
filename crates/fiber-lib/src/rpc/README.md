@@ -407,7 +407,7 @@ Opens a channel with external funding. The node will negotiate the channel with 
 ##### Returns
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel being opened.
-* `unsigned_funding_tx` - <em>`serde_json::Value`</em>, The final unsigned funding transaction that needs to be signed.
+* `unsigned_funding_tx` - <em>`Transaction`</em>, The final unsigned funding transaction that needs to be signed.
 
 ---
 
@@ -425,7 +425,7 @@ Submits a signed funding transaction for an externally funded channel.
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID returned from `open_channel_with_external_funding`.
-* `signed_funding_tx` - <em>`serde_json::Value`</em>, The signed funding transaction.
+* `signed_funding_tx` - <em>`Transaction`</em>, The signed funding transaction.
 
 ##### Returns
 

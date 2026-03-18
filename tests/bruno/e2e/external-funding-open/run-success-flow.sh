@@ -169,6 +169,7 @@ echo "[external-funding-open] run bruno collection with preopen signed tx"
 (
   cd "$ROOT_DIR/tests/bruno"
   npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test \
+    --env-var EXTERNAL_FUNDING_AMOUNT="$FUNDING_AMOUNT" \
     --env-var EXTERNAL_FUNDING_USE_PREOPEN=1 \
     --env-var EXTERNAL_FUNDING_PREOPEN_CHANNEL_ID="$CHANNEL_ID" \
     --env-var EXTERNAL_FUNDING_PREOPEN_UNSIGNED_TX="$UNSIGNED_TX_JSON" \

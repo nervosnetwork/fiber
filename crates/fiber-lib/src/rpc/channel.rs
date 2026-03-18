@@ -619,10 +619,9 @@ where
         handle_actor_call!(self.actor, message, params).map(|response| {
             OpenChannelWithExternalFundingResult {
                 channel_id: response.channel_id.into(),
-                unsigned_funding_tx: serde_json::to_value(ckb_jsonrpc_types::Transaction::from(
+                unsigned_funding_tx: ckb_jsonrpc_types::Transaction::from(
                     response.unsigned_funding_tx,
-                ))
-                .expect("serialize funding transaction to json value"),
+                ),
             }
         })
     }
@@ -633,10 +632,7 @@ where
         params: SubmitSignedFundingTxParams,
     ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
-        let signed_tx_json: ckb_jsonrpc_types::Transaction =
-            serde_json::from_value(params.signed_funding_tx.clone())
-                .map_err(|err| rpc_error(err.to_string(), Some(params.clone())))?;
-        let signed_tx: packed::Transaction = signed_tx_json.into();
+        let signed_tx: packed::Transaction = params.signed_funding_tx.clone().into();
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
                 channel_id,

@@ -3,7 +3,7 @@
 use crate::define_rpc_flags;
 use crate::schema_helpers::*;
 use crate::serde_utils::{CellDep, EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
-use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
+use ckb_jsonrpc_types::{EpochNumberWithFraction, Script, Transaction};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 use schemars::JsonSchema;
@@ -260,8 +260,7 @@ pub struct OpenChannelWithExternalFundingResult {
     pub channel_id: Hash256,
 
     /// The final unsigned funding transaction that needs to be signed.
-    #[schemars(schema_with = "schema_as_object")]
-    pub unsigned_funding_tx: serde_json::Value,
+    pub unsigned_funding_tx: Transaction,
 }
 
 /// Parameters for submitting a signed funding transaction.
@@ -271,8 +270,7 @@ pub struct SubmitSignedFundingTxParams {
     pub channel_id: Hash256,
 
     /// The signed funding transaction.
-    #[schemars(schema_with = "schema_as_object")]
-    pub signed_funding_tx: serde_json::Value,
+    pub signed_funding_tx: Transaction,
 }
 
 /// Result of submitting a signed funding transaction.
