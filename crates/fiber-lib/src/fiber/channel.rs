@@ -3902,6 +3902,28 @@ impl ChannelActorState {
         }
     }
 
+    fn notify_channel_connectivity(&self, connectivity_state: ChannelConnectivityState) {
+        let Some(channel_outpoint) = self.get_funding_transaction_outpoint() else {
+            return;
+        };
+        let event = match connectivity_state {
+            ChannelConnectivityState::Online => NetworkServiceEvent::ChannelOnline(
+                self.get_remote_pubkey(),
+                self.get_id(),
+                channel_outpoint,
+            ),
+            ChannelConnectivityState::Offline => NetworkServiceEvent::ChannelOffline(
+                self.get_remote_pubkey(),
+                self.get_id(),
+                channel_outpoint,
+            ),
+            ChannelConnectivityState::Syncing => return,
+        };
+        self.network()
+            .send_message(NetworkActorMessage::new_notification(event))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
     pub(crate) fn mark_reestablishing_offline(&mut self) {
         self.clear_waiting_peer_response();
         self.reestablishing = true;
@@ -3913,6 +3935,7 @@ impl ChannelActorState {
 
     fn on_peer_disconnected(&mut self) {
         self.mark_reestablishing_offline();
+        self.notify_channel_connectivity(ChannelConnectivityState::Offline);
         if let Some(outpoint) = self.get_funding_transaction_outpoint() {
             self.network()
                 .send_message(NetworkActorMessage::new_event(
@@ -6048,6 +6071,7 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         self.connectivity_state = ChannelConnectivityState::Online;
+        self.notify_channel_connectivity(ChannelConnectivityState::Online);
         let pubkey = self.get_remote_pubkey();
         self.on_owned_channel_updated(myself, false);
         self.network()
@@ -6068,6 +6092,7 @@ impl ChannelActorState {
 
         self.reestablishing = false;
         self.connectivity_state = ChannelConnectivityState::Online;
+        self.notify_channel_connectivity(ChannelConnectivityState::Online);
 
         // If the channel is already ready, we should notify the network actor.
         // so that we update the network.outpoint_channel_map

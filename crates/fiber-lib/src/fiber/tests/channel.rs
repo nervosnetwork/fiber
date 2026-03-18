@@ -455,7 +455,7 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     let node1_funding_amount = 100000000000;
     let node2_funding_amount = 11800000000;
 
-    let (mut node1, mut node2, _new_channel_id, _) =
+    let (mut node1, mut node2, new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
             node1_funding_amount,
             node2_funding_amount,
@@ -499,31 +499,69 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
         })
         .await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    node1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node2.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+    node2
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node1.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    wait_until_async_timeout(|| async {
+        node1.get_network_graph_channels().await.is_empty()
+            && node2.get_network_graph_channels().await.is_empty()
+    })
+    .await;
+
     let node1_channels = node1.get_network_graph_channels().await;
     assert_eq!(node1_channels, vec![]);
     let node2_channels = node2.get_network_graph_channels().await;
     assert_eq!(node2_channels, vec![]);
 
-    node1.connect_to(&mut node2).await;
+    node1.connect_to_nonblocking(&node2).await;
 
     node1
-        .expect_debug_event("Reestablished channel in ChannelReady")
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node2.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
         .await;
     node2
-        .expect_debug_event("Reestablished channel in ChannelReady")
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node1.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
         .await;
 
-    let mut node1_channels = vec![];
-    let mut node2_channels = vec![];
-    for _ in 0..100 {
-        node1_channels = node1.get_network_graph_channels().await;
-        node2_channels = node2.get_network_graph_channels().await;
-        if !node1_channels.is_empty() && !node2_channels.is_empty() {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    }
+    wait_until_async_timeout(|| async {
+        !node1.get_network_graph_channels().await.is_empty()
+            && !node2.get_network_graph_channels().await.is_empty()
+    })
+    .await;
+
+    let node1_channels = node1.get_network_graph_channels().await;
+    let node2_channels = node2.get_network_graph_channels().await;
     assert_ne!(node1_channels, vec![]);
     assert_ne!(node2_channels, vec![]);
 }

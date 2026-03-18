@@ -526,6 +526,10 @@ pub enum NetworkServiceEvent {
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(Pubkey, Hash256, OutPoint),
+    // The channel connectivity is online and normal operations may resume.
+    ChannelOnline(Pubkey, Hash256, OutPoint),
+    // The channel connectivity is offline and normal operations are paused.
+    ChannelOffline(Pubkey, Hash256, OutPoint),
     ChannelClosed(Pubkey, Hash256, Byte32),
     ChannelAbandon(Hash256),
     ChannelFundingAborted(Hash256),
