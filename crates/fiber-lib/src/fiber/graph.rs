@@ -1170,13 +1170,11 @@ where
         &mut self,
         attempt: &Attempt,
         tlc_err: TlcErr,
-        _first_hop_error: bool,
+        first_hop_error: bool,
     ) -> bool {
-        // Always drop the runtime reservation for a failed attempt. This is safe
-        // even if the attempt was never tracked because untrack uses saturating
-        // arithmetic, and without it reconnect/retry flows can leak channel_stats
-        // reservations until process restart.
-        self.untrack_attempt_router(attempt);
+        if !first_hop_error {
+            self.untrack_attempt_router(attempt);
+        }
         let mut internal_result = InternalResult::default();
         let nodes = &attempt.route.nodes;
         let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
