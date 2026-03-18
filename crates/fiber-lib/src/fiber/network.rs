@@ -1,15 +1,15 @@
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
-use ckb_types::H256;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
+use ckb_types::H256;
 use either::Either;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent, call_t,
+    call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
 use rand::seq::{IteratorRandom, SliceRandom};
 use secp256k1::SECP256K1;
@@ -19,8 +19,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
@@ -28,7 +28,7 @@ use tentacle::service::SessionType;
 use tentacle::utils::TransportType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
-    ProtocolId, SessionId, async_trait,
+    async_trait,
     builder::{MetaBuilder, ServiceBuilder},
     bytes::Bytes,
     context::SessionContext,
@@ -41,18 +41,19 @@ use tentacle::{
         TargetProtocol,
     },
     traits::{ServiceHandle, ServiceProtocol},
+    ProtocolId, SessionId,
 };
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_util::codec::length_delimited;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
-    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelOpenRecordStore, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, OpenChannelParameter,
+    get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
+    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
+    ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
     ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
-    get_funding_and_reserved_amount,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
@@ -61,8 +62,8 @@ use super::types::{
     OpenChannel, ReestablishChannel,
 };
 use super::{
-    ASSUME_NETWORK_ACTOR_ALIVE, FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments,
-    InFlightCkbTxKind,
+    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
+    ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::client::CkbChainClient;
 use crate::ckb::config::UdtCfgInfosExt;
@@ -71,9 +72,9 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelActorState, ChannelEphemeralConfig, ChannelInitializationOperation,
-    MAX_TLC_NUMBER_IN_FLIGHT, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
-    tlc_expiry_delay,
+    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
@@ -85,24 +86,24 @@ use crate::fiber::payment::{
 use crate::fiber::types::{
     FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort, TxSignatures,
 };
-use crate::fiber::{SettleTlcSetCommand, settle_tlc_set_command::TlcSettlement};
+use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
-use crate::{Error, now_timestamp_as_millis_u64, unwrap_or_return};
+use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
+use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
-use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::{
-    AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord, ChannelOpeningStatus,
-    ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256,
-    NodeAnnouncement, PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket,
-    PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SettlementData,
-    ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos,
-    blake2b_hash_with_salt,
+    blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
+    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
+    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
+    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
+    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
+    TrampolineContext, UdtCfgInfos,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1158,17 +1159,16 @@ where
                 }
             }
             NetworkActorCommand::DisconnectPeer(pubkey, reason, reply) => {
-                let peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
                 let session = state
                     .peer_session_map
                     .get(&pubkey)
                     .map(|peer| peer.session_id);
                 if matches!(reason, PeerDisconnectReason::Requested) {
-                    state.peer_reconnect_backoff_attempts.remove(&peer_id);
+                    state.peer_reconnect_backoff_attempts.remove(&pubkey);
                     if session.is_some() {
-                        state.requested_disconnect_peers.insert(peer_id.clone());
+                        state.requested_disconnect_peers.insert(pubkey);
                     } else {
-                        state.requested_disconnect_peers.remove(&peer_id);
+                        state.requested_disconnect_peers.remove(&pubkey);
                     }
                 }
                 if let Some(session) = session {
@@ -1189,24 +1189,30 @@ where
             }
             NetworkActorCommand::PeerReconnectBackoffTick(peer_id, attempt) => {
                 if state.is_connected(&peer_id) {
-                    state.peer_reconnect_backoff_attempts.remove(&peer_id);
+                    if let Some(pubkey) = state.get_connected_peer_pubkey(&peer_id) {
+                        state.peer_reconnect_backoff_attempts.remove(&pubkey);
+                    }
                     return Ok(());
                 }
 
-                if state.requested_disconnect_peers.contains(&peer_id) {
-                    state.peer_reconnect_backoff_attempts.remove(&peer_id);
+                let Some(pubkey) = state.resolve_peer_pubkey(&peer_id) else {
+                    return Ok(());
+                };
+
+                if state.requested_disconnect_peers.contains(&pubkey) {
+                    state.peer_reconnect_backoff_attempts.remove(&pubkey);
                     debug_event!(myself, "PeerReconnectBackoffSkippedRequested");
                     return Ok(());
                 }
 
-                if !state.has_direct_active_channel(&peer_id) {
-                    state.peer_reconnect_backoff_attempts.remove(&peer_id);
+                if !state.has_direct_active_channel(&pubkey) {
+                    state.peer_reconnect_backoff_attempts.remove(&pubkey);
                     debug_event!(myself, "PeerReconnectBackoffSkippedNoDirectChannel");
                     return Ok(());
                 }
 
                 let Some(current_attempt) =
-                    state.peer_reconnect_backoff_attempts.get(&peer_id).copied()
+                    state.peer_reconnect_backoff_attempts.get(&pubkey).copied()
                 else {
                     return Ok(());
                 };
@@ -1216,7 +1222,7 @@ where
 
                 debug_event!(myself, "PeerReconnectBackoffAttempt");
 
-                let addresses = state.get_peer_addresses_by_peer_id(&peer_id);
+                let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
                 if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
                     myself
                         .send_message(NetworkActorMessage::new_command(
@@ -1233,7 +1239,7 @@ where
                 let next_attempt = current_attempt.saturating_add(1);
                 state
                     .peer_reconnect_backoff_attempts
-                    .insert(peer_id.clone(), next_attempt);
+                    .insert(pubkey, next_attempt);
                 state.schedule_peer_reconnect_backoff(peer_id, next_attempt);
             }
             NetworkActorCommand::SavePeerAddress(addr) => {
@@ -1472,6 +1478,12 @@ where
                                 .collect();
 
                             for (tlc_id, id, payment_hash) in committed_tlcs {
+                                // Do not fulfill a forwarding TLC from a shared preimage
+                                // while its downstream add result is still unresolved.
+                                if actor_state.is_waiting_forward_result_for_received_tlc(tlc_id) {
+                                    continue;
+                                }
+
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&payment_hash) {
@@ -1545,7 +1557,12 @@ where
                                 .tlc_state
                                 .get_committed_received_tlcs()
                                 .filter(|tlc| {
-                                    tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry
+                                    // Treat TLCs with unresolved forward results as forwarding TLCs
+                                    // even before forwarding_tlc is recorded.
+                                    tlc.forwarding_tlc.is_none()
+                                        && !actor_state
+                                            .is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                                        && tlc.expiry < expect_expiry
                                 })
                                 .collect::<Vec<_>>();
                             for tlc in expired_tlcs {
@@ -2634,7 +2651,8 @@ where
         );
         trace!(
             "Sending AddTlcCommand to {}, command {:?}",
-            channel_id, command
+            channel_id,
+            command
         );
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(channel_id, command).await {
@@ -3050,8 +3068,8 @@ pub struct NetworkActorState<S, C> {
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
-    peer_reconnect_backoff_attempts: HashMap<PeerId, u32>,
-    requested_disconnect_peers: HashSet<PeerId>,
+    peer_reconnect_backoff_attempts: HashMap<Pubkey, u32>,
+    requested_disconnect_peers: HashSet<Pubkey>,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     channel_ephemeral_config: ChannelEphemeralConfig,
@@ -3752,21 +3770,11 @@ where
         self.get_connected_peer_pubkey(peer_id).is_some()
     }
 
-    fn has_direct_active_channel(&self, peer_id: &PeerId) -> bool {
-        self.resolve_peer_pubkey(peer_id)
-            .map(|pubkey| {
-                !self
-                    .store
-                    .get_active_channel_ids_by_pubkey(&pubkey)
-                    .is_empty()
-            })
-            .unwrap_or(false)
-    }
-
-    fn get_peer_addresses_by_peer_id(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
-        self.resolve_peer_pubkey(peer_id)
-            .map(|pubkey| self.get_peer_addresses_by_pubkey(&pubkey))
-            .unwrap_or_default()
+    fn has_direct_active_channel(&self, pubkey: &Pubkey) -> bool {
+        !self
+            .store
+            .get_active_channel_ids_by_pubkey(pubkey)
+            .is_empty()
     }
 
     fn schedule_peer_reconnect_backoff(&self, peer_id: PeerId, attempt: u32) {
@@ -3784,23 +3792,27 @@ where
         peer_id: &PeerId,
         trigger: PeerReconnectTrigger,
     ) {
-        if self.requested_disconnect_peers.contains(peer_id) {
+        let Some(pubkey) = self.resolve_peer_pubkey(peer_id) else {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedNoDirectChannel");
+            return;
+        };
+
+        if self.requested_disconnect_peers.contains(&pubkey) {
             debug_event!(self.network, "PeerReconnectBackoffSkippedRequested");
             return;
         }
-        if self.is_connected(peer_id) {
+        if self.peer_session_map.contains_key(&pubkey) {
             return;
         }
-        if !self.has_direct_active_channel(peer_id) {
+        if !self.has_direct_active_channel(&pubkey) {
             debug_event!(self.network, "PeerReconnectBackoffSkippedNoDirectChannel");
             return;
         }
-        if self.peer_reconnect_backoff_attempts.contains_key(peer_id) {
+        if self.peer_reconnect_backoff_attempts.contains_key(&pubkey) {
             return;
         }
 
-        self.peer_reconnect_backoff_attempts
-            .insert(peer_id.clone(), 0);
+        self.peer_reconnect_backoff_attempts.insert(pubkey, 0);
         match trigger {
             PeerReconnectTrigger::Disconnected => {
                 debug_event!(self.network, "PeerReconnectBackoffSeededByDisconnect");
@@ -4071,10 +4083,10 @@ where
                 features: None,
             },
         );
+        self.peer_reconnect_backoff_attempts.remove(&remote_pubkey);
+        self.requested_disconnect_peers.remove(&remote_pubkey);
         let remote_peer_id =
             PeerId::from_public_key(&super::types::pubkey_to_tentacle(remote_pubkey));
-        self.peer_reconnect_backoff_attempts.remove(&remote_peer_id);
-        self.requested_disconnect_peers.remove(&remote_peer_id);
         if let Some(addresses) = self.pending_save_peer_addresses.remove(&remote_peer_id) {
             let mut changed = false;
             for address in addresses {
@@ -4146,6 +4158,7 @@ where
         self.peer_session_map.remove(&pubkey);
         if let Some(channel_ids) = self.session_channels_map.remove(&session_id) {
             for channel_id in channel_ids {
+                self.outpoint_channel_map.retain(|_, id| *id != channel_id);
                 if let Some(channel) = self.channels.get(&channel_id) {
                     let event = match self.store.get_channel_actor_state(&channel_id) {
                         Some(channel_state)
@@ -4178,7 +4191,7 @@ where
         }
 
         let peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
-        if self.requested_disconnect_peers.remove(&peer_id) {
+        if self.requested_disconnect_peers.remove(&pubkey) {
             debug_event!(self.network, "PeerReconnectBackoffSkippedRequested");
             return;
         }
@@ -4823,10 +4836,8 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         let listening_addr = {
-            let mut addresses_to_listen = vec![
-                MultiAddr::from_str(config.listening_addr())
-                    .expect("valid tentacle listening address"),
-            ];
+            let mut addresses_to_listen = vec![MultiAddr::from_str(config.listening_addr())
+                .expect("valid tentacle listening address")];
             if config.reuse_port_for_websocket {
                 // Re-use the same port for websocket
                 let ws_listens = addresses_to_listen

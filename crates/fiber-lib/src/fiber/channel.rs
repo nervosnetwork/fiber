@@ -533,10 +533,6 @@ where
                     self.apply_retryable_tlc_operations(myself, state, false)
                         .await;
                 }
-                if !state.is_waiting_tlc_ack() && !state.tlc_state.need_another_commitment_signed()
-                {
-                    state.clean_up_failed_tlcs();
-                }
                 Ok(())
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
@@ -670,7 +666,10 @@ where
             | ProcessingChannelError::TlcValueInflightExceedLimit => {
                 TlcErrorCode::TemporaryChannelFailure
             }
-            ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
+            ProcessingChannelError::WaitingTlcAck
+            | ProcessingChannelError::ChannelReestablishing => {
+                TlcErrorCode::TemporaryChannelFailure
+            }
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
             ProcessingChannelError::InvalidState(_) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
@@ -791,10 +790,6 @@ where
         if state.defer_peer_tlc_updates {
             state.stop_defer_peer_tlc_updates();
             self.flush_deferred_peer_tlc_updates(state)?;
-        }
-
-        if !state.is_waiting_tlc_ack() && !state.tlc_state.need_another_commitment_signed() {
-            state.clean_up_failed_tlcs();
         }
 
         Ok(())
@@ -1034,6 +1029,12 @@ where
         state: &mut ChannelActorState,
         tlc: TlcInfo,
     ) {
+        // Do not settle a forwarding TLC from a globally visible preimage
+        // before the downstream forwarding result is known.
+        if state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id) {
+            return;
+        }
+
         // When a TLC has no associated invoice, it cannot be a hold invoice or MPP payment.
         // Check if we have the preimage: if yes, fulfill the TLC.
         let Some(payment_preimage) = self.store.get_preimage(&tlc.payment_hash) else {
@@ -3422,6 +3423,8 @@ pub enum ProcessingChannelError {
     Musig2SigningError(#[from] SigningError),
     #[error("Unable to handle TLC command in waiting TLC ACK state")]
     WaitingTlcAck,
+    #[error("Unable to handle AddTlc while channel is reestablishing")]
+    ChannelReestablishing,
     #[error("Failed to peel onion packet: {0}")]
     PeelingOnionPacketError(String),
     #[error(
@@ -3940,6 +3943,10 @@ impl ChannelActorState {
         if self.reestablishing {
             self.connectivity_state = ChannelConnectivityState::Syncing;
         }
+    }
+
+    pub(crate) fn is_waiting_forward_result_for_received_tlc(&self, tlc_id: TLCId) -> bool {
+        self.waiting_forward_tlc_tasks.contains_key(&tlc_id)
     }
 
     fn update_graph_for_local_channel_change(&mut self) {
@@ -5394,7 +5401,15 @@ impl ChannelActorState {
             TlcUpdateAction::AddTlcCommand { .. } | TlcUpdateAction::RemoveTlcCommand
         );
 
-        if is_tlc_command_message && (self.is_waiting_tlc_ack() || self.reestablishing) {
+        if is_tlc_command_message && self.is_waiting_tlc_ack() {
+            return Err(ProcessingChannelError::WaitingTlcAck);
+        }
+
+        if matches!(action, TlcUpdateAction::AddTlcCommand { .. }) && self.reestablishing {
+            return Err(ProcessingChannelError::ChannelReestablishing);
+        }
+
+        if matches!(action, TlcUpdateAction::RemoveTlcCommand) && self.reestablishing {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
 

@@ -3167,6 +3167,42 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_router_to_offline_channel_fails_fast() {
+    init_tracing();
+
+    let (nodes, _channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(1000),
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .expect("build direct router");
+
+    node_1.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let error = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(error.contains("UnknownNextPeer"));
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+}
+
+#[tokio::test]
 async fn test_send_payment_target_hop_stopped() {
     init_tracing();
 
