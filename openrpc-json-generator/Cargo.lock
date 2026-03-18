@@ -2049,6 +2049,7 @@ dependencies = [
  "tower-http 0.6.8",
  "tracing",
  "tracing-subscriber",
+ "wasm-bindgen-futures",
  "web-time",
 ]
 
@@ -3707,6 +3708,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "openrpc-json-generator"
 version = "0.1.0"
 dependencies = [
+ "ckb-jsonrpc-types",
  "fnn",
  "openrpsee",
  "phf 0.13.1",
@@ -4651,7 +4653,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
