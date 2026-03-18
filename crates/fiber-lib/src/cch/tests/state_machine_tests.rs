@@ -117,7 +117,7 @@ fn test_transition_pending_to_failed_via_invoice_expired() {
 }
 
 #[test]
-fn test_transition_outgoing_succeeded_to_success_via_invoice_paid() {
+fn test_transition_outgoing_success_to_success_via_invoice_paid() {
     let mut order = create_test_order(CchOrderStatus::OutgoingSuccess);
     order.payment_preimage = Some(test_payment_hash(99));
 
