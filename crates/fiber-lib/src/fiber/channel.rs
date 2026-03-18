@@ -2200,10 +2200,7 @@ where
                 ));
             }
             ChannelState::NegotiatingFunding(_) => {
-                debug!(
-                    "Beginning processing tx collaboration command, and transitioning from {:?} to CollaboratingFundingTx state",
-                    state.state
-                );
+                debug!("Beginning processing tx collaboration command, and transitioning from {:?} to CollaboratingFundingTx state", state.state);
                 state.state =
                     ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty());
                 CollaboratingFundingTxFlags::empty()
@@ -2294,10 +2291,7 @@ where
                     state.funding_tx = Some(tx);
                     state.update_state(ChannelState::AwaitingTxSignatures(flags));
                 } else {
-                    error!(
-                        "Invalid state. Expect channel state to be AwaitingTxSignatures, but bot {:?}",
-                        state.state
-                    );
+                    error!("Invalid state. Expect channel state to be AwaitingTxSignatures, but bot {:?}", state.state);
                 }
                 Ok(())
             }
@@ -3933,6 +3927,7 @@ impl ChannelActorState {
     fn on_peer_reconnected(&mut self) {
         if self.reestablishing {
             self.connectivity_state = ChannelConnectivityState::Syncing;
+            self.send_reestablish_message();
         }
     }
 
@@ -4857,10 +4852,8 @@ impl ChannelActorState {
             self.to_local_amount = to_local_amount;
             self.to_remote_amount = to_remote_amount;
 
-            debug!(
-                "Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
-                to_local_amount, to_remote_amount, tlc_id, reason
-            );
+            debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
+                            to_local_amount, to_remote_amount, tlc_id, reason);
             self.apply_remove_tlc(tlc_id);
         }
         debug!(
@@ -5626,9 +5619,7 @@ impl ChannelActorState {
                 debug!("We have sent our shutdown signature, waiting for counterparty's signature");
             }
         } else {
-            debug!(
-                "Not ready to shutdown the channel, waiting for both parties to send the Shutdown message"
-            );
+            debug!("Not ready to shutdown the channel, waiting for both parties to send the Shutdown message");
         }
 
         Ok(())
@@ -5681,8 +5672,7 @@ impl ChannelActorState {
             _ => {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Must/Mustn't send announcement nonce if channel is public/private, nonce {:?}, channel is public: {}",
-                    &accept_channel.channel_announcement_nonce,
-                    self.is_public()
+                    &accept_channel.channel_announcement_nonce, self.is_public()
                 )));
             }
         }
@@ -5719,10 +5709,7 @@ impl ChannelActorState {
                 ));
             }
             ChannelState::NegotiatingFunding(_) => {
-                debug!(
-                    "Started negotiating funding tx collaboration, and transitioning from {:?} to CollaboratingFundingTx state",
-                    self.state
-                );
+                debug!("Started negotiating funding tx collaboration, and transitioning from {:?} to CollaboratingFundingTx state", self.state);
                 self.state =
                     ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty());
                 CollaboratingFundingTxFlags::empty()
@@ -5925,9 +5912,7 @@ impl ChannelActorState {
         flags: SigningCommitmentFlags,
     ) -> ProcessingChannelResult {
         if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) {
-            debug!(
-                "Commitment signed message sent by both sides, transitioning to AwaitingTxSignatures state"
-            );
+            debug!("Commitment signed message sent by both sides, transitioning to AwaitingTxSignatures state");
             self.update_state(ChannelState::AwaitingTxSignatures(
                 AwaitingTxSignaturesFlags::empty(),
             ));
@@ -6719,10 +6704,8 @@ impl ChannelActorState {
                 "udt_amount: {}, to_remote_amount: {}, to_local_amount: {}",
                 udt_amount, self.to_remote_amount, self.to_local_amount
             );
-            debug!(
-                "current_capacity: {}, remote_reserved_ckb_amount: {}, local_reserved_ckb_amount: {}",
-                current_capacity, self.remote_reserved_ckb_amount, self.local_reserved_ckb_amount
-            );
+            debug!("current_capacity: {}, remote_reserved_ckb_amount: {}, local_reserved_ckb_amount: {}",
+                current_capacity, self.remote_reserved_ckb_amount, self.local_reserved_ckb_amount);
             let is_udt_amount_ok = udt_amount == self.get_liquid_capacity();
             return Ok(is_udt_amount_ok);
         } else {
@@ -7014,10 +6997,8 @@ impl ChannelActorState {
         } else {
             debug!(
                 "Final balance partition before shutting down: local {} (fee {}), remote {} (fee {})",
-                self.to_local_amount,
-                local_shutdown_fee,
-                self.to_remote_amount,
-                remote_shutdown_fee
+                self.to_local_amount, local_shutdown_fee,
+                self.to_remote_amount, remote_shutdown_fee
             );
             let local_value =
                 self.to_local_amount as u64 + self.local_reserved_ckb_amount - local_shutdown_fee;

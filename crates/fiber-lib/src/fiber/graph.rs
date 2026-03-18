@@ -1077,34 +1077,6 @@ where
         self.source
     }
 
-    #[cfg(any(test, feature = "bench"))]
-    pub fn debug_history_result(
-        &self,
-        channel_outpoint: &OutPoint,
-        from: Pubkey,
-        to: Pubkey,
-    ) -> Option<TimedResult> {
-        let (direction, _) = super::history::output_direction(from, to);
-        self.history
-            .get_result(channel_outpoint, direction)
-            .copied()
-    }
-
-    #[cfg(any(test, feature = "bench"))]
-    pub fn debug_history_probability(
-        &self,
-        channel_outpoint: &OutPoint,
-        from: Pubkey,
-        to: Pubkey,
-        amount: u128,
-    ) -> Option<f64> {
-        let channel = self.get_channel(channel_outpoint)?;
-        Some(
-            self.history
-                .eval_probability(from, to, channel_outpoint, amount, channel.capacity()),
-        )
-    }
-
     pub(crate) fn mark_channel_failed(&mut self, channel_outpoint: &OutPoint) {
         if let Some(channel) = self.channels.get_mut(channel_outpoint) {
             if let Some(info) = channel.update_of_node2.as_mut() {

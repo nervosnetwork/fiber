@@ -58,8 +58,7 @@ use super::channel::{
 use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
 use super::types::{
-    BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init,
-    OpenChannel, ReestablishChannel,
+    BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
@@ -1273,18 +1272,17 @@ where
 
                 if num_inbound_peers > state.max_inbound_peers {
                     debug!(
-                        "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
-                        num_inbound_peers, state.max_inbound_peers
-                    );
+                                "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
+                                num_inbound_peers, state.max_inbound_peers
+                            );
                     inbound_peer_sessions.retain(|k| !state.session_channels_map.contains_key(k));
                     let sessions_to_disconnect = if inbound_peer_sessions.len()
                         < num_inbound_peers - state.max_inbound_peers
                     {
                         warn!(
-                            "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
-                            num_inbound_peers - state.max_inbound_peers,
-                            &inbound_peer_sessions
-                        );
+                                    "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
+                                    num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
+                                );
                         &inbound_peer_sessions[..]
                     } else {
                         &inbound_peer_sessions[..num_inbound_peers - state.max_inbound_peers]
@@ -1302,9 +1300,9 @@ where
 
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
-                        "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
-                        num_outbound_peers, state.min_outbound_peers
-                    );
+                                "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
+                                num_outbound_peers, state.min_outbound_peers
+                            );
                     return Ok(());
                 }
 
@@ -1342,9 +1340,9 @@ where
                     debug!("Peer to connect: {:?}, {:?}", pubkey, addresses);
                     if let Some(peer) = state.peer_session_map.get(&pubkey) {
                         debug!(
-                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
-                            pubkey, peer.session_id
-                        );
+                                    "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                                    pubkey, peer.session_id
+                                );
                         continue;
                     }
 
@@ -3998,8 +3996,6 @@ where
             );
             self.attach_channel_to_session(remote_pubkey, channel_id);
             let _ = actor.send_message(ChannelActorMessage::Event(ChannelEvent::PeerReconnected));
-            self.send_reestablish_message(remote_pubkey, channel_id)
-                .await?;
             return Ok(actor);
         }
 
@@ -4041,28 +4037,6 @@ where
 
         Ok(channel)
     }
-
-    async fn send_reestablish_message(
-        &self,
-        remote_pubkey: Pubkey,
-        channel_id: Hash256,
-    ) -> Result<(), Error> {
-        let channel_actor_state = self
-            .store
-            .get_channel_actor_state(&channel_id)
-            .ok_or(Error::ChannelNotFound(channel_id))?;
-        let reestablish_channel = ReestablishChannel {
-            channel_id,
-            local_commitment_number: channel_actor_state.get_local_commitment_number(),
-            remote_commitment_number: channel_actor_state.get_remote_commitment_number(),
-        };
-        self.send_fiber_message_to_pubkey(
-            &remote_pubkey,
-            FiberMessage::reestablish_channel(reestablish_channel),
-        )
-        .await
-    }
-
     async fn on_peer_connected(&mut self, remote_pubkey: Pubkey, session: &SessionContext) {
         debug!("Peer {:?} connected", remote_pubkey);
         self.peer_session_map.insert(
