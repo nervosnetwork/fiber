@@ -1666,16 +1666,6 @@ where
                 // do nothing
             }
             Err((error, tlc_err)) => {
-                debug!(
-                    "add_tlc_result error payment_hash={:?} attempt_id={} error={:?} tlc_err={} error_node={:?} error_channel={:?} route={:?}",
-                    payment_hash,
-                    attempt.id,
-                    error,
-                    tlc_err.error_code_as_str(),
-                    tlc_err.error_node_id(),
-                    tlc_err.error_channel_outpoint(),
-                    attempt.route.nodes
-                );
                 self.update_graph_with_tlc_fail(&self.network, &tlc_err)
                     .await;
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
@@ -1743,15 +1733,6 @@ where
                         debug_event!(self.network, "InvalidOnionError");
                         TlcErr::new(TlcErrorCode::InvalidOnionError)
                     });
-                debug!(
-                    "remove_tlc_fail payment_hash={:?} attempt_id={} tlc_err={} error_node={:?} error_channel={:?} route={:?}",
-                    payment_hash,
-                    attempt.id,
-                    tlc_error.error_code_as_str(),
-                    tlc_error.error_node_id(),
-                    tlc_error.error_channel_outpoint(),
-                    attempt.route.nodes
-                );
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
                     &attempt,
                     tlc_error.clone(),

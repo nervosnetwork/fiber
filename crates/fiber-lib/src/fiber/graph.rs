@@ -1907,14 +1907,14 @@ where
         nodes_heap: &mut NodeHeap,
         channel_stats: &GraphChannelStat,
     ) {
-        let edge_probability = self.history.eval_probability(
-            from,
-            target,
-            channel_outpoint,
-            next_hop_received_amount,
-            channel_capacity,
-        );
-        let mut probability = cur_probability * edge_probability;
+        let mut probability = cur_probability
+            * self.history.eval_probability(
+                from,
+                target,
+                channel_outpoint,
+                next_hop_received_amount,
+                channel_capacity,
+            );
 
         let pending_count = channel_stats.get_channel_count(channel_outpoint) + cur_pending_count;
 
@@ -1923,18 +1923,7 @@ where
         }
 
         if probability < DEFAULT_MIN_PROBABILITY {
-            debug!(
-                "skip edge due to low probability channel={:?} from={:?} target={:?} amount={} channel_capacity={} edge_probability={} cur_probability={} pending_count={} final_probability={}",
-                channel_outpoint,
-                from,
-                target,
-                next_hop_received_amount,
-                channel_capacity,
-                edge_probability,
-                cur_probability,
-                pending_count,
-                probability,
-            );
+            debug!("probability is too low: {:?}", probability);
             return;
         }
 

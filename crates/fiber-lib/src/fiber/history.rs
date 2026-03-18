@@ -105,10 +105,6 @@ impl InternalResult {
         channel: OutPoint,
         amount: u128,
     ) {
-        debug!(
-            "history.add_fail_pair_balanced from={:?} target={:?} channel={:?} amount={}",
-            from, target, channel, amount
-        );
         self.add(
             from,
             target,
@@ -144,25 +140,12 @@ impl InternalResult {
             let b = nodes[index].pubkey;
             let amount = nodes[index].amount;
             let channel = nodes[index - 1].channel_outpoint.clone();
-            debug!(
-                "history.fail_pair_balanced index={} from={:?} target={:?} channel={:?} amount={} route={:?}",
-                index, a, b, channel, amount, nodes
-            );
             self.add_fail_pair_balanced(a, b, channel, amount);
         }
     }
 
     pub fn succeed_range_pairs(&mut self, nodes: &[SessionRouteNode], start: usize, end: usize) {
         for i in start..end {
-            debug!(
-                "history.succeed_pair index={} from={:?} target={:?} channel={:?} amount={} route={:?}",
-                i,
-                nodes[i].pubkey,
-                nodes[i + 1].pubkey,
-                nodes[i].channel_outpoint,
-                nodes[i].amount,
-                nodes
-            );
             self.add(
                 nodes[i].pubkey,
                 nodes[i + 1].pubkey,

@@ -713,17 +713,6 @@ where
         } else {
             None
         };
-        if error_code == TlcErrorCode::TemporaryChannelFailure {
-            debug!(
-                "temporary channel failure mapped from error {:?} on channel {} local={:?} remote={:?} waiting_ack={} reestablishing={}",
-                error,
-                state.get_id(),
-                state.local_pubkey,
-                state.remote_pubkey,
-                state.is_waiting_tlc_ack(),
-                state.reestablishing
-            );
-        }
         error!(
             "Generating TlcErr from error {:?} to error_code {:?} for channel {}",
             error,
@@ -1922,6 +1911,8 @@ where
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) {
+        // When channel reestablishing, tlc ops will be deferred to protect channel state
+        // To avoid lost preimage we store it immediately.
         self.persist_retryable_remove_tlc_preimage(state, tlc_id, &reason);
         let remove_tlc = RetryableTlcOperation::RemoveTlc(tlc_id, reason);
         self.register_retryable_tlc_operation(myself, state, remove_tlc);
@@ -5423,17 +5414,6 @@ impl ChannelActorState {
     }
 
     fn check_tlc_limits(&self, add_amount: u128, is_sent: bool) -> ProcessingChannelResult {
-        let tlc_snapshot = || {
-            (
-                self.get_all_offer_tlcs()
-                    .map(|tlc| tlc.log())
-                    .collect::<Vec<_>>(),
-                self.get_all_received_tlcs()
-                    .map(|tlc| tlc.log())
-                    .collect::<Vec<_>>(),
-            )
-        };
-
         if add_amount == 0 {
             return Err(ProcessingChannelError::TlcAmountIsTooLow);
         }
@@ -5441,37 +5421,11 @@ impl ChannelActorState {
             // local peer can not sent more tlc amount than they have
             let pending_sent_amount = self.get_offered_tlc_balance();
             if add_amount > self.to_local_amount.saturating_sub(pending_sent_amount) {
-                let (offered_tlcs, received_tlcs) = tlc_snapshot();
-                debug!(
-                    "check_tlc_limits send amount exceeded on channel {} add_amount={} to_local_amount={} pending_sent_amount={} waiting_ack={} reestablishing={} commitment_numbers={:?} offered_tlcs={:?} received_tlcs={:?}",
-                    self.get_id(),
-                    add_amount,
-                    self.to_local_amount,
-                    pending_sent_amount,
-                    self.is_waiting_tlc_ack(),
-                    self.reestablishing,
-                    self.commitment_numbers,
-                    offered_tlcs,
-                    received_tlcs,
-                );
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
             let active_offered_tls_number = self.get_all_offer_tlcs().count() as u64 + 1;
             if active_offered_tls_number > self.local_constraints.max_tlc_number_in_flight {
-                let (offered_tlcs, received_tlcs) = tlc_snapshot();
-                debug!(
-                    "check_tlc_limits send tlc number exceeded on channel {} add_amount={} active_offered_tlcs={} max_tlc_number_in_flight={} waiting_ack={} reestablishing={} commitment_numbers={:?} offered_tlcs={:?} received_tlcs={:?}",
-                    self.get_id(),
-                    add_amount,
-                    active_offered_tls_number,
-                    self.local_constraints.max_tlc_number_in_flight,
-                    self.is_waiting_tlc_ack(),
-                    self.reestablishing,
-                    self.commitment_numbers,
-                    offered_tlcs,
-                    received_tlcs,
-                );
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
@@ -5480,56 +5434,17 @@ impl ChannelActorState {
                 .fold(0_u128, |sum, tlc| sum + tlc.amount)
                 + add_amount;
             if active_offered_amount > self.local_constraints.max_tlc_value_in_flight {
-                let (offered_tlcs, received_tlcs) = tlc_snapshot();
-                debug!(
-                    "check_tlc_limits send inflight exceeded on channel {} add_amount={} active_offered_amount={} max_tlc_value_in_flight={} waiting_ack={} reestablishing={} commitment_numbers={:?} offered_tlcs={:?} received_tlcs={:?}",
-                    self.get_id(),
-                    add_amount,
-                    active_offered_amount,
-                    self.local_constraints.max_tlc_value_in_flight,
-                    self.is_waiting_tlc_ack(),
-                    self.reestablishing,
-                    self.commitment_numbers,
-                    offered_tlcs,
-                    received_tlcs,
-                );
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         } else {
             // remote peer can not sent more tlc amount than they have
             let pending_recv_amount = self.get_received_tlc_balance();
             if add_amount > self.to_remote_amount.saturating_sub(pending_recv_amount) {
-                let (offered_tlcs, received_tlcs) = tlc_snapshot();
-                debug!(
-                    "check_tlc_limits receive amount exceeded on channel {} add_amount={} to_remote_amount={} pending_recv_amount={} waiting_ack={} reestablishing={} commitment_numbers={:?} offered_tlcs={:?} received_tlcs={:?}",
-                    self.get_id(),
-                    add_amount,
-                    self.to_remote_amount,
-                    pending_recv_amount,
-                    self.is_waiting_tlc_ack(),
-                    self.reestablishing,
-                    self.commitment_numbers,
-                    offered_tlcs,
-                    received_tlcs,
-                );
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
             let active_received_tls_number = self.get_all_received_tlcs().count() as u64 + 1;
             if active_received_tls_number > self.remote_constraints.max_tlc_number_in_flight {
-                let (offered_tlcs, received_tlcs) = tlc_snapshot();
-                debug!(
-                    "check_tlc_limits receive tlc number exceeded on channel {} add_amount={} active_received_tlcs={} max_tlc_number_in_flight={} waiting_ack={} reestablishing={} commitment_numbers={:?} offered_tlcs={:?} received_tlcs={:?}",
-                    self.get_id(),
-                    add_amount,
-                    active_received_tls_number,
-                    self.remote_constraints.max_tlc_number_in_flight,
-                    self.is_waiting_tlc_ack(),
-                    self.reestablishing,
-                    self.commitment_numbers,
-                    offered_tlcs,
-                    received_tlcs,
-                );
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
@@ -5538,19 +5453,6 @@ impl ChannelActorState {
                 .fold(0_u128, |sum, tlc| sum + tlc.amount)
                 + add_amount;
             if active_received_amount > self.remote_constraints.max_tlc_value_in_flight {
-                let (offered_tlcs, received_tlcs) = tlc_snapshot();
-                debug!(
-                    "check_tlc_limits receive inflight exceeded on channel {} add_amount={} active_received_amount={} max_tlc_value_in_flight={} waiting_ack={} reestablishing={} commitment_numbers={:?} offered_tlcs={:?} received_tlcs={:?}",
-                    self.get_id(),
-                    add_amount,
-                    active_received_amount,
-                    self.remote_constraints.max_tlc_value_in_flight,
-                    self.is_waiting_tlc_ack(),
-                    self.reestablishing,
-                    self.commitment_numbers,
-                    offered_tlcs,
-                    received_tlcs,
-                );
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         }
