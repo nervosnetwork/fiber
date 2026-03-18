@@ -1104,8 +1104,7 @@ async fn test_abort_funding_on_building_funding_tx() {
 
 #[derive(Clone, Debug)]
 struct CkbTxFailureMockMiddleware;
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
     async fn handle(
         &mut self,

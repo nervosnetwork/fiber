@@ -280,8 +280,7 @@ impl GossipMessageUpdates {
 /// This trait provides a way to subscribe to the updates of the gossip message store.
 /// The subscriber will receive a batch of messages that are added to the store since the last time
 /// we sent messages to the subscriber.
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 pub trait SubscribableGossipMessageStore {
     type Subscription;
     type Error: std::error::Error;
@@ -650,8 +649,7 @@ pub(crate) enum GossipSyncingActorMessage {
     NewGetRequest(),
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S, C> Actor for GossipSyncingActor<S, C>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
@@ -884,8 +882,7 @@ enum PeerFilterProcessorMessage {
     UpdateFilter(Cursor),
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S> Actor for PeerFilterActor<S>
 where
     S: SubscribableGossipMessageStore + Clone + Send + Sync + 'static,
@@ -1105,8 +1102,7 @@ where
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
     for ExtendedGossipMessageStore<S>
 {
@@ -1539,8 +1535,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreActor<S
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + Sync + 'static> Actor
     for ExtendedGossipMessageStoreActor<S, C>
 {
@@ -2479,8 +2474,7 @@ impl GossipProtocolHandle {
             .build()
     }
 }
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S, C> Actor for GossipActor<S, C>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,

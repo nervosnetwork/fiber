@@ -213,8 +213,7 @@ impl TraceTxReplier {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl Actor for TraceTxReplier {
     type Msg = CkbTxTracingResult;
     type Arguments = (
@@ -260,8 +259,7 @@ impl Actor for TraceTxReplier {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     /// Returns Ok(None) if the message is handled by the middleware, otherwise the message
     /// will be forwarded to the underlying MockChainActor.
@@ -358,8 +356,7 @@ impl MockChainActor {
         .expect("start trace tx replier");
     }
 }
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl Actor for MockChainActor {
     type Msg = CkbChainMessage;
     type State = MockChainActorState;
@@ -727,8 +724,7 @@ impl MockCkbChainClient {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl CkbChainClient for MockCkbChainClient {
     async fn get_transaction(&self, hash: ckb_types::H256) -> Result<GetTxResponse, anyhow::Error> {
         let hash: Hash256 = hash.into();
