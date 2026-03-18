@@ -1042,15 +1042,6 @@ where
                 .await;
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
-                for message in &gossip_message_updates.messages {
-                    let BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) =
-                        message
-                    else {
-                        continue;
-                    };
-                    state.save_addresses_from_node_announcement(node_announcement);
-                }
-
                 let mut graph = self.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
                 debug_event!(myself, "Received gossip message updates");
@@ -4218,23 +4209,6 @@ where
         } else {
             false
         }
-    }
-
-    fn save_addresses_from_node_announcement(
-        &mut self,
-        node_announcement: &NodeAnnouncement,
-    ) -> Vec<Multiaddr> {
-        if node_announcement.node_id == self.get_public_key() {
-            return Vec::new();
-        }
-
-        let mut new_addresses = Vec::new();
-        for address in node_announcement.addresses.iter().cloned() {
-            if self.save_peer_address(node_announcement.node_id, address.clone()) {
-                new_addresses.push(address);
-            }
-        }
-        new_addresses
     }
 
     fn persist_state(&self) {
