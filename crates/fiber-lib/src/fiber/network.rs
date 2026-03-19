@@ -783,9 +783,8 @@ where
                 state.check_feature_compatibility(&peer_pubkey)?;
                 let channel_id = msg.get_channel_id();
                 let found = state
-                    .peer_session_map
+                    .peer_channels_map
                     .get(&peer_pubkey)
-                    .and_then(|peer| state.session_channels_map.get(&peer.session_id))
                     .is_some_and(|channels| channels.contains(&channel_id));
 
                 if !found {
@@ -845,44 +844,42 @@ where
                 funding_fee_rate,
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
-                if let Some(session) = state.peer_session_map.get(&pubkey).map(|p| p.session_id) {
-                    if let Some(channel) = state.channels.remove(&old) {
-                        debug!("Channel accepted: {:?} -> {:?}", old, new);
-                        state.channels.insert(new, channel);
-                        if let Some(set) = state.session_channels_map.get_mut(&session) {
-                            set.remove(&old);
-                            set.insert(new);
-                        };
+                if let Some(channel) = state.channels.remove(&old) {
+                    debug!("Channel accepted: {:?} -> {:?}", old, new);
+                    state.channels.insert(new, channel);
+                    if let Some(set) = state.peer_channels_map.get_mut(&pubkey) {
+                        set.remove(&old);
+                        set.insert(new);
+                    };
 
-                        // Update the opening record: rename from temp ID to final ID and advance status.
-                        if let Some(mut record) = state.store.get_channel_open_record(&old) {
-                            state.store.delete_channel_open_record(&old);
-                            record.channel_id = new;
-                            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
-                            state.store.insert_channel_open_record(record);
-                        }
-
-                        debug!("Starting funding channel");
-                        // TODO: Here we implies the one who receives AcceptChannel message
-                        //  (i.e. the channel initiator) will send TxUpdate message first.
-                        myself
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::UpdateChannelFunding(
-                                    new,
-                                    Default::default(),
-                                    FundingRequest {
-                                        script,
-                                        udt_type_script: udt_funding_script,
-                                        local_amount: local,
-                                        funding_fee_rate,
-                                        remote_amount: remote,
-                                        local_reserved_ckb_amount,
-                                        remote_reserved_ckb_amount,
-                                    },
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    // Update the opening record: rename from temp ID to final ID and advance status.
+                    if let Some(mut record) = state.store.get_channel_open_record(&old) {
+                        state.store.delete_channel_open_record(&old);
+                        record.channel_id = new;
+                        record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+                        state.store.insert_channel_open_record(record);
                     }
+
+                    debug!("Starting funding channel");
+                    // TODO: Here we implies the one who receives AcceptChannel message
+                    //  (i.e. the channel initiator) will send TxUpdate message first.
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::UpdateChannelFunding(
+                                new,
+                                Default::default(),
+                                FundingRequest {
+                                    script,
+                                    udt_type_script: udt_funding_script,
+                                    local_amount: local,
+                                    funding_fee_rate,
+                                    remote_amount: remote,
+                                    local_reserved_ckb_amount,
+                                    remote_reserved_ckb_amount,
+                                },
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             }
             NetworkActorEvent::ChannelReady(channel_id, pubkey, channel_outpoint) => {
@@ -1279,7 +1276,7 @@ where
                                 "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
                                 num_inbound_peers, state.max_inbound_peers
                             );
-                    inbound_peer_sessions.retain(|k| !state.session_channels_map.contains_key(k));
+                    inbound_peer_sessions.retain(|k| !state.sessions_map.contains(k));
                     let sessions_to_disconnect = if inbound_peer_sessions.len()
                         < num_inbound_peers - state.max_inbound_peers
                     {
@@ -3029,7 +3026,8 @@ pub struct NetworkActorState<S, C> {
     control: ServiceAsyncControl,
     peer_session_map: HashMap<Pubkey, ConnectedPeer>,
     pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
-    session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
+    sessions_map: HashSet<SessionId>,
+    peer_channels_map: HashMap<Pubkey, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     // Channels funding lock script cache
     channels_funding_lock_script_cache: HashMap<Hash256, Script>,
@@ -3998,8 +3996,11 @@ where
                 "Channel {:x} already exists, reusing live actor for reestablishment",
                 &channel_id
             );
-            self.attach_channel_to_session(remote_pubkey, channel_id);
-            let _ = actor.send_message(ChannelActorMessage::Event(ChannelEvent::PeerReconnected));
+            if let Err(err) =
+                actor.send_message(ChannelActorMessage::Event(ChannelEvent::PeerReconnected))
+            {
+                error!("Failed to send PeerReconnected error: {err:?}");
+            }
             return Ok(actor);
         }
 
@@ -4052,6 +4053,10 @@ where
                 features: None,
             },
         );
+        self.peer_channels_map
+            .entry(remote_pubkey)
+            .or_default()
+            .extend(self.store.get_active_channel_ids_by_pubkey(&remote_pubkey));
         self.peer_reconnect_backoff_attempts.remove(&remote_pubkey);
         self.requested_disconnect_peers.remove(&remote_pubkey);
         let remote_peer_id =
@@ -4111,7 +4116,7 @@ where
 
         let Some(current_peer) = self.peer_session_map.get(&pubkey).cloned() else {
             debug!("Ignoring disconnect for peer {pubkey:?} on unknown session {session_id:?}");
-            self.session_channels_map.remove(&session_id);
+            self.sessions_map.remove(&session_id);
             return;
         };
 
@@ -4120,16 +4125,17 @@ where
                 "Ignoring stale disconnect for peer {pubkey:?}: old session {session_id:?}, current session {:?}",
                 current_peer.session_id
             );
-            self.session_channels_map.remove(&session_id);
+            self.sessions_map.remove(&session_id);
             return;
         }
 
         self.peer_session_map.remove(&pubkey);
-        if let Some(channel_ids) = self.session_channels_map.remove(&session_id) {
+        self.sessions_map.remove(&session_id);
+        if let Some(channel_ids) = self.peer_channels_map.get(&pubkey) {
             for channel_id in channel_ids {
-                self.outpoint_channel_map.retain(|_, id| *id != channel_id);
-                if let Some(channel) = self.channels.get(&channel_id) {
-                    let event = match self.store.get_channel_actor_state(&channel_id) {
+                self.outpoint_channel_map.retain(|_, id| *id != *channel_id);
+                if let Some(channel) = self.channels.get(channel_id) {
+                    let event = match self.store.get_channel_actor_state(channel_id) {
                         Some(channel_state)
                             if matches!(channel_state.state, ChannelState::ChannelReady) =>
                         {
@@ -4216,7 +4222,7 @@ where
         actor: ActorRef<ChannelActorMessage>,
     ) {
         self.channels.insert(id, actor.clone());
-        self.attach_channel_to_session(pubkey, id);
+        self.peer_channels_map.entry(pubkey).or_default().insert(id);
         debug!("Channel {:x} created", &id);
         // Notify outside observers.
         self.network
@@ -4224,19 +4230,6 @@ where
                 NetworkServiceEvent::ChannelCreated(pubkey, id),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-    }
-
-    fn attach_channel_to_session(&mut self, pubkey: Pubkey, channel_id: Hash256) {
-        if let Some(session) = self
-            .peer_session_map
-            .get(&pubkey)
-            .map(|peer| peer.session_id)
-        {
-            self.session_channels_map
-                .entry(session)
-                .or_default()
-                .insert(channel_id);
-        }
     }
 
     async fn on_closing_transaction_pending(
@@ -4300,10 +4293,8 @@ where
             }
         }
 
-        if let Some(session) = self.peer_session_map.get(pubkey).map(|p| p.session_id) {
-            if let Some(set) = self.session_channels_map.get_mut(&session) {
-                set.remove(channel_id);
-            }
+        if let Some(channels) = self.peer_channels_map.get_mut(pubkey) {
+            channels.remove(channel_id);
         }
         if !force {
             // Notify outside observers.
@@ -4319,14 +4310,6 @@ where
         // all check passed, now begin to remove from memory and DB
         self.channels.remove(&channel_id);
         self.channels_funding_lock_script_cache.remove(&channel_id);
-        for (_pubkey, connected_peer) in self.peer_session_map.iter() {
-            if let Some(session_channels) = self
-                .session_channels_map
-                .get_mut(&connected_peer.session_id)
-            {
-                session_channels.remove(&channel_id);
-            }
-        }
 
         if reason == StopReason::Abandon || reason == StopReason::AbortFunding {
             if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
@@ -4909,7 +4892,8 @@ where
             control,
             peer_session_map: Default::default(),
             pending_save_peer_addresses: Default::default(),
-            session_channels_map: Default::default(),
+            sessions_map: Default::default(),
+            peer_channels_map: Default::default(),
             channels: Default::default(),
             outpoint_channel_map: Default::default(),
             channels_funding_lock_script_cache: Default::default(),
