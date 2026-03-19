@@ -8,15 +8,30 @@ use fiber_json_types::{
     PaymentHistoryResult, ReceivedPaymentReportResult, SentPaymentReportResult,
 };
 
+/// Stats for a specific UDT type.
+#[derive(Debug, Clone, Default)]
+pub struct UdtStats {
+    /// Total local balance (raw amount).
+    pub local_balance: u128,
+    /// Total remote balance (raw amount).
+    pub remote_balance: u128,
+    /// Total capacity = local + remote.
+    pub total_capacity: u128,
+    /// Number of channels for this UDT type.
+    pub channel_count: usize,
+}
+
 /// Aggregated stats computed client-side from channel data + node info.
 #[derive(Debug, Clone, Default)]
 pub struct DashboardStats {
-    /// Total local balance across all channels (shannons).
+    /// Total local balance across all CKB channels (shannons).
     pub total_local_balance: u128,
-    /// Total remote balance across all channels (shannons).
+    /// Total remote balance across all CKB channels (shannons).
     pub total_remote_balance: u128,
-    /// Total capacity = local + remote for all channels.
+    /// Total capacity = local + remote for all CKB channels.
     pub total_capacity: u128,
+    /// Stats per UDT type (key: code_hash hex string).
+    pub udt_stats: HashMap<String, UdtStats>,
     /// Number of channels in Ready state.
     pub ready_count: usize,
     /// Number of channels in a negotiating/pending state.
@@ -31,9 +46,9 @@ pub struct DashboardStats {
     pub disabled_count: usize,
     /// Total pending TLCs across all channels.
     pub total_pending_tlcs: usize,
-    /// Total offered TLC balance.
+    /// Total offered TLC balance (CKB only).
     pub total_offered_tlc: u128,
-    /// Total received TLC balance.
+    /// Total received TLC balance (CKB only).
     pub total_received_tlc: u128,
     /// Total number of channels.
     pub total_channels: usize,
@@ -152,10 +167,20 @@ impl DashboardTab {
         };
 
         for ch in channels {
-            stats.total_local_balance += ch.local_balance;
-            stats.total_remote_balance += ch.remote_balance;
-            stats.total_offered_tlc += ch.offered_tlc_balance;
-            stats.total_received_tlc += ch.received_tlc_balance;
+            if let Some(ref udt_script) = ch.funding_udt_type_script {
+                // UDT channel: group by type script code_hash
+                let code_hash = format!("{}", udt_script.code_hash);
+                let udt_entry = stats.udt_stats.entry(code_hash).or_default();
+                udt_entry.local_balance += ch.local_balance;
+                udt_entry.remote_balance += ch.remote_balance;
+                udt_entry.channel_count += 1;
+            } else {
+                // CKB channel
+                stats.total_local_balance += ch.local_balance;
+                stats.total_remote_balance += ch.remote_balance;
+                stats.total_offered_tlc += ch.offered_tlc_balance;
+                stats.total_received_tlc += ch.received_tlc_balance;
+            }
             stats.total_pending_tlcs += ch.pending_tlcs.len();
 
             let state_name = channel_state_category(ch);
@@ -174,6 +199,10 @@ impl DashboardTab {
             }
         }
 
+        // Calculate total capacity for each UDT type
+        for udt_stats in stats.udt_stats.values_mut() {
+            udt_stats.total_capacity = udt_stats.local_balance + udt_stats.remote_balance;
+        }
         stats.total_capacity = stats.total_local_balance + stats.total_remote_balance;
         self.stats = stats;
     }

@@ -469,7 +469,7 @@ fn draw_dashboard_summary(
     let channel_count = node_info.map_or(stats.total_channels as u32, |n| n.channel_count);
     let pending_count = node_info.map_or(stats.pending_count as u32, |n| n.pending_channel_count);
 
-    let line = Line::from(vec![
+    let mut line_parts = vec![
         Span::styled("  Channels: ", Style::default().fg(p.label)),
         Span::styled(
             format!("{}", channel_count),
@@ -487,7 +487,26 @@ fn draw_dashboard_summary(
             format_ckb(stats.total_capacity),
             Style::default().fg(p.success).add_modifier(Modifier::BOLD),
         ),
-    ]);
+    ];
+
+    // Add UDT stats if any
+    for (code_hash, udt_stats) in &stats.udt_stats {
+        let short_id = &code_hash[..code_hash.len().min(6)];
+        line_parts.push(Span::raw("   "));
+        line_parts.push(Span::styled(
+            format!("UDT({}): ", short_id),
+            Style::default().fg(p.label),
+        ));
+        line_parts.push(Span::styled(
+            format!(
+                "{} ({} ch)",
+                udt_stats.total_capacity, udt_stats.channel_count
+            ),
+            Style::default().fg(p.warning),
+        ));
+    }
+
+    let line = Line::from(line_parts);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -520,7 +539,7 @@ fn draw_dashboard_capacity_gauge(f: &mut Frame, tab: &DashboardTab, p: &ThemePal
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(" Capacity (Local / Remote) ")
+                .title(" CKB Capacity (Local / Remote) ")
                 .border_style(Style::default().fg(p.border))
                 .title_style(Style::default().fg(p.text_primary)),
         )
