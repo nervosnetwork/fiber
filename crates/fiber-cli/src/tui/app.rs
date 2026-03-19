@@ -534,12 +534,14 @@ impl App {
         // Payments
         match result.payments {
             Ok((payments, last_cursor)) => {
-                self.payments_tab.cursor_stack.clear();
-                self.payments_tab.current_page = 1;
-                if !payments.is_empty() {
-                    self.payments_tab.table_state.select(Some(0));
-                } else {
-                    self.payments_tab.table_state.select(None);
+                // Only reset pagination when on first page (preserves browsing position)
+                if self.payments_tab.current_page == 1 {
+                    self.payments_tab.cursor_stack.clear();
+                    if !payments.is_empty() {
+                        self.payments_tab.table_state.select(Some(0));
+                    } else {
+                        self.payments_tab.table_state.select(None);
+                    }
                 }
                 self.payments_tab.payments = payments;
                 self.payments_tab.last_cursor = last_cursor;
@@ -553,12 +555,14 @@ impl App {
         // Invoices
         match result.invoices {
             Ok((invoices, last_cursor)) => {
-                self.invoices_tab.cursor_stack.clear();
-                self.invoices_tab.current_page = 1;
-                if !invoices.is_empty() {
-                    self.invoices_tab.table_state.select(Some(0));
-                } else {
-                    self.invoices_tab.table_state.select(None);
+                // Only reset pagination when on first page (preserves browsing position)
+                if self.invoices_tab.current_page == 1 {
+                    self.invoices_tab.cursor_stack.clear();
+                    if !invoices.is_empty() {
+                        self.invoices_tab.table_state.select(Some(0));
+                    } else {
+                        self.invoices_tab.table_state.select(None);
+                    }
                 }
                 self.invoices_tab.invoices = invoices;
                 self.invoices_tab.last_cursor = last_cursor;
@@ -584,12 +588,14 @@ impl App {
         // Graph nodes
         match result.graph_nodes {
             Ok((nodes, last_cursor)) => {
-                self.graph_tab.nodes_cursor_stack.clear();
-                self.graph_tab.nodes_page = 1;
-                if !nodes.is_empty() {
-                    self.graph_tab.nodes_table_state.select(Some(0));
-                } else {
-                    self.graph_tab.nodes_table_state.select(None);
+                // Only reset pagination when on first page (preserves browsing position)
+                if self.graph_tab.nodes_page == 1 {
+                    self.graph_tab.nodes_cursor_stack.clear();
+                    if !nodes.is_empty() {
+                        self.graph_tab.nodes_table_state.select(Some(0));
+                    } else {
+                        self.graph_tab.nodes_table_state.select(None);
+                    }
                 }
                 self.graph_tab.nodes = nodes;
                 self.graph_tab.nodes_last_cursor = last_cursor;
@@ -603,12 +609,14 @@ impl App {
         // Graph channels
         match result.graph_channels {
             Ok((channels, last_cursor)) => {
-                self.graph_tab.channels_cursor_stack.clear();
-                self.graph_tab.channels_page = 1;
-                if !channels.is_empty() {
-                    self.graph_tab.channels_table_state.select(Some(0));
-                } else {
-                    self.graph_tab.channels_table_state.select(None);
+                // Only reset pagination when on first page (preserves browsing position)
+                if self.graph_tab.channels_page == 1 {
+                    self.graph_tab.channels_cursor_stack.clear();
+                    if !channels.is_empty() {
+                        self.graph_tab.channels_table_state.select(Some(0));
+                    } else {
+                        self.graph_tab.channels_table_state.select(None);
+                    }
                 }
                 self.graph_tab.channels = channels;
                 self.graph_tab.channels_last_cursor = last_cursor;
