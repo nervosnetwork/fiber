@@ -946,10 +946,7 @@ impl App {
                             ch.tlc_fee_proportional_millionths as f64 / 10_000.0
                         ),
                     ),
-                    (
-                        "Created".to_string(),
-                        ui::format_timestamp_pub(ch.created_at),
-                    ),
+                    ("Created".to_string(), ui::format_timestamp(ch.created_at)),
                     (
                         "Channel Outpoint".to_string(),
                         ch.channel_outpoint
@@ -1005,13 +1002,10 @@ impl App {
                     ("Payment Hash".to_string(), format!("{}", p.payment_hash)),
                     ("Status".to_string(), status.to_string()),
                     ("Fee".to_string(), ui::format_ckb_pub(p.fee)),
-                    (
-                        "Created".to_string(),
-                        ui::format_timestamp_pub(p.created_at),
-                    ),
+                    ("Created".to_string(), ui::format_timestamp(p.created_at)),
                     (
                         "Updated".to_string(),
-                        ui::format_timestamp_pub(p.last_updated_at),
+                        ui::format_timestamp(p.last_updated_at),
                     ),
                 ];
                 if let Some(ref err) = p.failed_error {
@@ -1096,7 +1090,7 @@ impl App {
                     ),
                     (
                         "Timestamp".to_string(),
-                        ui::format_timestamp_pub(inv.invoice.data.timestamp as u64),
+                        ui::format_timestamp(inv.invoice.data.timestamp as u64),
                     ),
                 ];
                 // Add attributes
@@ -1146,7 +1140,7 @@ impl App {
                     rows.push(("Features".to_string(), node.features.join(", ")));
                     rows.push((
                         "Timestamp".to_string(),
-                        ui::format_timestamp_pub(node.timestamp),
+                        ui::format_timestamp(node.timestamp),
                     ));
                     rows.push(("Chain Hash".to_string(), format!("{}", node.chain_hash)));
                     rows.push((
@@ -1221,7 +1215,7 @@ impl App {
                             ("Features".to_string(), node.features.join(", ")),
                             (
                                 "Timestamp".to_string(),
-                                ui::format_timestamp_pub(node.timestamp),
+                                ui::format_timestamp(node.timestamp),
                             ),
                             ("Chain Hash".to_string(), format!("{}", node.chain_hash)),
                             (
@@ -1255,7 +1249,7 @@ impl App {
                             ("Capacity".to_string(), ui::format_ckb_pub(ch.capacity)),
                             (
                                 "Created".to_string(),
-                                ui::format_timestamp_pub(ch.created_timestamp),
+                                ui::format_timestamp(ch.created_timestamp),
                             ),
                             ("Chain Hash".to_string(), format!("{}", ch.chain_hash)),
                             (
@@ -1526,7 +1520,7 @@ fn append_channel_update_rows(
 ) {
     rows.push((
         "  Timestamp".to_string(),
-        ui::format_timestamp_pub(info.timestamp),
+        ui::format_timestamp(info.timestamp),
     ));
     rows.push((
         "  Enabled".to_string(),

@@ -99,7 +99,7 @@ fn truncate_hex(s: &str, max_len: usize) -> String {
 }
 
 /// Format a UNIX timestamp (milliseconds) into a human-readable string.
-fn format_timestamp(ms: u64) -> String {
+pub fn format_timestamp(ms: u64) -> String {
     use chrono::{Local, TimeZone};
     match Local.timestamp_millis_opt(ms as i64) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -107,17 +107,12 @@ fn format_timestamp(ms: u64) -> String {
     }
 }
 
-/// Public wrapper for format_timestamp, used by popup row builders in app.rs.
-pub fn format_timestamp_pub(ms: u64) -> String {
-    format_timestamp(ms)
-}
-
 /// Main drawing entry point.
 pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
     // Force an explicit background AND default foreground on the entire TUI
-    // area.  All child widgets that don't set their own fg/bg will inherit
+    // area. All child widgets that don't set their own fg/bg will inherit
     // these values, so borders and text are always visible regardless of the
     // terminal's own color scheme.
     f.render_widget(
@@ -133,10 +128,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(5), // Node info header
         Constraint::Length(3), // Tab bar
-        Constraint::Min(10),   // Main content area
+        Constraint::Fill(1),   // Main content area (flexible)
         Constraint::Length(1), // Footer / status bar
     ])
     .split(size);
+
+    // Defensive check: ensure all chunks have valid dimensions
+    if chunks.iter().any(|c| c.width == 0 || c.height == 0) {
+        return; // Skip rendering if any area is invalid
+    }
 
     draw_header(f, app, chunks[0]);
     draw_tab_bar(f, app, chunks[1]);
@@ -426,16 +426,26 @@ fn draw_dashboard_tab(
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
+    // Defensive check: ensure inner area is large enough
+    if inner.width < 4 || inner.height < 4 {
+        return;
+    }
+
     // Layout: top stats row + capacity gauge + channel states & TLC + payment stats + fee stats + network overview
     let chunks = Layout::vertical([
         Constraint::Length(3), // Summary stats row
         Constraint::Length(3), // Capacity utilization gauge
-        Constraint::Length(9), // Channel states (left) + TLC activity (right)
-        Constraint::Length(9), // Payment stats (sent/received)
-        Constraint::Length(9), // Fee & forwarding stats
-        Constraint::Min(4),    // Network overview (from graph)
+        Constraint::Fill(2),   // Channel states (left) + TLC activity (right)
+        Constraint::Fill(2),   // Payment stats (sent/received)
+        Constraint::Fill(2),   // Fee & forwarding stats
+        Constraint::Fill(1),   // Network overview (from graph)
     ])
     .split(inner);
+
+    // Defensive check: ensure all chunks have valid dimensions
+    if chunks.iter().any(|c| c.width == 0 || c.height == 0) {
+        return;
+    }
 
     // ── Row 1: Summary stats ────────────────────────────────────────
     draw_dashboard_summary(f, tab, node_info, p, chunks[0]);
