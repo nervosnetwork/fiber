@@ -100,7 +100,7 @@ jobs:
           tool: nextest
       - name: Run channel_restart_stress tests
         run: |
-          RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run -p fnn --lib --run-ignored only --no-fail-fast -j 1 -- fiber::tests::channel_restart_stress::test_node_restart --exact
+          RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run -p fnn --lib --features rocksdb --run-ignored only --no-fail-fast -j 1 -- fiber::tests::channel_restart_stress::test_node_restart --exact
         env:
           RUST_TEST_THREADS: 2
 
