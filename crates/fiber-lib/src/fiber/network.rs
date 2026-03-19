@@ -3924,19 +3924,6 @@ where
                     Ok(())
                 }
                 None => {
-                    if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                        let remote_pubkey = actor_state.get_remote_pubkey();
-                        if self.peer_session_map.contains_key(&remote_pubkey) {
-                            debug!(
-                                "Channel {:?} actor missing while peer {:?} is connected, reestablishing before handling command",
-                                channel_id, remote_pubkey
-                            );
-                            let actor = self.reestablish_channel(remote_pubkey, channel_id).await?;
-                            actor.send_message(ChannelActorMessage::Command(command))?;
-                            return Ok(());
-                        }
-                    }
-
                     // if it's relay remove tlc, insert it into ChannelActorState's retryable queue
                     if let ChannelCommand::RemoveTlc(remove_tlc, _) = &command {
                         if let Some(mut state) = self.store.get_channel_actor_state(&channel_id) {
@@ -4135,15 +4122,11 @@ where
             for channel_id in channel_ids {
                 self.outpoint_channel_map.retain(|_, id| *id != *channel_id);
                 if let Some(channel) = self.channels.get(channel_id) {
-                    let event = match self.store.get_channel_actor_state(channel_id) {
-                        Some(channel_state)
-                            if matches!(channel_state.state, ChannelState::ChannelReady) =>
-                        {
-                            ChannelEvent::PeerDisconnected
-                        }
-                        _ => ChannelEvent::Stop(StopReason::PeerDisConnected),
-                    };
-                    let _ = channel.send_message(ChannelActorMessage::Event(event));
+                    if let Err(err) = channel
+                        .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected))
+                    {
+                        error!("Failed to send PeerDisconnected event to channel actor: {err:?}");
+                    }
                 }
             }
         }

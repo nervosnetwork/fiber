@@ -4163,9 +4163,10 @@ async fn test_reestablish_channel() {
             rpc_reply,
         ))
     };
-    let _accept_channel_result = call!(node_b.network_actor, message)
+    let accept_channel_result = call!(node_b.network_actor, message)
         .expect("node_b alive")
         .expect("accept channel success");
+    let new_channel_id = accept_channel_result.new_channel_id;
 
     node_a
         .expect_event(|event| match event {
@@ -4183,6 +4184,28 @@ async fn test_reestablish_channel() {
             NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
                 println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
                 assert_eq!(pubkey, &node_a.pubkey);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_b.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_a.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
                 true
             }
             _ => false,
@@ -4220,16 +4243,11 @@ async fn test_reestablish_channel() {
         })
         .await;
 
-    // Don't use `connect_to` here as that may consume the `ChannelCreated` event.
-    // This is due to tentacle connection is async. We may actually send
-    // the `ChannelCreated` event before the `PeerConnected` event.
-    node_a.connect_to_nonblocking(&node_b).await;
-
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
                 assert_eq!(pubkey, &node_b.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
                 true
             }
             _ => false,
@@ -4238,9 +4256,36 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
                 assert_eq!(pubkey, &node_a.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    // Don't use `connect_to` here as that may consume the `ChannelOnline` event.
+    // This is due to tentacle connection is async. We may actually send
+    // the `ChannelOnline` event before the `PeerConnected` event.
+    node_a.connect_to_nonblocking(&node_b).await;
+
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_b.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_a.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
                 true
             }
             _ => false,
