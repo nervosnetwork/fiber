@@ -33,12 +33,16 @@ use ckb_types::{
 };
 use fiber_types::{ChannelFlags, ShutdownInfo};
 use musig2::{PartialSignature, SecNonce};
+use once_cell::sync::Lazy;
 use ractor::{call, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
     multiaddr::{MultiAddr, Multiaddr, Protocol},
     secio::PeerId,
 };
+use tokio::sync::Mutex;
+
+static BLOCK_TIMESTAMP_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn get_test_priv_key() -> Privkey {
     Privkey::from_slice(&[42u8; 32])
@@ -327,6 +331,130 @@ async fn test_sync_channel_announcement_on_startup() {
 }
 
 #[tokio::test]
+async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce_enabled() {
+    init_tracing();
+    let _block_timestamp_guard = BLOCK_TIMESTAMP_TEST_LOCK.lock().await;
+
+    let mut node1 = NetworkNode::new_with_node_name("node1").await;
+    let mut node2 = NetworkNode::new_with_node_name("node2").await;
+
+    let historical_timestamp =
+        now_timestamp_as_millis_u64() - Duration::from_secs(3 * 60 * 60).as_millis() as u64;
+    let capacity = 42;
+    let priv_key: Privkey = get_test_priv_key();
+    let pubkey = priv_key.x_only_pub_key().serialize();
+    let pubkey_hash = &blake2b_256(pubkey.as_slice())[0..20];
+    let tx = TransactionView::new_advanced_builder()
+        .output(
+            CellOutput::new_builder()
+                .capacity(capacity)
+                .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
+                .build(),
+        )
+        .output_data([0u8; 8].pack())
+        .build();
+    let outpoint = tx.output_pts()[0].clone();
+    let (node_announcement_1, node_announcement_2, channel_announcement) =
+        create_fake_channel_announcement_message(priv_key, capacity, outpoint.clone());
+
+    set_next_block_timestamp(historical_timestamp).await;
+    assert!(matches!(
+        node1.submit_tx(tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
+
+    for message in [
+        BroadcastMessage::NodeAnnouncement(node_announcement_1.clone()),
+        BroadcastMessage::NodeAnnouncement(node_announcement_2.clone()),
+        BroadcastMessage::ChannelAnnouncement(channel_announcement.clone()),
+    ] {
+        node1.mock_received_gossip_message_from_peer(
+            get_test_pub_key(),
+            broadcast_message_to_gossip(&message),
+        );
+    }
+
+    node1.connect_to(&mut node2).await;
+    assert!(matches!(
+        node2.submit_tx(tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
+
+    wait_until_async_timeout(|| async { !node2.get_network_graph_channels().await.is_empty() })
+        .await;
+
+    let channels = node2.get_network_graph_channels().await;
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0].channel_outpoint, outpoint);
+}
+
+#[tokio::test]
+async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce_disabled() {
+    init_tracing();
+    let _block_timestamp_guard = BLOCK_TIMESTAMP_TEST_LOCK.lock().await;
+
+    let mut node1 = NetworkNode::new_with_node_name("node1").await;
+    let mut node2 = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node2".to_string()))
+            .fiber_config_updater(|config| {
+                config.auto_announce_node = Some(false);
+            })
+            .build(),
+    )
+    .await;
+
+    let historical_timestamp =
+        now_timestamp_as_millis_u64() - Duration::from_secs(3 * 60 * 60).as_millis() as u64;
+    let capacity = 42;
+    let priv_key: Privkey = get_test_priv_key();
+    let pubkey = priv_key.x_only_pub_key().serialize();
+    let pubkey_hash = &blake2b_256(pubkey.as_slice())[0..20];
+    let tx = TransactionView::new_advanced_builder()
+        .output(
+            CellOutput::new_builder()
+                .capacity(capacity)
+                .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
+                .build(),
+        )
+        .output_data([0u8; 8].pack())
+        .build();
+    let outpoint = tx.output_pts()[0].clone();
+    let (node_announcement_1, node_announcement_2, channel_announcement) =
+        create_fake_channel_announcement_message(priv_key, capacity, outpoint.clone());
+
+    set_next_block_timestamp(historical_timestamp).await;
+    assert!(matches!(
+        node1.submit_tx(tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
+
+    for message in [
+        BroadcastMessage::NodeAnnouncement(node_announcement_1.clone()),
+        BroadcastMessage::NodeAnnouncement(node_announcement_2.clone()),
+        BroadcastMessage::ChannelAnnouncement(channel_announcement.clone()),
+    ] {
+        node1.mock_received_gossip_message_from_peer(
+            get_test_pub_key(),
+            broadcast_message_to_gossip(&message),
+        );
+    }
+
+    node1.connect_to(&mut node2).await;
+    assert!(matches!(
+        node2.submit_tx(tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
+
+    wait_until_async_timeout(|| async { !node2.get_network_graph_channels().await.is_empty() })
+        .await;
+
+    let channels = node2.get_network_graph_channels().await;
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0].channel_outpoint, outpoint);
+}
+
+#[tokio::test]
 async fn test_node1_node2_channel_update() {
     let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
@@ -455,6 +583,8 @@ async fn test_channel_update_version() {
 
 #[tokio::test]
 async fn test_query_missing_broadcast_message() {
+    let _block_timestamp_guard = BLOCK_TIMESTAMP_TEST_LOCK.lock().await;
+
     let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();

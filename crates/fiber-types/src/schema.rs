@@ -12,6 +12,7 @@
 //! | 65           | OutPoint             | ChannelId                   |
 //! | 96           | Cursor               | BroadcastMessage            |
 //! | 97           | BroadcastMessageID   | u64                         |
+//! | 98           | ()                   | Cursor                      |
 //! | 192          | Hash256              | PaymentSession              |
 //! | 193          | OutPoint | Direction | TimedResult                 |
 //! | 194          | Hash256              | PaymentCustomRecords        |
@@ -30,6 +31,7 @@ pub const PUBKEY_CHANNEL_ID_PREFIX: u8 = 64;
 pub const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;
 pub const BROADCAST_MESSAGE_PREFIX: u8 = 96;
 pub const BROADCAST_MESSAGE_TIMESTAMP_PREFIX: u8 = 97;
+pub const LATEST_REMOTE_BROADCAST_MESSAGE_CURSOR_PREFIX: u8 = 98;
 pub const PAYMENT_SESSION_PREFIX: u8 = 192;
 pub const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
 pub const PAYMENT_CUSTOM_RECORD_PREFIX: u8 = 194;

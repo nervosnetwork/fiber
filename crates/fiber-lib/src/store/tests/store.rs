@@ -240,6 +240,38 @@ fn test_store_save_node_announcement() {
     assert_eq!(new_node_announcement, Some(node_announcement));
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_latest_remote_broadcast_message_cursor() {
+    let (store, _dir) = generate_store();
+    let (_sk, node_announcement) = mock_node();
+    let local_cursor = node_announcement.cursor();
+    let older_cursor = Cursor::new(
+        local_cursor.timestamp.saturating_sub(1),
+        BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
+    );
+    let newer_cursor = Cursor::new(
+        local_cursor.timestamp.saturating_add(1),
+        BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
+    );
+
+    store.save_node_announcement(node_announcement);
+    assert_eq!(store.get_latest_remote_broadcast_message_cursor(), None);
+
+    store.update_latest_remote_broadcast_message_cursor(local_cursor.clone());
+    store.update_latest_remote_broadcast_message_cursor(older_cursor);
+    assert_eq!(
+        store.get_latest_remote_broadcast_message_cursor(),
+        Some(local_cursor.clone())
+    );
+
+    store.update_latest_remote_broadcast_message_cursor(newer_cursor.clone());
+    assert_eq!(
+        store.get_latest_remote_broadcast_message_cursor(),
+        Some(newer_cursor)
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

@@ -176,6 +176,10 @@ pub trait GossipMessageStore {
 
     fn get_latest_broadcast_message_cursor(&self) -> Option<Cursor>;
 
+    fn get_latest_remote_broadcast_message_cursor(&self) -> Option<Cursor>;
+
+    fn update_latest_remote_broadcast_message_cursor(&self, cursor: Cursor);
+
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64>;
 
     fn get_latest_channel_update_timestamp(
@@ -1275,7 +1279,11 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             )
             .await
             {
-                Ok(message) => {
+                Ok((message, saved_to_store)) => {
+                    if saved_to_store {
+                        self.store
+                            .update_latest_remote_broadcast_message_cursor(message.cursor());
+                    }
                     verified_sorted_messages.push(message);
                 }
                 Err(error) => {
@@ -1965,9 +1973,9 @@ where
         self.peer_states.get(pubkey).map(|s| s.session_id)
     }
 
-    fn get_latest_cursor(&self) -> Cursor {
+    fn get_latest_remote_cursor(&self) -> Cursor {
         self.get_store()
-            .get_latest_broadcast_message_cursor()
+            .get_latest_remote_broadcast_message_cursor()
             .unwrap_or_default()
     }
 
@@ -1976,7 +1984,7 @@ where
     // before this cursor are not important for the node to sync with the network.
     // We will start syncing from this cursor to avoid syncing from the very beginning of the network.
     fn get_safe_cursor_to_start_syncing(&self) -> Cursor {
-        let latest_cursor_timestamp = self.get_latest_cursor().timestamp;
+        let latest_cursor_timestamp = self.get_latest_remote_cursor().timestamp;
         let safe_cursor_timestamp = latest_cursor_timestamp
             .saturating_sub(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT.as_millis() as u64);
         let timestamp_after_considered_stale = now_timestamp_as_millis_u64()
@@ -2122,33 +2130,43 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
-) -> Result<BroadcastMessageWithTimestamp, Error> {
-    let timestamp = match message {
+) -> Result<(BroadcastMessageWithTimestamp, bool), Error> {
+    let (timestamp, already_saved) = match message {
         BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
             let on_chain_info =
                 get_channel_on_chain_info(channel_announcement.out_point(), chain, client).await?;
-            if !verify_channel_announcement(channel_announcement, &on_chain_info, store).await? {
+            let already_saved =
+                verify_channel_announcement(channel_announcement, &on_chain_info, store).await?;
+            if !already_saved {
                 store.save_channel_announcement(
                     on_chain_info.timestamp,
                     channel_announcement.clone(),
                 );
             }
-            on_chain_info.timestamp
+            (on_chain_info.timestamp, already_saved)
         }
         BroadcastMessage::ChannelUpdate(channel_update) => {
-            if !verify_channel_update(channel_update, store)? {
+            let already_saved = verify_channel_update(channel_update, store)?;
+            if !already_saved {
                 store.save_channel_update(channel_update.clone());
             }
-            channel_update.timestamp
+            (channel_update.timestamp, already_saved)
         }
         BroadcastMessage::NodeAnnouncement(node_announcement) => {
-            if !verify_node_announcement(node_announcement, store)? {
+            let already_saved = verify_node_announcement(node_announcement, store)?;
+            if !already_saved {
                 store.save_node_announcement(node_announcement.clone());
             }
-            node_announcement.timestamp
+            (node_announcement.timestamp, already_saved)
         }
     };
-    Ok((message.clone(), timestamp).into())
+    let message_with_timestamp: BroadcastMessageWithTimestamp = (message.clone(), timestamp).into();
+    let saved_to_store = !already_saved
+        && store
+            .get_broadcast_message_with_cursor(&message_with_timestamp.cursor())
+            .as_ref()
+            == Some(&message_with_timestamp);
+    Ok((message_with_timestamp, saved_to_store))
 }
 
 async fn get_channel_tx(

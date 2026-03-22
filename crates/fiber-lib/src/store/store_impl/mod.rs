@@ -212,6 +212,14 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             BROADCAST_MESSAGE_TIMESTAMP_PREFIX => {}
+            LATEST_REMOTE_BROADCAST_MESSAGE_CURSOR_PREFIX => {
+                if Cursor::from_bytes(&value).is_err() {
+                    errors.insert(
+                        "Failed to deserialize LATEST_REMOTE_BROADCAST_MESSAGE_CURSOR_PREFIX"
+                            .to_string(),
+                    );
+                }
+            }
             PAYMENT_SESSION_PREFIX => {
                 check_deserialization::<PaymentSession>(
                     &value,
@@ -292,6 +300,7 @@ pub enum KeyValue {
     OutPointChannelId(OutPoint, Hash256),
     BroadcastMessageTimestamp(BroadcastMessageID, u64),
     BroadcastMessage(Cursor, BroadcastMessage),
+    LatestRemoteBroadcastMessageCursor(Cursor),
     #[cfg(feature = "watchtower")]
     WatchtowerChannel(NodeId, Hash256, ChannelData),
     #[cfg(feature = "watchtower")]
@@ -418,6 +427,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::BroadcastMessage(cursor, _) => {
                 [&[BROADCAST_MESSAGE_PREFIX], cursor.to_bytes().as_slice()].concat()
             }
+            KeyValue::LatestRemoteBroadcastMessageCursor(_) => {
+                vec![LATEST_REMOTE_BROADCAST_MESSAGE_CURSOR_PREFIX]
+            }
             KeyValue::PaymentCustomRecord(payment_hash, _data) => {
                 [&[PAYMENT_CUSTOM_RECORD_PREFIX], payment_hash.as_ref()].concat()
             }
@@ -467,6 +479,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::BroadcastMessage(_cursor, broadcast_message) => {
                 serialize_to_vec(broadcast_message, "BroadcastMessage")
             }
+            KeyValue::LatestRemoteBroadcastMessageCursor(cursor) => cursor.to_bytes().to_vec(),
             KeyValue::PaymentHistoryTimedResult(_, result) => {
                 serialize_to_vec(result, "TimedResult")
             }
@@ -1337,6 +1350,25 @@ impl GossipMessageStore for Store {
                 let last_key = kv.key.to_vec();
                 Cursor::from_bytes(&last_key[1..]).expect("deserialize Cursor should be OK")
             })
+    }
+
+    fn get_latest_remote_broadcast_message_cursor(&self) -> Option<Cursor> {
+        self.get([LATEST_REMOTE_BROADCAST_MESSAGE_CURSOR_PREFIX])
+            .and_then(|value| Cursor::from_bytes(&value).ok())
+    }
+
+    fn update_latest_remote_broadcast_message_cursor(&self, cursor: Cursor) {
+        if self
+            .get_latest_remote_broadcast_message_cursor()
+            .is_some_and(|existing| existing >= cursor)
+        {
+            return;
+        }
+
+        let kv = KeyValue::LatestRemoteBroadcastMessageCursor(cursor);
+        let mut batch = self.batch();
+        batch.put(kv.key(), kv.value());
+        batch.commit();
     }
 
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64> {
