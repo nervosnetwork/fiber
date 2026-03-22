@@ -33,16 +33,12 @@ use ckb_types::{
 };
 use fiber_types::{ChannelFlags, ShutdownInfo};
 use musig2::{PartialSignature, SecNonce};
-use once_cell::sync::Lazy;
 use ractor::{call, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
     multiaddr::{MultiAddr, Multiaddr, Protocol},
     secio::PeerId,
 };
-use tokio::sync::Mutex;
-
-static BLOCK_TIMESTAMP_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn get_test_priv_key() -> Privkey {
     Privkey::from_slice(&[42u8; 32])
@@ -333,7 +329,6 @@ async fn test_sync_channel_announcement_on_startup() {
 #[tokio::test]
 async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce_enabled() {
     init_tracing();
-    let _block_timestamp_guard = BLOCK_TIMESTAMP_TEST_LOCK.lock().await;
 
     let mut node1 = NetworkNode::new_with_node_name("node1").await;
     let mut node2 = NetworkNode::new_with_node_name("node2").await;
@@ -391,7 +386,6 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
 #[tokio::test]
 async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce_disabled() {
     init_tracing();
-    let _block_timestamp_guard = BLOCK_TIMESTAMP_TEST_LOCK.lock().await;
 
     let mut node1 = NetworkNode::new_with_node_name("node1").await;
     let mut node2 = NetworkNode::new_with_config(
@@ -583,8 +577,6 @@ async fn test_channel_update_version() {
 
 #[tokio::test]
 async fn test_query_missing_broadcast_message() {
-    let _block_timestamp_guard = BLOCK_TIMESTAMP_TEST_LOCK.lock().await;
-
     let channel_context = ChannelTestContext::gen().await;
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
