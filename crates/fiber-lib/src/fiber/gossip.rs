@@ -2161,11 +2161,7 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
         }
     };
     let message_with_timestamp: BroadcastMessageWithTimestamp = (message.clone(), timestamp).into();
-    let saved_to_store = !already_saved
-        && store
-            .get_broadcast_message_with_cursor(&message_with_timestamp.cursor())
-            .as_ref()
-            == Some(&message_with_timestamp);
+    let saved_to_store = !already_saved;
     Ok((message_with_timestamp, saved_to_store))
 }
 
