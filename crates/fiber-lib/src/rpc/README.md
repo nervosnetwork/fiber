@@ -1312,7 +1312,10 @@ The state of a channel.
 #### Enum with values of
 
 * `NegotiatingFunding` - <em>`NegotiatingFundingFlags`</em>, We are negotiating the parameters required for the channel prior to funding it.
-* `AwaitingExternalFunding` - We're waiting for the user to sign and submit the funding transaction externally.
+
+ For channels opened with external funding, this state is also used together with
+ `NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING` to indicate that we are waiting
+ for the user to sign and submit the funding transaction externally.
 * `CollaboratingFundingTx` - <em>`CollaboratingFundingTxFlags`</em>, We're collaborating with the other party on the funding transaction.
 * `SigningCommitment` - <em>`SigningCommitmentFlags`</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
 * `AwaitingTxSignatures` - <em>`AwaitingTxSignaturesFlags`</em>, We've received and sent `commitment_signed` and are now waiting for both

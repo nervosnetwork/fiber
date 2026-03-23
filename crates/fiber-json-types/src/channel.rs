@@ -22,6 +22,7 @@ define_rpc_flags! {
         const OUR_INIT_SENT = 1;
         const THEIR_INIT_SENT = 1 << 1;
         const INIT_SENT = 1 | (1 << 1);
+        const AWAITING_EXTERNAL_FUNDING = 1 << 2;
     }
 }
 
@@ -382,8 +383,6 @@ pub struct ListChannelsResult {
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(#[schemars(schema_with = "schema_as_string")] NegotiatingFundingFlags),
-    /// We're waiting for the user to sign and submit the funding transaction externally.
-    AwaitingExternalFunding,
     /// We're collaborating with the other party on the funding transaction.
     CollaboratingFundingTx(
         #[schemars(schema_with = "schema_as_string")] CollaboratingFundingTxFlags,

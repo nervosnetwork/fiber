@@ -129,7 +129,10 @@ fn test_channel_state_bincode_compatibility() {
         ChannelState::Closed(CloseFlags::empty()),
         &[7, 0, 0, 0, 0, 0, 0, 0],
     );
-    assert_channel_state_encoding(ChannelState::AwaitingExternalFunding, &[8, 0, 0, 0]);
+    assert_channel_state_encoding(
+        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING),
+        &[0, 0, 0, 0, 4, 0, 0, 0],
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -7524,7 +7527,7 @@ async fn test_submit_signed_funding_tx() {
         "returned tx hash should match the signed tx hash"
     );
 
-    // Verify channel state transitioned beyond AwaitingExternalFunding
+    // Verify channel state transitioned beyond NegotiatingFunding(AWAITING_EXTERNAL_FUNDING)
     let state = node_a.get_channel_actor_state(channel_id);
     assert!(
         matches!(
@@ -7534,7 +7537,7 @@ async fn test_submit_signed_funding_tx() {
                 | ChannelState::AwaitingTxSignatures(_)
                 | ChannelState::AwaitingChannelReady(_)
         ),
-        "channel should have progressed beyond AwaitingExternalFunding, got {:?}",
+        "channel should have progressed beyond AWAITING_EXTERNAL_FUNDING, got {:?}",
         state.state
     );
 }
@@ -7660,7 +7663,7 @@ async fn test_submit_signed_funding_tx_wrong_state() {
     let channel_id = open_result.channel_id;
 
     // Try to submit a signed funding tx to a normal (non-external-funding) channel.
-    // This should fail because the channel is not in AwaitingExternalFunding state.
+    // This should fail because the channel is not in AWAITING_EXTERNAL_FUNDING state.
     let dummy_tx = Transaction::default();
     let submit_message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
@@ -7677,7 +7680,7 @@ async fn test_submit_signed_funding_tx_wrong_state() {
     );
     let err_msg = submit_result.unwrap_err();
     assert!(
-        err_msg.contains("AwaitingExternalFunding") || err_msg.contains("InvalidState"),
+        err_msg.contains("AWAITING_EXTERNAL_FUNDING") || err_msg.contains("InvalidState"),
         "error should mention wrong state, got: {}",
         err_msg
     );
@@ -7729,7 +7732,7 @@ async fn test_submit_signed_funding_tx_duplicate() {
     assert!(
         err_msg.contains("already been submitted")
             || err_msg.contains("InvalidState")
-            || err_msg.contains("AwaitingExternalFunding"),
+            || err_msg.contains("AWAITING_EXTERNAL_FUNDING"),
         "error should indicate repeated processing or wrong state, got: {}",
         err_msg
     );

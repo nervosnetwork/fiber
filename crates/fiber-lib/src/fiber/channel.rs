@@ -347,7 +347,7 @@ pub struct OpenChannelWithExternalFundingParameter {
 /// | State | `enabled` | `signed_submitted` | `unsigned_funding_tx` |
 /// |-------|-----------|-------------------|----------------------|
 /// | Normal channel | `false` | - | - |
-/// | `AwaitingExternalFunding` | `true` | `false` | `Some(tx)` |
+/// | `NegotiatingFunding(AWAITING_EXTERNAL_FUNDING)` | `true` | `false` | `Some(tx)` |
 /// | `SigningCommitment` (after submit) | `true` | `true` | `Some(tx)` |
 /// | `ChannelReady` | `true` | `true` | `None` (cleared) |
 #[derive(Clone, Debug, Default)]
@@ -503,7 +503,8 @@ where
                 state.fill_in_channel_id();
 
                 if state.ephemeral_config.external_funding.enabled {
-                    // For external funding, send a different event and transition to AwaitingExternalFunding
+                    // For external funding, send a different event and transition to
+                    // NegotiatingFunding(AWAITING_EXTERNAL_FUNDING).
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::ChannelAcceptedForExternalFunding {
@@ -559,7 +560,7 @@ where
             FiberChannelMessage::TxUpdate(tx) => {
                 if state.ephemeral_config.external_funding.enabled
                     && !state.ephemeral_config.external_funding.signed_submitted
-                    && matches!(state.state, ChannelState::AwaitingExternalFunding)
+                    && state.state.is_awaiting_external_funding()
                 {
                     self.handle_external_funding_tx_sync(myself, state, tx.tx)
                         .await?;
@@ -2729,15 +2730,16 @@ where
     ///
     /// # State Transition
     ///
-    /// This function handles the transition from `AwaitingExternalFunding` to the signing phase:
+    /// This function handles the transition from
+    /// `NegotiatingFunding(AWAITING_EXTERNAL_FUNDING)` to the signing phase:
     ///
     /// ## Current State Checks
-    /// - Must be in `AwaitingExternalFunding` OR
+    /// - Must be in `NegotiatingFunding(AWAITING_EXTERNAL_FUNDING)` OR
     /// - `SigningCommitment(THEIR_COMMITMENT_SIGNED_SENT)` (if peer sent early CommitmentSigned)
     ///
     /// ## State Transition Flow
     /// ```text
-    /// AwaitingExternalFunding ───────┐
+    /// NegotiatingFunding(AWAITING_EXTERNAL_FUNDING) ───────┐
     ///     │                          │
     ///     │ submit_signed_funding_tx │
     ///     ↓                          │
@@ -2772,16 +2774,16 @@ where
         // During external funding, the peer may send CommitmentSigned before the user
         // submits the externally signed funding tx. We allow that early message to move
         // us into SigningCommitment(THEIR_COMMITMENT_SIGNED_SENT), then continue from there.
-        let can_submit = matches!(
-            state.state,
-            ChannelState::AwaitingExternalFunding
-                | ChannelState::SigningCommitment(
+        let can_submit = state.state.is_awaiting_external_funding()
+            || matches!(
+                state.state,
+                ChannelState::SigningCommitment(
                     SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT
                 )
-        );
+            );
         if !can_submit {
             return Err(ProcessingChannelError::InvalidState(format!(
-                "Expected channel in AwaitingExternalFunding-compatible state, but got {:?}",
+                "Expected channel in AWAITING_EXTERNAL_FUNDING-compatible state, but got {:?}",
                 state.state
             )));
         }
@@ -2830,7 +2832,9 @@ where
         );
         state.ephemeral_config.external_funding.unsigned_funding_tx = Some(tx);
         state.ephemeral_config.external_funding.started_at = Some(SystemTime::now());
-        state.update_state(ChannelState::AwaitingExternalFunding);
+        state.update_state(ChannelState::NegotiatingFunding(
+            NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING,
+        ));
         self.schedule_external_funding_timeout_check(myself, state);
         Ok(())
     }
@@ -3707,7 +3711,7 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if state.can_abort_funding_on_timeout() {
-            if state.state == ChannelState::AwaitingExternalFunding {
+            if state.state.is_awaiting_external_funding() {
                 self.schedule_external_funding_timeout_check(&myself, state);
             } else {
                 self.schedule_timeout_event(
@@ -6523,8 +6527,9 @@ impl ChannelActorState {
                     )));
                 }
             }
-            ChannelState::AwaitingExternalFunding
-                if self.ephemeral_config.external_funding.enabled
+            ChannelState::NegotiatingFunding(flags)
+                if flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING)
+                    && self.ephemeral_config.external_funding.enabled
                     && !self.ephemeral_config.external_funding.signed_submitted =>
             {
                 CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
@@ -7057,8 +7062,7 @@ impl ChannelActorState {
         match self.state {
             ChannelState::NegotiatingFunding(_)
             | ChannelState::CollaboratingFundingTx(_)
-            | ChannelState::SigningCommitment(_)
-            | ChannelState::AwaitingExternalFunding => {
+            | ChannelState::SigningCommitment(_) => {
                 // Abort funding. It's better to resume the funding workflow, but it will make the code more complex.
                 // Consider refactoring the code to better support restarting in the future.
                 myself
@@ -8076,8 +8080,7 @@ impl ChannelActorState {
         match self.state {
             ChannelState::NegotiatingFunding(_)
             | ChannelState::CollaboratingFundingTx(_)
-            | ChannelState::SigningCommitment(_)
-            | ChannelState::AwaitingExternalFunding => true,
+            | ChannelState::SigningCommitment(_) => true,
             // Once we have sent the signature, the peer may succeed to submit
             // the funding tx on-chain.The best solution is waiting for the
             // confirmations or spending any input of the funding tx.

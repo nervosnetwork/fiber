@@ -56,6 +56,7 @@ bitflags! {
         const OUR_INIT_SENT = 1;
         const THEIR_INIT_SENT = 1 << 1;
         const INIT_SENT = NegotiatingFundingFlags::OUR_INIT_SENT.bits() | NegotiatingFundingFlags::THEIR_INIT_SENT.bits();
+        const AWAITING_EXTERNAL_FUNDING = 1 << 2;
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,13 +253,17 @@ pub enum ChannelState {
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
-    /// We're waiting for the user to sign and submit the funding transaction externally.
-    ///
-    /// Keep this variant at the end so its bincode discriminant stays stable for persisted data.
-    AwaitingExternalFunding,
 }
 
 impl ChannelState {
+    pub fn is_awaiting_external_funding(&self) -> bool {
+        matches!(
+            self,
+            ChannelState::NegotiatingFunding(flags)
+                if flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING)
+        )
+    }
+
     pub fn is_closed(&self) -> bool {
         matches!(
             self,
@@ -270,7 +275,6 @@ impl ChannelState {
     pub fn can_abort_funding(&self) -> bool {
         match self {
             ChannelState::NegotiatingFunding(_)
-            | ChannelState::AwaitingExternalFunding
             | ChannelState::CollaboratingFundingTx(_)
             | ChannelState::SigningCommitment(_) => true,
             ChannelState::AwaitingTxSignatures(flags)

@@ -87,10 +87,15 @@ script:post-response {
     "ChannelReady",
   ]);
 
-  const waitingExternalFundingStates = new Set([
-    "AWAITING_EXTERNAL_FUNDING",
-    "AwaitingExternalFunding",
-  ]);
+  function isWaitingExternalFundingState(ch) {
+    const stateName = ch && ch.state && ch.state.state_name;
+    const stateFlags = ch && ch.state && ch.state.state_flags;
+    return (
+      stateName === "NegotiatingFunding" &&
+      typeof stateFlags === "string" &&
+      stateFlags.split(",").includes("AwaitingExternalFunding")
+    );
+  }
 
   async function waitForChannelProgress(nodeLabel, rpcUrl, pubkey) {
     for (let i = 0; i < 20; i++) {
@@ -124,7 +129,7 @@ script:post-response {
         return;
       }
 
-      if (ch && !waitingExternalFundingStates.has(stateName)) {
+      if (ch && !isWaitingExternalFundingState(ch)) {
         throw new Error(
           `Assertion failed: unexpected ${nodeLabel} state after submit_signed_funding_tx: ${String(stateName)}`,
         );

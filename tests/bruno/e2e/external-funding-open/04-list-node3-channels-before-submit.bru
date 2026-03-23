@@ -46,9 +46,14 @@ script:post-response {
   }
 
   const stateName = ch.state && ch.state.state_name;
-  if (stateName !== "AWAITING_EXTERNAL_FUNDING") {
+  const stateFlags = ch.state && ch.state.state_flags;
+  if (
+    stateName !== "NegotiatingFunding" ||
+    typeof stateFlags !== "string" ||
+    !stateFlags.split(",").includes("AwaitingExternalFunding")
+  ) {
     throw new Error(
-      `Assertion failed: expected node1 channel ${channelId} to be AWAITING_EXTERNAL_FUNDING before submit, got ${String(stateName)}`,
+      `Assertion failed: expected node1 channel ${channelId} to be NegotiatingFunding(AwaitingExternalFunding) before submit, got ${String(stateName)} / ${String(stateFlags)}`,
     );
   }
 }
