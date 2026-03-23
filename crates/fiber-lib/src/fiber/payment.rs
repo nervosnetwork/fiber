@@ -801,8 +801,7 @@ pub struct PaymentActor<S> {
     network: ActorRef<NetworkActorMessage>,
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S> Actor for PaymentActor<S>
 where
     S: NetworkActorStateStore

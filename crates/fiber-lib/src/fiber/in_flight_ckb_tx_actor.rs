@@ -82,8 +82,7 @@ pub enum InFlightCkbTxActorMessage {
     Internal(InternalMessage),
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<C> Actor for InFlightCkbTxActor<C>
 where
     C: CkbChainClient + Send + Sync + 'static,
