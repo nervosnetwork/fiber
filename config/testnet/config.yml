@@ -2,6 +2,9 @@
 # All options' descriptions can be found via `fnn --help` and be overridden by command line arguments or environment variables.
 fiber:
   listening_addr: "/ip4/0.0.0.0/tcp/8228"
+  # Node name announced to the Fiber network. It is shown in RPC responses,
+  # the TUI header, and the network graph.
+  # announced_node_name: "my-fiber-node"
   bootnode_addrs:
     - "/ip4/54.179.226.154/tcp/8228/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
     - "/ip4/16.163.7.105/tcp/8228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"
