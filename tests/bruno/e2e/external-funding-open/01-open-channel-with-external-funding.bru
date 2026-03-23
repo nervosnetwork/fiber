@@ -1,7 +1,7 @@
 meta {
   name: Node1 open channel with external funding to Node3
   type: http
-  seq: 8
+  seq: 1
 }
 
 post {
@@ -33,6 +33,54 @@ body:json {
 }
 
 script:pre-request {
+  const axios = require("axios");
+
+  async function rpc(url, body) {
+    const resp = await axios.post(url, body, {
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+    });
+    if (resp.data && resp.data.error) {
+      throw new Error(`Assertion failed: RPC ${body.method} failed on ${url}: ${resp.data.error.message}`);
+    }
+    return resp.data && resp.data.result;
+  }
+
+  async function loadFundingContext(nodeLabel, nodeRpcUrl, balanceVar, scriptVar) {
+    const nodeInfo = await rpc(nodeRpcUrl, {
+      id: `external-funding-${nodeLabel}-info`,
+      jsonrpc: "2.0",
+      method: "node_info",
+      params: [],
+    });
+    const script = nodeInfo && nodeInfo.default_funding_lock_script;
+    if (!script) {
+      throw new Error(`Assertion failed: ${nodeLabel} default_funding_lock_script is missing`);
+    }
+
+    const balanceResult = await rpc(bru.getEnvVar("CKB_RPC_URL"), {
+      id: `external-funding-${nodeLabel}-balance`,
+      jsonrpc: "2.0",
+      method: "get_cells_capacity",
+      params: [
+        {
+          script_type: "lock",
+          script,
+        },
+      ],
+    });
+    const capacity = balanceResult && balanceResult.capacity;
+    if (capacity === undefined) {
+      throw new Error(`Assertion failed: ${nodeLabel} balance capacity is missing`);
+    }
+
+    bru.setVar(scriptVar, script);
+    bru.setVar(balanceVar, capacity);
+  }
+
+  await loadFundingContext("node1", bru.getEnvVar("NODE1_RPC_URL"), "NODE1_BALANCE_BEFORE", "NODE1_FUNDING_SCRIPT");
+  await loadFundingContext("node2", bru.getEnvVar("NODE2_RPC_URL"), "NODE2_BALANCE_BEFORE", "NODE2_FUNDING_SCRIPT");
+  await loadFundingContext("node3", bru.getEnvVar("NODE3_RPC_URL"), "NODE3_BALANCE_BEFORE", "NODE3_FUNDING_SCRIPT");
+
   const fundingAmount = bru.getEnvVar("EXTERNAL_FUNDING_AMOUNT") || "0x8bb2c9700";
   const usePreopen = bru.getEnvVar("EXTERNAL_FUNDING_USE_PREOPEN");
   if (usePreopen === "1") {

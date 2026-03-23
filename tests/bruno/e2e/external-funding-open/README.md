@@ -8,7 +8,7 @@ REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/external-funding-open
 
 This test validates a success-only scenario:
 
-- Get node1/node2/node3 CKB balances before open.
+- Initialize node1/node2/node3 funding scripts and CKB balances before open.
 - Node1 opens an external-funded channel to node3 via:
   - `open_channel_with_external_funding`
   - `submit_signed_funding_tx` (node2 signs).
@@ -19,11 +19,17 @@ This test validates a success-only scenario:
   - node2 decreased (funding amount + fee).
 - Node3 generates an invoice, node1 pays node3 over fiber.
 - Node1 initiates `shutdown_channel` with node2 `close_script`.
-- Wait channel is `CLOSED`.
+- Wait channel is `CLOSED` on node3.
 - Check balances after close:
   - node1 unchanged from initial;
   - node2 increased vs post-open, but still lower than initial;
   - node3 increased vs initial.
+
+The Bruno collection is intentionally trimmed to the core path now:
+
+- `01` initializes scripts/balances and consumes the pre-opened channel context from the wrapper.
+- `02/04/05/06/08/11/12/13/14` carry the main assertions.
+- `03/07/09/10` remain as required transition steps inside the end-to-end flow.
 
 ## Running
 
@@ -54,7 +60,7 @@ Reason: it is relatively slow and depends on an external-signing wrapper flow.
 ### Why not run Bruno directly
 
 Do not run `npm exec -- @usebruno/cli run e2e/external-funding-open ...` directly for this success-only flow.
-`06-submit-signed-funding-tx.bru` requires `EXTERNAL_FUNDING_SIGNED_TX`, which is injected by `run-success-flow.sh`.
+`02-submit-signed-funding-tx.bru` requires `EXTERNAL_FUNDING_SIGNED_TX`, which is injected by `run-success-flow.sh`.
 
 The wrapper script will:
 
@@ -62,6 +68,9 @@ The wrapper script will:
 - call `open_channel_with_external_funding`;
 - sign the returned unsigned funding tx with node2 key (`tests/nodes/2/ckb/plain_key`);
 - run the Bruno collection with injected env vars (`EXTERNAL_FUNDING_AMOUNT`, `EXTERNAL_FUNDING_SIGNED_TX`, preopen channel/tx).
+
+The wrapper owns the fragile setup and signing work. The Bruno collection focuses on
+submission, confirmation, readiness, payment, close, and post-close balance assertions.
 
 By default, the wrapper auto-tries multiple funding amounts (from higher to lower)
 until `open_channel_with_external_funding` succeeds.

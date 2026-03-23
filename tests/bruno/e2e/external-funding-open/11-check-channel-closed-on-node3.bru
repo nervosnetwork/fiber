@@ -1,11 +1,11 @@
 meta {
   name: check channel closed on node3
   type: http
-  seq: 23
+  seq: 11
 }
 
 post {
-  url: {{NODE1_RPC_URL}}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -22,7 +22,7 @@ body:json {
     "method": "list_channels",
     "params": [
       {
-        "pubkey": "{{NODE3_PUBKEY}}",
+        "pubkey": "{{NODE1_PUBKEY}}",
         "include_closed": true
       }
     ]
