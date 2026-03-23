@@ -750,6 +750,122 @@ where
         }
     }
 
+    /// Start Tor onion hidden service if properly configured.
+    /// Returns the onion multiaddr to be added to announced addresses, or None if
+    /// the required configuration (onion_server or proxy_url) is missing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_onion_service(
+        &self,
+        config: &FiberConfig,
+        listening_addrs: &[MultiAddr],
+        my_peer_id: &tentacle::secio::PeerId,
+        tracker: &tokio_util::task::TaskTracker,
+    ) -> Result<Option<MultiAddr>, String> {
+        use std::net::{Ipv4Addr, SocketAddr};
+
+        if config.onion_server.is_none() && config.proxy_url.is_none() {
+            return Ok(None);
+        }
+
+        // Resolve p2p listen address for onion service forwarding
+        let p2p_listen_address: SocketAddr = match &config.onion_p2p_listen_address {
+            Some(addr) => {
+                let addr: SocketAddr = addr
+                    .parse()
+                    .map_err(|err| format!("Failed to parse onion_p2p_listen_address: {}", err))?;
+                if addr.port() == 0 {
+                    return Err(
+                        "onion_p2p_listen_address port must not be 0".to_string()
+                    );
+                }
+                addr
+            }
+            None => {
+                // Try to derive from listening addresses
+                let port = listening_addrs.iter().find_map(|addr| {
+                    let mut iter = addr.iter();
+                    if let (Some(tentacle::multiaddr::Protocol::Ip4(ip)), Some(tentacle::multiaddr::Protocol::Tcp(port))) =
+                        (iter.next(), iter.next())
+                    {
+                        if ip == Ipv4Addr::new(0, 0, 0, 0) || ip == Ipv4Addr::new(127, 0, 0, 1) {
+                            return Some(port);
+                        }
+                    }
+                    None
+                });
+                match port {
+                    Some(port) => SocketAddr::new(
+                        std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                        port,
+                    ),
+                    None => {
+                        warn!("No suitable IPv4 listen address found for onion service, using default 127.0.0.1:8115");
+                        SocketAddr::new(
+                            std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                            8115,
+                        )
+                    }
+                }
+            }
+        };
+
+        // Check tor controller is reachable
+        let tor_controller_str = config.tor_controller();
+        let tor_controller_addr: SocketAddr = tor_controller_str
+            .parse()
+            .map_err(|err| format!("Failed to parse tor_controller address: {}", err))?;
+        match std::net::TcpStream::connect_timeout(
+            &tor_controller_addr,
+            std::time::Duration::from_secs(2),
+        ) {
+            Ok(_) => {
+                info!(
+                    "Confirmed tor_controller is listening on {}",
+                    tor_controller_str
+                );
+            }
+            Err(_err) => {
+                error!(
+                    "tor_controller is not listening on {}, skipping onion service",
+                    tor_controller_addr
+                );
+                return Ok(None);
+            }
+        }
+
+        let onion_private_key_path = config
+            .onion_private_key_path
+            .clone()
+            .unwrap_or_else(|| {
+                config
+                    .base_dir()
+                    .join("onion_private_key")
+                    .display()
+                    .to_string()
+            });
+
+        let onion_config = super::onion_service::OnionServiceConfig {
+            onion_private_key_path,
+            tor_controller: tor_controller_str.to_string(),
+            tor_password: config.tor_password.clone(),
+            p2p_listen_address,
+            onion_external_port: config.onion_external_port(),
+        };
+
+        let peer_id_str = my_peer_id.to_base58();
+        let (onion_service, onion_addr) =
+            super::onion_service::OnionService::new(onion_config, &peer_id_str)?;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        tracker.spawn(async move {
+            if let Err(err) = onion_service.start(cancel_token).await {
+                error!("Onion service stopped with error: {}", err);
+            }
+        });
+
+        Ok(Some(onion_addr))
+    }
+
     pub async fn handle_peer_message(
         &self,
         myself: ActorRef<NetworkActorMessage>,
@@ -4710,6 +4826,33 @@ where
             if let Some(gossip_handle) = gossip_handle_opt {
                 builder = builder.insert_protocol(gossip_handle.create_meta());
             }
+
+            // Set SOCKS5 proxy config
+            if let Some(proxy_url) = &config.proxy_url {
+                super::proxy::check_proxy_url(proxy_url)
+                    .expect("invalid proxy_url in config");
+                builder = builder
+                    .tcp_proxy_config(proxy_url)
+                    .tcp_proxy_random_auth(config.proxy_random_auth);
+                info!(
+                    "Set tcp_proxy_config: {:?}, proxy_random_auth: {}",
+                    proxy_url, config.proxy_random_auth
+                );
+            }
+
+            // Set onion proxy config (for .onion address connections via Tor SOCKS5)
+            let onion_proxy_url = config.onion_server.clone().map(|s| {
+                if s.starts_with("socks5://") {
+                    s
+                } else {
+                    format!("socks5://{}", s)
+                }
+            });
+            if let Some(ref onion_proxy_url) = onion_proxy_url {
+                info!("Set tcp_onion_config: {:?}", onion_proxy_url);
+                builder = builder.tcp_onion_config(onion_proxy_url);
+            }
+
             builder.build(handle)
         };
         #[cfg(target_arch = "wasm32")]
@@ -4793,6 +4936,24 @@ where
                     .unwrap_or_default()
             });
         }
+
+        // Start Tor onion hidden service if configured
+        #[cfg(not(target_arch = "wasm32"))]
+        if config.listen_on_onion() {
+            match self.start_onion_service(&config, &listening_addr, &my_peer_id, &tracker) {
+                Ok(Some(onion_addr)) => {
+                    info!("Onion service address: {}", onion_addr);
+                    announced_addrs.push(onion_addr);
+                }
+                Ok(None) => {
+                    info!("Onion service not started: missing onion_server or proxy_url");
+                }
+                Err(err) => {
+                    error!("Failed to start onion service: {}", err);
+                }
+            }
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         info!(
             "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
@@ -5210,6 +5371,7 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     iter.find_map(|proto| match proto {
         Protocol::Ws => Some(TransportType::Ws),
         Protocol::Wss => Some(TransportType::Wss),
+        Protocol::Onion3(_) => Some(TransportType::Onion),
         _ => None,
     })
     .unwrap_or(TransportType::Tcp)
