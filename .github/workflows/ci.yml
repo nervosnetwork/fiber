@@ -53,6 +53,11 @@ jobs:
           RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast
         env:
           RUST_TEST_THREADS: 2
+      - name: Run tests (sqlite)
+        run: |
+          RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast --no-default-features --features sqlite
+        env:
+          RUST_TEST_THREADS: 2
 
   fmt:
     name: Rustfmt

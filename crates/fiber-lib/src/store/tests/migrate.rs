@@ -1,3 +1,4 @@
+use fiber_store::backend::StorageBackend;
 use fiber_store::db_migrate::DbMigrate;
 use fiber_store::migration::{
     DefaultMigration, Migration, Migrations, LATEST_DB_VERSION, MIGRATION_VERSION_KEY,

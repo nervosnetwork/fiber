@@ -1,8 +1,11 @@
-pub use rocksdb::Direction as DbDirection;
-pub use rocksdb::IteratorMode;
+use rocksdb::Direction as DbDirection;
+use rocksdb::IteratorMode;
 use rocksdb::{prelude::*, DBCompressionType, WriteBatch, DB};
 use std::path::Path;
 use std::sync::Arc;
+
+use crate::backend::{BatchWriter, StorageBackend, TakeWhileFn};
+use crate::iterator::{IteratorDirection, KVPair};
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -18,60 +21,68 @@ impl Store {
         let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
         Ok(Self { db })
     }
+}
 
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
+impl StorageBackend for Store {
+    type Batch = Batch;
+
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
         self.db
             .get(key.as_ref())
             .map(|v| v.map(|vi| vi.to_vec()))
             .expect("get should be OK")
     }
 
-    pub fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.db.delete(key).expect("Unexpected error from delete");
-    }
-
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
         self.db.put(key, value).expect("put should be ok");
     }
 
-    pub fn batch(&self) -> Batch {
+    fn delete<K: AsRef<[u8]>>(&self, key: K) {
+        self.db.delete(key).expect("Unexpected error from delete");
+    }
+
+    fn batch(&self) -> Self::Batch {
         Batch {
             db: Arc::clone(&self.db),
             wb: WriteBatch::default(),
         }
     }
 
-    /// Returns a prefix iterator, using iterator mode `mode`, skipping items until `skip_while`
-    /// returns false, iterating over items prefixed with `prefix`
-    #[allow(clippy::type_complexity)]
-    pub fn prefix_iterator_with_skip_while_and_start<'a>(
-        &'a self,
-        prefix: &'a [u8],
-        mode: IteratorMode<'a>,
-        skip_while: Box<dyn Fn(&[u8]) -> bool + 'static>,
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        self.db
-            .get_iter(
-                &{
-                    let mut opts = ReadOptions::default();
-                    opts.set_prefix_same_as_start(true);
-                    opts
-                },
-                mode,
-            )
-            .skip_while(move |(key, _)| skip_while(key))
-            .take_while(move |(col_key, _)| col_key.starts_with(prefix))
-    }
+    fn collect_iterator(
+        &self,
+        start: Vec<u8>,
+        direction: IteratorDirection,
+        take_while_fn: TakeWhileFn,
+        limit: usize,
+    ) -> Vec<KVPair> {
+        let db_direction = match direction {
+            IteratorDirection::Forward => DbDirection::Forward,
+            IteratorDirection::Reverse => DbDirection::Reverse,
+        };
 
-    pub fn prefix_iterator<'a>(
-        &'a self,
-        prefix: &'a [u8],
-    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
-        self.prefix_iterator_with_skip_while_and_start(
-            prefix,
-            IteratorMode::From(prefix, DbDirection::Forward),
-            Box::new(|_| false),
-        )
+        let mode = IteratorMode::From(&start, db_direction);
+
+        let mut opts = ReadOptions::default();
+        opts.set_prefix_same_as_start(true);
+
+        let iter = self.db.get_iter(&opts, mode);
+
+        let mut results = Vec::new();
+        for (key, value) in iter {
+            if !take_while_fn(&key) {
+                break;
+            }
+
+            results.push(KVPair {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
+            if limit > 0 && results.len() >= limit {
+                break;
+            }
+        }
+
+        results
     }
 }
 
@@ -80,23 +91,16 @@ pub struct Batch {
     wb: WriteBatch,
 }
 
-impl Batch {
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.db
-            .get(key.as_ref())
-            .map(|v| v.map(|vi| vi.to_vec()))
-            .expect("get should be OK")
-    }
-
-    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+impl BatchWriter for Batch {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
         self.wb.put(key, value).expect("put should be OK")
     }
 
-    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
         self.wb.delete(key.as_ref()).expect("delete should be OK");
     }
 
-    pub fn commit(self) {
+    fn commit(self) {
         self.db.write(&self.wb).expect("commit should be OK");
     }
 }

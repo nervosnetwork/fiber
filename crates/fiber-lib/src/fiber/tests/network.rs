@@ -459,14 +459,17 @@ async fn test_query_missing_broadcast_message() {
     let funding_tx = channel_context.funding_tx.clone();
     let out_point = channel_context.channel_outpoint().clone();
     let channel_announcement = channel_context.channel_announcement.clone();
-    // A timestamp so large that the other node will unlikely try to send GetBroadcastMessages
-    // with timestamp smaller than this one.
-    let long_long_time_ago = now_timestamp_as_millis_u64() - 30 * 24 * 3600 * 100;
+    // A timestamp in the recent past. It needs to be recent enough to pass the
+    // broadcast subscription filter (which is latest_cursor - MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT,
+    // i.e. ~2 hours), but old enough to be distinct from the current timestamp.
+    // Node2 won't sync this during active syncing because it hasn't submitted the funding tx yet,
+    // not because of the timestamp.
+    let not_long_ago = now_timestamp_as_millis_u64() - 60 * 60 * 1000;
 
     let mut node1 = NetworkNode::new().await;
     // Set a small timestamp for the ChannelAnnouncement.
     // So that node2 will not sync this ChannelAnnouncement with node1.
-    set_next_block_timestamp(long_long_time_ago).await;
+    set_next_block_timestamp(not_long_ago).await;
     node1.submit_tx(funding_tx.clone()).await;
     node1.mock_received_gossip_message_from_peer(
         get_test_pub_key(),
@@ -477,7 +480,7 @@ async fn test_query_missing_broadcast_message() {
         1,
         1,
         1,
-        Some(long_long_time_ago + 10),
+        Some(not_long_ago + 10),
     );
     node1.mock_received_gossip_message_from_peer(
         get_test_pub_key(),
@@ -1104,8 +1107,7 @@ async fn test_abort_funding_on_building_funding_tx() {
 
 #[derive(Clone, Debug)]
 struct CkbTxFailureMockMiddleware;
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
     async fn handle(
         &mut self,
@@ -1132,8 +1134,7 @@ impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
 
 #[derive(Clone, Debug)]
 struct SignFundingTxFailureMockMiddleware;
-#[cfg_attr(target_arch="wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl MockChainActorMiddleware for SignFundingTxFailureMockMiddleware {
     async fn handle(
         &mut self,

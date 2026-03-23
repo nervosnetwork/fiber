@@ -101,7 +101,7 @@ pub async fn main_loop(log_level: &str) {
                     input_i32_arr.set_index(0, InputCommand::Waiting as i32);
                     debug!("Invoking request take while with args key={:?}", key,);
                     write_command_with_payload(
-                        OutputCommand::PrefixIteratorRequestForNextEntry as i32,
+                        OutputCommand::RequestTakeWhile as i32,
                         key.to_vec(),
                         &output_i32_arr,
                         &output_u8_arr,
@@ -109,6 +109,14 @@ pub async fn main_loop(log_level: &str) {
                     .unwrap();
                     // Sync wait here, so transaction of IndexedDB won't be committed (it will be committed once control flow was returned from sync call stack)
                     wait_for_command_sync(&input_i32_arr, InputCommand::Waiting).unwrap();
+
+                    let cmd = InputCommand::try_from(input_i32_arr.get_index(0))
+                        .expect("Invalid input command from client");
+                    assert!(
+                        matches!(cmd, InputCommand::ResponseTakeWhile),
+                        "Expected ResponseTakeWhile, got {:?}",
+                        input_i32_arr.get_index(0)
+                    );
 
                     let result =
                         read_command_payload::<bool>(&input_i32_arr, &input_u8_arr).unwrap();
@@ -136,7 +144,7 @@ pub async fn main_loop(log_level: &str) {
                 };
             }
             InputCommand::Shutdown => break,
-            InputCommand::Waiting | InputCommand::PrefixIteratorResponse => unreachable!(),
+            InputCommand::Waiting | InputCommand::ResponseTakeWhile => unreachable!(),
         }
     }
     info!("Db worker main loop exited");
