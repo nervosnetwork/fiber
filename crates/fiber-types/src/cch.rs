@@ -18,9 +18,9 @@ pub enum CchOrderStatus {
     /// The outgoing payment is in flight.
     OutgoingInFlight = 2,
     /// The outgoing payment is settled and preimage has been obtained.
-    OutgoingSucceeded = 3,
+    OutgoingSuccess = 3,
     /// Both payments are settled and the order succeeds.
-    Succeeded = 4,
+    Success = 4,
     /// Order is failed.
     Failed = 5,
 }
@@ -32,7 +32,7 @@ impl From<CkbInvoiceStatus> for CchOrderStatus {
             CkbInvoiceStatus::Cancelled => CchOrderStatus::Failed,
             CkbInvoiceStatus::Expired => CchOrderStatus::Failed,
             CkbInvoiceStatus::Received => CchOrderStatus::IncomingAccepted,
-            CkbInvoiceStatus::Paid => CchOrderStatus::Succeeded,
+            CkbInvoiceStatus::Paid => CchOrderStatus::Success,
         }
     }
 }
@@ -42,7 +42,7 @@ impl From<PaymentStatus> for CchOrderStatus {
         match status {
             PaymentStatus::Created => CchOrderStatus::IncomingAccepted,
             PaymentStatus::Inflight => CchOrderStatus::OutgoingInFlight,
-            PaymentStatus::Success => CchOrderStatus::OutgoingSucceeded,
+            PaymentStatus::Success => CchOrderStatus::OutgoingSuccess,
             PaymentStatus::Failed => CchOrderStatus::Failed,
         }
     }
@@ -95,7 +95,7 @@ pub struct CchOrder {
 
 impl CchOrder {
     pub fn is_final(&self) -> bool {
-        self.status == CchOrderStatus::Succeeded || self.status == CchOrderStatus::Failed
+        self.status == CchOrderStatus::Success || self.status == CchOrderStatus::Failed
     }
 
     /// Check if the order is expired given the current time, and mark it as Failed if expired.

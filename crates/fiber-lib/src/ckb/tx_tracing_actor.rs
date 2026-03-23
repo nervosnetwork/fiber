@@ -119,8 +119,7 @@ impl CkbTxTracingMessage {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl Actor for CkbTxTracingActor {
     type Msg = CkbTxTracingMessage;
     type State = CkbTxTracingState;

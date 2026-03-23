@@ -115,7 +115,6 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // triggered 10 times per second, plus we also trigger `apply_retryable_tlc_operations` when
 // receiving ACK from peer, so it's a reason number for 20 TPS
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
-const WAITING_REESTABLISH_FINISH_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
 #[cfg(not(any(test, feature = "bench")))]
@@ -178,6 +177,8 @@ pub enum ChannelCommand {
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     NotifyEvent(ChannelEvent),
     #[cfg(any(test, feature = "bench"))]
+    SetDeferPeerTlcUpdates(bool),
+    #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
 }
 
@@ -193,6 +194,10 @@ impl Display for ChannelCommand {
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::NotifyEvent(event) => write!(f, "NotifyEvent [{:?}]", event),
+            #[cfg(any(test, feature = "bench"))]
+            ChannelCommand::SetDeferPeerTlcUpdates(enabled) => {
+                write!(f, "SetDeferPeerTlcUpdates [{enabled}]")
+            }
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -533,6 +538,10 @@ where
                     self.apply_retryable_tlc_operations(myself, state, false)
                         .await;
                 }
+                if state.finish_pending_reestablish_channel_ready(myself) {
+                    state.schedule_next_retry_task(myself);
+                    debug_event!(self.network, "Reestablished channel in ChannelReady");
+                }
                 Ok(())
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
@@ -567,14 +576,17 @@ where
             }
             FiberChannelMessage::AddTlc(add_tlc) => {
                 if state.defer_peer_tlc_updates {
-                    state.queue_deferred_peer_tlc_update(DeferredPeerTlcUpdate::Add(add_tlc));
+                    state
+                        .try_queue_deferred_peer_tlc_update(DeferredPeerTlcUpdate::Add(add_tlc))?;
                     return Ok(());
                 }
                 self.handle_add_tlc_peer_message(state, add_tlc)
             }
             FiberChannelMessage::RemoveTlc(remove_tlc) => {
                 if state.defer_peer_tlc_updates {
-                    state.queue_deferred_peer_tlc_update(DeferredPeerTlcUpdate::Remove(remove_tlc));
+                    state.try_queue_deferred_peer_tlc_update(DeferredPeerTlcUpdate::Remove(
+                        remove_tlc,
+                    ))?;
                     return Ok(());
                 }
                 self.handle_remove_tlc_peer_message(state, remove_tlc)
@@ -2375,6 +2387,15 @@ where
             }
             ChannelCommand::NotifyEvent(event) => self.handle_event(myself, state, event).await,
             #[cfg(any(test, feature = "bench"))]
+            ChannelCommand::SetDeferPeerTlcUpdates(enabled) => {
+                if enabled {
+                    state.start_defer_peer_tlc_updates();
+                } else {
+                    state.stop_defer_peer_tlc_updates();
+                }
+                Ok(())
+            }
+            #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(reload_params) => {
                 let private_key = state.private_key.clone();
                 *state = self
@@ -2583,8 +2604,7 @@ where
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S> Actor for ChannelActor<S>
 where
     S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
@@ -3288,6 +3308,10 @@ pub struct ChannelActorState {
     pub core: ChannelActorData,
 
     // --- Runtime-only fields (not serialized) ---
+    /// Reestablish replay has resumed message flow, but we still owe the network actor a
+    /// `ChannelReady` notification once the missing peer acknowledgment arrives.
+    #[doc = "skip_store"]
+    pub pending_reestablish_channel_ready: bool,
     /// Temporarily defer peer TLC updates while replaying dual-owed state.
     #[doc = "skip_store"]
     pub defer_peer_tlc_updates: bool,
@@ -3351,6 +3375,7 @@ impl<'de> Deserialize<'de> for ChannelActorState {
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
+            pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
@@ -3665,13 +3690,33 @@ impl ChannelActorState {
         }
     }
 
-    fn queue_deferred_peer_tlc_update(&mut self, update: DeferredPeerTlcUpdate) {
+    fn max_deferred_peer_tlc_updates(&self) -> usize {
+        self.local_constraints
+            .max_tlc_number_in_flight
+            .saturating_add(self.remote_constraints.max_tlc_number_in_flight) as usize
+    }
+
+    fn try_queue_deferred_peer_tlc_update(
+        &mut self,
+        update: DeferredPeerTlcUpdate,
+    ) -> ProcessingChannelResult {
+        let max_deferred_updates = self.max_deferred_peer_tlc_updates();
+        if self.deferred_peer_tlc_updates.len() >= max_deferred_updates {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Too many deferred peer TLC updates while replaying channel {}: queued {}, limit {}",
+                self.get_id(),
+                self.deferred_peer_tlc_updates.len(),
+                max_deferred_updates
+            )));
+        }
+
         self.deferred_peer_tlc_updates.push_back(update);
         debug!(
             "Deferred peer TLC update for channel {} (queued={})",
             self.get_id(),
             self.deferred_peer_tlc_updates.len()
         );
+        Ok(())
     }
 
     fn log_ack_state(&self, context: &str) {
@@ -4172,6 +4217,7 @@ impl ChannelActorState {
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
+            pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
@@ -4263,6 +4309,7 @@ impl ChannelActorState {
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
+            pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
@@ -6090,6 +6137,7 @@ impl ChannelActorState {
             return;
         };
 
+        self.pending_reestablish_channel_ready = false;
         self.reestablishing = false;
         self.connectivity_state = ChannelConnectivityState::Online;
         self.notify_channel_connectivity(ChannelConnectivityState::Online);
@@ -6099,12 +6147,23 @@ impl ChannelActorState {
         let channel_id = self.get_id();
         let pubkey = self.get_remote_pubkey();
         self.network()
-            .send_after(WAITING_REESTABLISH_FINISH_TIMEOUT, move || {
-                NetworkActorMessage::new_event(NetworkActorEvent::ChannelReady(
-                    channel_id, pubkey, outpoint,
-                ))
-            });
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelReady(channel_id, pubkey, outpoint),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.on_owned_channel_updated(myself, false);
+    }
+
+    fn finish_pending_reestablish_channel_ready(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+    ) -> bool {
+        if !self.pending_reestablish_channel_ready {
+            return false;
+        }
+
+        self.on_reestablished_channel_ready(myself);
+        true
     }
 
     fn resume_funding(&mut self, myself: &ActorRef<ChannelActorMessage>) {
@@ -6393,12 +6452,14 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady => {
                 self.clear_waiting_peer_response();
+                self.pending_reestablish_channel_ready = false;
 
                 let my_local_commitment_number = self.get_local_commitment_number();
                 let my_remote_commitment_number = self.get_remote_commitment_number();
                 let my_waiting_ack = self.tlc_state.waiting_ack;
                 let peer_local_commitment_number = reestablish_channel.local_commitment_number;
                 let peer_remote_commitment_number = reestablish_channel.remote_commitment_number;
+                let mut reestablish_complete = true;
 
                 warn!(
                     "peer: {:?} \
@@ -6498,11 +6559,18 @@ impl ChannelActorState {
                         self.resend_tlcs_on_reestablish(true)?;
                     }
                 } else {
-                    // ignore, waiting for remote peer to resend revoke_and_ack
+                    // Wait for the peer to resend the missing revoke_and_ack before declaring the
+                    // channel ready again. We must resume normal message handling so that ack can
+                    // be processed, but we delay the ready notification until then.
+                    self.reestablishing = false;
+                    self.pending_reestablish_channel_ready = true;
+                    reestablish_complete = false;
                 }
 
-                self.on_reestablished_channel_ready(myself);
-                debug_event!(network, "Reestablished channel in ChannelReady");
+                if reestablish_complete {
+                    self.on_reestablished_channel_ready(myself);
+                    debug_event!(network, "Reestablished channel in ChannelReady");
+                }
             }
             ChannelState::ShuttingDown(flags) => {
                 // Resend the shutdown message to the peer if we have not received the peer's shutdown message.

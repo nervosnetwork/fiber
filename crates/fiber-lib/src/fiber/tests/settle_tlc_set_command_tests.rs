@@ -307,6 +307,7 @@ fn create_test_channel_state_with_tlc(
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: std::collections::VecDeque::new(),
         ephemeral_config: Default::default(),
