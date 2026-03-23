@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use lightning_invoice::Bolt11Invoice;
 use lightning_invoice::Currency as LnCurrency;
 use lnd_grpc_tonic_client::{invoicesrpc, Uri};
 use ractor::{
-    call, port::OutputPortSubscriberTrait as _, Actor, ActorProcessingErr, ActorRef, OutputPort,
+    port::OutputPortSubscriberTrait as _, Actor, ActorProcessingErr, ActorRef, OutputPort,
     RpcReplyPort,
 };
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
@@ -11,9 +11,11 @@ use serde::Deserialize;
 use std::str::FromStr;
 use std::sync::Arc;
 use tentacle::secio::SecioKeyPair;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::cch::actions::{ActionDispatcher, CchOrderAction};
+use crate::cch::cch_fiber_agent::{CchFiberAgentActor, CchFiberAgentHttpBackend, CchFiberAgentRef};
 use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
@@ -21,9 +23,9 @@ use crate::cch::trackers::{
 };
 use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
+use crate::store::store_impl::StoreChange;
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
 use fiber_types::{Hash256, Privkey};
@@ -60,6 +62,9 @@ pub enum CchMessage {
 
     TrackingEvent(CchTrackingEvent),
 
+    /// Store change event from the Fiber node (either in-process or via WebSocket).
+    StoreChangeEvent(StoreChange),
+
     /// Schedule a retry for an action with backoff after a transient failure.
     ActionRetry {
         payment_hash: Hash256,
@@ -85,6 +90,12 @@ impl From<CchTrackingEvent> for CchMessage {
     }
 }
 
+impl From<StoreChange> for CchMessage {
+    fn from(value: StoreChange) -> Self {
+        CchMessage::StoreChangeEvent(value)
+    }
+}
+
 pub struct CchActor<S>(std::marker::PhantomData<S>);
 
 impl<S> Default for CchActor<S> {
@@ -97,8 +108,8 @@ pub struct CchArgs<S> {
     pub config: CchConfig,
     pub tracker: TaskTracker,
     pub token: CancellationToken,
-    pub network_actor: ActorRef<NetworkActorMessage>,
-    pub node_keypair: crate::fiber::KeyPair,
+    pub network_actor: Option<ActorRef<NetworkActorMessage>>,
+    pub node_keypair: Option<crate::fiber::KeyPair>,
     pub store: S,
     /// The CKB network currency this node is configured for.
     /// Used to validate that incoming invoices match the expected network.
@@ -107,8 +118,8 @@ pub struct CchArgs<S> {
 
 pub struct CchState<S> {
     pub(super) config: CchConfig,
-    pub(super) network_actor: ActorRef<NetworkActorMessage>,
-    pub(super) node_keypair: (PublicKey, SecretKey),
+    pub(super) fiber_agent_ref: CchFiberAgentRef,
+    pub(super) node_keypair: Option<(PublicKey, SecretKey)>,
     pub(super) lnd_connection: LndConnectionInfo,
     pub(super) lnd_tracker: ActorRef<LndTrackerMessage>,
     pub(super) scheduler: ActorRef<SchedulerMessage>,
@@ -128,6 +139,17 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        // Validate that we have either an in-process network actor or a fiber RPC URL
+        if args.network_actor.is_none() {
+            if args.config.fiber_rpc_url.is_none() {
+                return Err(anyhow!(
+                    "Cch requires either in-process network actor or configured fiber RPC URL"
+                )
+                .into());
+            }
+            ensure_fiber_http_url(args.config.fiber_rpc_url.clone())?;
+        }
+
         let lnd_rpc_url: Uri = args.config.lnd_rpc_url.clone().try_into()?;
         let cert = match args.config.resolve_lnd_cert_path() {
             Some(path) => Some(
@@ -147,15 +169,16 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         };
         let lnd_connection = LndConnectionInfo::new(lnd_rpc_url, cert, macaroon);
 
-        let private_key: Privkey = <[u8; 32]>::try_from(args.node_keypair.as_ref())
-            .expect("valid length for key")
-            .into();
-        let secio_kp = SecioKeyPair::from(args.node_keypair);
-
-        let node_keypair = (
-            PublicKey::from_slice(secio_kp.public_key().inner_ref()).expect("valid public key"),
-            private_key.into(),
-        );
+        let node_keypair = args.node_keypair.map(|kp| {
+            let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
+                .expect("valid length for key")
+                .into();
+            let secio_kp = SecioKeyPair::from(kp);
+            (
+                PublicKey::from_slice(secio_kp.public_key().inner_ref()).expect("valid public key"),
+                private_key.into(),
+            )
+        });
 
         // Create LND tracker port and subscribe
         let lnd_port = Arc::new(OutputPort::default());
@@ -163,7 +186,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             LndTrackerArgs {
                 port: lnd_port.clone(),
                 lnd_connection: lnd_connection.clone(),
-                tracker: args.tracker,
+                tracker: args.tracker.clone(),
                 token: args.token.clone(),
             },
             myself.get_cell(),
@@ -181,9 +204,35 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         )
         .await?;
 
+        // Set up store change subscription
+        if args.network_actor.is_none() {
+            // Separate service mode: subscribe to Fiber node's store changes via WebSocket
+            let ws_url = ensure_fiber_ws_url(args.config.fiber_rpc_url.clone())?;
+            let myself_clone = myself.clone();
+            let token = args.token.clone();
+            args.tracker.spawn(async move {
+                subscribe_store_changes_ws(ws_url, myself_clone, token).await;
+            });
+        }
+
+        let fiber_agent_ref = if let Some(network_actor) = args.network_actor {
+            CchFiberAgentRef::InProcess(network_actor)
+        } else {
+            let url = args
+                .config
+                .fiber_rpc_url
+                .as_deref()
+                .expect("validated in pre_start");
+            let backend = CchFiberAgentHttpBackend::try_new(url)?;
+            let (rpc_actor, _handle) =
+                ractor::Actor::spawn_linked(None, CchFiberAgentActor, backend, myself.get_cell())
+                    .await?;
+            CchFiberAgentRef::Rpc(rpc_actor)
+        };
+
         let state = CchState {
             config: args.config,
-            network_actor: args.network_actor,
+            fiber_agent_ref,
             store: args.store,
             node_keypair,
             lnd_connection,
@@ -307,6 +356,26 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 }
                 Ok(())
             }
+            CchMessage::StoreChangeEvent(change) => {
+                tracing::debug!("store change event {:?}", change);
+                let events = state.map_store_change_to_events(&change);
+                for event in events {
+                    let payment_hash = *event.payment_hash();
+                    match state.handle_tracking_event(event).await {
+                        Ok(actions) => {
+                            append_actions(myself.clone(), payment_hash, actions)?;
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                "handle_tracking_event for payment hash {:x} failed: {}",
+                                payment_hash,
+                                err
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            }
             CchMessage::ActionRetry {
                 payment_hash,
                 action,
@@ -339,7 +408,6 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                         &err.to_string(),
                     );
                 }
-
                 Ok(())
             }
             #[cfg(test)]
@@ -431,6 +499,35 @@ impl<S: CchOrderStore> CchState<S> {
         }
     }
 
+    /// Resolve the full wrapped BTC type script.
+    ///
+    /// Uses the explicit `wrapped_btc_type_script` config option when set.
+    /// Falls back to building the script from the contracts context using
+    /// `wrapped_btc_type_script_args` (safe in non-standalone mode where the
+    /// contracts context is always initialized; standalone mode enforces the
+    /// config option at startup).
+    fn resolve_wrapped_btc_type_script(&self) -> Result<ckb_jsonrpc_types::Script, CchError> {
+        if let Some(ref json_str) = self.config.wrapped_btc_type_script {
+            return serde_json::from_str(json_str).map_err(|e| {
+                CchError::ConfigError(format!(
+                    "failed to parse wrapped_btc_type_script JSON: {}",
+                    e
+                ))
+            });
+        }
+
+        let args = hex::decode(
+            self.config
+                .wrapped_btc_type_script_args
+                .trim_start_matches("0x"),
+        )
+        .map_err(|_| {
+            CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
+        })?;
+
+        Ok(get_script_by_contract(Contract::SimpleUDT, &args).into())
+    }
+
     async fn send_btc(&self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
@@ -485,45 +582,29 @@ impl<S: CchOrderStore> CchState<S> {
             / 1_000_000_000u128
             + (self.config.base_fee_sats as u128);
 
-        let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
-            Contract::SimpleUDT,
-            hex::decode(
-                self.config
-                    .wrapped_btc_type_script_args
-                    .trim_start_matches("0x"),
-            )
-            .map_err(|_| {
-                CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
-            })?
-            .as_ref(),
-        )
-        .into();
+        let wrapped_btc_type_script = self.resolve_wrapped_btc_type_script()?;
         let invoice_amount_sats = amount_msat
             .div_ceil(1_000u128)
             .checked_add(fee_sats)
             .ok_or(CchError::SendBTCOrderAmountTooLarge)?;
 
-        let invoice = InvoiceBuilder::new(send_btc.currency)
+        let invoice_builder = InvoiceBuilder::new(send_btc.currency)
             .amount(Some(invoice_amount_sats))
             .payment_hash(payment_hash)
             .hash_algorithm(HashAlgorithm::Sha256)
             .expiry_time(Duration::from_secs(outgoing_invoice_expiry_delta_seconds))
             .final_expiry_delta(self.config.ckb_final_tlc_expiry_delta_seconds * 1000)
-            .udt_type_script(wrapped_btc_type_script.clone().into())
-            .payee_pub_key(self.node_keypair.0)
-            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &self.node_keypair.1))?;
+            .udt_type_script(wrapped_btc_type_script.clone().into());
 
-        let message = {
-            let invoice = invoice.clone();
-            move |rpc_reply| -> NetworkActorMessage {
-                NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
-                    invoice.clone(),
-                    None,
-                    rpc_reply,
-                ))
-            }
-        };
-        call!(self.network_actor, message).expect(ASSUME_NETWORK_ACTOR_ALIVE)?;
+        let invoice = if let Some((public_key, secret_key)) = &self.node_keypair {
+            invoice_builder
+                .payee_pub_key(*public_key)
+                .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, secret_key))
+        } else {
+            invoice_builder.build()
+        }?;
+
+        let invoice = self.fiber_agent_ref.call_add_invoice(invoice).await?;
 
         let order = CchOrder {
             amount_sats: invoice_amount_sats,
@@ -615,19 +696,7 @@ impl<S: CchOrderStore> CchState<S> {
         }
 
         // Verify wrapped_btc_type_script matches invoice UDT type script
-        let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
-            Contract::SimpleUDT,
-            hex::decode(
-                self.config
-                    .wrapped_btc_type_script_args
-                    .trim_start_matches("0x"),
-            )
-            .map_err(|_| {
-                CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
-            })?
-            .as_ref(),
-        )
-        .into();
+        let wrapped_btc_type_script = self.resolve_wrapped_btc_type_script()?;
 
         // Verify invoice UDT type script matches configured wrapped_btc_type_script
         if let Some(invoice_udt_script) = invoice.udt_type_script() {
@@ -695,6 +764,53 @@ impl<S: CchOrderStore> CchState<S> {
             Ok(vec![])
         }
     }
+
+    /// Map a StoreChange into CchTrackingEvent(s).
+    /// This replaces the old CchFiberStoreWatcher: the mapping logic now lives in the actor.
+    fn map_store_change_to_events(&self, change: &StoreChange) -> Vec<CchTrackingEvent> {
+        match change {
+            StoreChange::PutCkbInvoiceStatus {
+                payment_hash,
+                invoice_status,
+            } => vec![CchTrackingEvent::InvoiceChanged {
+                payment_hash: *payment_hash,
+                status: *invoice_status,
+                failure_reason: None,
+            }],
+            StoreChange::PutPaymentSession {
+                payment_hash,
+                payment_session,
+            } => {
+                use fiber_types::payment::PaymentStatus;
+                let status = payment_session.status;
+                // For successful payments, we need the preimage. If it's not in the same
+                // store change batch, the PutPreimage event will follow.
+                if status == PaymentStatus::Success {
+                    // Defer to PutPreimage
+                    vec![]
+                } else {
+                    vec![CchTrackingEvent::PaymentChanged {
+                        payment_hash: *payment_hash,
+                        payment_preimage: None,
+                        status,
+                        failure_reason: None,
+                    }]
+                }
+            }
+            StoreChange::PutPreimage {
+                payment_hash,
+                payment_preimage,
+            } => {
+                use fiber_types::payment::PaymentStatus;
+                vec![CchTrackingEvent::PaymentChanged {
+                    payment_hash: *payment_hash,
+                    payment_preimage: Some(*payment_preimage),
+                    status: PaymentStatus::Success,
+                    failure_reason: None,
+                }]
+            }
+        }
+    }
 }
 
 fn append_actions(
@@ -735,4 +851,108 @@ fn schedule_action_retry(
         action,
         retry_count: retry_count.saturating_add(1),
     });
+}
+
+fn ensure_fiber_http_url(url_opt: Option<String>) -> Result<String> {
+    if let Some(url) = url_opt {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            return Ok(url);
+        }
+    }
+    Err(anyhow!("fiber_rpc_url must start with http:// or https://"))
+}
+
+fn ensure_fiber_ws_url(url_opt: Option<String>) -> Result<String> {
+    let mut url = ensure_fiber_http_url(url_opt)?;
+    // replace http with ws
+    url.replace_range(..4, "ws");
+    Ok(url)
+}
+
+/// Subscribe to store changes from a Fiber node via WebSocket RPC.
+/// Reconnects automatically on failure until the cancellation token is triggered.
+async fn subscribe_store_changes_ws(
+    ws_url: String,
+    actor: ActorRef<CchMessage>,
+    token: CancellationToken,
+) {
+    use jsonrpsee::ws_client::WsClientBuilder;
+
+    loop {
+        if token.is_cancelled() {
+            return;
+        }
+
+        tracing::info!(
+            "Connecting to Fiber node WebSocket for store changes at {}",
+            ws_url
+        );
+
+        let client = match WsClientBuilder::default().build(&ws_url).await {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::error!(
+                    "Failed to connect to Fiber WebSocket at {}: {}. Retrying in 5s.",
+                    ws_url,
+                    err
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+                    _ = token.cancelled() => return,
+                }
+            }
+        };
+
+        use jsonrpsee::core::client::SubscriptionClientT as _;
+        let mut subscription = match client
+            .subscribe::<StoreChange, _>(
+                "subscribe_store_changes",
+                jsonrpsee::rpc_params![],
+                "unsubscribe_store_changes",
+            )
+            .await
+        {
+            Ok(sub) => sub,
+            Err(err) => {
+                tracing::error!(
+                    "Failed to subscribe to store changes: {}. Retrying in 5s.",
+                    err
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+                    _ = token.cancelled() => return,
+                }
+            }
+        };
+
+        tracing::info!("Successfully subscribed to Fiber node store changes");
+
+        loop {
+            tokio::select! {
+                item = subscription.next() => {
+                    match item {
+                        Some(Ok(change)) => {
+                            tracing::debug!("Received store change via WebSocket: {:?}", change);
+                            if let Err(err) = actor.send_message(CchMessage::StoreChangeEvent(change)) {
+                                tracing::error!("Failed to forward store change to CCH actor: {}", err);
+                                return;
+                            }
+                        }
+                        Some(Err(err)) => {
+                            tracing::error!("WebSocket subscription error: {}. Reconnecting...", err);
+                            break;
+                        }
+                        None => {
+                            tracing::warn!("WebSocket subscription ended. Reconnecting...");
+                            break;
+                        }
+                    }
+                }
+                _ = token.cancelled() => {
+                    tracing::info!("Cancellation received, stopping WebSocket subscription");
+                    return;
+                }
+            }
+        }
+    }
 }

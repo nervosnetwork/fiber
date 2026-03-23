@@ -2,7 +2,7 @@ use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
-use fnn::cch::{CchArgs, CchFiberStoreWatcher};
+use fnn::cch::CchArgs;
 use fnn::ckb::client::CkbRpcClient;
 use fnn::ckb::contracts::TypeIDResolver;
 #[cfg(debug_assertions)]
@@ -72,20 +72,19 @@ pub async fn main() -> Result<(), ExitMessage> {
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
     let config = Config::parse();
+    let parsed_fiber_config = config
+        .parsed_fiber()
+        .ok_or(ExitMessage("fiber config must be set".to_string()))?;
 
-    let store_path = config
-        .fiber
-        .as_ref()
-        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
-        .store_path();
-
+    // Derive store_path: prefer fiber config, fall back to base_dir/fiber/store
+    let store_path = parsed_fiber_config.store_path();
     let raw_store = open_store(store_path).map_err(|err| ExitMessage(err.to_string()))?;
 
-    if config.cch.is_some() {
+    if config.cch.is_some() || config.rpc.is_some() {
         let port = Arc::new(OutputPort::default());
-        let watcher = CchFiberStoreWatcher::build_watcher(raw_store.clone(), port.clone());
+        let port_clone = port.clone();
         let mut store = raw_store;
-        store.set_watcher(watcher);
+        store.set_watcher(Arc::new(move |change| port_clone.send(change)));
         run_node(store, Some(port), config).await
     } else {
         run_node(raw_store, None, config).await
@@ -94,7 +93,7 @@ pub async fn main() -> Result<(), ExitMessage> {
 
 async fn run_node(
     store: fnn::store::Store,
-    cch_fiber_store_event_port: Option<Arc<OutputPort<fnn::cch::trackers::CchTrackingEvent>>>,
+    store_change_port: Option<Arc<OutputPort<fnn::store::store_impl::StoreChange>>>,
     config: Config,
 ) -> Result<(), ExitMessage> {
     let tracker = new_tokio_task_tracker();
@@ -319,19 +318,40 @@ async fn run_node(
         None => (None, None, None),
     };
 
-    let cch_actor = match (config.cch, &network_actor) {
-        (Some(cch_config), Some(network_actor)) => {
+    let cch_currency = config
+        .parsed_fiber()
+        .map(|fc| fc.currency())
+        .unwrap_or_default();
+    let cch_actor = match config.cch {
+        Some(cch_config) => {
+            // CCH can run either:
+            // 1. In-process with a co-located Fiber node (network_actor is Some)
+            // 2. As a separate service connecting to Fiber via RPC (fiber_rpc_url is configured)
+            if network_actor.is_none() && cch_config.fiber_rpc_url.is_none() {
+                return ExitMessage::err(
+                    "CCH requires either a running Fiber service or a configured fiber_rpc_url"
+                        .to_string(),
+                );
+            }
+
+            // In standalone mode (no Fiber service) the contracts context is never
+            // initialized, so the wrapped BTC type script must be supplied via config.
+            if network_actor.is_none() {
+                cch_config.validate_standalone().map_err(ExitMessage)?;
+            }
+
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;
-            let fiber_config = config.fiber.as_ref().ok_or_else(|| {
-                ExitMessage(
-                    "failed to read secret key because fiber config is not available".to_string(),
-                )
-            })?;
-            let node_keypair = fiber_config
-                .read_or_generate_secret_key()
-                .map_err(|err| ExitMessage(format!("failed to read secret key: {}", err)))?;
-            let currency = fiber_config.currency();
+
+            let node_keypair =
+                if let Some(fiber_config) = config.fiber.as_ref() {
+                    Some(fiber_config.read_or_generate_secret_key().map_err(|err| {
+                        ExitMessage(format!("failed to read secret key: {}", err))
+                    })?)
+                } else {
+                    None
+                };
+
             match Actor::spawn_linked(
                 Some("cch actor".to_string()),
                 CchActor::default(),
@@ -340,9 +360,9 @@ async fn run_node(
                     tracker: new_tokio_task_tracker(),
                     token: new_tokio_cancellation_token(),
                     network_actor: network_actor.clone(),
-                    node_keypair,
+                    currency: cch_currency,
                     store: store.clone(),
-                    currency,
+                    node_keypair,
                 },
                 root_actor.get_cell(),
             )
@@ -360,9 +380,13 @@ async fn run_node(
                     }
                 }
                 Ok((actor, _handle)) => {
-                    if let Some(port) = cch_fiber_store_event_port {
-                        actor.subscribe_to_port(&port);
+                    // In-process mode: subscribe CCH actor to store change port for change notifications
+                    if network_actor.is_some() {
+                        if let Some(ref port) = store_change_port {
+                            actor.subscribe_to_port(port);
+                        }
                     }
+                    // In separate service mode, the WebSocket subscription is set up in the actor's pre_start
 
                     info!("cch started successfully ...");
                     Some(actor)
@@ -373,8 +397,8 @@ async fn run_node(
     };
 
     // Start rpc service
-    let rpc_server_handle = match (config.rpc, network_graph) {
-        (Some(rpc_config), Some(network_graph)) => {
+    let rpc_server_handle = match config.rpc {
+        Some(rpc_config) => {
             match start_rpc(
                 rpc_config,
                 config.ckb,
@@ -383,20 +407,21 @@ async fn run_node(
                 cch_actor,
                 store,
                 network_graph,
-                #[cfg(debug_assertions)] ckb_chain_actor,
-                #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
+                root_actor.get_cell(),
+                store_change_port,
+                #[cfg(debug_assertions)]
+                ckb_chain_actor,
+                #[cfg(debug_assertions)]
+                rpc_dev_module_commitment_txs,
             )
-            .await {
+            .await
+            {
                 Ok(handle) => Some(handle),
                 Err(err) => {
                     return ExitMessage::err(format!("rpc server failed to start: {}", err));
                 }
             }
-        },
-        (Some(_), None) => return ExitMessage::err(
-            "RPC requires network graph in the fiber service which is not enabled in the config file"
-            .to_string()
-        ),
+        }
         _ => None,
     };
 

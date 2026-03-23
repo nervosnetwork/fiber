@@ -15,6 +15,8 @@ pub mod payment;
 pub mod peer;
 #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
 pub mod prof;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pubsub;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
@@ -75,6 +77,8 @@ pub mod server {
     use tracing::debug;
 
     use super::biscuit::BiscuitAuth;
+    use crate::store::store_impl::StoreChange;
+    use ractor::{ActorCell, OutputPort};
 
     #[cfg(feature = "watchtower")]
     pub trait RpcServerStore:
@@ -269,7 +273,9 @@ pub mod server {
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
         store: S,
-        network_graph: Arc<RwLock<NetworkGraph<S>>>,
+        network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
+        supervisor: ActorCell,
+        store_change_port: Option<Arc<OutputPort<StoreChange>>>,
         #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -299,9 +305,11 @@ pub mod server {
                 .unwrap();
         }
         if config.is_module_enabled("graph") {
-            modules
-                .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
-                .unwrap();
+            if let Some(ref network_graph) = network_graph {
+                modules
+                    .merge(GraphRpcServerImpl::new(network_graph.clone(), store.clone()).into_rpc())
+                    .unwrap();
+            }
         }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {
@@ -370,6 +378,16 @@ pub mod server {
                 modules
                     .merge(CchRpcServerImpl::new(cch_actor).into_rpc())
                     .unwrap();
+            }
+        }
+        if config.is_module_enabled("pubsub") {
+            if let Some(ref store_change_port) = store_change_port {
+                crate::rpc::pubsub::register_pub_sub_rpc(
+                    &mut modules,
+                    store_change_port,
+                    supervisor,
+                )
+                .await?;
             }
         }
 

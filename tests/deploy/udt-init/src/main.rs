@@ -234,6 +234,7 @@ fn create_node_config(
     node_index: usize,
     fiber_port: u16,
     rpc_port: u16,
+    node3_rpc_port: Option<u16>,
 ) -> serde_yaml::Value {
     let mut config = base_data.clone();
 
@@ -249,12 +250,53 @@ fn create_node_config(
     config["rpc"]["listening_addr"] = serde_yaml::Value::String(format!("127.0.0.1:{}", rpc_port));
     config["ckb"]["udt_whitelist"] = serde_yaml::to_value(udt_infos).unwrap();
 
-    // Node 3 acts as a CCH node
+    // Node 3 acts as a CCH node (in-process mode)
     if node_index == 3 {
         config["services"]
             .as_sequence_mut()
             .unwrap()
             .push(serde_yaml::Value::String("cch".to_string()));
+    }
+
+    // Node 4 (cch) is a standalone CCH service connecting to node 3 via RPC
+    if node_index == 4 {
+        // Remove fiber and ckb sections — CCH-only node doesn't run these
+        config.as_mapping_mut().unwrap().remove("fiber");
+        config.as_mapping_mut().unwrap().remove("ckb");
+
+        // Remove ignore_startup_failure from CCH config — must succeed for CCH-only node
+        if let Some(cch) = config.get_mut("cch") {
+            cch.as_mapping_mut()
+                .unwrap()
+                .remove("ignore_startup_failure");
+            // Point to node 3's RPC
+            let target_rpc_port = node3_rpc_port.unwrap_or(21713 + 3);
+            cch["fiber_rpc_url"] =
+                serde_yaml::Value::String(format!("http://127.0.0.1:{}", target_rpc_port));
+
+            // Standalone CCH needs the full wrapped BTC type script because
+            // the contracts context is not available without fiber/ckb services.
+            let wrapped_btc_args = cch["wrapped_btc_type_script_args"]
+                .as_str()
+                .expect("wrapped_btc_type_script_args must be set")
+                .to_string();
+            let (code_hash, _, _) = get_udt_info("SIMPLE_UDT");
+            let script_json = format!(
+                r#"{{"code_hash":"0x{:x}","hash_type":"data2","args":"{}"}}"#,
+                code_hash, wrapped_btc_args
+            );
+            cch["wrapped_btc_type_script"] = serde_yaml::Value::String(script_json);
+        }
+
+        // Only enable cch module in RPC
+        config["rpc"]["enabled_modules"] =
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("cch".to_string())]);
+
+        // Services: only rpc and cch
+        config["services"] = serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("rpc".to_string()),
+            serde_yaml::Value::String("cch".to_string()),
+        ]);
     }
 
     config
@@ -272,7 +314,10 @@ fn write_node_config(
     std::fs::write(config_path, yaml_content).expect("write config failed");
 
     let node_dev_config = nodes_dir.join(config_dir).join("dev.toml");
-    fs::copy(dev_config, node_dev_config).expect("copy dev.toml failed");
+    // CCH-only node doesn't need dev.toml (no fiber/ckb sections)
+    if config_dir != "cch" {
+        fs::copy(dev_config, node_dev_config).expect("copy dev.toml failed");
+    }
 }
 
 fn generate_nodes_config() {
@@ -310,16 +355,18 @@ fn generate_nodes_config() {
         "# this is generated from nodes/deployer/config.yml, any changes will not be checked in",
         "# you can edit nodes/deployer/config.yml and run `REMOVE_OLD_STATE=y ./tests/nodes/start.sh TESTCASE` to regenerate"
     );
-    let config_dirs = ["bootnode", "1", "2", "3"];
+    let config_dirs = ["bootnode", "1", "2", "3", "cch"];
     let on_github_action = std::env::var("ON_GITHUB_ACTION").is_ok();
     let gen_ports = if on_github_action {
-        Some(generate_ports(6).into_iter())
+        Some(generate_ports(8).into_iter())
     } else {
         None
     };
     let mut gen_ports_iter = gen_ports;
     let mut ports_map: Vec<(u16, u16)> = Vec::new();
     let dev_config = nodes_dir.join("deployer/dev.toml");
+
+    let mut node3_rpc_port: Option<u16> = None;
 
     for (i, &config_dir) in config_dirs.iter().enumerate() {
         let default_ports = (8343 + i as u16, 21713 + i as u16);
@@ -329,7 +376,13 @@ fn generate_nodes_config() {
         };
         ports_map.extend([(8343 + i as u16, fiber_port), (21713 + i as u16, rpc_port)]);
 
-        let config_data = create_node_config(&data, &udt_infos, i, fiber_port, rpc_port);
+        // Remember node 3's actual RPC port for the CCH-only node
+        if i == 3 {
+            node3_rpc_port = Some(rpc_port);
+        }
+
+        let config_data =
+            create_node_config(&data, &udt_infos, i, fiber_port, rpc_port, node3_rpc_port);
         write_node_config(&nodes_dir, config_dir, &header, &config_data, &dev_config);
     }
 
@@ -339,10 +392,13 @@ fn generate_nodes_config() {
         }
     }
 
-    // write the real ports into a file so that later script can use it to double check the ports
+    // Write ports for nodes that always start (1, 2, 3) so wait.sh can verify they're ready.
+    // Bootnode (first 2 entries) and CCH-only node (last 2 entries) start conditionally,
+    // so their ports are excluded.
     let content = ports_map
         .iter()
-        .skip(2) // bootnode node was not always started
+        .skip(2)
+        .take(6)
         .map(|(_, port)| port.to_string())
         .collect::<Vec<_>>()
         .join("\n")
