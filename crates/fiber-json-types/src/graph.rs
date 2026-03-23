@@ -1,9 +1,7 @@
 //! Network graph types for the Fiber Network JSON-RPC API.
 
 use crate::schema_helpers::*;
-use crate::serde_utils::{
-    deserialize_json_dep_type, serialize_json_dep_type, EntityHex, Hash256, Pubkey, U128Hex, U64Hex,
-};
+use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script, ScriptHashType};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
@@ -52,11 +50,6 @@ pub struct UdtCellDep {
     /// The out point of the cell dep.
     pub out_point: OutPointWrapper,
     /// The type of the cell dep.
-    #[serde(
-        serialize_with = "serialize_json_dep_type",
-        deserialize_with = "deserialize_json_dep_type"
-    )]
-    #[schemars(with = "String")]
     pub dep_type: DepType,
 }
 

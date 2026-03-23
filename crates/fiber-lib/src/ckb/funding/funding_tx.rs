@@ -560,7 +560,6 @@ impl FundingTxBuilder {
 
 /// Builder for unsigned funding transactions for external signing.
 /// This is similar to FundingTxBuilder but does not sign the transaction.
-#[allow(dead_code)]
 struct ExternalFundingTxBuilder {
     funding_tx: FundingTx,
     request: FundingRequest,
