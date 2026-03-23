@@ -93,7 +93,7 @@ script:post-response {
     return (
       stateName === "NegotiatingFunding" &&
       typeof stateFlags === "string" &&
-      stateFlags.split(",").includes("AwaitingExternalFunding")
+      stateFlags.split(/[|,]/).map((flag) => flag.trim()).includes("AwaitingExternalFunding")
     );
   }
 
