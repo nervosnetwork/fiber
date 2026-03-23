@@ -1320,9 +1320,10 @@ impl GossipMessageStore for Store {
     fn get_broadcast_messages_iter_reverse(
         &self,
         before_cursor: Option<&Cursor>,
+        limit: usize,
     ) -> impl IntoIterator<Item = crate::fiber::types::BroadcastMessageWithTimestamp> {
         let prefix = [BROADCAST_MESSAGE_PREFIX];
-        let mut options = PrefixIterOptions::new().reverse();
+        let mut options = PrefixIterOptions::new().reverse().limit(limit);
 
         let start_cloned = before_cursor.map(|cursor| {
             let cursor_bytes = cursor.to_bytes();

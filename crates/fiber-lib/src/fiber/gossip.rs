@@ -114,6 +114,7 @@ pub trait GossipMessageStore {
     fn get_broadcast_messages_iter_reverse(
         &self,
         before_cursor: Option<&Cursor>,
+        limit: usize,
     ) -> impl IntoIterator<Item = BroadcastMessageWithTimestamp>;
 
     fn get_broadcast_messages(
@@ -289,13 +290,16 @@ pub(crate) fn get_latest_startup_broadcast_message_cursor<S: GossipMessageStore>
     local_pubkey: Option<&Pubkey>,
 ) -> Cursor {
     match local_pubkey {
-        Some(local_pubkey) => store
-            .get_broadcast_messages_iter_reverse(None)
-            .into_iter()
-            .filter(|message| is_remote_cursor_candidate(store, local_pubkey, message))
-            .map(|message| message.cursor())
-            .next()
-            .unwrap_or_default(),
+        Some(local_pubkey) => {
+            // TODO: Support lazy load of broadcast messages, know we just add a limit to the query to avoid loading too many messages into memory.
+            store
+                .get_broadcast_messages_iter_reverse(None, 100)
+                .into_iter()
+                .filter(|message| is_remote_cursor_candidate(store, local_pubkey, message))
+                .map(|message| message.cursor())
+                .next()
+                .unwrap_or_default()
+        }
         None => store
             .get_latest_broadcast_message_cursor()
             .unwrap_or_default(),
