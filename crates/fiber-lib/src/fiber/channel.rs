@@ -2615,74 +2615,14 @@ where
                 )
             })?;
 
-        let unsigned_view = unsigned_tx.clone().into_view();
+        if unsigned_tx.raw().as_slice() != signed_tx.raw().as_slice() {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Signed funding transaction raw data mismatch; only witnesses may change for external funding"
+                    .to_string(),
+            ));
+        }
+
         let signed_view = signed_tx.clone().into_view();
-
-        if unsigned_view.inputs().len() != signed_view.inputs().len() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Input count mismatch: unsigned has {}, signed has {}",
-                unsigned_view.inputs().len(),
-                signed_view.inputs().len()
-            )));
-        }
-
-        for (i, (unsigned_input, signed_input)) in unsigned_view
-            .inputs()
-            .into_iter()
-            .zip(signed_view.inputs().into_iter())
-            .enumerate()
-        {
-            if unsigned_input.previous_output() != signed_input.previous_output() {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Input {} previous_output mismatch",
-                    i
-                )));
-            }
-        }
-
-        if unsigned_view.outputs().len() != signed_view.outputs().len() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Output count mismatch: unsigned has {}, signed has {}",
-                unsigned_view.outputs().len(),
-                signed_view.outputs().len()
-            )));
-        }
-
-        for (i, (unsigned_output, signed_output)) in unsigned_view
-            .outputs()
-            .into_iter()
-            .zip(signed_view.outputs().into_iter())
-            .enumerate()
-        {
-            if unsigned_output.as_slice() != signed_output.as_slice() {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Output {} mismatch",
-                    i
-                )));
-            }
-        }
-
-        if unsigned_view.outputs_data().len() != signed_view.outputs_data().len() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Outputs data count mismatch: unsigned has {}, signed has {}",
-                unsigned_view.outputs_data().len(),
-                signed_view.outputs_data().len()
-            )));
-        }
-
-        for (i, (unsigned_data, signed_data)) in unsigned_view
-            .outputs_data()
-            .into_iter()
-            .zip(signed_view.outputs_data().into_iter())
-            .enumerate()
-        {
-            if unsigned_data.as_slice() != signed_data.as_slice() {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Output data {} mismatch",
-                    i
-                )));
-            }
-        }
 
         if !state.is_tx_final(signed_tx)? {
             return Err(ProcessingChannelError::InvalidParameter(

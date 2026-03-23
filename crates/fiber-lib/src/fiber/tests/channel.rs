@@ -35,7 +35,7 @@ use crate::{
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
-    packed::{CellInput, Script, Transaction},
+    packed::{CellDep, CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use fiber_types::{
@@ -7813,6 +7813,46 @@ async fn test_submit_signed_funding_tx_input_count_mismatch() {
     assert!(
         err_msg.contains("Input count mismatch") || err_msg.contains("mismatch"),
         "error should mention input count mismatch, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_cell_deps_mismatch() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let funding_amount: u128 = 100_000_000_000;
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, funding_amount).await;
+
+    let mut tampered_cell_deps: Vec<_> = unsigned_tx.raw().cell_deps().into_iter().collect();
+    tampered_cell_deps.push(CellDep::default());
+
+    let tampered_raw_tx = unsigned_tx
+        .raw()
+        .as_builder()
+        .cell_deps(tampered_cell_deps)
+        .build();
+    let tampered_tx: Transaction = unsigned_tx.as_builder().raw(tampered_raw_tx).build();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: tampered_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message).expect("node_a alive");
+    assert!(
+        submit_result.is_err(),
+        "submitting tx with tampered cell deps should fail"
+    );
+    let err_msg = submit_result.unwrap_err();
+    assert!(
+        err_msg.contains("raw data mismatch") || err_msg.contains("only witnesses may change"),
+        "error should mention raw data mismatch, got: {}",
         err_msg
     );
 }
