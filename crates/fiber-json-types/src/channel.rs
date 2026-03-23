@@ -382,6 +382,9 @@ pub struct ListChannelsResult {
 #[serde(tag = "state_name", content = "state_flags")]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
+    /// For channels opened with external funding, this state is also used together with
+    /// `NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING` to indicate that we are waiting
+    /// for the user to sign and submit the funding transaction externally.
     NegotiatingFunding(#[schemars(schema_with = "schema_as_string")] NegotiatingFundingFlags),
     /// We're collaborating with the other party on the funding transaction.
     CollaboratingFundingTx(

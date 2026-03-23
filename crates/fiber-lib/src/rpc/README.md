@@ -1312,7 +1312,6 @@ The state of a channel.
 #### Enum with values of
 
 * `NegotiatingFunding` - <em>`NegotiatingFundingFlags`</em>, We are negotiating the parameters required for the channel prior to funding it.
-
  For channels opened with external funding, this state is also used together with
  `NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING` to indicate that we are waiting
  for the user to sign and submit the funding transaction externally.
