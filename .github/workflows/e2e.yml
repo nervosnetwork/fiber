@@ -7,39 +7,38 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  discover:
+    name: Discover e2e test suites
+    runs-on: ubuntu-latest
+    outputs:
+      workflows: ${{ steps.find.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tests/bruno/e2e
+      - id: find
+        run: |
+          workflows=$(find tests/bruno/e2e -name '*.bru' -printf '%h\n' | sort -u | sed 's|tests/bruno/e2e/||' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
+
   e2e-testing:
     name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+    needs: discover
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        workflow:
-          - 3-nodes-transfer
-          - invoice-ops
-          - open-use-close-a-channel
-          - udt
-          - reestablish
-          - cross-chain-hub
-          - router-pay
-          - udt-router-pay
-          - watchtower/force-close
-          - watchtower/force-close-after-multiple-payments
-          - watchtower/force-close-after-open-channel
-          - watchtower/force-close-preimage
-          - watchtower/force-close-preimage-multiple
-          - watchtower/force-close-remote-with-pending-tlcs-and-stop-watchtower
-          - watchtower/force-close-remote-without-pending-tlcs-and-stop-watchtower
-          - watchtower/force-close-with-consecutive-settlement
-          - watchtower/force-close-with-pending-tlcs
-          - watchtower/force-close-with-pending-tlcs-and-stop-watchtower
-          - watchtower/force-close-with-pending-tlcs-and-udt
-          - watchtower/revocation
+        workflow: ${{ fromJSON(needs.discover.outputs.workflows) }}
         release:
           - "0.202.0"
         test_env:
           - "test"
         extra_bru_args:
           - ""
+        exclude:
+          # funding-tx-verification requires specific FUNDING_TX_VERIFICATION_CASE
+          # args and is handled entirely through the include entries below.
+          - workflow: "funding-tx-verification"
         include:
           # add an extra workflow to run udt using the env file xudt-test
           - workflow: "udt"
