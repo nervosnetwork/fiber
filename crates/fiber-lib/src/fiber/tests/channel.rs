@@ -1,6 +1,7 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ReplayOrderHint, UpdateCommand, MAX_COMMITMENT_DELAY_EPOCHS,
+    AddTlcResponse, ChannelActorStateStore, ReloadParams, ReplayOrderHint, UpdateCommand,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
     MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
@@ -12,7 +13,8 @@ use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{DebugEvent, FiberMessageWithTarget, PeerDisconnectReason};
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, TlcErr,
+    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, ReestablishChannel,
+    TlcErr,
 };
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode};
@@ -20,10 +22,7 @@ use crate::tests::test_utils::*;
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
-        channel::{
-            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand,
-            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
-        },
+        channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, ShutdownCommand},
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         network::{AcceptChannelCommand, OpenChannelCommand},
         NetworkActorCommand, NetworkActorMessage,
@@ -38,9 +37,10 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, Pack, Unpack},
 };
 use fiber_types::{
-    derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelState, HashAlgorithm,
-    InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
-    Privkey, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelConstraints, ChannelState,
+    HashAlgorithm, InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData,
+    PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErrorCode, TlcStatus,
+    NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
@@ -50,6 +50,18 @@ use secp256k1::SECP256K1;
 use std::collections::HashSet;
 use std::time::Duration;
 use tracing::{debug, error};
+
+fn create_deferred_replay_test_add_tlc(channel_id: Hash256, tlc_id: u64) -> AddTlc {
+    AddTlc {
+        channel_id,
+        tlc_id,
+        amount: 1,
+        payment_hash: gen_rand_sha256_hash(),
+        expiry: now_timestamp_as_millis_u64() + 60_000,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        onion_packet: None,
+    }
+}
 
 #[tokio::test]
 // Not supported on wasm: require filesystem access
@@ -4403,6 +4415,71 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
 }
 
 #[tokio::test]
+async fn test_reestablished_channel_ready_notification_is_not_delayed() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 11800000000;
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            true,
+        )
+        .await;
+
+    node_a.restart().await;
+
+    node_a
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
+        )
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let mut saw_reestablished = false;
+    let mut saw_channel_ready = false;
+
+    while tokio::time::Instant::now() < deadline && !(saw_reestablished && saw_channel_ready) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, node_a.event_emitter.recv())
+            .await
+            .expect("timed out while waiting for post-reconnect events")
+            .expect("event emitter unexpectedly stopped");
+
+        match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
+                if message == "Reestablished channel in ChannelReady" =>
+            {
+                saw_reestablished = true;
+            }
+            NetworkServiceEvent::ChannelReady(pubkey, ready_channel_id, _funding_tx_outpoint)
+                if pubkey == node_b.pubkey && ready_channel_id == channel_id =>
+            {
+                saw_channel_ready = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_reestablished,
+        "expected reestablish completion debug event within 1s after reconnect"
+    );
+    assert!(
+        saw_channel_ready,
+        "expected ChannelReady notification within 1s after reconnect completed"
+    );
+
+    node_b
+        .expect_debug_event("Reestablished channel in ChannelReady")
+        .await;
+    assert!(node_a.get_triggered_unexpected_events().await.is_empty());
+    assert!(node_b.get_triggered_unexpected_events().await.is_empty());
+}
+
+#[tokio::test]
 async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
     init_tracing();
 
@@ -6472,6 +6549,14 @@ async fn test_reestablish_restores_send_nonce() {
         "  Verify Nonce: {:?}",
         state.remote_revocation_nonce_for_verify.is_some()
     );
+    assert!(
+        state.remote_revocation_nonce_for_send.is_some(),
+        "node_b should restore send nonce after reestablish"
+    );
+    assert!(
+        state.remote_revocation_nonce_for_verify.is_some(),
+        "node_b should retain verify nonce after reestablish"
+    );
 
     let state_a = node_a.get_channel_actor_state(channel_id);
     println!("Node A State:");
@@ -6491,16 +6576,25 @@ async fn test_reestablish_restores_send_nonce() {
         "  Verify Nonce: {:?}",
         state_a.remote_revocation_nonce_for_verify.is_some()
     );
+    assert!(
+        state_a.remote_revocation_nonce_for_send.is_some(),
+        "node_a should have a send nonce after reestablish completes"
+    );
+    assert!(
+        state_a.remote_revocation_nonce_for_verify.is_some(),
+        "node_a should have a verify nonce after reestablish completes"
+    );
 
     // Further verification: A can send another payment.
-    // Use a new payment to differentiate.
-    let res = node_a.send_payment_keysend(&node_b, 2000, false).await;
-    let err_string = res.unwrap_err().to_string();
-    println!("err: {err_string}");
-    // check error string
-    assert!(err_string.contains(
-        "Send payment first hop error: Failed to send onion packet with error UnknownNextPeer"
-    ));
+    let second_payment_hash = node_a
+        .send_payment_keysend(&node_b, 2000, false)
+        .await
+        .expect("send should succeed after send nonce is restored")
+        .payment_hash;
+    node_a.wait_until_success(second_payment_hash).await;
+    node_a
+        .assert_payment_status(second_payment_hash, PaymentStatus::Success, None)
+        .await;
 }
 
 /// Bidirectional pending operations during reestablish.
@@ -6541,6 +6635,128 @@ async fn test_reestablish_bidirectional_pending() {
         state_a_after.get_local_commitment_number(),
         state_b_after.get_remote_commitment_number(),
         "Commitment numbers should remain symmetric"
+    );
+}
+
+#[tokio::test]
+async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    state.local_constraints = ChannelConstraints::new(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, 3);
+    state.remote_constraints = ChannelConstraints::new(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, 4);
+    node_a
+        .update_channel_actor_state(
+            state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    let max_deferred_updates = 7;
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::SetDeferPeerTlcUpdates(true),
+            }),
+        ))
+        .expect("enable deferred peer TLC replay");
+
+    for tlc_id in 0..max_deferred_updates {
+        node_b
+            .network_actor
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    node_a.pubkey,
+                    FiberMessage::add_tlc(create_deferred_replay_test_add_tlc(channel_id, tlc_id)),
+                )),
+            ))
+            .expect("send deferred add_tlc message");
+    }
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::add_tlc(create_deferred_replay_test_add_tlc(
+                    channel_id,
+                    max_deferred_updates,
+                )),
+            )),
+        ))
+        .expect("send overflow deferred add_tlc message");
+
+    node_a
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
+                if message.contains("Too many deferred peer TLC updates") =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_reestablish_does_not_complete_while_waiting_for_peer_revoke_and_ack() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    let peer_commitment_number = state.get_remote_commitment_number();
+    state.increment_local_commitment_number();
+    state.reestablishing = true;
+    node_a.update_channel_actor_state(state, None).await;
+
+    while tokio::time::timeout(Duration::from_millis(25), node_a.event_emitter.recv())
+        .await
+        .is_ok()
+    {}
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: peer_commitment_number,
+                    remote_commitment_number: peer_commitment_number,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    let mut saw_channel_ready = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(Some(event)) = tokio::time::timeout(remaining, node_a.event_emitter.recv()).await
+        else {
+            break;
+        };
+        if matches!(
+            event,
+            NetworkServiceEvent::ChannelReady(pubkey, ready_channel_id, _)
+                if pubkey == node_b.pubkey && ready_channel_id == channel_id
+        ) {
+            saw_channel_ready = true;
+            break;
+        }
+    }
+
+    assert!(
+        !saw_channel_ready,
+        "channel should not emit ChannelReady before the missing revoke_and_ack arrives"
     );
 }
 
