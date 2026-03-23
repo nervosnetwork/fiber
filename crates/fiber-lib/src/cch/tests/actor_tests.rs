@@ -5,10 +5,10 @@
 //! by the CchActor.
 //!
 //! SendBTC Flow (User pays Lightning invoice via Fiber):
-//!   Pending → IncomingAccepted → OutgoingInFlight → OutgoingSucceeded → Succeeded
+//!   Pending → IncomingAccepted → OutgoingInFlight → OutgoingSuccess → Success
 //!
 //! ReceiveBTC Flow (User receives BTC via Lightning, pays Fiber invoice):
-//!   Pending → IncomingAccepted → OutgoingInFlight → OutgoingSucceeded → Succeeded
+//!   Pending → IncomingAccepted → OutgoingInFlight → OutgoingSuccess → Success
 
 use crate::cch::{
     actor::{CchActor, CchArgs, CchMessage},
@@ -494,8 +494,8 @@ fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) ->
 /// 1. Hub creates a Fiber invoice for the user to pay
 /// 2. User pays the Fiber invoice → IncomingAccepted
 /// 3. Hub sends Lightning payment → OutgoingInFlight (via SendLightningOutgoingPaymentExecutor)
-/// 4. Lightning payment succeeds with preimage → OutgoingSucceeded
-/// 5. Hub settles the Fiber invoice with preimage → Succeeded (via SettleFiberIncomingInvoiceExecutor)
+/// 4. Lightning payment succeeds with preimage → OutgoingSuccess
+/// 5. Hub settles the Fiber invoice with preimage → Success (via SettleFiberIncomingInvoiceExecutor)
 #[tokio::test]
 async fn test_send_btc_happy_path() {
     // Set up test harness
@@ -524,14 +524,14 @@ async fn test_send_btc_happy_path() {
     harness.simulate_lightning_payment_success(payment_hash, preimage);
 
     // Step 5: The state machine transitions through:
-    //   OutgoingSucceeded (after payment success) → SettleInvoice dispatched
+    //   OutgoingSuccess (after payment success) → SettleInvoice dispatched
     //   MockNetworkActor handles SettleInvoice and sends InvoiceChanged(Paid)
-    //   → Succeeded (final state)
-    // Note: These transitions happen quickly, so we wait for the final Succeeded status
+    //   → Success (final state)
+    // Note: These transitions happen quickly, so we wait for the final Success status
     let order = harness
-        .wait_for_order_status(payment_hash, CchOrderStatus::Succeeded, 1000)
+        .wait_for_order_status(payment_hash, CchOrderStatus::Success, 1000)
         .await;
-    assert_eq!(order.status, CchOrderStatus::Succeeded);
+    assert_eq!(order.status, CchOrderStatus::Success);
     assert!(order.is_final());
     assert_eq!(order.payment_preimage, Some(preimage));
     assert!(order.failure_reason.is_none());
@@ -548,8 +548,8 @@ async fn test_send_btc_happy_path() {
 /// 1. Order created directly in database (bypassing LND hold invoice creation)
 /// 2. Payer pays the Lightning invoice → IncomingAccepted
 /// 3. Hub sends Fiber payment → OutgoingInFlight (via SendFiberOutgoingPaymentExecutor)
-/// 4. Fiber payment succeeds with preimage → OutgoingSucceeded
-/// 5. Hub settles the Lightning invoice with preimage → Succeeded
+/// 4. Fiber payment succeeds with preimage → OutgoingSuccess
+/// 5. Hub settles the Lightning invoice with preimage → Success
 #[tokio::test]
 async fn test_receive_btc_happy_path() {
     // Generate a valid preimage/payment hash pair
@@ -603,23 +603,23 @@ async fn test_receive_btc_happy_path() {
     // (OutgoingInFlight proves MockNetworkActor received SendPayment)
     harness.simulate_fiber_payment_success(payment_hash, preimage);
 
-    // Wait for order to reach OutgoingSucceeded status
+    // Wait for order to reach OutgoingSuccess status
     // CchActor dispatches SettleIncomingInvoice action
     let order = harness
-        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingSucceeded, 1000)
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingSuccess, 1000)
         .await;
-    assert_eq!(order.status, CchOrderStatus::OutgoingSucceeded);
+    assert_eq!(order.status, CchOrderStatus::OutgoingSuccess);
     assert_eq!(order.payment_preimage, Some(preimage));
 
     // Step 5: Simulate LND invoice settlement
     // In production, SettleLightningIncomingInvoiceExecutor calls LND, then LndTrackerActor sends this event
     harness.simulate_lightning_invoice_settled(payment_hash);
 
-    // Wait for order to reach Succeeded status
+    // Wait for order to reach Success status
     let order = harness
-        .wait_for_order_status(payment_hash, CchOrderStatus::Succeeded, 1000)
+        .wait_for_order_status(payment_hash, CchOrderStatus::Success, 1000)
         .await;
-    assert_eq!(order.status, CchOrderStatus::Succeeded);
+    assert_eq!(order.status, CchOrderStatus::Success);
 
     // Verify final state
     assert!(order.is_final());
@@ -705,7 +705,7 @@ async fn test_resume_active_order_tracking_resumed() {
     assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
 }
 
-/// Tests that final orders (Succeeded/Failed) are skipped when resuming.
+/// Tests that final orders (Success/Failed) are skipped when resuming.
 #[tokio::test]
 async fn test_resume_skips_final_orders() {
     let (preimage1, payment_hash1) = create_valid_preimage_pair(152);
@@ -725,7 +725,7 @@ async fn test_resume_skips_final_orders() {
         payment_preimage: Some(preimage1),
         amount_sats: 100_000,
         fee_sats: 1_000,
-        status: CchOrderStatus::Succeeded,
+        status: CchOrderStatus::Success,
         failure_reason: None,
     };
 
@@ -753,7 +753,7 @@ async fn test_resume_skips_final_orders() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let order1 = harness.get_order(payment_hash1).await.unwrap();
-    assert_eq!(order1.status, CchOrderStatus::Succeeded);
+    assert_eq!(order1.status, CchOrderStatus::Success);
     assert_eq!(order1.payment_preimage, Some(preimage1));
 
     let order2 = harness.get_order(payment_hash2).await.unwrap();

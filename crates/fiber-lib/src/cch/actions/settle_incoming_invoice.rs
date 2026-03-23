@@ -123,7 +123,7 @@ impl SettleLightningIncomingInvoiceExecutor {
 
 impl SettleIncomingInvoiceDispatcher {
     pub fn should_dispatch(order: &CchOrder) -> bool {
-        order.status == CchOrderStatus::OutgoingSucceeded
+        order.status == CchOrderStatus::OutgoingSuccess
     }
 
     pub fn dispatch<S: CchOrderStore>(

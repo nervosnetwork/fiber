@@ -117,8 +117,8 @@ fn test_transition_pending_to_failed_via_invoice_expired() {
 }
 
 #[test]
-fn test_transition_outgoing_succeeded_to_succeeded_via_invoice_paid() {
-    let mut order = create_test_order(CchOrderStatus::OutgoingSucceeded);
+fn test_transition_outgoing_success_to_success_via_invoice_paid() {
+    let mut order = create_test_order(CchOrderStatus::OutgoingSuccess);
     order.payment_preimage = Some(test_payment_hash(99));
 
     let event = CchOrderEvent::IncomingInvoiceChanged {
@@ -129,7 +129,7 @@ fn test_transition_outgoing_succeeded_to_succeeded_via_invoice_paid() {
     let transition = CchOrderStateMachine::apply(&mut order, event).unwrap();
 
     assert!(transition.is_some());
-    assert_eq!(order.status, CchOrderStatus::Succeeded);
+    assert_eq!(order.status, CchOrderStatus::Success);
 }
 
 // ============================================================================
@@ -165,7 +165,7 @@ fn test_transition_incoming_accepted_to_outgoing_succeeded_via_payment_success()
     let transition = CchOrderStateMachine::apply(&mut order, event).unwrap();
 
     assert!(transition.is_some());
-    assert_eq!(order.status, CchOrderStatus::OutgoingSucceeded);
+    assert_eq!(order.status, CchOrderStatus::OutgoingSuccess);
     assert_eq!(order.payment_preimage, Some(preimage));
 }
 
@@ -183,7 +183,7 @@ fn test_transition_outgoing_in_flight_to_outgoing_succeeded_via_payment_success(
     let transition = CchOrderStateMachine::apply(&mut order, event).unwrap();
 
     assert!(transition.is_some());
-    assert_eq!(order.status, CchOrderStatus::OutgoingSucceeded);
+    assert_eq!(order.status, CchOrderStatus::OutgoingSuccess);
     assert_eq!(order.payment_preimage, Some(preimage));
 }
 
@@ -286,7 +286,7 @@ fn test_invalid_transition_pending_to_outgoing_succeeded() {
 }
 
 #[test]
-fn test_invalid_transition_pending_to_succeeded() {
+fn test_invalid_transition_pending_to_success() {
     let mut order = create_test_order(CchOrderStatus::Pending);
     let event = CchOrderEvent::IncomingInvoiceChanged {
         status: CkbInvoiceStatus::Paid,
@@ -299,8 +299,8 @@ fn test_invalid_transition_pending_to_succeeded() {
 }
 
 #[test]
-fn test_invalid_transition_succeeded_to_any_other() {
-    let mut order = create_test_order(CchOrderStatus::Succeeded);
+fn test_invalid_transition_success_to_any_other() {
+    let mut order = create_test_order(CchOrderStatus::Success);
     let event = CchOrderEvent::IncomingInvoiceChanged {
         status: CkbInvoiceStatus::Open,
         failure_reason: None,
@@ -395,7 +395,7 @@ fn test_failure_from_outgoing_in_flight() {
 
 #[test]
 fn test_failure_from_outgoing_succeeded() {
-    let mut order = create_test_order(CchOrderStatus::OutgoingSucceeded);
+    let mut order = create_test_order(CchOrderStatus::OutgoingSuccess);
     let event = CchOrderEvent::IncomingInvoiceChanged {
         status: CkbInvoiceStatus::Cancelled,
         failure_reason: Some("test failure".to_string()),
@@ -412,8 +412,8 @@ fn test_failure_from_outgoing_succeeded() {
 // ============================================================================
 
 #[test]
-fn test_is_final_returns_true_for_succeeded() {
-    let order = create_test_order(CchOrderStatus::Succeeded);
+fn test_is_final_returns_true_for_success() {
+    let order = create_test_order(CchOrderStatus::Success);
     assert!(order.is_final());
 }
 
@@ -434,7 +434,7 @@ fn test_is_final_returns_false_for_in_progress_statuses() {
     for status in [
         CchOrderStatus::IncomingAccepted,
         CchOrderStatus::OutgoingInFlight,
-        CchOrderStatus::OutgoingSucceeded,
+        CchOrderStatus::OutgoingSuccess,
     ] {
         let order = create_test_order(status);
         assert!(!order.is_final(), "Expected {:?} to not be final", status);
