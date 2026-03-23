@@ -4,7 +4,10 @@ use std::{
     cmp::max,
     collections::{HashMap, HashSet},
     marker::PhantomData,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -107,6 +110,12 @@ pub trait GossipMessageStore {
         after_cursor: &Cursor,
     ) -> impl IntoIterator<Item = BroadcastMessageWithTimestamp>;
 
+    /// The implementors should guarantee that the returned messages are sorted by timestamp in the descending order.
+    fn get_broadcast_messages_iter_reverse(
+        &self,
+        before_cursor: Option<&Cursor>,
+    ) -> impl IntoIterator<Item = BroadcastMessageWithTimestamp>;
+
     fn get_broadcast_messages(
         &self,
         after_cursor: &Cursor,
@@ -175,10 +184,6 @@ pub trait GossipMessageStore {
     ) -> Option<BroadcastMessageWithTimestamp>;
 
     fn get_latest_broadcast_message_cursor(&self) -> Option<Cursor>;
-
-    fn get_latest_remote_broadcast_message_cursor(&self) -> Option<Cursor>;
-
-    fn update_latest_remote_broadcast_message_cursor(&self, cursor: Cursor);
 
     fn get_latest_channel_announcement_timestamp(&self, outpoint: &OutPoint) -> Option<u64>;
 
@@ -254,6 +259,47 @@ pub trait GossipMessageStore {
     fn get_channel_timestamps_iter(&self) -> impl IntoIterator<Item = (OutPoint, [u64; 3])>;
 
     fn delete_channel_timestamps(&self, outpoint: &OutPoint);
+}
+
+fn is_remote_cursor_candidate<S: GossipMessageStore>(
+    store: &S,
+    local_pubkey: &Pubkey,
+    message: &BroadcastMessageWithTimestamp,
+) -> bool {
+    match message {
+        BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
+            node_announcement.node_id != *local_pubkey
+        }
+        BroadcastMessageWithTimestamp::ChannelAnnouncement(_, channel_announcement) => {
+            channel_announcement.node1_id != *local_pubkey
+                && channel_announcement.node2_id != *local_pubkey
+        }
+        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => store
+            .get_latest_channel_announcement(&channel_update.channel_outpoint)
+            .map(|(_, channel_announcement)| {
+                channel_announcement.node1_id != *local_pubkey
+                    && channel_announcement.node2_id != *local_pubkey
+            })
+            .unwrap_or(false),
+    }
+}
+
+pub(crate) fn get_latest_startup_broadcast_message_cursor<S: GossipMessageStore>(
+    store: &S,
+    local_pubkey: Option<&Pubkey>,
+) -> Cursor {
+    match local_pubkey {
+        Some(local_pubkey) => store
+            .get_broadcast_messages_iter_reverse(None)
+            .into_iter()
+            .filter(|message| is_remote_cursor_candidate(store, local_pubkey, message))
+            .map(|message| message.cursor())
+            .next()
+            .unwrap_or_default(),
+        None => store
+            .get_latest_broadcast_message_cursor()
+            .unwrap_or_default(),
+    }
 }
 
 // A batch of gossip messages has been added to the store since the last time
@@ -468,6 +514,7 @@ where
             actor_name,
             GossipActor::new(),
             (
+                pubkey,
                 network_control_receiver,
                 store_sender,
                 gossip_network_maintenance_interval,
@@ -1074,11 +1121,13 @@ impl<S> ExtendedGossipMessageStore<S>
 where
     S: GossipMessageStore + Send + Sync + Clone + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     async fn new<C: CkbChainClient + Clone + Send + Sync + 'static>(
         maintenance_interval: Duration,
         announce_private_addr: bool,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
+        latest_remote_broadcast_timestamp: Arc<AtomicU64>,
         chain_actor: ActorRef<CkbChainMessage>,
         chain_client: C,
         supervisor: ActorCell,
@@ -1094,6 +1143,7 @@ where
                 announce_private_addr,
                 store.clone(),
                 gossip_actor,
+                latest_remote_broadcast_timestamp.clone(),
                 chain_actor,
                 chain_client.clone(),
             ),
@@ -1212,6 +1262,7 @@ pub struct ExtendedGossipMessageStoreState<S, C> {
     announce_private_addr: bool,
     store: S,
     gossip_actor: ActorRef<GossipActorMessage>,
+    latest_remote_broadcast_timestamp: Arc<AtomicU64>,
     chain_actor: ActorRef<CkbChainMessage>,
     chain_client: C,
     next_id: u64,
@@ -1227,6 +1278,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         announce_private_addr: bool,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
+        latest_remote_broadcast_timestamp: Arc<AtomicU64>,
         chain_actor: ActorRef<CkbChainMessage>,
         chain_client: C,
     ) -> Self {
@@ -1234,6 +1286,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             announce_private_addr,
             store,
             gossip_actor,
+            latest_remote_broadcast_timestamp,
             chain_actor,
             chain_client,
             next_id: Default::default(),
@@ -1281,8 +1334,8 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             {
                 Ok((message, saved_to_store)) => {
                     if saved_to_store {
-                        self.store
-                            .update_latest_remote_broadcast_message_cursor(message.cursor());
+                        self.latest_remote_broadcast_timestamp
+                            .fetch_max(message.cursor().timestamp, Ordering::AcqRel);
                     }
                     verified_sorted_messages.push(message);
                 }
@@ -1554,6 +1607,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
         bool,
         S,
         ActorRef<GossipActorMessage>,
+        Arc<AtomicU64>,
         ActorRef<CkbChainMessage>,
         C,
     );
@@ -1566,6 +1620,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
             announce_private_addr,
             store,
             gossip_actor,
+            latest_remote_broadcast_timestamp,
             chain_actor,
             chain_client,
         ): Self::Arguments,
@@ -1577,6 +1632,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
             announce_private_addr,
             store,
             gossip_actor,
+            latest_remote_broadcast_timestamp,
             chain_actor,
             chain_client,
         ))
@@ -1794,6 +1850,7 @@ pub(crate) struct GossipActorState<S, C> {
     query_reply_ports:
         HashMap<(Pubkey, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
     peer_states: HashMap<Pubkey, PeerState>,
+    latest_remote_broadcast_timestamp: Arc<AtomicU64>,
 }
 
 impl<S, C> GossipActorState<S, C>
@@ -1973,18 +2030,14 @@ where
         self.peer_states.get(pubkey).map(|s| s.session_id)
     }
 
-    fn get_latest_remote_cursor(&self) -> Cursor {
-        self.get_store()
-            .get_latest_remote_broadcast_message_cursor()
-            .unwrap_or_default()
-    }
-
     // A cursor that is "safe" to start syncing from. By "safe" we mean that
     // the node is mostly having the messages that are newer than this cursor or the messages
     // before this cursor are not important for the node to sync with the network.
     // We will start syncing from this cursor to avoid syncing from the very beginning of the network.
     fn get_safe_cursor_to_start_syncing(&self) -> Cursor {
-        let latest_cursor_timestamp = self.get_latest_remote_cursor().timestamp;
+        let latest_cursor_timestamp = self
+            .latest_remote_broadcast_timestamp
+            .load(Ordering::Acquire);
         let safe_cursor_timestamp = latest_cursor_timestamp
             .saturating_sub(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT.as_millis() as u64);
         let timestamp_after_considered_stale = now_timestamp_as_millis_u64()
@@ -2497,6 +2550,7 @@ where
     type Msg = GossipActorMessage;
     type State = GossipActorState<S, C>;
     type Arguments = (
+        Option<Pubkey>,
         oneshot::Receiver<ServiceAsyncControl>,
         oneshot::Sender<ExtendedGossipMessageStore<S>>,
         Duration,
@@ -2514,6 +2568,7 @@ where
         &self,
         myself: ActorRef<Self::Msg>,
         (
+            local_pubkey,
             rx,
             tx,
             network_maintenance_interval,
@@ -2527,11 +2582,15 @@ where
             chain_client,
         ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let latest_remote_broadcast_timestamp = Arc::new(AtomicU64::new(
+            get_latest_startup_broadcast_message_cursor(&store, local_pubkey.as_ref()).timestamp,
+        ));
         let store = ExtendedGossipMessageStore::new(
             store_maintenance_interval,
             announce_private_addr,
             store,
             myself.clone(),
+            latest_remote_broadcast_timestamp.clone(),
             chain_actor.clone(),
             chain_client.clone(),
             myself.get_cell(),
@@ -2582,6 +2641,7 @@ where
             query_reply_ports: Default::default(),
             num_finished_active_syncing_peers: Default::default(),
             peer_states: Default::default(),
+            latest_remote_broadcast_timestamp,
         };
         Ok(state)
     }

@@ -1,6 +1,6 @@
 use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
-use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
@@ -15,6 +15,7 @@ use crate::fiber::{
     PaymentCustomRecords, PaymentSession, PaymentStatus, Privkey, Pubkey, PublicChannelInfo,
     RevocationData, SendPaymentData, SettlementData, SigningCommitmentFlags, TimedResult,
 };
+use crate::gen_rand_channel_outpoint;
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
@@ -242,33 +243,114 @@ fn test_store_save_node_announcement() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_store_latest_remote_broadcast_message_cursor() {
+fn test_get_latest_startup_broadcast_message_cursor_skips_local_messages_conservatively() {
     let (store, _dir) = generate_store();
-    let (_sk, node_announcement) = mock_node();
-    let local_cursor = node_announcement.cursor();
-    let older_cursor = Cursor::new(
-        local_cursor.timestamp.saturating_sub(1),
-        BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
-    );
-    let newer_cursor = Cursor::new(
-        local_cursor.timestamp.saturating_add(1),
-        BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
-    );
+    let local_signer = gen_rand_local_signer();
+    let local_privkey: Privkey = (*local_signer.secret_key()).into();
+    let local_pubkey = local_privkey.pubkey();
+    let remote_signer = gen_rand_local_signer();
+    let remote_privkey: Privkey = (*remote_signer.secret_key()).into();
+    let remote_pubkey = remote_privkey.pubkey();
+    let remote_peer_signer = gen_rand_local_signer();
+    let remote_peer_pubkey: Pubkey = (*remote_peer_signer.pubkey()).into();
+    let announcement_signer = gen_rand_local_signer();
+    let x_only_pubkey = announcement_signer.x_only_pub_key();
 
-    store.save_node_announcement(node_announcement);
-    assert_eq!(store.get_latest_remote_broadcast_message_cursor(), None);
+    let local_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("local").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &local_privkey,
+        get_chain_hash(),
+        10,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(local_node_announcement.clone());
 
-    store.update_latest_remote_broadcast_message_cursor(local_cursor.clone());
-    store.update_latest_remote_broadcast_message_cursor(older_cursor);
+    let local_channel_outpoint = gen_rand_channel_outpoint();
+    let local_channel_announcement = ChannelAnnouncement::new_unsigned(
+        &local_pubkey,
+        &remote_pubkey,
+        local_channel_outpoint.clone(),
+        get_chain_hash(),
+        &x_only_pubkey,
+        0,
+        None,
+    );
+    store.save_channel_announcement(20, local_channel_announcement);
+    store.save_channel_update(new_channel_update_unsigned(
+        local_channel_outpoint,
+        30,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    ));
+
+    let remote_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("remote").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &remote_privkey,
+        get_chain_hash(),
+        40,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(remote_node_announcement);
+
+    let remote_channel_outpoint = gen_rand_channel_outpoint();
+    let remote_channel_announcement = ChannelAnnouncement::new_unsigned(
+        &remote_pubkey,
+        &remote_peer_pubkey,
+        remote_channel_outpoint.clone(),
+        get_chain_hash(),
+        &x_only_pubkey,
+        0,
+        None,
+    );
+    store.save_channel_announcement(50, remote_channel_announcement);
+    let remote_channel_update = new_channel_update_unsigned(
+        remote_channel_outpoint,
+        60,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    );
+    store.save_channel_update(remote_channel_update.clone());
+
+    store.save_channel_update(new_channel_update_unsigned(
+        gen_rand_channel_outpoint(),
+        70,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    ));
+
+    let newer_local_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("local").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &local_privkey,
+        get_chain_hash(),
+        80,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(newer_local_node_announcement);
+
     assert_eq!(
-        store.get_latest_remote_broadcast_message_cursor(),
-        Some(local_cursor.clone())
-    );
-
-    store.update_latest_remote_broadcast_message_cursor(newer_cursor.clone());
-    assert_eq!(
-        store.get_latest_remote_broadcast_message_cursor(),
-        Some(newer_cursor)
+        get_latest_startup_broadcast_message_cursor(&store, Some(&local_pubkey)),
+        remote_channel_update.cursor()
     );
 }
 
