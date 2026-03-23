@@ -1156,27 +1156,6 @@ where
                     num_inbound_no_channel_peers, num_outbound_peers
                 );
 
-                if num_inbound_no_channel_peers > state.max_inbound_peers {
-                    debug!(
-                        "Already connected to {} inbound no-channel peers, only wants {} peers, disconnecting some",
-                        num_inbound_no_channel_peers, state.max_inbound_peers
-                    );
-                    let sessions_to_disconnect = inbound_no_channel_peers
-                        .iter()
-                        .take(num_inbound_no_channel_peers - state.max_inbound_peers)
-                        .map(|(_, session_id)| *session_id)
-                        .collect::<Vec<_>>();
-                    debug!(
-                        "Disconnecting inbound no-channel peer sessions {:?}",
-                        sessions_to_disconnect
-                    );
-                    for session in sessions_to_disconnect {
-                        if let Err(err) = state.control.disconnect(session).await {
-                            error!("Failed to disconnect session: {}", err);
-                        }
-                    }
-                }
-
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
                                 "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
