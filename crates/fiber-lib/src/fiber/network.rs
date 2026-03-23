@@ -2901,7 +2901,6 @@ pub struct NetworkActorState<S, C> {
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
-    next_connected_peer_order: u64,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     channel_ephemeral_config: ChannelEphemeralConfig,
@@ -2914,7 +2913,6 @@ pub struct NetworkActorState<S, C> {
 pub struct ConnectedPeer {
     pub session_id: SessionId,
     pub session_type: SessionType,
-    pub connected_order: u64,
     pub address: Multiaddr,
     pub features: Option<FeatureVector>,
 }
@@ -3568,14 +3566,11 @@ where
             .filter_map(|(pubkey, peer)| {
                 (peer.session_type == SessionType::Inbound
                     && !self.session_has_channels(&peer.session_id))
-                .then_some((peer.connected_order, *pubkey, peer.session_id))
+                .then_some((*pubkey, peer.session_id))
             })
             .collect::<Vec<_>>();
-        peers.sort_by_key(|(connected_order, _, _)| *connected_order);
+        peers.sort_by_key(|(_, session_id)| *session_id);
         peers
-            .into_iter()
-            .map(|(_, pubkey, session_id)| (pubkey, session_id))
-            .collect()
     }
 
     async fn enforce_inbound_peer_budget(&mut self) {
@@ -3858,14 +3853,11 @@ where
 
     async fn on_peer_connected(&mut self, remote_pubkey: Pubkey, session: &SessionContext) {
         debug!("Peer {:?} connected", remote_pubkey);
-        let connected_order = self.next_connected_peer_order;
-        self.next_connected_peer_order = self.next_connected_peer_order.saturating_add(1);
         self.peer_session_map.insert(
             remote_pubkey,
             ConnectedPeer {
                 session_id: session.id,
                 session_type: session.ty,
-                connected_order,
                 address: session.address.clone(),
                 features: None,
             },
@@ -4697,7 +4689,6 @@ where
             gossip_actor,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
-            next_connected_peer_order: 0,
             features,
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
