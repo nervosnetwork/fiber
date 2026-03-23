@@ -1317,6 +1317,40 @@ impl GossipMessageStore for Store {
         .collect::<Vec<_>>()
     }
 
+    fn get_broadcast_messages_iter_reverse(
+        &self,
+        before_cursor: Option<&Cursor>,
+        limit: usize,
+    ) -> impl IntoIterator<Item = crate::fiber::types::BroadcastMessageWithTimestamp> {
+        let prefix = [BROADCAST_MESSAGE_PREFIX];
+        let mut options = PrefixIterOptions::new().reverse().limit(limit);
+
+        let start_cloned = before_cursor.map(|cursor| {
+            let cursor_bytes = cursor.to_bytes();
+            [&prefix, cursor_bytes.as_slice()].concat()
+        });
+
+        if let Some(start) = start_cloned.as_ref() {
+            options = options.start_key(start).skip_while(Box::new({
+                let start = start.clone();
+                move |key: &[u8]| key == start
+            }));
+        }
+
+        self.collect_by_prefix_with(&prefix, options)
+            .into_iter()
+            .map(|kv| {
+                debug_assert_eq!(kv.key.len(), 1 + CURSOR_SIZE);
+                let mut timestamp_bytes = [0u8; 8];
+                timestamp_bytes.copy_from_slice(&kv.key[1..9]);
+                let timestamp = u64::from_be_bytes(timestamp_bytes);
+                let message: BroadcastMessage =
+                    deserialize_from(kv.value.as_ref(), "BroadcastMessage");
+                (message, timestamp).into()
+            })
+            .collect::<Vec<_>>()
+    }
+
     fn get_broadcast_message_with_cursor(
         &self,
         cursor: &Cursor,

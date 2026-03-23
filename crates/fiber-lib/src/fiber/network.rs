@@ -55,7 +55,10 @@ use super::channel::{
     ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
-use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
+use super::gossip::{
+    get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
+    GossipMessageUpdates,
+};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
@@ -4496,12 +4499,11 @@ where
             )
             .await;
 
-            let graph_subscribing_cursor = {
-                let graph = self.network_graph.write().await;
-                graph
-                    .get_latest_cursor()
-                    .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT)
-            };
+            let graph_subscribing_cursor = get_latest_startup_broadcast_message_cursor(
+                &self.store,
+                Some(&private_key.pubkey()),
+            )
+            .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
 
             gossip_service
                 .get_subscriber()
