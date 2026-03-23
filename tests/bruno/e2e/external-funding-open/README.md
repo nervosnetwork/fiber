@@ -46,6 +46,10 @@ Reason: it is relatively slow and depends on an external-signing wrapper flow.
   - `curl`, `node`, `npm`, `ckb-cli`
 - Default environment file used by the wrapper:
   - `tests/bruno/environments/test.bru`
+- Default signer helper used by the wrapper:
+  - `tests/bruno/utils/sign-openchannel-response.mjs`
+- Optional override:
+  - `SIGNER_SCRIPT=/path/to/sign-openchannel-response.mjs`
 
 ### Why not run Bruno directly
 
@@ -71,5 +75,5 @@ EXTERNAL_FUNDING_AMOUNT=0x6fc23ac00 ./tests/bruno/e2e/external-funding-open/run-
 ## Troubleshooting
 
 - `Missing node2 key file`: ensure `tests/nodes/2/ckb/plain_key` exists.
-- `Missing signer script`: ensure `.vscode/dbg-tools/utils/sign-openchannel-response.mjs` exists.
+- `Missing signer script`: ensure `tests/bruno/utils/sign-openchannel-response.mjs` exists, or set `SIGNER_SCRIPT` to an alternative path.
 - Failed to open with fixed amount: lower `EXTERNAL_FUNDING_AMOUNT`.

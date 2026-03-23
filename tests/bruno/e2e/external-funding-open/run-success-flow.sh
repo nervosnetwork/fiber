@@ -39,7 +39,8 @@ if [[ -z "${CKB_RPC_URL}" || -z "${NODE1_RPC_URL}" || -z "${NODE2_RPC_URL}" || -
 fi
 
 NODE2_KEY_FILE="$ROOT_DIR/tests/nodes/2/ckb/plain_key"
-SIGNER_SCRIPT="$ROOT_DIR/.vscode/dbg-tools/utils/sign-openchannel-response.mjs"
+DEFAULT_SIGNER_SCRIPT="$ROOT_DIR/tests/bruno/utils/sign-openchannel-response.mjs"
+SIGNER_SCRIPT="${SIGNER_SCRIPT:-$DEFAULT_SIGNER_SCRIPT}"
 
 if [[ ! -f "$NODE2_KEY_FILE" ]]; then
   echo "Missing node2 key file: $NODE2_KEY_FILE" >&2

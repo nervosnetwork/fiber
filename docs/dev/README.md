@@ -48,3 +48,6 @@ Use the wrapper script to run it:
 ```
 ./tests/bruno/e2e/external-funding-open/run-success-flow.sh
 ```
+
+The wrapper uses the committed signer helper at `tests/bruno/utils/sign-openchannel-response.mjs` by default.
+Set `SIGNER_SCRIPT=/path/to/sign-openchannel-response.mjs` if you need to override it.
