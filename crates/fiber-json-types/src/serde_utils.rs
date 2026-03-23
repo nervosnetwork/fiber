@@ -500,7 +500,7 @@ macro_rules! define_rpc_flags {
                 if names.is_empty() {
                     serializer.serialize_str("")
                 } else {
-                    serializer.serialize_str(&names.join(" | "))
+                    serializer.serialize_str(&names.join("|"))
                 }
             }
         }
