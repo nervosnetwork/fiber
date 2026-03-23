@@ -1002,7 +1002,7 @@ fn test_received_invoice_not_updated() {
     let command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &store);
     let _settlements = command.run();
 
-    // Status should be promoted to Paid once settlement starts.
+    // Immediate settlement rejects Received invoices, so the stored status stays unchanged.
     assert_eq!(
         store.get_invoice_status(&payment_hash),
         Some(CkbInvoiceStatus::Received)
