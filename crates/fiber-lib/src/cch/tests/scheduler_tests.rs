@@ -184,7 +184,7 @@ async fn test_expiry_skips_final_orders() {
     let expiry_delta_seconds = 3600;
     let created_at = current_time - expiry_delta_seconds - 100;
 
-    // Create a final order (already success)
+    // Create a final order (already successful)
     let order = create_test_order(
         payment_hash,
         created_at,
