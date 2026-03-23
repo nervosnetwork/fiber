@@ -11,7 +11,10 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
-use torut::control::{AsyncEvent, AuthenticatedConn, ConnError, TorAuthData, TorAuthMethod, UnauthenticatedConn, COOKIE_LENGTH};
+use torut::control::{
+    AsyncEvent, AuthenticatedConn, ConnError, TorAuthData, TorAuthMethod, UnauthenticatedConn,
+    COOKIE_LENGTH,
+};
 use torut::onion::TorSecretKeyV3;
 use tracing::{debug, error, info, warn};
 
@@ -69,7 +72,10 @@ impl OnionService {
     pub async fn start(&self, cancel_token: CancellationToken) -> Result<(), String> {
         loop {
             let (tor_alive_tx, mut tor_alive_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-            match self.launch_onion_service(cancel_token.clone(), tor_alive_tx).await {
+            match self
+                .launch_onion_service(cancel_token.clone(), tor_alive_tx)
+                .await
+            {
                 Ok(_) => {
                     info!("Onion service started successfully");
                 }
@@ -104,15 +110,18 @@ impl OnionService {
         cancel_token: CancellationToken,
         tor_alive_tx: tokio::sync::mpsc::UnboundedSender<()>,
     ) -> Result<(), String> {
-        let mut tor_controller =
-            TorController::new(&self.config.tor_controller, self.config.tor_password.clone())
-                .await?;
+        let mut tor_controller = TorController::new(
+            &self.config.tor_controller,
+            self.config.tor_password.clone(),
+        )
+        .await?;
 
-        tor_controller
-            .wait_bootstrap_done(&cancel_token)
-            .await?;
+        tor_controller.wait_bootstrap_done(&cancel_token).await?;
 
-        let listeners = [(self.config.onion_external_port, self.config.p2p_listen_address)];
+        let listeners = [(
+            self.config.onion_external_port,
+            self.config.p2p_listen_address,
+        )];
         info!(
             "Adding onion service v3, forwarding to {}",
             self.config.p2p_listen_address
@@ -197,7 +206,10 @@ impl TorController {
         Ok(Duration::from_secs(secs))
     }
 
-    async fn wait_bootstrap_done(&mut self, cancel_token: &CancellationToken) -> Result<(), String> {
+    async fn wait_bootstrap_done(
+        &mut self,
+        cancel_token: &CancellationToken,
+    ) -> Result<(), String> {
         info!("Waiting for Tor server to bootstrap...");
         loop {
             if cancel_token.is_cancelled() {
@@ -249,7 +261,9 @@ async fn authenticate(
             .await
             .map_err(|err| format!("Failed to authenticate with null: {:?}", err))?;
         if tor_password.is_some() {
-            warn!("Password not required for the Tor controller, but `tor_password` is configured.");
+            warn!(
+                "Password not required for the Tor controller, but `tor_password` is configured."
+            );
         }
         return Ok(());
     }
@@ -271,7 +285,7 @@ async fn authenticate(
     if proto_info.auth_methods.contains(&TorAuthMethod::Cookie)
         || proto_info.auth_methods.contains(&TorAuthMethod::SafeCookie)
     {
-        let cookie = load_auth_cookie(&proto_info).await?;
+        let cookie = load_auth_cookie(proto_info).await?;
         let tor_auth_data = if proto_info.auth_methods.contains(&TorAuthMethod::Cookie) {
             debug!("Using Cookie auth method...");
             TorAuthData::Cookie(Cow::Owned(cookie))

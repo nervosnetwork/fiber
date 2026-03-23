@@ -14,4 +14,4 @@ jobs:
           key: openrpc-${{ runner.os }}
       - run: |
           cd openrpc-json-generator
-          cargo run --locked
+          cargo run

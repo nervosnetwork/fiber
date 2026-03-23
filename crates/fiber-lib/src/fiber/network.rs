@@ -774,9 +774,7 @@ where
                     .parse()
                     .map_err(|err| format!("Failed to parse onion_p2p_listen_address: {}", err))?;
                 if addr.port() == 0 {
-                    return Err(
-                        "onion_p2p_listen_address port must not be 0".to_string()
-                    );
+                    return Err("onion_p2p_listen_address port must not be 0".to_string());
                 }
                 addr
             }
@@ -784,8 +782,10 @@ where
                 // Try to derive from listening addresses
                 let port = listening_addrs.iter().find_map(|addr| {
                     let mut iter = addr.iter();
-                    if let (Some(tentacle::multiaddr::Protocol::Ip4(ip)), Some(tentacle::multiaddr::Protocol::Tcp(port))) =
-                        (iter.next(), iter.next())
+                    if let (
+                        Some(tentacle::multiaddr::Protocol::Ip4(ip)),
+                        Some(tentacle::multiaddr::Protocol::Tcp(port)),
+                    ) = (iter.next(), iter.next())
                     {
                         if ip == Ipv4Addr::new(0, 0, 0, 0) || ip == Ipv4Addr::new(127, 0, 0, 1) {
                             return Some(port);
@@ -794,16 +794,12 @@ where
                     None
                 });
                 match port {
-                    Some(port) => SocketAddr::new(
-                        std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                        port,
-                    ),
+                    Some(port) => {
+                        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+                    }
                     None => {
                         warn!("No suitable IPv4 listen address found for onion service, using default 127.0.0.1:8115");
-                        SocketAddr::new(
-                            std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                            8115,
-                        )
+                        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8115)
                     }
                 }
             }
@@ -833,16 +829,13 @@ where
             }
         }
 
-        let onion_private_key_path = config
-            .onion_private_key_path
-            .clone()
-            .unwrap_or_else(|| {
-                config
-                    .base_dir()
-                    .join("onion_private_key")
-                    .display()
-                    .to_string()
-            });
+        let onion_private_key_path = config.onion_private_key_path.clone().unwrap_or_else(|| {
+            config
+                .base_dir()
+                .join("onion_private_key")
+                .display()
+                .to_string()
+        });
 
         let onion_config = super::onion_service::OnionServiceConfig {
             onion_private_key_path,
@@ -4829,8 +4822,7 @@ where
 
             // Set SOCKS5 proxy config
             if let Some(proxy_url) = &config.proxy_url {
-                super::proxy::check_proxy_url(proxy_url)
-                    .expect("invalid proxy_url in config");
+                super::proxy::check_proxy_url(proxy_url).expect("invalid proxy_url in config");
                 builder = builder
                     .tcp_proxy_config(proxy_url)
                     .tcp_proxy_random_auth(config.proxy_random_auth);
