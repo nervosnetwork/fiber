@@ -1,0 +1,244 @@
+meta {
+  name: check node1 node2 node3 balances after close
+  type: http
+  seq: 08
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  const body = req.getBody();
+  body.params[0].script = script;
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const axios = require("axios");
+
+  async function rpc(method, params, requestId, label) {
+    const resp = await axios.post(
+      bru.getEnvVar("CKB_RPC_URL"),
+      { id: requestId, jsonrpc: "2.0", method, params },
+      { headers: { "Content-Type": "application/json", Accept: "application/json" } },
+    );
+
+    if (resp.data && resp.data.error) {
+      throw new Error(`Assertion failed: ${label}: ${resp.data.error.message}`);
+    }
+
+    return resp.data;
+  }
+
+  async function getCapacity(nodeLabel, scriptVar, requestId) {
+    const script = bru.getVar(scriptVar);
+    if (!script) {
+      throw new Error(`Assertion failed: missing ${scriptVar} for ${nodeLabel} balance check`);
+    }
+
+    const body = await rpc(
+      "get_cells_capacity",
+      [{ script_type: "lock", script }],
+      requestId,
+      `get_cells_capacity failed for ${nodeLabel}`,
+    );
+    const capacity = body && body.result && body.result.capacity;
+    if (capacity === undefined) {
+      throw new Error(
+        `Assertion failed: get_cells_capacity has no result.capacity for ${nodeLabel}, response=${JSON.stringify(body)}`,
+      );
+    }
+    return BigInt(capacity);
+  }
+
+  async function inspectShutdownTx(shutdownTxHash, fundingAmount, node2Script) {
+    const shutdownTxBody = await rpc(
+      "get_transaction",
+      [shutdownTxHash],
+      "external-funding-shutdown-tx-inspect",
+      `get_transaction failed for shutdown tx ${shutdownTxHash}`,
+    );
+    const tx = shutdownTxBody && shutdownTxBody.result && shutdownTxBody.result.transaction;
+    if (!tx) {
+      throw new Error(`Assertion failed: shutdown tx ${shutdownTxHash} is missing transaction details`);
+    }
+
+    const outputs = tx.outputs || [];
+    let shutdownRefund = BigInt(0);
+    for (const output of outputs) {
+      const outputLock = output.lock;
+      const sameScript =
+        outputLock &&
+        node2Script &&
+        outputLock.code_hash === node2Script.code_hash &&
+        outputLock.hash_type === node2Script.hash_type &&
+        outputLock.args === node2Script.args;
+      if (sameScript) {
+        shutdownRefund += BigInt(output.capacity);
+      }
+    }
+
+    if (shutdownRefund <= BigInt(0)) {
+      throw new Error(
+        `Assertion failed: shutdown tx should return capacity to node2 script, tx=${JSON.stringify(tx)}`,
+      );
+    }
+    if (shutdownRefund >= fundingAmount) {
+      throw new Error(
+        `Assertion failed: node2 refund should be lower than funding_amount because shutdown fee is deducted, refund=${shutdownRefund}, funding_amount=${fundingAmount}`,
+      );
+    }
+
+    const shutdownFee = fundingAmount - shutdownRefund;
+    const maxExpectedShutdownFee = BigInt("100000000");
+    if (shutdownFee <= BigInt(0) || shutdownFee > maxExpectedShutdownFee) {
+      throw new Error(
+        `Assertion failed: unexpected shutdown fee, fee=${shutdownFee}, refund=${shutdownRefund}, funding_amount=${fundingAmount}`,
+      );
+    }
+
+    return { shutdownRefund, shutdownFee };
+  }
+
+  const node1Before = BigInt(bru.getVar("NODE1_BALANCE_BEFORE"));
+  const node2Before = BigInt(bru.getVar("NODE2_BALANCE_BEFORE"));
+  const node3Before = BigInt(bru.getVar("NODE3_BALANCE_BEFORE"));
+  const node1AfterOpen = BigInt(bru.getVar("NODE1_BALANCE_AFTER"));
+  const node2AfterOpen = BigInt(bru.getVar("NODE2_BALANCE_AFTER"));
+  const node3AfterOpen = BigInt(bru.getVar("NODE3_BALANCE_AFTER"));
+
+  const shutdownTxHash = bru.getVar("EXTERNAL_FUNDING_SHUTDOWN_TX_HASH");
+  if (!shutdownTxHash) {
+    throw new Error("Assertion failed: missing EXTERNAL_FUNDING_SHUTDOWN_TX_HASH");
+  }
+  const fundingAmount = BigInt(bru.getVar("EXTERNAL_FUNDING_AMOUNT"));
+  const rawNode2Script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  if (!rawNode2Script) {
+    throw new Error("Assertion failed: missing NODE2_FUNDING_SCRIPT");
+  }
+  const node2Script =
+    typeof rawNode2Script === "string" ? JSON.parse(rawNode2Script) : rawNode2Script;
+  const { shutdownRefund, shutdownFee } = await inspectShutdownTx(
+    shutdownTxHash,
+    fundingAmount,
+    node2Script,
+  );
+
+  // Check Node1
+  const node1AfterClose = await getCapacity(
+    "node1",
+    "NODE1_FUNDING_SCRIPT",
+    "external-funding-node1-balance-after-close",
+  );
+  if (node1AfterClose !== node1AfterOpen) {
+    throw new Error(
+      `Assertion failed: node1 balance should remain unchanged after close, after_open=${node1AfterOpen}, after_close=${node1AfterClose}`,
+    );
+  }
+
+  // Check Node2
+  const node2Capacity = res.body && res.body.result && res.body.result.capacity;
+  if (node2Capacity === undefined) {
+    throw new Error(
+      `Assertion failed: get_cells_capacity has no result.capacity for node2, response=${JSON.stringify(res.body)}`,
+    );
+  }
+  const node2AfterClose = BigInt(node2Capacity);
+  const returnedFromClose = node2AfterClose - node2AfterOpen;
+  const totalLost = node2Before - node2AfterClose;
+  if (node2AfterClose >= node2Before) {
+    throw new Error(
+      `Assertion failed: node2 should still be lower than initial balance after close, before_open=${node2Before}, after_close=${node2AfterClose}`,
+    );
+  }
+  if (node2AfterClose <= node2AfterOpen) {
+    throw new Error(
+      `Assertion failed: node2 balance should increase after close versus post-open, after_open=${node2AfterOpen}, after_close=${node2AfterClose}`,
+    );
+  }
+  if (returnedFromClose !== shutdownRefund) {
+    throw new Error(
+      `Assertion failed: node2 balance increase after close should equal shutdown refund output, returned_from_close=${returnedFromClose}, shutdown_refund=${shutdownRefund}`,
+    );
+  }
+  if (shutdownRefund !== fundingAmount - shutdownFee) {
+    throw new Error(
+      `Assertion failed: shutdown refund should equal funding_amount - shutdown_fee, refund=${shutdownRefund}, funding_amount=${fundingAmount}, shutdown_fee=${shutdownFee}`,
+    );
+  }
+  if (totalLost <= BigInt(0)) {
+    throw new Error(
+      `Assertion failed: node2 should still pay some fees overall, before_open=${node2Before}, after_close=${node2AfterClose}`,
+    );
+  }
+
+  // Check Node3
+  const node3AfterClose = await getCapacity(
+    "node3",
+    "NODE3_FUNDING_SCRIPT",
+    "external-funding-node3-balance-after-close",
+  );
+  if (node3AfterClose <= node3AfterOpen) {
+    throw new Error(
+      `Assertion failed: node3 balance should increase after close, after_open=${node3AfterOpen}, after_close=${node3AfterClose}`,
+    );
+  }
+  const node3ReturnedFromClose = node3AfterClose - node3AfterOpen;
+  const node3SpentOnOpen = node3Before - node3AfterOpen;
+  const node3NetLoss = node3Before - node3AfterClose;
+  const node3OpenFee = node3SpentOnOpen - node3ReturnedFromClose;
+  if (node3ReturnedFromClose >= node3SpentOnOpen) {
+    throw new Error(
+      `Assertion failed: node3 close refund should be lower than node3 open spend because open fees are not refunded, returned_from_close=${node3ReturnedFromClose}, spent_on_open=${node3SpentOnOpen}`,
+    );
+  }
+  if (node3NetLoss !== node3OpenFee) {
+    throw new Error(
+      `Assertion failed: node3 net loss after close should equal the non-refundable open fee, net_loss=${node3NetLoss}, open_fee=${node3OpenFee}`,
+    );
+  }
+  if (node3NetLoss <= BigInt(0)) {
+    throw new Error(
+      `Assertion failed: node3 should still lose some balance overall due to open fees, before_open=${node3Before}, after_close=${node3AfterClose}`,
+    );
+  }
+
+  console.log("[external-funding-open] Node balances after close:");
+  console.log(`  node1: before_open=${node1Before} after_open=${node1AfterOpen} after_close=${node1AfterClose}`);
+  console.log(`  node2: before_open=${node2Before} after_open=${node2AfterOpen} after_close=${node2AfterClose}`);
+  console.log(`  node3: before_open=${node3Before} after_open=${node3AfterOpen} after_close=${node3AfterClose}`);
+  console.log(`  node2 returned_from_close=${returnedFromClose}`);
+  console.log(`  node3 returned_from_close=${node3ReturnedFromClose}`);
+  console.log(`  node3 open_fee=${node3OpenFee}`);
+  console.log(`  node2 shutdown_fee=${shutdownFee}`);
+  console.log(`  node2 shutdown_tx_hash=${shutdownTxHash}`);
+  console.log(`  node2 total_lost_vs_initial=${totalLost}`);
+}

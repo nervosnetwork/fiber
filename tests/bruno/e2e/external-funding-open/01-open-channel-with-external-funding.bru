@@ -32,22 +32,8 @@ body:json {
   }
 }
 
-vars:post-response {
-  max_open_attempts: 7
-}
-
 script:pre-request {
   const axios = require("axios");
-
-  const DEFAULT_FUNDING_AMOUNTS = [
-    "0x8bb2c9700",
-    "0x6fc23ac00",
-    "0x5d21dba00",
-    "0x4a817c800",
-    "0x37e11d600",
-    "0x2540be400",
-    "0x12a05f200",
-  ];
 
   async function rpc(url, body) {
     const resp = await axios.post(url, body, {
@@ -113,23 +99,19 @@ script:pre-request {
     await new Promise((r) => setTimeout(r, 1000));
   }
 
-  if (bru.getVar("EXTERNAL_FUNDING_INIT_DONE") !== "1") {
-    await ensurePeerConnected();
-    await loadFundingContext("node1", bru.getEnvVar("NODE1_RPC_URL"), "NODE1_BALANCE_BEFORE", "NODE1_FUNDING_SCRIPT");
-    await loadFundingContext("node2", bru.getEnvVar("NODE2_RPC_URL"), "NODE2_BALANCE_BEFORE", "NODE2_FUNDING_SCRIPT");
-    await loadFundingContext("node3", bru.getEnvVar("NODE3_RPC_URL"), "NODE3_BALANCE_BEFORE", "NODE3_FUNDING_SCRIPT");
-    bru.setVar("EXTERNAL_FUNDING_INIT_DONE", "1");
-  }
+  await ensurePeerConnected();
 
-  const fixedFundingAmount = bru.getEnvVar("EXTERNAL_FUNDING_AMOUNT");
-  const openAttemptIndex = bru.getVar("external_funding_open_attempt_index") || 0;
-  const fundingAmount = fixedFundingAmount || DEFAULT_FUNDING_AMOUNTS[openAttemptIndex];
-  const script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  await loadFundingContext("node1", bru.getEnvVar("NODE1_RPC_URL"), "NODE1_BALANCE_BEFORE", "NODE1_FUNDING_SCRIPT");
+  await loadFundingContext("node2", bru.getEnvVar("NODE2_RPC_URL"), "NODE2_BALANCE_BEFORE", "NODE2_FUNDING_SCRIPT");
+  await loadFundingContext("node3", bru.getEnvVar("NODE3_RPC_URL"), "NODE3_BALANCE_BEFORE", "NODE3_FUNDING_SCRIPT");
+
   const body = req.getBody();
-  body.params[0].funding_amount = fundingAmount;
+  const fundingAmount = body.params[0].funding_amount;
+  const script = bru.getVar("NODE2_FUNDING_SCRIPT");
   body.params[0].shutdown_script = script;
   body.params[0].funding_lock_script = script;
   req.setBody(body);
+  // 500 CKB
   bru.setVar("EXTERNAL_FUNDING_AMOUNT", fundingAmount);
 }
 
@@ -138,27 +120,9 @@ assert {
 }
 
 script:post-response {
-  const fixedFundingAmount = bru.getEnvVar("EXTERNAL_FUNDING_AMOUNT");
   if (res.body.error) {
-    if (fixedFundingAmount) {
-      throw new Error(
-        `open_channel_with_external_funding failed with EXTERNAL_FUNDING_AMOUNT=${fixedFundingAmount}: ${res.body.error.message}`,
-      );
-    }
-
-    const i = bru.getVar("external_funding_open_attempt_index") || 0;
-    const n = bru.getVar("max_open_attempts");
-    if (i + 1 < n) {
-      bru.setVar("external_funding_open_attempt_index", i + 1);
-      console.log(
-        `[external-funding-open] open failed with funding_amount=${bru.getVar("EXTERNAL_FUNDING_AMOUNT")}, retry ${i + 1}/${n}: ${res.body.error.message}`,
-      );
-      bru.setNextRequest("Node1 open channel with external funding to Node3");
-      return;
-    }
-
     throw new Error(
-      `open_channel_with_external_funding failed for all candidate amounts, last error: ${res.body.error.message}`,
+      `open_channel_with_external_funding failed with funding_amount=${bru.getVar("EXTERNAL_FUNDING_AMOUNT")}: ${res.body.error.message}`,
     );
   }
 
@@ -166,7 +130,6 @@ script:post-response {
   if (!tx.outputs || tx.outputs.length === 0) {
     throw new Error("Assertion failed: unsigned_funding_tx.outputs should not be empty");
   }
-  bru.setVar("external_funding_open_attempt_index", 0);
   bru.setVar("EXTERNAL_FUNDING_CHANNEL_ID", res.body.result.channel_id);
   bru.setVar("EXTERNAL_FUNDING_UNSIGNED_TX", tx);
 }

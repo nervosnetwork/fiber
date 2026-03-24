@@ -32,8 +32,6 @@ body:json {
 script:pre-request {
   const signedTx = bru.getVar("EXTERNAL_FUNDING_SIGNED_TX");
   if (!signedTx) {
-    bru.setVar("EXTERNAL_FUNDING_SUBMIT_STATUS", "missing_signed_tx");
-    bru.setVar("FUNDING_TX_COMMITTED", "false");
     throw new Error(
       "Missing EXTERNAL_FUNDING_SIGNED_TX. Run sign_external_funding_tx first.",
     );
@@ -49,8 +47,6 @@ script:pre-request {
 }
 
 script:post-response {
-  const axios = require("axios");
-
   if (res.body.error) {
     throw new Error(`Assertion failed: submit_signed_funding_tx should succeed in success-only flow, got ${res.body.error.message}`);
   }
@@ -58,80 +54,6 @@ script:post-response {
   if (!res.body.result || !res.body.result.funding_tx_hash || !res.body.result.channel_id) {
     throw new Error("Assertion failed: expected successful submit result with channel_id and funding_tx_hash");
   }
-  bru.setVar("EXTERNAL_FUNDING_SUBMIT_STATUS", "submitted");
   bru.setVar("EXTERNAL_FUNDING_TX_HASH", res.body.result.funding_tx_hash);
-  bru.setVar("FUNDING_TX_COMMITTED", "false");
-
-  const channelId = res.body.result.channel_id;
-  const expectedProgressStates = new Set([
-    "COLLABORATING_FUNDING_TX",
-    "CollaboratingFundingTx",
-    "SIGNING_COMMITMENT",
-    "SigningCommitment",
-    "AWAITING_TX_SIGNATURES",
-    "AwaitingTxSignatures",
-    "AWAITING_CHANNEL_READY",
-    "AwaitingChannelReady",
-    "CHANNEL_READY",
-    "ChannelReady",
-  ]);
-
-  function isWaitingExternalFundingState(ch) {
-    const stateName = ch && ch.state && ch.state.state_name;
-    const stateFlags = ch && ch.state && ch.state.state_flags;
-    return (
-      stateName === "NegotiatingFunding" &&
-      typeof stateFlags === "string" &&
-      stateFlags.split(/[|,]/).map((flag) => flag.trim()).includes("AwaitingExternalFunding")
-    );
-  }
-
-  async function waitForChannelProgress(nodeLabel, rpcUrl, pubkey) {
-    for (let i = 0; i < 20; i++) {
-      const resp = await axios.post(
-        rpcUrl,
-        {
-          id: `external-funding-progress-${nodeLabel}-${i}`,
-          jsonrpc: "2.0",
-          method: "list_channels",
-          params: [{ pubkey }],
-        },
-        {
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-        },
-      );
-
-      if (resp.data && resp.data.error) {
-        throw new Error(
-          `Assertion failed: list_channels failed on ${nodeLabel} after submit: ${resp.data.error.message}`,
-        );
-      }
-
-      const channels = (resp.data && resp.data.result && resp.data.result.channels) || [];
-      const ch = channels.find((item) => item.channel_id === channelId);
-      const stateName = ch && ch.state && ch.state.state_name;
-
-      if (ch && expectedProgressStates.has(stateName)) {
-        console.log(
-          `[external-funding-open] ${nodeLabel} progressed after submit: channel_id=${channelId} state=${stateName}`,
-        );
-        return;
-      }
-
-      if (ch && !isWaitingExternalFundingState(ch)) {
-        throw new Error(
-          `Assertion failed: unexpected ${nodeLabel} state after submit_signed_funding_tx: ${String(stateName)}`,
-        );
-      }
-
-      await new Promise((r) => setTimeout(r, 500));
-    }
-
-    throw new Error(
-      `Assertion failed: ${nodeLabel} channel ${channelId} did not progress after submit_signed_funding_tx`,
-    );
-  }
-
-  await waitForChannelProgress("node1", bru.getEnvVar("NODE1_RPC_URL"), bru.getEnvVar("NODE3_PUBKEY"));
-  await waitForChannelProgress("node3", bru.getEnvVar("NODE3_RPC_URL"), bru.getEnvVar("NODE1_PUBKEY"));
+  bru.setVar("CHANNEL_READY", "false");
 }

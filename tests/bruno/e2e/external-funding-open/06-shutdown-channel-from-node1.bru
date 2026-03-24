@@ -1,7 +1,7 @@
 meta {
   name: shutdown external funding channel from node1
   type: http
-  seq: 10
+  seq: 6
 }
 
 post {
@@ -42,14 +42,6 @@ script:pre-request {
 }
 
 script:post-response {
-  const status = bru.getVar("EXTERNAL_FUNDING_SUBMIT_STATUS");
-  if (status !== "submitted") {
-    console.log(
-      `[external-funding-open] skip shutdown because submit status is ${String(status)}`,
-    );
-    return;
-  }
-
   if (res.body.error) {
     throw new Error(`Assertion failed: shutdown_channel should succeed, got ${res.body.error.message}`);
   }

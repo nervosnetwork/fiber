@@ -1,37 +1,46 @@
-# E2E test for external funding channel success flow (node2-funded)
+# E2E test for external funding open/close flow (node2-funded)
 
-Start nodes with a clean state:
+This collection covers a minimal external-funding happy path with three dev nodes:
 
-```bash
-REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/external-funding-open
-```
+- node1 connects to node3 and opens the channel;
+- node2 provides the CKB funding inputs and signs the funding transaction for node1's channel open;
+- the channel is cooperatively closed back to node2's lock script.
 
-This test validates a success-only scenario:
+The flow verifies that node1 acts as the channel initiator without spending its own CKB, and that the external funding is returned to node2 after close.
+
+## Flow overview
+
+This test validates the following sequence:
 
 - Initialize node1/node2/node3 funding scripts and CKB balances before open.
 - Node1 opens an external-funded channel to node3 via:
   - `open_channel_with_external_funding`
   - `sign_external_funding_tx` (node2 signs via dev RPC)
   - `submit_signed_funding_tx`
-- Wait funding tx `committed`, then wait channel state to become `ChannelReady`.
-- Check balances after open:
-  - node1 unchanged;
-  - node3 unchanged or lower (temporary reserved capacity is possible);
-  - node2 decreased (funding amount + fee).
-- Node3 generates an invoice, node1 pays node3 over fiber.
+- Wait channel state to become `ChannelReady`.
+- Check balances after open and confirm:
+  - node1 balance stays unchanged;
+  - node2 balance decreases by at least `funding_amount`;
+  - node3 balance decreases by about 100 CKB for the auto-accept side.
 - Node1 initiates `shutdown_channel` with node2 `close_script`.
-- Wait channel is `CLOSED` on node3.
-- Check balances after close:
-  - node1 unchanged from initial;
-  - node2 increased vs post-open, but still lower than initial;
-  - node3 increased vs initial.
+- Wait channel is `Closed` and capture the cooperative shutdown transaction hash.
+- Check balances after close and verify:
+  - node2 receives the close output back to its script;
+  - the returned amount is `funding_amount - shutdown_fee`;
+  - node2 wallet balance increase after close matches that shutdown output exactly;
+  - node1 balance stays unchanged across the entire flow;
+  - node3 recovers part of its open-time spend, but still pays the non-refundable open fee.
 
-The Bruno collection now covers the full success flow end to end:
+The Bruno collection now focuses on the open/sign/ready/close accounting path:
 
 - `01` initializes scripts/balances, connects node1 to node3, and opens the channel directly.
 - `02` signs the unsigned funding tx via `sign_external_funding_tx`.
 - `03` submits the signed funding tx.
-- `04` to `15` verify the channel funding, readiness, payment, shutdown, and post-close balances.
+- `04` drives the funding tx to chain confirmation and waits for `ChannelReady`.
+- `05` checks node1/node2/node3 balances after the channel is ready.
+- `06` initiates cooperative shutdown from node1.
+- `07` drives the shutdown flow to chain confirmation, waits for `Closed`, and captures the shutdown tx hash.
+- `08` inspects the shutdown refund returned to node2 and verifies it matches the balance delta.
 
 ## Running
 
@@ -48,10 +57,6 @@ cd tests/bruno
 npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test
 ```
 
-### CI status
-
-This scenario is part of the Bruno e2e suite now. It is intended to be run as a normal end-to-end case rather than kept as a manual-only flow.
-
 ### Prerequisites
 
 - Required commands:
@@ -63,25 +68,13 @@ This scenario is part of the Bruno e2e suite now. It is intended to be run as a 
 
 ### Funding amount selection
 
-By default, `01-open-channel-with-external-funding.bru` auto-tries these funding amounts from high to low until `open_channel_with_external_funding` succeeds:
+[`01-open-channel-with-external-funding.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/01-open-channel-with-external-funding.bru) makes a single open attempt with the `funding_amount` defined in the JSON-RPC request body. In the current checked-in version, that value is `0xba43b7400` (500 CKB).
 
-- `0x8bb2c9700` (375 CKB)
-- `0x6fc23ac00` (300 CKB)
-- `0x5d21dba00` (250 CKB)
-- `0x4a817c800` (200 CKB)
-- `0x37e11d600` (150 CKB)
-- `0x2540be400` (100 CKB)
-- `0x12a05f200` (50 CKB)
+`EXTERNAL_FUNDING_AMOUNT` is not an input parameter for this collection. Step `01` reads the `funding_amount` from the request body and stores it in the Bruno variable `EXTERNAL_FUNDING_AMOUNT` only so later steps can reuse the same value for assertions.
 
-If you want to force a fixed amount, pass `EXTERNAL_FUNDING_AMOUNT` to Bruno:
-
-```bash
-cd tests/bruno
-npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test \
-  --env-var EXTERNAL_FUNDING_AMOUNT=0x6fc23ac00
-```
+If you want to test a different amount, update the `funding_amount` field in [`01-open-channel-with-external-funding.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/01-open-channel-with-external-funding.bru).
 
 ## Troubleshooting
 
 - `Missing NODE2_PRIVKEY environment variable`: add it to `tests/bruno/environments/test.bru`, or pass it with `--env-var NODE2_PRIVKEY=...`.
-- Failed to open with fixed amount: lower `EXTERNAL_FUNDING_AMOUNT`.
+- Failed to open with the selected amount: lower `funding_amount` in [`01-open-channel-with-external-funding.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/01-open-channel-with-external-funding.bru).

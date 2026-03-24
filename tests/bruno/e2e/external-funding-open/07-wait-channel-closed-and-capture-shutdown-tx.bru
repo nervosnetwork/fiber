@@ -1,0 +1,83 @@
+meta {
+  name: wait channel closed and capture shutdown tx
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "generate_epochs",
+    "params": ["0x1"]
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const axios = require("axios");
+
+  if (res.body.error) {
+    throw new Error(`Assertion failed: generate_epochs failed before closed check: ${res.body.error.message}`);
+  }
+
+  console.log("[external-funding-open] generated one epoch before checking Closed");
+  await new Promise((r) => setTimeout(r, 5000));
+
+  const node3Resp = await axios.post(
+    bru.getEnvVar("NODE3_RPC_URL"),
+    {
+      id: "external-funding-node3-closed-check",
+      jsonrpc: "2.0",
+      method: "list_channels",
+      params: [{ pubkey: bru.getEnvVar("NODE1_PUBKEY"), include_closed: true }],
+    },
+    {
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+    },
+  );
+
+  if (node3Resp.data && node3Resp.data.error) {
+    throw new Error(`Assertion failed: list_channels failed: ${node3Resp.data.error.message}`);
+  }
+
+  const channels = (node3Resp.data && node3Resp.data.result && node3Resp.data.result.channels) || [];
+  const channelId = bru.getVar("EXTERNAL_FUNDING_CHANNEL_ID");
+  const ch = channels.find((c) => c.channel_id === channelId);
+  if (!ch) {
+    throw new Error(`Assertion failed: channel ${channelId} not found in include_closed list`);
+  }
+
+  const stateName = ch.state && ch.state.state_name;
+  if (stateName !== "Closed") {
+    throw new Error(
+      `Assertion failed: expected channel state Closed after one epoch, got ${JSON.stringify(ch.state)}`,
+    );
+  }
+
+  const shutdownTxHash = ch.shutdown_transaction_hash;
+  if (!shutdownTxHash) {
+    throw new Error(
+      `Assertion failed: closed channel ${channelId} is missing shutdown_transaction_hash`,
+    );
+  }
+
+  bru.setVar("EXTERNAL_FUNDING_SHUTDOWN_TX_HASH", shutdownTxHash);
+  console.log(
+    `[external-funding-open] channel closed: ${channelId}, shutdown_tx_hash=${shutdownTxHash}`,
+  );
+}
