@@ -5,8 +5,9 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::rpc::utils::rpc_error;
+use ckb_sdk::util::blake160;
 use ckb_types::core::TransactionView;
-use ckb_types::prelude::Entity;
+use ckb_types::prelude::{Entity, Unpack};
 use fiber_json_types::serde_utils::Hash256 as JsonHash256;
 use fiber_types::{
     AddTlcCommand, Hash256, HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode,
@@ -81,6 +82,7 @@ trait DevRpc {
 }
 
 pub struct DevRpcServerImpl {
+    ckb_rpc_url: String,
     ckb_chain_actor: ActorRef<CkbChainMessage>,
     network_actor: ActorRef<NetworkActorMessage>,
     commitment_txs: Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -88,11 +90,13 @@ pub struct DevRpcServerImpl {
 
 impl DevRpcServerImpl {
     pub fn new(
+        ckb_rpc_url: String,
         ckb_chain_actor: ActorRef<CkbChainMessage>,
         network_actor: ActorRef<NetworkActorMessage>,
         commitment_txs: Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
     ) -> Self {
         Self {
+            ckb_rpc_url,
             ckb_chain_actor,
             network_actor,
             commitment_txs,
@@ -297,15 +301,14 @@ impl DevRpcServerImpl {
             traits::{SecpCkbRawKeySigner, Signer},
             types::ScriptGroup,
             unlock::generate_message,
-            SECP256K1,
         };
         use ckb_types::{
             bytes::Bytes,
             packed::{self, WitnessArgs},
             prelude::{Builder, Entity, IntoTransactionView, Pack},
-            H160,
         };
         use secp256k1::SecretKey;
+        use std::collections::hash_map::Entry;
 
         // Parse the private key
         let private_key_hex = params
@@ -336,24 +339,95 @@ impl DevRpcServerImpl {
         )
         .map_err(|e| rpc_error(format!("failed to create signer: {}", e), &params))?]);
 
-        // Compute pubkey hash (blake160 of pubkey) for signer id
-        let pubkey = secp256k1::PublicKey::from_secret_key(&SECP256K1, &secret_key);
-        let pubkey_hash = H160::from_slice(&ckb_hash::blake2b_256(&pubkey.serialize()[..])[0..20])
-            .map_err(|e| rpc_error(format!("failed to compute pubkey hash: {}", e), &params))?;
+        let pubkey_hash = blake160(
+            secret_key
+                .public_key(secp256k1::SECP256K1)
+                .serialize()
+                .as_ref(),
+        );
+        let ckb_client = crate::ckb::config::new_ckb_rpc_async_client(&self.ckb_rpc_url);
 
-        // Sign each input with the provided lock script
+        // Resolve each input's previous output lock and keep only the secp sighash locks
+        // owned by the provided private key. Inputs sharing the same lock script must be
+        // signed as one script group.
+        let mut signing_groups: Vec<ScriptGroup> = Vec::new();
+        let mut group_index_by_lock: HashMap<Vec<u8>, usize> = HashMap::new();
+        for (input_idx, input) in tx_view.inputs().into_iter().enumerate() {
+            let previous_output = input.previous_output();
+            let tx_hash: ckb_types::H256 = previous_output.tx_hash().unpack();
+            let output_index: u32 = previous_output.index().unpack();
+            let output_index = output_index as usize;
+            let previous_tx = ckb_client
+                .get_transaction(tx_hash.clone())
+                .await
+                .map_err(|e| {
+                    rpc_error(
+                        format!("failed to fetch previous transaction: {}", e),
+                        &params,
+                    )
+                })?;
+            let previous_tx = previous_tx.and_then(|response| {
+                response.transaction.map(|tx| match tx.inner {
+                    ckb_jsonrpc_types::Either::Left(json) => {
+                        let packed_tx: packed::Transaction = json.inner.into();
+                        packed_tx.into_view()
+                    }
+                    ckb_jsonrpc_types::Either::Right(_) => {
+                        panic!("bytes response format not used");
+                    }
+                })
+            });
+            let previous_tx = previous_tx.ok_or_else(|| {
+                rpc_error(
+                    format!(
+                        "previous transaction not found for input {}: {}",
+                        input_idx, tx_hash
+                    ),
+                    &params,
+                )
+            })?;
+            let previous_output = previous_tx.outputs().get(output_index).ok_or_else(|| {
+                rpc_error(
+                    format!(
+                        "previous output index {} out of bounds for input {}",
+                        output_index, input_idx
+                    ),
+                    &params,
+                )
+            })?;
+            let lock_script = previous_output.lock();
+            if lock_script.args().raw_data().as_ref() != pubkey_hash.as_bytes() {
+                continue;
+            }
+
+            let lock_script_key = lock_script.as_slice().to_vec();
+            match group_index_by_lock.entry(lock_script_key) {
+                Entry::Occupied(entry) => {
+                    signing_groups[*entry.get()].input_indices.push(input_idx);
+                }
+                Entry::Vacant(entry) => {
+                    let mut script_group = ScriptGroup::from_lock_script(&lock_script);
+                    script_group.input_indices.push(input_idx);
+                    let group_index = signing_groups.len();
+                    signing_groups.push(script_group);
+                    entry.insert(group_index);
+                }
+            }
+        }
+
+        if signing_groups.is_empty() {
+            return Err(rpc_error(
+                "no transaction inputs matched the provided private key".to_string(),
+                &params,
+            ));
+        }
+
         let mut witnesses: Vec<packed::Bytes> = tx_view.witnesses().into_iter().collect();
-        for (input_idx, lock_script_rpc) in &params.input_lock_scripts {
-            let input_idx = *input_idx as usize;
-
-            // Convert JSON lock script to packed lock script
-            let lock_script: packed::Script = lock_script_rpc.clone().into();
-
-            // Create script group for this input (lock script group)
-            let mut script_group = ScriptGroup::from_lock_script(&lock_script);
-            script_group.input_indices.push(input_idx);
-
-            // Generate sighash message (65 bytes of zeros as placeholder for signature)
+        for script_group in signing_groups {
+            let input_idx = *script_group
+                .input_indices
+                .first()
+                .expect("script group should contain at least one input");
             let zero_lock = Bytes::from(vec![0u8; 65]);
             let message = generate_message(&tx_view, &script_group, zero_lock).map_err(|e| {
                 rpc_error(
@@ -362,21 +436,17 @@ impl DevRpcServerImpl {
                 )
             })?;
 
-            // Sign the message (pure local operation, no RPC needed)
             let signature = signer
                 .sign(pubkey_hash.as_bytes(), &message, true, &tx_view)
                 .map_err(|e| rpc_error(format!("failed to sign message: {}", e), &params))?;
 
-            // Ensure witness list is long enough
             while witnesses.len() <= input_idx {
                 witnesses.push(Default::default());
             }
 
-            // Parse existing witness or create new one
             let witness_data = witnesses[input_idx].raw_data();
             let witness: WitnessArgs = WitnessArgs::from_slice(&witness_data).unwrap_or_default();
 
-            // Set the lock field with the signature
             let updated_witness = witness.as_builder().lock(Some(signature).pack()).build();
             witnesses[input_idx] = updated_witness.as_bytes().pack();
         }

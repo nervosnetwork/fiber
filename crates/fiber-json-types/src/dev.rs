@@ -105,10 +105,6 @@ pub struct SignExternalFundingTxParams {
     /// The private key to sign the transaction, as a 0x-prefixed 32-byte hex string.
     /// Note: This is a development-only RPC and the private key is provided directly.
     pub private_key: String,
-    /// The lock scripts for the transaction inputs that need to be signed.
-    /// Each tuple contains: (input_index, lock_script).
-    /// The lock script should be the secp256k1 sighash script corresponding to the private key.
-    pub input_lock_scripts: Vec<(u32, ckb_jsonrpc_types::Script)>,
 }
 
 /// Result of signing an external funding transaction.

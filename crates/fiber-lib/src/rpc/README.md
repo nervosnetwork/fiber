@@ -548,9 +548,6 @@ Sign an external funding transaction with a provided private key.
 * `unsigned_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The unsigned funding transaction returned from `open_channel_with_external_funding`.
 * `private_key` - <em>`String`</em>, The private key to sign the transaction, as a 0x-prefixed 32-byte hex string.
  Note: This is a development-only RPC and the private key is provided directly.
-* `input_lock_scripts` - <em>`Vec<>`</em>, The lock scripts for the transaction inputs that need to be signed.
- Each tuple contains: (input_index, lock_script).
- The lock script should be the secp256k1 sighash script corresponding to the private key.
 
 ##### Returns
 
