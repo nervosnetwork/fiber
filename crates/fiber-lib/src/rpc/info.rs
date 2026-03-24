@@ -4,6 +4,7 @@ use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::{handle_actor_call, log_and_error, now_timestamp_as_millis_u64};
 use ckb_jsonrpc_types::{JsonBytes, Script};
 use ckb_types::prelude::Entity;
+use fiber_types::schema::{FORWARDING_EVENT_PREFIX, PAYMENT_EVENT_PREFIX};
 use fiber_types::PaymentEventType;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
@@ -24,6 +25,9 @@ const DEFAULT_FORWARDING_HISTORY_LIMIT: u64 = 100;
 const DEFAULT_PAYMENT_HISTORY_LIMIT: u64 = 100;
 const MAX_FORWARDING_HISTORY_LIMIT: u64 = 10000;
 const MAX_PAYMENT_HISTORY_LIMIT: u64 = 10000;
+/// Batch size for streaming full-table scans in report RPCs.
+/// Large enough to amortize RocksDB overhead; small enough to bound memory per batch.
+const REPORT_BATCH_SIZE: usize = 1000;
 pub(crate) const MILLIS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 pub(crate) const MILLIS_PER_WEEK: u64 = 7 * MILLIS_PER_DAY;
 pub(crate) const MILLIS_PER_MONTH: u64 = 30 * MILLIS_PER_DAY;
@@ -232,31 +236,36 @@ pub fn fee_report_impl(
     let day_ago = now.saturating_sub(MILLIS_PER_DAY);
     let week_ago = now.saturating_sub(MILLIS_PER_WEEK);
 
-    let events = store
-        .get_forwarding_events(start_time, end_time, usize::MAX, None)
-        .0;
-
-    // Group by asset type
+    // Stream events in batches to avoid loading the entire time window into memory at once.
     let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, AssetAccum)> =
         BTreeMap::new();
+    let mut cursor: Option<Vec<u8>> = None;
+    loop {
+        let (batch, next_cursor) =
+            store.get_forwarding_events(start_time, end_time, REPORT_BATCH_SIZE, cursor);
+        let done = next_cursor.is_none() || batch.is_empty();
+        for event in &batch {
+            let key = asset_key(&event.udt_type_script);
+            let entry = accums
+                .entry(key)
+                .or_insert_with(|| (event.udt_type_script.clone(), AssetAccum::default()));
+            let accum = &mut entry.1;
 
-    for event in &events {
-        let key = asset_key(&event.udt_type_script);
-        let entry = accums
-            .entry(key)
-            .or_insert_with(|| (event.udt_type_script.clone(), AssetAccum::default()));
-        let accum = &mut entry.1;
-
-        accum.monthly_fee_sum = accum.monthly_fee_sum.saturating_add(event.fee);
-        accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
-        if event.timestamp >= week_ago {
-            accum.weekly_fee_sum = accum.weekly_fee_sum.saturating_add(event.fee);
-            accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+            accum.monthly_fee_sum = accum.monthly_fee_sum.saturating_add(event.fee);
+            accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
+            if event.timestamp >= week_ago {
+                accum.weekly_fee_sum = accum.weekly_fee_sum.saturating_add(event.fee);
+                accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+            }
+            if event.timestamp >= day_ago {
+                accum.daily_fee_sum = accum.daily_fee_sum.saturating_add(event.fee);
+                accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+            }
         }
-        if event.timestamp >= day_ago {
-            accum.daily_fee_sum = accum.daily_fee_sum.saturating_add(event.fee);
-            accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+        if done {
+            break;
         }
+        cursor = next_cursor;
     }
 
     let asset_reports = accums
@@ -313,7 +322,9 @@ pub fn forwarding_history_impl(
         let mut cursor = after_cursor;
         let final_store_cursor;
         loop {
-            let batch_limit = (limit - collected.len()).max(1);
+            // Use at least REPORT_BATCH_SIZE to avoid degenerate single-record fetches
+            // when the UDT hit rate is low.  This keeps RocksDB round-trips bounded.
+            let batch_limit = (limit - collected.len()).max(REPORT_BATCH_SIZE);
             let (batch, next_cursor) =
                 store.get_forwarding_events(start_time, end_time, batch_limit, cursor.clone());
             let done = next_cursor.is_none() || batch.is_empty();
@@ -326,9 +337,17 @@ pub fn forwarding_history_impl(
                 }
             }
             if collected.len() >= limit {
-                // We have enough — use the last matching event's implicit cursor.
-                // Re-fetch one page to get the proper cursor.
-                final_store_cursor = next_cursor;
+                // Cursor must point to the last *matching* event so the next page
+                // starts immediately after it, not after some non-matching event.
+                let last = collected.last().expect("collected is non-empty");
+                let key = [
+                    &[FORWARDING_EVENT_PREFIX],
+                    &last.timestamp.to_be_bytes()[..],
+                    last.payment_hash.as_ref(),
+                    last.incoming_channel_id.as_ref(),
+                ]
+                .concat();
+                final_store_cursor = Some(key);
                 break;
             }
             if done {
@@ -393,28 +412,38 @@ fn payment_report_impl(
     let week_ago = now.saturating_sub(MILLIS_PER_WEEK);
     let month_ago = now.saturating_sub(MILLIS_PER_MONTH);
 
-    let events = store.get_payment_events(month_ago, now, usize::MAX, None).0;
-
     let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, PaymentAccum)> =
         BTreeMap::new();
 
-    for event in events.iter().filter(|e| e.event_type == event_type) {
-        let key = asset_key(&event.udt_type_script);
-        let entry = accums
-            .entry(key)
-            .or_insert_with(|| (event.udt_type_script.clone(), PaymentAccum::default()));
-        let accum = &mut entry.1;
+    // Stream events in batches to avoid loading the entire month into memory at once.
+    // Only accumulate events matching the requested event_type.
+    let mut cursor: Option<Vec<u8>> = None;
+    loop {
+        let (batch, next_cursor) =
+            store.get_payment_events(month_ago, now, REPORT_BATCH_SIZE, cursor);
+        let done = next_cursor.is_none() || batch.is_empty();
+        for event in batch.iter().filter(|e| e.event_type == event_type) {
+            let key = asset_key(&event.udt_type_script);
+            let entry = accums
+                .entry(key)
+                .or_insert_with(|| (event.udt_type_script.clone(), PaymentAccum::default()));
+            let accum = &mut entry.1;
 
-        accum.monthly_amount_sum = accum.monthly_amount_sum.saturating_add(event.amount);
-        accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
-        if event.timestamp >= week_ago {
-            accum.weekly_amount_sum = accum.weekly_amount_sum.saturating_add(event.amount);
-            accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+            accum.monthly_amount_sum = accum.monthly_amount_sum.saturating_add(event.amount);
+            accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
+            if event.timestamp >= week_ago {
+                accum.weekly_amount_sum = accum.weekly_amount_sum.saturating_add(event.amount);
+                accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+            }
+            if event.timestamp >= day_ago {
+                accum.daily_amount_sum = accum.daily_amount_sum.saturating_add(event.amount);
+                accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+            }
         }
-        if event.timestamp >= day_ago {
-            accum.daily_amount_sum = accum.daily_amount_sum.saturating_add(event.amount);
-            accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+        if done {
+            break;
         }
+        cursor = next_cursor;
     }
 
     let asset_reports = accums
@@ -466,7 +495,9 @@ pub fn payment_history_impl(
         let mut cursor = after_cursor;
         let final_store_cursor;
         loop {
-            let batch_limit = (limit - collected.len()).max(1);
+            // Use at least REPORT_BATCH_SIZE to avoid degenerate single-record fetches
+            // when the UDT hit rate is low.  This keeps RocksDB round-trips bounded.
+            let batch_limit = (limit - collected.len()).max(REPORT_BATCH_SIZE);
             let (batch, next_cursor) =
                 store.get_payment_events(start_time, end_time, batch_limit, cursor.clone());
             let done = next_cursor.is_none() || batch.is_empty();
@@ -479,7 +510,17 @@ pub fn payment_history_impl(
                 }
             }
             if collected.len() >= limit {
-                final_store_cursor = next_cursor;
+                // Cursor must point to the last *matching* event so the next page
+                // starts immediately after it, not after some non-matching event.
+                let last = collected.last().expect("collected is non-empty");
+                let key = [
+                    &[PAYMENT_EVENT_PREFIX],
+                    &last.timestamp.to_be_bytes()[..],
+                    last.payment_hash.as_ref(),
+                    last.channel_id.as_ref(),
+                ]
+                .concat();
+                final_store_cursor = Some(key);
                 break;
             }
             if done {

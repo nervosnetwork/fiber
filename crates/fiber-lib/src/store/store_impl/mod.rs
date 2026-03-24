@@ -750,59 +750,64 @@ impl PaymentEventStore for Store {
         limit: usize,
         after_cursor: Option<Vec<u8>>,
     ) -> (Vec<ForwardingEvent>, Option<Vec<u8>>) {
-        let prefix = [FORWARDING_EVENT_PREFIX];
-        let start_key = match &after_cursor {
-            Some(cursor) => cursor.clone(),
+        // Key layout: [prefix(1)][timestamp_be(8)][payment_hash(32)][incoming_channel_id(32)]
+        //
+        // start_key: cursor (exclusive via skip_while) when paginating, otherwise
+        //            [prefix][start_time_be] to skip records before the time window.
+        //
+        // take_while_fn encodes both the prefix boundary and the end_time upper bound so
+        // that `limit` counts only records inside the [start_time, end_time] window.
+        // This means we can use a plain `limit + 1` peek to detect a next page without
+        // any post-collection time filtering.
+        let end_key: Vec<u8> = [
+            &[FORWARDING_EVENT_PREFIX],
+            // end_time + 1 so that records with timestamp == end_time are included.
+            &end_time.saturating_add(1).to_be_bytes()[..],
+        ]
+        .concat();
+        let take_while_fn: TakeWhileFn = Box::new(move |key: &[u8]| key < end_key.as_slice());
+
+        let start_key: Vec<u8> = match after_cursor.as_deref() {
+            Some(cursor) => cursor.to_vec(),
             None => [&[FORWARDING_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat(),
         };
-        let end_time_bytes = end_time.to_be_bytes();
-        // take_while_fn: keep keys that belong to this prefix AND have timestamp <= end_time
-        // Key layout: [prefix(1)][timestamp_be(8)][payment_hash(32)][incoming_channel_id(32)]
-        let take_while: TakeWhileFn = Box::new(move |key: &[u8]| {
-            if !key.starts_with(&prefix) {
-                return false;
-            }
-            // Extract timestamp bytes (bytes 1..9)
-            if key.len() < 9 {
-                return true; // malformed key, let prefix check handle it
-            }
-            key[1..9] <= end_time_bytes[..]
-        });
-        let cursor_key = after_cursor.clone();
-        let results = self.collect_iterator(
+
+        // When a cursor is present it occupies one slot in the result, so ask for
+        // limit + 2 to still have limit + 1 usable records after dropping the cursor.
+        // Without a cursor limit + 1 is enough for the "has next page" peek.
+        let fetch_limit = if after_cursor.is_some() {
+            limit + 2
+        } else {
+            limit + 1
+        };
+
+        let mut raw = self.collect_iterator(
             start_key,
             IteratorDirection::Forward,
-            take_while,
-            limit + if after_cursor.is_some() { 1 } else { 0 },
+            take_while_fn,
+            fetch_limit,
         );
-        let events: Vec<ForwardingEvent> = results
-            .iter()
-            .filter(|kv| {
-                // Skip the cursor key itself (exclusive)
-                if let Some(ref ck) = cursor_key {
-                    if &kv.key == ck {
-                        return false;
-                    }
-                }
-                true
-            })
-            .map(|kv| deserialize_from::<ForwardingEvent>(kv.value.as_ref(), "ForwardingEvent"))
-            .collect();
-        let last_cursor = if events.len() == limit {
-            // There may be more; the cursor is the key of the last returned event
-            results
-                .iter()
-                .rfind(|kv| {
-                    if let Some(ref ck) = after_cursor {
-                        &kv.key != ck
-                    } else {
-                        true
-                    }
-                })
-                .map(|kv| kv.key.clone())
+
+        // When a cursor is provided the first record is the cursor itself — skip it.
+        if let Some(cursor) = after_cursor.as_deref() {
+            if raw.first().map(|kv| kv.key.as_slice()) == Some(cursor) {
+                raw.remove(0);
+            }
+        }
+
+        // If we got more than `limit` results there is a next page.
+        let last_cursor = if raw.len() > limit {
+            raw.get(limit - 1).map(|kv| kv.key.clone())
         } else {
             None
         };
+        raw.truncate(limit);
+
+        let events = raw
+            .into_iter()
+            .map(|kv| deserialize_from::<ForwardingEvent>(kv.value.as_ref(), "ForwardingEvent"))
+            .collect();
+
         (events, last_cursor)
     }
 
@@ -820,57 +825,61 @@ impl PaymentEventStore for Store {
         limit: usize,
         after_cursor: Option<Vec<u8>>,
     ) -> (Vec<PaymentEvent>, Option<Vec<u8>>) {
-        let prefix = [PAYMENT_EVENT_PREFIX];
-        let start_key = match &after_cursor {
-            Some(cursor) => cursor.clone(),
+        // Key layout: [prefix(1)][timestamp_be(8)][payment_hash(32)][channel_id(32)]
+        //
+        // start_key: cursor (exclusive via manual skip) when paginating, otherwise
+        //            [prefix][start_time_be] to skip records before the time window.
+        //
+        // take_while_fn encodes both the prefix boundary and the end_time upper bound so
+        // that `limit` counts only records inside the [start_time, end_time] window.
+        let end_key: Vec<u8> = [
+            &[PAYMENT_EVENT_PREFIX],
+            &end_time.saturating_add(1).to_be_bytes()[..],
+        ]
+        .concat();
+        let take_while_fn: TakeWhileFn = Box::new(move |key: &[u8]| key < end_key.as_slice());
+
+        let start_key: Vec<u8> = match after_cursor.as_deref() {
+            Some(cursor) => cursor.to_vec(),
             None => [&[PAYMENT_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat(),
         };
-        let end_time_bytes = end_time.to_be_bytes();
-        // take_while_fn: keep keys that belong to this prefix AND have timestamp <= end_time
-        // Key layout: [prefix(1)][timestamp_be(8)][payment_hash(32)][channel_id(32)]
-        let take_while: TakeWhileFn = Box::new(move |key: &[u8]| {
-            if !key.starts_with(&prefix) {
-                return false;
-            }
-            if key.len() < 9 {
-                return true;
-            }
-            key[1..9] <= end_time_bytes[..]
-        });
-        let cursor_key = after_cursor.clone();
-        let results = self.collect_iterator(
+
+        // When a cursor is present it occupies one slot in the result, so ask for
+        // limit + 2 to still have limit + 1 usable records after dropping the cursor.
+        // Without a cursor limit + 1 is enough for the "has next page" peek.
+        let fetch_limit = if after_cursor.is_some() {
+            limit + 2
+        } else {
+            limit + 1
+        };
+
+        let mut raw = self.collect_iterator(
             start_key,
             IteratorDirection::Forward,
-            take_while,
-            limit + if after_cursor.is_some() { 1 } else { 0 },
+            take_while_fn,
+            fetch_limit,
         );
-        let events: Vec<PaymentEvent> = results
-            .iter()
-            .filter(|kv| {
-                // Skip the cursor key itself (exclusive)
-                if let Some(ref ck) = cursor_key {
-                    if &kv.key == ck {
-                        return false;
-                    }
-                }
-                true
-            })
-            .map(|kv| deserialize_from::<PaymentEvent>(kv.value.as_ref(), "PaymentEvent"))
-            .collect();
-        let last_cursor = if events.len() == limit {
-            results
-                .iter()
-                .rfind(|kv| {
-                    if let Some(ref ck) = after_cursor {
-                        &kv.key != ck
-                    } else {
-                        true
-                    }
-                })
-                .map(|kv| kv.key.clone())
+
+        // When a cursor is provided the first record is the cursor itself — skip it.
+        if let Some(cursor) = after_cursor.as_deref() {
+            if raw.first().map(|kv| kv.key.as_slice()) == Some(cursor) {
+                raw.remove(0);
+            }
+        }
+
+        // If we got more than `limit` results there is a next page.
+        let last_cursor = if raw.len() > limit {
+            raw.get(limit - 1).map(|kv| kv.key.clone())
         } else {
             None
         };
+        raw.truncate(limit);
+
+        let events = raw
+            .into_iter()
+            .map(|kv| deserialize_from::<PaymentEvent>(kv.value.as_ref(), "PaymentEvent"))
+            .collect();
+
         (events, last_cursor)
     }
 }
