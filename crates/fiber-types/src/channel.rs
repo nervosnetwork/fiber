@@ -253,9 +253,8 @@ pub enum ChannelState {
     Closed(CloseFlags),
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelConnectivityState {
-    #[default]
     Online,
     Offline,
     Syncing,
@@ -1520,7 +1519,6 @@ pub struct ChannelActorData {
     /// A flag to indicate whether the channel is reestablishing,
     /// we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
-    #[serde(default)]
     pub connectivity_state: ChannelConnectivityState,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
