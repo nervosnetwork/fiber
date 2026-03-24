@@ -3076,7 +3076,6 @@ pub struct NetworkActorState<S, C> {
     control: ServiceAsyncControl,
     peer_session_map: HashMap<Pubkey, ConnectedPeer>,
     pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
-    sessions_map: HashSet<SessionId>,
     peer_channel_index: PeerChannelIndex,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     // Channels funding lock script cache
@@ -4179,7 +4178,6 @@ where
 
         let Some(current_peer) = self.peer_session_map.get(&pubkey).cloned() else {
             debug!("Ignoring disconnect for peer {pubkey:?} on unknown session {session_id:?}");
-            self.sessions_map.remove(&session_id);
             return;
         };
 
@@ -4188,12 +4186,10 @@ where
                 "Ignoring stale disconnect for peer {pubkey:?}: old session {session_id:?}, current session {:?}",
                 current_peer.session_id
             );
-            self.sessions_map.remove(&session_id);
             return;
         }
 
         self.peer_session_map.remove(&pubkey);
-        self.sessions_map.remove(&session_id);
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(channel_id) {
@@ -4951,7 +4947,6 @@ where
             control,
             peer_session_map: Default::default(),
             pending_save_peer_addresses: Default::default(),
-            sessions_map: Default::default(),
             peer_channel_index,
             channels: Default::default(),
             outpoint_channel_map: Default::default(),
