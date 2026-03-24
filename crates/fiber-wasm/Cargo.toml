@@ -24,9 +24,5 @@ serde = "1.0.219"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[dev-dependencies]
-wasm-bindgen-test = "0.3.50"
-js-sys = "0.3.77"
-
 [package.metadata.cargo-shear]
 ignored = ["wasm-bindgen-futures"]
