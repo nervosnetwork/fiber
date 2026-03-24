@@ -1,0 +1,107 @@
+meta {
+  name: sign external funding tx with node2 key
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "sign_external_funding_tx",
+    "params": [
+      {
+        "unsigned_funding_tx": {},
+        "private_key": "{{NODE2_PRIVKEY}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const unsignedTx = bru.getVar("EXTERNAL_FUNDING_UNSIGNED_TX");
+  if (!unsignedTx) {
+    throw new Error("Missing EXTERNAL_FUNDING_UNSIGNED_TX. Run open_channel_with_external_funding first.");
+  }
+
+  const node2Privkey = bru.getEnvVar("NODE2_PRIVKEY");
+  if (!node2Privkey) {
+    throw new Error("Missing NODE2_PRIVKEY environment variable");
+  }
+
+  // Construct input_lock_scripts from the unsigned transaction inputs
+  // Each input needs its lock script for signing (secp256k1 sighash)
+  // The lock script should match the funding_lock_script used in open_channel_with_external_funding
+  const inputLockScripts = [];
+  const rawLockScript = bru.getVar("NODE2_FUNDING_SCRIPT");
+
+  function normalizeLockScript(value) {
+    if (!value) {
+      return null;
+    }
+    if (typeof value === "string") {
+      try {
+        return JSON.parse(value);
+      } catch (e) {
+        throw new Error(`Failed to parse NODE2_FUNDING_SCRIPT: ${e.message}`);
+      }
+    }
+    if (typeof value === "object") {
+      return value;
+    }
+    throw new Error(
+      `NODE2_FUNDING_SCRIPT must be a JSON string or object, got ${typeof value}`,
+    );
+  }
+
+  const lockScript = normalizeLockScript(rawLockScript);
+  if (unsignedTx.inputs && unsignedTx.inputs.length > 0) {
+    for (let i = 0; i < unsignedTx.inputs.length; i++) {
+      // For external funding, the funding user (node2) needs to sign their inputs
+      // The lock script should be the secp256k1 sighash script for the funding key
+      // Format: [input_index, lock_script_json]
+      // This example assumes node2's lock script - in practice, derive from NODE2_PUBKEY_HASH
+      if (lockScript) {
+        inputLockScripts.push([i, lockScript]);
+      }
+    }
+  }
+
+  if (inputLockScripts.length === 0) {
+    throw new Error("No input lock scripts available. Make sure NODE2_FUNDING_SCRIPT is set by the previous test step.");
+  }
+
+  const body = req.getBody();
+  body.params[0].unsigned_funding_tx = unsignedTx;
+  body.params[0].input_lock_scripts = inputLockScripts;
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  if (res.body.error) {
+    throw new Error(`sign_external_funding_tx failed: ${res.body.error.message}`);
+  }
+
+  const signedTx = res.body.result.signed_funding_tx;
+  if (!signedTx || !Array.isArray(signedTx.witnesses)) {
+    throw new Error("Assertion failed: signed_funding_tx must be a signed transaction object with witnesses");
+  }
+
+  bru.setVar("EXTERNAL_FUNDING_SIGNED_TX", signedTx);
+}

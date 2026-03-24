@@ -30,8 +30,8 @@ use crate::{
 
 pub use fiber_json_types::{
     AddTlcParams, AddTlcResult, CheckChannelShutdownParams, CommitmentSignedParams,
-    RemoveTlcParams, RemoveTlcReason, SubmitCommitmentTransactionParams,
-    SubmitCommitmentTransactionResult,
+    RemoveTlcParams, RemoveTlcReason, SignExternalFundingTxParams, SignExternalFundingTxResult,
+    SubmitCommitmentTransactionParams, SubmitCommitmentTransactionResult,
 };
 
 /// RPC module for development purposes, this module is not intended to be used in production.
@@ -67,6 +67,17 @@ trait DevRpc {
         &self,
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned>;
+
+    /// Sign an external funding transaction with a provided private key.
+    ///
+    /// This is a development-only RPC that signs an unsigned funding transaction
+    /// (returned from `open_channel_with_external_funding`) using the provided private key.
+    /// The signed transaction can then be submitted via `submit_signed_funding_tx`.
+    #[method(name = "sign_external_funding_tx")]
+    async fn sign_external_funding_tx(
+        &self,
+        params: SignExternalFundingTxParams,
+    ) -> Result<SignExternalFundingTxResult, ErrorObjectOwned>;
 }
 
 pub struct DevRpcServerImpl {
@@ -123,6 +134,13 @@ impl DevRpcServer for DevRpcServerImpl {
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned> {
         self.check_channel_shutdown(params).await
+    }
+
+    async fn sign_external_funding_tx(
+        &self,
+        params: SignExternalFundingTxParams,
+    ) -> Result<SignExternalFundingTxResult, ErrorObjectOwned> {
+        self.sign_external_funding_tx(params).await
     }
 }
 impl DevRpcServerImpl {
@@ -269,5 +287,109 @@ impl DevRpcServerImpl {
         };
 
         handle_actor_call!(self.network_actor, message, params)
+    }
+
+    pub async fn sign_external_funding_tx(
+        &self,
+        params: SignExternalFundingTxParams,
+    ) -> Result<SignExternalFundingTxResult, ErrorObjectOwned> {
+        use ckb_sdk::{
+            traits::{SecpCkbRawKeySigner, Signer},
+            types::ScriptGroup,
+            unlock::generate_message,
+            SECP256K1,
+        };
+        use ckb_types::{
+            bytes::Bytes,
+            packed::{self, WitnessArgs},
+            prelude::{Builder, Entity, IntoTransactionView, Pack},
+            H160,
+        };
+        use secp256k1::SecretKey;
+
+        // Parse the private key
+        let private_key_hex = params
+            .private_key
+            .strip_prefix("0x")
+            .unwrap_or(&params.private_key);
+        let private_key_bytes = hex::decode(private_key_hex)
+            .map_err(|e| rpc_error(format!("invalid private key hex: {}", e), &params))?;
+        if private_key_bytes.len() != 32 {
+            return Err(rpc_error(
+                format!(
+                    "invalid private key length: expected 32 bytes, got {}",
+                    private_key_bytes.len()
+                ),
+                &params,
+            ));
+        }
+        let secret_key = SecretKey::from_slice(&private_key_bytes)
+            .map_err(|e| rpc_error(format!("invalid private key: {}", e), &params))?;
+
+        // Convert the JSON transaction to a packed transaction
+        let packed_tx: ckb_types::packed::Transaction = params.unsigned_funding_tx.clone().into();
+        let tx_view = packed_tx.into_view();
+
+        // Create signer for secp256k1 sighash
+        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![std::str::FromStr::from_str(
+            hex::encode(secret_key.as_ref()).as_ref(),
+        )
+        .map_err(|e| rpc_error(format!("failed to create signer: {}", e), &params))?]);
+
+        // Compute pubkey hash (blake160 of pubkey) for signer id
+        let pubkey = secp256k1::PublicKey::from_secret_key(&SECP256K1, &secret_key);
+        let pubkey_hash = H160::from_slice(&ckb_hash::blake2b_256(&pubkey.serialize()[..])[0..20])
+            .map_err(|e| rpc_error(format!("failed to compute pubkey hash: {}", e), &params))?;
+
+        // Sign each input with the provided lock script
+        let mut witnesses: Vec<packed::Bytes> = tx_view.witnesses().into_iter().collect();
+        for (input_idx, lock_script_rpc) in &params.input_lock_scripts {
+            let input_idx = *input_idx as usize;
+
+            // Convert JSON lock script to packed lock script
+            let lock_script: packed::Script = lock_script_rpc.clone().into();
+
+            // Create script group for this input (lock script group)
+            let mut script_group = ScriptGroup::from_lock_script(&lock_script);
+            script_group.input_indices.push(input_idx);
+
+            // Generate sighash message (65 bytes of zeros as placeholder for signature)
+            let zero_lock = Bytes::from(vec![0u8; 65]);
+            let message = generate_message(&tx_view, &script_group, zero_lock).map_err(|e| {
+                rpc_error(
+                    format!("failed to generate sighash message: {}", e),
+                    &params,
+                )
+            })?;
+
+            // Sign the message (pure local operation, no RPC needed)
+            let signature = signer
+                .sign(pubkey_hash.as_bytes(), &message, true, &tx_view)
+                .map_err(|e| rpc_error(format!("failed to sign message: {}", e), &params))?;
+
+            // Ensure witness list is long enough
+            while witnesses.len() <= input_idx {
+                witnesses.push(Default::default());
+            }
+
+            // Parse existing witness or create new one
+            let witness_data = witnesses[input_idx].raw_data();
+            let witness: WitnessArgs = WitnessArgs::from_slice(&witness_data).unwrap_or_default();
+
+            // Set the lock field with the signature
+            let updated_witness = witness.as_builder().lock(Some(signature).pack()).build();
+            witnesses[input_idx] = updated_witness.as_bytes().pack();
+        }
+
+        // Build the signed transaction
+        let signed_tx = tx_view
+            .as_advanced_builder()
+            .set_witnesses(witnesses)
+            .build();
+
+        // Convert back to JSON transaction
+        let signed_funding_tx = ckb_jsonrpc_types::Transaction::from(signed_tx.data());
+
+        Ok(SignExternalFundingTxResult { signed_funding_tx })
     }
 }

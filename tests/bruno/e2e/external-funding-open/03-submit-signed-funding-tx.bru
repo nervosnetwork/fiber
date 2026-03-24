@@ -1,7 +1,7 @@
 meta {
   name: submit signed funding tx by node2 key
   type: http
-  seq: 2
+  seq: 3
 }
 
 post {
@@ -30,24 +30,13 @@ body:json {
 }
 
 script:pre-request {
-  const signedTxVar = bru.getVar("EXTERNAL_FUNDING_SIGNED_TX") || bru.getEnvVar("EXTERNAL_FUNDING_SIGNED_TX");
-  if (!signedTxVar) {
+  const signedTx = bru.getVar("EXTERNAL_FUNDING_SIGNED_TX");
+  if (!signedTx) {
     bru.setVar("EXTERNAL_FUNDING_SUBMIT_STATUS", "missing_signed_tx");
     bru.setVar("FUNDING_TX_COMMITTED", "false");
     throw new Error(
-      "Missing EXTERNAL_FUNDING_SIGNED_TX. Provide a node2-signed funding tx JSON for success-only flow.",
+      "Missing EXTERNAL_FUNDING_SIGNED_TX. Run sign_external_funding_tx first.",
     );
-  }
-
-  let signedTx;
-  if (typeof signedTxVar === "string") {
-    try {
-      signedTx = JSON.parse(signedTxVar);
-    } catch (err) {
-      throw new Error(`EXTERNAL_FUNDING_SIGNED_TX is not valid JSON: ${String(err)}`);
-    }
-  } else {
-    signedTx = signedTxVar;
   }
 
   if (!signedTx || !Array.isArray(signedTx.witnesses)) {

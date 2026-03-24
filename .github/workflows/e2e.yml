@@ -15,6 +15,7 @@ jobs:
       matrix:
         workflow:
           - 3-nodes-transfer
+          - external-funding-open
           - invoice-ops
           - open-use-close-a-channel
           - udt
@@ -123,4 +124,3 @@ jobs:
         with:
           name: e2e-test-${{ env.SAFE_WORKFLOW_NAME }}-${{ hashFiles('matrix.json') }}-logs
           path: tests/nodes/*.log
-

@@ -32,22 +32,3 @@ We can (re)initialize the dev chain to transfer some balances from the default d
 cd tests/bruno
 npm exec -- @usebruno/cli run e2e/open-use-close-a-channel -r --env test
 ```
-
-### Run `external-funding-open` separately
-
-`external-funding-open` is not included in the simple Bruno example above because this case requires external signing of the funding transaction.
-
-Start dev nodes first (clean state is recommended):
-
-```
-REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/external-funding-open
-```
-
-Use the wrapper script to run it:
-
-```
-./tests/bruno/e2e/external-funding-open/run-success-flow.sh
-```
-
-The wrapper uses the committed signer helper at `tests/bruno/utils/sign-openchannel-response.mjs` by default.
-Set `SIGNER_SCRIPT=/path/to/sign-openchannel-response.mjs` if you need to override it.

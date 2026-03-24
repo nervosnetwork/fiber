@@ -33,6 +33,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `remove_tlc`](#dev-remove_tlc)
         * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
         * [Method `check_channel_shutdown`](#dev-check_channel_shutdown)
+        * [Method `sign_external_funding_tx`](#dev-sign_external_funding_tx)
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
         * [Method `graph_channels`](#graph-graph_channels)
@@ -529,6 +530,32 @@ Manually trigger CheckShutdownTx on all channels
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="dev-sign_external_funding_tx"></a>
+#### Method `sign_external_funding_tx`
+
+Sign an external funding transaction with a provided private key.
+
+ This is a development-only RPC that signs an unsigned funding transaction
+ (returned from `open_channel_with_external_funding`) using the provided private key.
+ The signed transaction can then be submitted via `submit_signed_funding_tx`.
+
+##### Params
+
+* `unsigned_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The unsigned funding transaction returned from `open_channel_with_external_funding`.
+* `private_key` - <em>`String`</em>, The private key to sign the transaction, as a 0x-prefixed 32-byte hex string.
+ Note: This is a development-only RPC and the private key is provided directly.
+* `input_lock_scripts` - <em>`Vec<>`</em>, The lock scripts for the transaction inputs that need to be signed.
+ Each tuple contains: (input_index, lock_script).
+ The lock script should be the secp256k1 sighash script corresponding to the private key.
+
+##### Returns
+
+* `signed_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The signed funding transaction that can be submitted via `submit_signed_funding_tx`.
 
 ---
 

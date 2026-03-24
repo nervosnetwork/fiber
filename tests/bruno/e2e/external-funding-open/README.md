@@ -11,7 +11,8 @@ This test validates a success-only scenario:
 - Initialize node1/node2/node3 funding scripts and CKB balances before open.
 - Node1 opens an external-funded channel to node3 via:
   - `open_channel_with_external_funding`
-  - `submit_signed_funding_tx` (node2 signs).
+  - `sign_external_funding_tx` (node2 signs via dev RPC)
+  - `submit_signed_funding_tx`
 - Wait funding tx `committed`, then wait channel state to become `ChannelReady`.
 - Check balances after open:
   - node1 unchanged;
@@ -25,64 +26,62 @@ This test validates a success-only scenario:
   - node2 increased vs post-open, but still lower than initial;
   - node3 increased vs initial.
 
-The Bruno collection is intentionally trimmed to the core path now:
+The Bruno collection now covers the full success flow end to end:
 
-- `01` initializes scripts/balances and consumes the pre-opened channel context from the wrapper.
-- `02/04/05/06/08/11/12/13/14` carry the main assertions.
-- `03/07/09/10` remain as required transition steps inside the end-to-end flow.
+- `01` initializes scripts/balances, connects node1 to node3, and opens the channel directly.
+- `02` signs the unsigned funding tx via `sign_external_funding_tx`.
+- `03` submits the signed funding tx.
+- `04` to `15` verify the channel funding, readiness, payment, shutdown, and post-close balances.
 
 ## Running
 
-This flow needs a node2-signed funding transaction. The easiest way is:
+Start dev nodes first:
 
 ```bash
-./tests/bruno/e2e/external-funding-open/run-success-flow.sh
+REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/external-funding-open
+```
+
+Then run the Bruno collection directly:
+
+```bash
+cd tests/bruno
+npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test
 ```
 
 ### CI status
 
-This scenario is currently not included in required PR CI runs.
-Reason: it is relatively slow and depends on an external-signing wrapper flow.
+This scenario is part of the Bruno e2e suite now. It is intended to be run as a normal end-to-end case rather than kept as a manual-only flow.
 
 ### Prerequisites
 
-- Started dev nodes for this testcase (clean state recommended):
-  - `REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/external-funding-open`
 - Required commands:
-  - `curl`, `node`, `npm`, `ckb-cli`
-- Default environment file used by the wrapper:
+  - `node`, `npm`
+- Default Bruno environment:
   - `tests/bruno/environments/test.bru`
-- Default signer helper used by the wrapper:
-  - `tests/bruno/utils/sign-openchannel-response.mjs`
-- Optional override:
-  - `SIGNER_SCRIPT=/path/to/sign-openchannel-response.mjs`
+- Required environment variable in that file:
+  - `NODE2_PRIVKEY`
 
-### Why not run Bruno directly
+### Funding amount selection
 
-Do not run `npm exec -- @usebruno/cli run e2e/external-funding-open ...` directly for this success-only flow.
-`02-submit-signed-funding-tx.bru` requires `EXTERNAL_FUNDING_SIGNED_TX`, which is injected by `run-success-flow.sh`.
+By default, `01-open-channel-with-external-funding.bru` auto-tries these funding amounts from high to low until `open_channel_with_external_funding` succeeds:
 
-The wrapper script will:
+- `0x8bb2c9700` (375 CKB)
+- `0x6fc23ac00` (300 CKB)
+- `0x5d21dba00` (250 CKB)
+- `0x4a817c800` (200 CKB)
+- `0x37e11d600` (150 CKB)
+- `0x2540be400` (100 CKB)
+- `0x12a05f200` (50 CKB)
 
-- connect node3 to node1;
-- call `open_channel_with_external_funding`;
-- sign the returned unsigned funding tx with node2 key (`tests/nodes/2/ckb/plain_key`);
-- run the Bruno collection with injected env vars (`EXTERNAL_FUNDING_AMOUNT`, `EXTERNAL_FUNDING_SIGNED_TX`, preopen channel/tx).
-
-The wrapper owns the fragile setup and signing work. The Bruno collection focuses on
-submission, confirmation, readiness, payment, close, and post-close balance assertions.
-
-By default, the wrapper auto-tries multiple funding amounts (from higher to lower)
-until `open_channel_with_external_funding` succeeds.
-
-You can still force a fixed amount:
+If you want to force a fixed amount, pass `EXTERNAL_FUNDING_AMOUNT` to Bruno:
 
 ```bash
-EXTERNAL_FUNDING_AMOUNT=0x6fc23ac00 ./tests/bruno/e2e/external-funding-open/run-success-flow.sh
+cd tests/bruno
+npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test \
+  --env-var EXTERNAL_FUNDING_AMOUNT=0x6fc23ac00
 ```
 
 ## Troubleshooting
 
-- `Missing node2 key file`: ensure `tests/nodes/2/ckb/plain_key` exists.
-- `Missing signer script`: ensure `tests/bruno/utils/sign-openchannel-response.mjs` exists, or set `SIGNER_SCRIPT` to an alternative path.
+- `Missing NODE2_PRIVKEY environment variable`: add it to `tests/bruno/environments/test.bru`, or pass it with `--env-var NODE2_PRIVKEY=...`.
 - Failed to open with fixed amount: lower `EXTERNAL_FUNDING_AMOUNT`.
