@@ -237,9 +237,7 @@ impl PeerChannelIndex {
             .or_default()
             .insert(channel_id);
         let peer_id = pubkey_to_tentacle(pubkey).peer_id();
-        if !self.peer_id_to_pubkey_map.contains_key(&peer_id) {
-            self.peer_id_to_pubkey_map.insert(peer_id, pubkey);
-        }
+        self.peer_id_to_pubkey_map.entry(peer_id).or_insert(pubkey);
     }
 
     fn remove_channel(&mut self, pubkey: &Pubkey, channel_id: &Hash256) {
@@ -277,6 +275,10 @@ impl PeerChannelIndex {
             channels.remove(&old);
             channels.insert(new);
         }
+    }
+
+    fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
+        self.peer_id_to_pubkey_map.get(peer_id).cloned()
     }
 }
 
@@ -1262,26 +1264,19 @@ where
                 state.seed_peer_reconnect_backoff_if_needed(&peer_id, trigger);
             }
             NetworkActorCommand::PeerReconnectBackoffTick(peer_id, attempt) => {
-                if state.is_connected(&peer_id) {
-                    if let Some(pubkey) = state.get_connected_peer_pubkey(&peer_id) {
-                        state.peer_reconnect_backoff_attempts.remove(&pubkey);
-                    }
-                    return Ok(());
-                }
-
-                let Some(pubkey) = state.resolve_peer_pubkey(&peer_id) else {
+                let Some(pubkey) = state.peer_channel_index.get_pubkey(&peer_id) else {
+                    debug_event!(myself, "PeerReconnectBackoffSkippedNoDirectChannel");
                     return Ok(());
                 };
+
+                if state.peer_session_map.contains_key(&pubkey) {
+                    state.peer_reconnect_backoff_attempts.remove(&pubkey);
+                    return Ok(());
+                }
 
                 if state.requested_disconnect_peers.contains(&pubkey) {
                     state.peer_reconnect_backoff_attempts.remove(&pubkey);
                     debug_event!(myself, "PeerReconnectBackoffSkippedRequested");
-                    return Ok(());
-                }
-
-                if !state.has_direct_active_channel(&pubkey) {
-                    state.peer_reconnect_backoff_attempts.remove(&pubkey);
-                    debug_event!(myself, "PeerReconnectBackoffSkippedNoDirectChannel");
                     return Ok(());
                 }
 
@@ -3845,29 +3840,6 @@ where
         }
     }
 
-    fn resolve_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
-        self.get_connected_peer_pubkey(peer_id).or_else(|| {
-            self.store
-                .get_channel_states(None)
-                .into_iter()
-                .find_map(|(pubkey, _, _)| {
-                    let id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
-                    (id == *peer_id).then_some(pubkey)
-                })
-        })
-    }
-
-    fn is_connected(&self, peer_id: &PeerId) -> bool {
-        self.get_connected_peer_pubkey(peer_id).is_some()
-    }
-
-    fn has_direct_active_channel(&self, pubkey: &Pubkey) -> bool {
-        !self
-            .store
-            .get_active_channel_ids_by_pubkey(pubkey)
-            .is_empty()
-    }
-
     fn schedule_peer_reconnect_backoff(&self, peer_id: PeerId, attempt: u32) {
         let delay = compute_peer_reconnect_delay(attempt);
         debug_event!(self.network, "PeerReconnectBackoffScheduled");
@@ -3883,7 +3855,7 @@ where
         peer_id: &PeerId,
         trigger: PeerReconnectTrigger,
     ) {
-        let Some(pubkey) = self.resolve_peer_pubkey(peer_id) else {
+        let Some(pubkey) = self.peer_channel_index.get_pubkey(peer_id) else {
             debug_event!(self.network, "PeerReconnectBackoffSkippedNoDirectChannel");
             return;
         };
@@ -3893,10 +3865,6 @@ where
             return;
         }
         if self.peer_session_map.contains_key(&pubkey) {
-            return;
-        }
-        if !self.has_direct_active_channel(&pubkey) {
-            debug_event!(self.network, "PeerReconnectBackoffSkippedNoDirectChannel");
             return;
         }
         if self.peer_reconnect_backoff_attempts.contains_key(&pubkey) {
