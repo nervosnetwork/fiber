@@ -582,7 +582,9 @@ Returns individual forwarding events with optional time range, asset filter,
 * `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive). Default is 0 (the beginning of time).
 * `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive). Default is the current time.
 * `limit` - <em>`Option<u64>`</em>, Maximum number of events to return. Default is 100.
-* `offset` - <em>`Option<u64>`</em>, Number of events to skip (for pagination). Default is 0.
+* `after` - <em>`Option<JsonBytes>`</em>, Opaque cursor for pagination. Pass the `last_cursor` value from a previous
+ response to retrieve the next page of results. Omit or set to `null` to
+ start from the beginning.
 * `udt_type_script` - <em>`Option<Script>`</em>, Filter by UDT type script. If set, only events for this specific UDT are returned.
  Use `null` or omit to return events for all asset types.
 
@@ -590,6 +592,9 @@ Returns individual forwarding events with optional time range, asset filter,
 
 * `events` - <em>Vec<[ForwardingEventInfo](#type-forwardingeventinfo)></em>, The list of forwarding events.
 * `total_count` - <em>`u64`</em>, The total number of forwarding events returned in this result.
+* `last_cursor` - <em>`Option<JsonBytes>`</em>, Opaque cursor pointing past the last event in this page.
+ Pass this value as `after` in the next request to fetch the next page.
+ `null` means there are no more results.
 
 ---
 
@@ -640,13 +645,18 @@ Returns individual send/receive payment events with optional time range,
 * `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive). Default is 0.
 * `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive). Default is the current time.
 * `limit` - <em>`Option<u64>`</em>, Maximum number of events to return. Default is 100.
-* `offset` - <em>`Option<u64>`</em>, Number of events to skip (for pagination). Default is 0.
+* `after` - <em>`Option<JsonBytes>`</em>, Opaque cursor for pagination. Pass the `last_cursor` value from a previous
+ response to retrieve the next page of results. Omit or set to `null` to
+ start from the beginning.
 * `udt_type_script` - <em>`Option<Script>`</em>, Filter by UDT type script.
 
 ##### Returns
 
 * `events` - <em>Vec<[PaymentEventInfo](#type-paymenteventinfo)></em>, The list of payment events.
 * `total_count` - <em>`u64`</em>, The total number of events returned in this result.
+* `last_cursor` - <em>`Option<JsonBytes>`</em>, Opaque cursor pointing past the last event in this page.
+ Pass this value as `after` in the next request to fetch the next page.
+ `null` means there are no more results.
 
 ---
 

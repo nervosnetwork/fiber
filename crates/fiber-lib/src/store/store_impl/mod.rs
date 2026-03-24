@@ -748,24 +748,62 @@ impl PaymentEventStore for Store {
         start_time: u64,
         end_time: u64,
         limit: usize,
-        offset: usize,
-    ) -> Vec<ForwardingEvent> {
-        let start_key = [&[FORWARDING_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat();
-        self.collect_by_prefix_with(
-            &[FORWARDING_EVENT_PREFIX],
-            PrefixIterOptions {
-                direction: IteratorDirection::Forward,
-                start_key: Some(&start_key),
-                skip_while: None,
-                limit: 0,
-            },
-        )
-        .into_iter()
-        .map(|kv| deserialize_from::<ForwardingEvent>(kv.value.as_ref(), "ForwardingEvent"))
-        .take_while(|event| event.timestamp <= end_time)
-        .skip(offset)
-        .take(limit)
-        .collect()
+        after_cursor: Option<Vec<u8>>,
+    ) -> (Vec<ForwardingEvent>, Option<Vec<u8>>) {
+        let prefix = [FORWARDING_EVENT_PREFIX];
+        let start_key = match &after_cursor {
+            Some(cursor) => cursor.clone(),
+            None => [&[FORWARDING_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat(),
+        };
+        let end_time_bytes = end_time.to_be_bytes();
+        // take_while_fn: keep keys that belong to this prefix AND have timestamp <= end_time
+        // Key layout: [prefix(1)][timestamp_be(8)][payment_hash(32)][incoming_channel_id(32)]
+        let take_while: TakeWhileFn = Box::new(move |key: &[u8]| {
+            if !key.starts_with(&prefix) {
+                return false;
+            }
+            // Extract timestamp bytes (bytes 1..9)
+            if key.len() < 9 {
+                return true; // malformed key, let prefix check handle it
+            }
+            key[1..9] <= end_time_bytes[..]
+        });
+        let cursor_key = after_cursor.clone();
+        let results = self.collect_iterator(
+            start_key,
+            IteratorDirection::Forward,
+            take_while,
+            limit + if after_cursor.is_some() { 1 } else { 0 },
+        );
+        let events: Vec<ForwardingEvent> = results
+            .iter()
+            .filter(|kv| {
+                // Skip the cursor key itself (exclusive)
+                if let Some(ref ck) = cursor_key {
+                    if &kv.key == ck {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|kv| deserialize_from::<ForwardingEvent>(kv.value.as_ref(), "ForwardingEvent"))
+            .collect();
+        let last_cursor = if events.len() == limit {
+            // There may be more; the cursor is the key of the last returned event
+            results
+                .iter()
+                .rfind(|kv| {
+                    if let Some(ref ck) = after_cursor {
+                        &kv.key != ck
+                    } else {
+                        true
+                    }
+                })
+                .map(|kv| kv.key.clone())
+        } else {
+            None
+        };
+        (events, last_cursor)
     }
 
     fn insert_payment_event(&self, event: PaymentEvent) {
@@ -780,24 +818,60 @@ impl PaymentEventStore for Store {
         start_time: u64,
         end_time: u64,
         limit: usize,
-        offset: usize,
-    ) -> Vec<PaymentEvent> {
-        let start_key = [&[PAYMENT_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat();
-        self.collect_by_prefix_with(
-            &[PAYMENT_EVENT_PREFIX],
-            PrefixIterOptions {
-                direction: IteratorDirection::Forward,
-                start_key: Some(&start_key),
-                skip_while: None,
-                limit: 0,
-            },
-        )
-        .into_iter()
-        .map(|kv| deserialize_from::<PaymentEvent>(kv.value.as_ref(), "PaymentEvent"))
-        .take_while(|event| event.timestamp <= end_time)
-        .skip(offset)
-        .take(limit)
-        .collect()
+        after_cursor: Option<Vec<u8>>,
+    ) -> (Vec<PaymentEvent>, Option<Vec<u8>>) {
+        let prefix = [PAYMENT_EVENT_PREFIX];
+        let start_key = match &after_cursor {
+            Some(cursor) => cursor.clone(),
+            None => [&[PAYMENT_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat(),
+        };
+        let end_time_bytes = end_time.to_be_bytes();
+        // take_while_fn: keep keys that belong to this prefix AND have timestamp <= end_time
+        // Key layout: [prefix(1)][timestamp_be(8)][payment_hash(32)][channel_id(32)]
+        let take_while: TakeWhileFn = Box::new(move |key: &[u8]| {
+            if !key.starts_with(&prefix) {
+                return false;
+            }
+            if key.len() < 9 {
+                return true;
+            }
+            key[1..9] <= end_time_bytes[..]
+        });
+        let cursor_key = after_cursor.clone();
+        let results = self.collect_iterator(
+            start_key,
+            IteratorDirection::Forward,
+            take_while,
+            limit + if after_cursor.is_some() { 1 } else { 0 },
+        );
+        let events: Vec<PaymentEvent> = results
+            .iter()
+            .filter(|kv| {
+                // Skip the cursor key itself (exclusive)
+                if let Some(ref ck) = cursor_key {
+                    if &kv.key == ck {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|kv| deserialize_from::<PaymentEvent>(kv.value.as_ref(), "PaymentEvent"))
+            .collect();
+        let last_cursor = if events.len() == limit {
+            results
+                .iter()
+                .rfind(|kv| {
+                    if let Some(ref ck) = after_cursor {
+                        &kv.key != ck
+                    } else {
+                        true
+                    }
+                })
+                .map(|kv| kv.key.clone())
+        } else {
+            None
+        };
+        (events, last_cursor)
     }
 }
 

@@ -2,7 +2,7 @@ use crate::ckb::CkbConfig;
 use crate::fiber::channel::PaymentEventStore;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::{handle_actor_call, log_and_error, now_timestamp_as_millis_u64};
-use ckb_jsonrpc_types::Script;
+use ckb_jsonrpc_types::{JsonBytes, Script};
 use ckb_types::prelude::Entity;
 use fiber_types::PaymentEventType;
 #[cfg(not(target_arch = "wasm32"))]
@@ -232,7 +232,9 @@ pub fn fee_report_impl(
     let day_ago = now.saturating_sub(MILLIS_PER_DAY);
     let week_ago = now.saturating_sub(MILLIS_PER_WEEK);
 
-    let events = store.get_forwarding_events(start_time, end_time, usize::MAX, 0);
+    let events = store
+        .get_forwarding_events(start_time, end_time, usize::MAX, None)
+        .0;
 
     // Group by asset type
     let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, AssetAccum)> =
@@ -282,7 +284,6 @@ pub fn forwarding_history_impl(
     let start_time = params.start_time.unwrap_or(0);
     let end_time = params.end_time.unwrap_or(now);
     let limit = params.limit.unwrap_or(DEFAULT_FORWARDING_HISTORY_LIMIT) as usize;
-    let offset = params.offset.unwrap_or(0) as usize;
 
     if limit > MAX_FORWARDING_HISTORY_LIMIT as usize {
         return Err(ErrorObjectOwned::owned(
@@ -296,25 +297,56 @@ pub fn forwarding_history_impl(
         ));
     }
 
+    // Decode the opaque cursor from the request, if present.
+    let after_cursor: Option<Vec<u8>> = params.after.map(|b| b.as_bytes().to_vec());
+
     // Convert the optional RPC Script filter to packed::Script for comparison
     let udt_filter: Option<Option<ckb_types::packed::Script>> =
         params.udt_type_script.map(|s| Some(s.into()));
 
-    // Fetch enough events to cover offset + limit
-    let fetch_limit = offset.saturating_add(limit);
-    let events = store.get_forwarding_events(start_time, end_time, fetch_limit, 0);
-    let filtered: Vec<_> = events
-        .into_iter()
-        .filter(|e| match &udt_filter {
-            None => true, // no filter, return all
-            Some(script) => &e.udt_type_script == script,
-        })
-        .skip(offset)
-        .take(limit)
-        .collect();
+    // With a UDT filter, some fetched events may be filtered out, so we may need
+    // to fetch more than `limit` events.  We fetch in batches until we have enough
+    // filtered results or exhaust the store.
+    let (events, store_cursor) = if let Some(filter) = &udt_filter {
+        // With filter: fetch in batches to collect `limit` matching events.
+        let mut collected: Vec<fiber_types::ForwardingEvent> = Vec::with_capacity(limit);
+        let mut cursor = after_cursor;
+        let final_store_cursor;
+        loop {
+            let batch_limit = (limit - collected.len()).max(1);
+            let (batch, next_cursor) =
+                store.get_forwarding_events(start_time, end_time, batch_limit, cursor.clone());
+            let done = next_cursor.is_none() || batch.is_empty();
+            for event in batch {
+                if &event.udt_type_script == filter {
+                    collected.push(event);
+                    if collected.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            if collected.len() >= limit {
+                // We have enough — use the last matching event's implicit cursor.
+                // Re-fetch one page to get the proper cursor.
+                final_store_cursor = next_cursor;
+                break;
+            }
+            if done {
+                // No more data in the store.
+                final_store_cursor = None;
+                break;
+            }
+            cursor = next_cursor;
+        }
+        (collected, final_store_cursor)
+    } else {
+        // No filter: a single store fetch is sufficient.
+        store.get_forwarding_events(start_time, end_time, limit, after_cursor)
+    };
 
-    let total_count = filtered.len() as u64;
-    let events = filtered
+    let total_count = events.len() as u64;
+    let last_cursor = store_cursor.map(JsonBytes::from_vec);
+    let events = events
         .into_iter()
         .map(|e| ForwardingEventInfo {
             timestamp: e.timestamp,
@@ -331,6 +363,7 @@ pub fn forwarding_history_impl(
     Ok(ForwardingHistoryResult {
         events,
         total_count,
+        last_cursor,
     })
 }
 
@@ -360,7 +393,7 @@ fn payment_report_impl(
     let week_ago = now.saturating_sub(MILLIS_PER_WEEK);
     let month_ago = now.saturating_sub(MILLIS_PER_MONTH);
 
-    let events = store.get_payment_events(month_ago, now, usize::MAX, 0);
+    let events = store.get_payment_events(month_ago, now, usize::MAX, None).0;
 
     let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, PaymentAccum)> =
         BTreeMap::new();
@@ -409,7 +442,6 @@ pub fn payment_history_impl(
     let start_time = params.start_time.unwrap_or(0);
     let end_time = params.end_time.unwrap_or(now);
     let limit = params.limit.unwrap_or(DEFAULT_PAYMENT_HISTORY_LIMIT) as usize;
-    let offset = params.offset.unwrap_or(0) as usize;
 
     if limit > MAX_PAYMENT_HISTORY_LIMIT as usize {
         return Err(ErrorObjectOwned::owned(
@@ -423,25 +455,47 @@ pub fn payment_history_impl(
         ));
     }
 
+    // Decode the opaque cursor from the request, if present.
+    let after_cursor: Option<Vec<u8>> = params.after.map(|b| b.as_bytes().to_vec());
+
     let udt_filter: Option<Option<ckb_types::packed::Script>> =
         params.udt_type_script.map(|s| Some(s.into()));
 
-    // Fetch enough events to cover offset + limit
-    let fetch_limit = offset.saturating_add(limit);
-    let events = store.get_payment_events(start_time, end_time, fetch_limit, 0);
+    let (events, store_cursor) = if let Some(filter) = &udt_filter {
+        let mut collected: Vec<fiber_types::PaymentEvent> = Vec::with_capacity(limit);
+        let mut cursor = after_cursor;
+        let final_store_cursor;
+        loop {
+            let batch_limit = (limit - collected.len()).max(1);
+            let (batch, next_cursor) =
+                store.get_payment_events(start_time, end_time, batch_limit, cursor.clone());
+            let done = next_cursor.is_none() || batch.is_empty();
+            for event in batch {
+                if &event.udt_type_script == filter {
+                    collected.push(event);
+                    if collected.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            if collected.len() >= limit {
+                final_store_cursor = next_cursor;
+                break;
+            }
+            if done {
+                final_store_cursor = None;
+                break;
+            }
+            cursor = next_cursor;
+        }
+        (collected, final_store_cursor)
+    } else {
+        store.get_payment_events(start_time, end_time, limit, after_cursor)
+    };
 
-    let filtered: Vec<_> = events
-        .into_iter()
-        .filter(|e| match &udt_filter {
-            None => true,
-            Some(script) => &e.udt_type_script == script,
-        })
-        .skip(offset)
-        .take(limit)
-        .collect();
-
-    let total_count = filtered.len() as u64;
-    let events = filtered
+    let total_count = events.len() as u64;
+    let last_cursor = store_cursor.map(JsonBytes::from_vec);
+    let events = events
         .into_iter()
         .map(|e| PaymentEventInfo {
             event_type: match e.event_type {
@@ -460,6 +514,7 @@ pub fn payment_history_impl(
     Ok(PaymentHistoryResult {
         events,
         total_count,
+        last_cursor,
     })
 }
 

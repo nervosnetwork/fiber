@@ -12,6 +12,10 @@ use std::sync::Mutex;
 
 /// A simple in-memory mock store for testing the fee RPC logic
 /// without requiring RocksDB.
+///
+/// Events are stored sorted by (timestamp, payment_hash) to match the
+/// real store's key ordering.  The cursor is the composite key bytes
+/// [timestamp_be_u64 ++ payment_hash(32)] of the last returned event.
 struct MockForwardingStore {
     events: Mutex<Vec<ForwardingEvent>>,
     payment_events: Mutex<Vec<PaymentEvent>>,
@@ -26,9 +30,33 @@ impl MockForwardingStore {
     }
 }
 
+/// Build a cursor key for a forwarding event (mirrors the real key layout
+/// used by the RocksDB store: prefix(1) + timestamp_be(8) + payment_hash(32)
+/// + incoming_channel_id(32) = 73 bytes).
+fn forwarding_cursor_key(event: &ForwardingEvent) -> Vec<u8> {
+    let mut key = vec![240u8]; // FORWARDING_EVENT_PREFIX
+    key.extend_from_slice(&event.timestamp.to_be_bytes());
+    key.extend_from_slice(event.payment_hash.as_ref());
+    key.extend_from_slice(event.incoming_channel_id.as_ref());
+    key
+}
+
+/// Build a cursor key for a payment event (mirrors the real key layout:
+/// prefix(1) + timestamp_be(8) + payment_hash(32) + channel_id(32) = 73 bytes).
+fn payment_cursor_key(event: &PaymentEvent) -> Vec<u8> {
+    let mut key = vec![241u8]; // PAYMENT_EVENT_PREFIX
+    key.extend_from_slice(&event.timestamp.to_be_bytes());
+    key.extend_from_slice(event.payment_hash.as_ref());
+    key.extend_from_slice(event.channel_id.as_ref());
+    key
+}
+
 impl PaymentEventStore for MockForwardingStore {
     fn insert_forwarding_event(&self, event: ForwardingEvent) {
-        self.events.lock().unwrap().push(event);
+        let mut events = self.events.lock().unwrap();
+        events.push(event);
+        // Keep sorted by (timestamp, payment_hash, incoming_channel_id) to match real store
+        events.sort_by_key(forwarding_cursor_key);
     }
 
     fn get_forwarding_events(
@@ -36,20 +64,35 @@ impl PaymentEventStore for MockForwardingStore {
         start_time: u64,
         end_time: u64,
         limit: usize,
-        offset: usize,
-    ) -> Vec<ForwardingEvent> {
+        after_cursor: Option<Vec<u8>>,
+    ) -> (Vec<ForwardingEvent>, Option<Vec<u8>>) {
         let events = self.events.lock().unwrap();
-        events
+        let filtered: Vec<ForwardingEvent> = events
             .iter()
             .filter(|e| e.timestamp >= start_time && e.timestamp <= end_time)
-            .skip(offset)
+            .filter(|e| {
+                if let Some(ref cursor) = after_cursor {
+                    forwarding_cursor_key(e) > *cursor
+                } else {
+                    true
+                }
+            })
             .take(limit)
             .cloned()
-            .collect()
+            .collect();
+        let last_cursor = if filtered.len() == limit {
+            filtered.last().map(forwarding_cursor_key)
+        } else {
+            None
+        };
+        (filtered, last_cursor)
     }
 
     fn insert_payment_event(&self, event: PaymentEvent) {
-        self.payment_events.lock().unwrap().push(event);
+        let mut events = self.payment_events.lock().unwrap();
+        events.push(event);
+        // Keep sorted by (timestamp, payment_hash, channel_id) to match real store
+        events.sort_by_key(payment_cursor_key);
     }
 
     fn get_payment_events(
@@ -57,16 +100,28 @@ impl PaymentEventStore for MockForwardingStore {
         start_time: u64,
         end_time: u64,
         limit: usize,
-        offset: usize,
-    ) -> Vec<PaymentEvent> {
+        after_cursor: Option<Vec<u8>>,
+    ) -> (Vec<PaymentEvent>, Option<Vec<u8>>) {
         let events = self.payment_events.lock().unwrap();
-        events
+        let filtered: Vec<PaymentEvent> = events
             .iter()
             .filter(|e| e.timestamp >= start_time && e.timestamp <= end_time)
-            .skip(offset)
+            .filter(|e| {
+                if let Some(ref cursor) = after_cursor {
+                    payment_cursor_key(e) > *cursor
+                } else {
+                    true
+                }
+            })
             .take(limit)
             .cloned()
-            .collect()
+            .collect();
+        let last_cursor = if filtered.len() == limit {
+            filtered.last().map(payment_cursor_key)
+        } else {
+            None
+        };
+        (filtered, last_cursor)
     }
 }
 
@@ -244,7 +299,7 @@ async fn test_forwarding_history_pagination() {
         ForwardingHistoryParams {
             end_time: Some(u64::MAX),
             limit: Some(3),
-            offset: Some(0),
+            after: None,
             ..Default::default()
         },
     )
@@ -252,14 +307,15 @@ async fn test_forwarding_history_pagination() {
     assert_eq!(result.total_count, 3);
     assert_eq!(result.events[0].timestamp, 100);
     assert_eq!(result.events[2].timestamp, 102);
+    assert!(result.last_cursor.is_some());
 
-    // Second page
+    // Second page using the cursor from the first page
     let result = forwarding_history_impl(
         &store,
         ForwardingHistoryParams {
             end_time: Some(u64::MAX),
             limit: Some(3),
-            offset: Some(3),
+            after: result.last_cursor,
             ..Default::default()
         },
     )
@@ -617,7 +673,7 @@ async fn test_payment_history_pagination() {
         PaymentHistoryParams {
             end_time: Some(u64::MAX),
             limit: Some(3),
-            offset: Some(0),
+            after: None,
             ..Default::default()
         },
     )
@@ -625,14 +681,15 @@ async fn test_payment_history_pagination() {
     assert_eq!(result.total_count, 3);
     assert_eq!(result.events[0].timestamp, 100);
     assert_eq!(result.events[2].timestamp, 102);
+    assert!(result.last_cursor.is_some());
 
-    // Second page
+    // Second page using cursor from first page
     let result = payment_history_impl(
         &store,
         PaymentHistoryParams {
             end_time: Some(u64::MAX),
             limit: Some(3),
-            offset: Some(3),
+            after: result.last_cursor,
             ..Default::default()
         },
     )

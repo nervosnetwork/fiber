@@ -7430,28 +7430,32 @@ pub trait ChannelOpenRecordStore {
 pub trait PaymentEventStore {
     /// Insert a new forwarding event into the store.
     fn insert_forwarding_event(&self, event: ForwardingEvent);
-    /// Query forwarding events within a time range, with pagination.
+    /// Query forwarding events within a time range, with cursor-based pagination.
     /// `start_time` and `end_time` are milliseconds since UNIX epoch (inclusive).
-    /// Returns up to `limit` events starting after `offset` events.
+    /// Returns up to `limit` events. Pass the opaque `after_cursor` key returned
+    /// from a previous call to fetch the next page (exclusive — the cursor item
+    /// itself is not included in the result).
     fn get_forwarding_events(
         &self,
         start_time: u64,
         end_time: u64,
         limit: usize,
-        offset: usize,
-    ) -> Vec<ForwardingEvent>;
+        after_cursor: Option<Vec<u8>>,
+    ) -> (Vec<ForwardingEvent>, Option<Vec<u8>>);
     /// Insert a new payment event (send or receive) into the store.
     fn insert_payment_event(&self, event: PaymentEvent);
-    /// Query payment events within a time range, with pagination.
+    /// Query payment events within a time range, with cursor-based pagination.
     /// `start_time` and `end_time` are milliseconds since UNIX epoch (inclusive).
-    /// Returns up to `limit` events starting after `offset` events.
+    /// Returns up to `limit` events. Pass the opaque `after_cursor` key returned
+    /// from a previous call to fetch the next page (exclusive — the cursor item
+    /// itself is not included in the result).
     fn get_payment_events(
         &self,
         start_time: u64,
         end_time: u64,
         limit: usize,
-        offset: usize,
-    ) -> Vec<PaymentEvent>;
+        after_cursor: Option<Vec<u8>>,
+    ) -> (Vec<PaymentEvent>, Option<Vec<u8>>);
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

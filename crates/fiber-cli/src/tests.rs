@@ -1192,7 +1192,7 @@ mod info_fee_cli_tests {
         assert!(params.start_time.is_none());
         assert!(params.end_time.is_none());
         assert!(params.limit.is_none());
-        assert!(params.offset.is_none());
+        assert!(params.after.is_none());
         assert!(params.udt_type_script.is_none());
     }
 
@@ -1211,11 +1211,11 @@ mod info_fee_cli_tests {
     fn test_forwarding_history_with_pagination() {
         let matches = parse_args(
             ForwardingHistoryParams::augment_command,
-            &["test", "--limit", "50", "--offset", "10"],
+            &["test", "--limit", "50", "--after", "0xdeadbeef"],
         );
         let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
         assert_eq!(params.limit, Some(50));
-        assert_eq!(params.offset, Some(10));
+        assert!(params.after.is_some());
     }
 
     #[test]
@@ -1242,8 +1242,8 @@ mod info_fee_cli_tests {
                 "9000",
                 "--limit",
                 "25",
-                "--offset",
-                "5",
+                "--after",
+                "0xaabbccdd",
                 "--udt-type-script",
                 script_json,
             ],
@@ -1252,7 +1252,7 @@ mod info_fee_cli_tests {
         assert_eq!(params.start_time, Some(500));
         assert_eq!(params.end_time, Some(9000));
         assert_eq!(params.limit, Some(25));
-        assert_eq!(params.offset, Some(5));
+        assert!(params.after.is_some());
         assert!(params.udt_type_script.is_some());
     }
 }

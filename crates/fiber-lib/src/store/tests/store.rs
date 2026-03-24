@@ -1145,14 +1145,14 @@ fn test_store_forwarding_event_insert_and_query() {
     let (store, _dir) = generate_store();
 
     // Initially empty
-    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_forwarding_events(0, u64::MAX, 100, None);
     assert!(events.is_empty());
 
     // Insert a single event
     let event = make_forwarding_event(1000, 5);
     store.insert_forwarding_event(event.clone());
 
-    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_forwarding_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0], event);
 }
@@ -1176,31 +1176,31 @@ fn test_store_forwarding_event_time_range() {
     store.insert_forwarding_event(e4.clone());
 
     // Query all
-    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_forwarding_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 4);
 
     // Query with start_time filter (inclusive)
-    let events = store.get_forwarding_events(200, u64::MAX, 100, 0);
+    let (events, _) = store.get_forwarding_events(200, u64::MAX, 100, None);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0], e2);
     assert_eq!(events[1], e3);
     assert_eq!(events[2], e4);
 
     // Query with end_time filter (inclusive)
-    let events = store.get_forwarding_events(0, 300, 100, 0);
+    let (events, _) = store.get_forwarding_events(0, 300, 100, None);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0], e1);
     assert_eq!(events[1], e2);
     assert_eq!(events[2], e3);
 
     // Query narrow range
-    let events = store.get_forwarding_events(200, 300, 100, 0);
+    let (events, _) = store.get_forwarding_events(200, 300, 100, None);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0], e2);
     assert_eq!(events[1], e3);
 
     // Query range that matches nothing
-    let events = store.get_forwarding_events(500, 600, 100, 0);
+    let (events, _) = store.get_forwarding_events(500, 600, 100, None);
     assert!(events.is_empty());
 }
 
@@ -1215,27 +1215,40 @@ fn test_store_forwarding_event_pagination() {
         store.insert_forwarding_event(make_forwarding_event(100 + i, i as u128));
     }
 
-    // Limit
-    let events = store.get_forwarding_events(0, u64::MAX, 3, 0);
+    // First page (limit 3, no cursor)
+    let (events, cursor) = store.get_forwarding_events(0, u64::MAX, 3, None);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].timestamp, 100);
     assert_eq!(events[2].timestamp, 102);
+    assert!(cursor.is_some());
 
-    // Offset
-    let events = store.get_forwarding_events(0, u64::MAX, 3, 5);
+    // Second page (limit 3, using cursor from first page)
+    let (events, cursor2) = store.get_forwarding_events(0, u64::MAX, 3, cursor);
     assert_eq!(events.len(), 3);
-    assert_eq!(events[0].timestamp, 105);
-    assert_eq!(events[2].timestamp, 107);
+    assert_eq!(events[0].timestamp, 103);
+    assert_eq!(events[2].timestamp, 105);
+    assert!(cursor2.is_some());
 
-    // Offset past end
-    let events = store.get_forwarding_events(0, u64::MAX, 100, 10);
-    assert!(events.is_empty());
+    // Skip to page starting at timestamp 108 (using cursor from second-to-last page)
+    // Fetch page at offset 8 by chaining cursors
+    let (events, _) = store.get_forwarding_events(0, u64::MAX, 3, cursor2);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].timestamp, 106);
+    assert_eq!(events[2].timestamp, 108);
 
-    // Limit larger than remaining
-    let events = store.get_forwarding_events(0, u64::MAX, 100, 8);
+    // Last page: limit larger than remaining
+    let (events_first3, cursor_at_106) = store.get_forwarding_events(0, u64::MAX, 3, None);
+    // Advance to just before timestamp 108 to test "limit larger than remaining"
+    let _ = events_first3;
+    // Directly test: fetch starting from offset 8 by seeking to just before it
+    let (events_page1, c1) = store.get_forwarding_events(0, u64::MAX, 8, None);
+    let _ = events_page1;
+    let (events, last_cursor) = store.get_forwarding_events(0, u64::MAX, 100, c1);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].timestamp, 108);
     assert_eq!(events[1].timestamp, 109);
+    assert!(last_cursor.is_none()); // no more data
+    let _ = cursor_at_106;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1255,7 +1268,7 @@ fn test_store_forwarding_event_ordering() {
     store.insert_forwarding_event(e1.clone());
     store.insert_forwarding_event(e2.clone());
 
-    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_forwarding_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].timestamp, 100);
     assert_eq!(events[1].timestamp, 200);
@@ -1280,7 +1293,7 @@ fn test_store_forwarding_event_same_timestamp_different_hash() {
     store.insert_forwarding_event(e1.clone());
     store.insert_forwarding_event(e2.clone());
 
-    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_forwarding_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 2);
     // Both should be present (order within same timestamp depends on payment_hash bytes)
     assert!(events.contains(&e1));
@@ -1319,7 +1332,7 @@ fn test_store_forwarding_event_with_udt() {
     store.insert_forwarding_event(ckb_event.clone());
     store.insert_forwarding_event(udt_event.clone());
 
-    let events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_forwarding_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 2);
 
     // Verify CKB event round-trips correctly
@@ -1363,14 +1376,14 @@ fn test_store_payment_event_insert_and_query() {
     let (store, _dir) = generate_store();
 
     // Initially empty
-    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_payment_events(0, u64::MAX, 100, None);
     assert!(events.is_empty());
 
     // Insert a single send event
     let event = make_payment_event(1000, 500, fiber_types::PaymentEventType::Send);
     store.insert_payment_event(event.clone());
 
-    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_payment_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0], event);
 }
@@ -1393,31 +1406,31 @@ fn test_store_payment_event_time_range() {
     store.insert_payment_event(e4.clone());
 
     // Query all
-    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_payment_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 4);
 
     // Query with start_time filter (inclusive)
-    let events = store.get_payment_events(200, u64::MAX, 100, 0);
+    let (events, _) = store.get_payment_events(200, u64::MAX, 100, None);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0], e2);
     assert_eq!(events[1], e3);
     assert_eq!(events[2], e4);
 
     // Query with end_time filter (inclusive)
-    let events = store.get_payment_events(0, 300, 100, 0);
+    let (events, _) = store.get_payment_events(0, 300, 100, None);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0], e1);
     assert_eq!(events[1], e2);
     assert_eq!(events[2], e3);
 
     // Query narrow range
-    let events = store.get_payment_events(200, 300, 100, 0);
+    let (events, _) = store.get_payment_events(200, 300, 100, None);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0], e2);
     assert_eq!(events[1], e3);
 
     // Query range that matches nothing
-    let events = store.get_payment_events(500, 600, 100, 0);
+    let (events, _) = store.get_payment_events(500, 600, 100, None);
     assert!(events.is_empty());
 }
 
@@ -1437,27 +1450,27 @@ fn test_store_payment_event_pagination() {
         store.insert_payment_event(make_payment_event(100 + i, i as u128 * 100, event_type));
     }
 
-    // Limit
-    let events = store.get_payment_events(0, u64::MAX, 3, 0);
+    // First page (limit 3, no cursor)
+    let (events, cursor) = store.get_payment_events(0, u64::MAX, 3, None);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].timestamp, 100);
     assert_eq!(events[2].timestamp, 102);
+    assert!(cursor.is_some());
 
-    // Offset
-    let events = store.get_payment_events(0, u64::MAX, 3, 5);
+    // Second page (limit 3, using cursor from first page)
+    let (events, cursor2) = store.get_payment_events(0, u64::MAX, 3, cursor);
     assert_eq!(events.len(), 3);
-    assert_eq!(events[0].timestamp, 105);
-    assert_eq!(events[2].timestamp, 107);
+    assert_eq!(events[0].timestamp, 103);
+    assert_eq!(events[2].timestamp, 105);
+    assert!(cursor2.is_some());
 
-    // Offset past end
-    let events = store.get_payment_events(0, u64::MAX, 100, 10);
-    assert!(events.is_empty());
-
-    // Limit larger than remaining
-    let events = store.get_payment_events(0, u64::MAX, 100, 8);
+    // Last page: fetch remaining 2 events after all 8 (using cursor after 8th)
+    let (_, c8) = store.get_payment_events(0, u64::MAX, 8, None);
+    let (events, last_cursor) = store.get_payment_events(0, u64::MAX, 100, c8);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].timestamp, 108);
     assert_eq!(events[1].timestamp, 109);
+    assert!(last_cursor.is_none()); // no more data
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1476,7 +1489,7 @@ fn test_store_payment_event_ordering() {
     store.insert_payment_event(e1.clone());
     store.insert_payment_event(e2.clone());
 
-    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_payment_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].timestamp, 100);
     assert_eq!(events[1].timestamp, 200);
@@ -1499,7 +1512,7 @@ fn test_store_payment_event_same_timestamp_different_hash() {
     store.insert_payment_event(e1.clone());
     store.insert_payment_event(e2.clone());
 
-    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_payment_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 2);
     assert!(events.contains(&e1));
     assert!(events.contains(&e2));
@@ -1536,7 +1549,7 @@ fn test_store_payment_event_with_udt() {
     store.insert_payment_event(ckb_event.clone());
     store.insert_payment_event(udt_event.clone());
 
-    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_payment_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 2);
 
     // Verify CKB event round-trips correctly
@@ -1563,7 +1576,7 @@ fn test_store_payment_event_mixed_types() {
     store.insert_payment_event(send_event.clone());
     store.insert_payment_event(recv_event.clone());
 
-    let events = store.get_payment_events(0, u64::MAX, 100, 0);
+    let (events, _) = store.get_payment_events(0, u64::MAX, 100, None);
     assert_eq!(events.len(), 2);
 
     // get_payment_events returns all types; filtering is done at the RPC layer
@@ -1598,10 +1611,10 @@ fn test_store_payment_event_independent_of_forwarding_events() {
     store.insert_payment_event(pay.clone());
 
     // They should be in separate namespaces
-    let fwd_events = store.get_forwarding_events(0, u64::MAX, 100, 0);
+    let (fwd_events, _) = store.get_forwarding_events(0, u64::MAX, 100, None);
     assert_eq!(fwd_events.len(), 1);
 
-    let pay_events = store.get_payment_events(0, u64::MAX, 100, 0);
+    let (pay_events, _) = store.get_payment_events(0, u64::MAX, 100, None);
     assert_eq!(pay_events.len(), 1);
     assert_eq!(pay_events[0], pay);
 }
