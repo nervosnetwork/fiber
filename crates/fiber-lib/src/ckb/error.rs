@@ -127,6 +127,25 @@ mod tests {
     }
 
     #[test]
+    fn tx_builder_error_transient_display_fallback_without_io_in_chain() {
+        #[derive(Debug)]
+        struct OpaqueSdkError;
+
+        impl std::fmt::Display for OpaqueSdkError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "cell collector: connection reset by peer")
+            }
+        }
+
+        impl std::error::Error for OpaqueSdkError {}
+
+        let err = FundingError::CkbTxBuilderError(TxBuilderError::InvalidParameter(
+            anyhow::Error::new(OpaqueSdkError),
+        ));
+        assert!(err.is_temporary());
+    }
+
+    #[test]
     fn unlock_error_with_io_cause_is_temporary() {
         let io_err =
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");

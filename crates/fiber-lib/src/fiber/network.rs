@@ -161,13 +161,16 @@ const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
 
-const FUNDING_RETRY_MAX_ATTEMPTS: u32 = 5;
+/// Maximum number of tries for a single funding step (initial try plus follow-up attempts after
+/// transient failures). `retry_count` passed to handlers is zero-based (0 = first try).
+const FUNDING_RETRY_MAX_TOTAL_ATTEMPTS: u32 = 5;
 const FUNDING_RETRY_BASE_MILLIS: u64 = 2000;
 const FUNDING_RETRY_MAX_MILLIS: u64 = 60_000;
 
 fn funding_retry_delay(retry_count: u32) -> Duration {
-    let max_shift = (FUNDING_RETRY_MAX_MILLIS / FUNDING_RETRY_BASE_MILLIS).ilog2();
-    let delay = FUNDING_RETRY_BASE_MILLIS.saturating_mul(1 << retry_count.min(max_shift));
+    let shift = retry_count.min(63);
+    let factor = 1u64 << shift;
+    let delay = FUNDING_RETRY_BASE_MILLIS.saturating_mul(factor);
     Duration::from_millis(delay.min(FUNDING_RETRY_MAX_MILLIS))
 }
 
@@ -183,27 +186,30 @@ fn schedule_funding_retry(
     operation: &str,
     retry_msg_fn: impl FnOnce(u32) -> NetworkActorCommand + Send + 'static,
 ) -> bool {
+    let attempt = retry_count + 1;
     error!(
         "Failed to {} (attempt {}/{}): {}",
-        operation, retry_count, FUNDING_RETRY_MAX_ATTEMPTS, err
+        operation, attempt, FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, err
     );
-    if err.is_temporary() && retry_count < FUNDING_RETRY_MAX_ATTEMPTS {
-        let next = retry_count + 1;
+    if err.is_temporary() && attempt < FUNDING_RETRY_MAX_TOTAL_ATTEMPTS {
         let delay = funding_retry_delay(retry_count);
         warn!(
-            "Temporary {} error, scheduling retry {}/{} in {:?}",
-            operation, next, FUNDING_RETRY_MAX_ATTEMPTS, delay
+            "Temporary {} error, scheduling retry in {:?} (next attempt {}/{})",
+            operation,
+            delay,
+            attempt + 1,
+            FUNDING_RETRY_MAX_TOTAL_ATTEMPTS
         );
         let myself = myself.clone();
         myself.send_after(delay, move || {
-            NetworkActorMessage::new_command(retry_msg_fn(next))
+            NetworkActorMessage::new_command(retry_msg_fn(retry_count + 1))
         });
         false
     } else {
         if err.is_temporary() {
             error!(
-                "Exhausted {} {} retries, aborting channel {:?}",
-                FUNDING_RETRY_MAX_ATTEMPTS, operation, channel_id
+                "Exhausted {} attempts for {}, aborting channel {:?}",
+                FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, operation, channel_id
             );
         }
         true
@@ -2817,7 +2823,7 @@ where
             Ok(tx) => match tx.into_inner() {
                 Some(tx) => tx,
                 _ => {
-                    error!("Obtained empty funding tx (attempt {})", retry_count);
+                    error!("Obtained empty funding tx (attempt {})", retry_count + 1);
                     return Ok(());
                 }
             },
@@ -2846,7 +2852,7 @@ where
         if tracing::enabled!(target: "fnn::fiber::network::funding", tracing::Level::DEBUG) {
             let tx_json: ckb_jsonrpc_types::Transaction = tx.data().into();
             let tx_json = serde_json::to_string(&tx_json).unwrap_or_default();
-            debug!(target: "fnn::fiber::network::funding", "Funding transaction updated on our part (attempt {}): {}", retry_count, tx_json);
+            debug!(target: "fnn::fiber::network::funding", "Funding transaction updated on our part (attempt {}/{}): {}", retry_count + 1, FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, tx_json);
         }
         state
             .send_command_to_channel(
@@ -2939,8 +2945,10 @@ where
             }
         };
         debug!(
-            "Funding transaction signed (attempt {}): {:?}",
-            retry_count, &signed_funding_tx
+            "Funding transaction signed (attempt {}/{}): {:?}",
+            retry_count + 1,
+            FUNDING_RETRY_MAX_TOTAL_ATTEMPTS,
+            &signed_funding_tx
         );
 
         let funding_tx = signed_funding_tx.take().expect("take tx");
