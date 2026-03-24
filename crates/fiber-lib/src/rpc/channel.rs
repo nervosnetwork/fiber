@@ -11,13 +11,11 @@ use crate::fiber::{
 };
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{handle_actor_call, log_and_error};
-use ckb_jsonrpc_types::CellDep as CkbJsonRpcCellDep;
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
     packed::{self},
     prelude::{IntoTransactionView, Unpack},
 };
-use fiber_json_types::serde_utils::CellDep;
 use fiber_types::{ChannelOpeningStatus, Pubkey, TLCId};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
@@ -33,14 +31,6 @@ pub use fiber_json_types::{
     ShutdownChannelParams, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
     UpdateChannelParams,
 };
-
-fn rpc_cell_dep_to_packed(dep: CellDep) -> packed::CellDep {
-    CkbJsonRpcCellDep {
-        out_point: dep.out_point,
-        dep_type: dep.dep_type,
-    }
-    .into()
-}
 
 /// RPC module for channel management.
 #[cfg(not(target_arch = "wasm32"))]
@@ -587,7 +577,7 @@ where
             .clone()
             .unwrap_or_default()
             .into_iter()
-            .map(rpc_cell_dep_to_packed)
+            .map(Into::into)
             .collect();
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(

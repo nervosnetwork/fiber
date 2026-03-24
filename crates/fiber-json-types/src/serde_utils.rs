@@ -3,50 +3,10 @@
 //! These are self-contained copies of the helpers from fiber-types, so that
 //! fiber-json-types can be compiled without depending on fiber-types.
 
-use ckb_jsonrpc_types::DepType;
 use molecule::prelude::Entity;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{serde_as, serde_conv, DeserializeAs, SerializeAs};
-
-pub fn serialize_json_dep_type<S>(dep_type: &DepType, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match dep_type {
-        DepType::Code => "code",
-        DepType::DepGroup => "dep_group",
-    }
-    .serialize(serializer)
-}
-
-pub fn deserialize_json_dep_type<'de, D>(deserializer: D) -> Result<DepType, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    match s.to_lowercase().as_str() {
-        "code" => Ok(DepType::Code),
-        "dep_group" | "depgroup" => Ok(DepType::DepGroup),
-        _ => Err(D::Error::custom("invalid dep type")),
-    }
-}
-
-/// A wrapper type for `CellDep` that supports both `dep_group` and `depGroup` formats.
-/// This handles compatibility with JS libraries like Lumos that use camelCase.
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-pub struct CellDep {
-    /// The out point of the cell dep.
-    pub out_point: ckb_jsonrpc_types::OutPoint,
-
-    /// The type of the cell dep.
-    #[serde(
-        serialize_with = "serialize_json_dep_type",
-        deserialize_with = "deserialize_json_dep_type"
-    )]
-    #[schemars(with = "String")]
-    pub dep_type: DepType,
-}
 
 pub fn from_hex<'de, D, E>(deserializer: D) -> Result<E, D::Error>
 where

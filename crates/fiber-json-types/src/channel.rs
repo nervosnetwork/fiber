@@ -2,8 +2,8 @@
 
 use crate::define_rpc_flags;
 use crate::schema_helpers::*;
-use crate::serde_utils::{CellDep, EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
-use ckb_jsonrpc_types::{EpochNumberWithFraction, Script, Transaction};
+use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
+use ckb_jsonrpc_types::{CellDep, EpochNumberWithFraction, Script, Transaction};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 use schemars::JsonSchema;
