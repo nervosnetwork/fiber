@@ -4195,8 +4195,6 @@ where
         self.peer_session_map.remove(&pubkey);
         self.sessions_map.remove(&session_id);
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
-            self.outpoint_channel_map
-                .retain(|_, id| !channel_ids.contains(id));
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(channel_id) {
                     if let Err(err) = channel
