@@ -751,8 +751,8 @@ where
     }
 
     /// Start Tor onion hidden service if properly configured.
-    /// Returns the onion multiaddr to be added to announced addresses, or None if
-    /// the required configuration (onion_server or proxy_url) is missing.
+    /// Returns the onion multiaddr and a CancellationToken to stop the service,
+    /// or None if the required configuration (onion_server or proxy_url) is missing.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_onion_service(
         &self,
@@ -760,7 +760,7 @@ where
         listening_addrs: &[MultiAddr],
         my_peer_id: &tentacle::secio::PeerId,
         tracker: &tokio_util::task::TaskTracker,
-    ) -> Result<Option<MultiAddr>, String> {
+    ) -> Result<Option<(MultiAddr, tokio_util::sync::CancellationToken)>, String> {
         use std::net::{Ipv4Addr, SocketAddr};
 
         if config.onion_server.is_none() && config.proxy_url.is_none() {
@@ -850,13 +850,14 @@ where
             super::onion_service::OnionService::new(onion_config, &peer_id_str)?;
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let token_clone = cancel_token.clone();
         tracker.spawn(async move {
-            if let Err(err) = onion_service.start(cancel_token).await {
+            if let Err(err) = onion_service.start(token_clone).await {
                 error!("Onion service stopped with error: {}", err);
             }
         });
 
-        Ok(Some(onion_addr))
+        Ok(Some((onion_addr, cancel_token)))
     }
 
     pub async fn handle_peer_message(
@@ -3153,6 +3154,9 @@ pub struct NetworkActorState<S, C> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
+    // Cancellation token for the onion service background task.
+    #[cfg(not(target_arch = "wasm32"))]
+    onion_service_token: Option<tokio_util::sync::CancellationToken>,
     peer_session_map: HashMap<Pubkey, ConnectedPeer>,
     pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
@@ -4931,20 +4935,25 @@ where
 
         // Start Tor onion hidden service if configured
         #[cfg(not(target_arch = "wasm32"))]
-        if config.listen_on_onion() {
+        let onion_service_token = if config.listen_on_onion() {
             match self.start_onion_service(&config, &listening_addr, &my_peer_id, &tracker) {
-                Ok(Some(onion_addr)) => {
-                    info!("Onion service address: {}", onion_addr);
-                    announced_addrs.push(onion_addr);
+                Ok(Some((addr, token))) => {
+                    info!("Onion service address: {}", addr);
+                    announced_addrs.push(addr);
+                    Some(token)
                 }
                 Ok(None) => {
                     info!("Onion service not started: missing onion_server or proxy_url");
+                    None
                 }
                 Err(err) => {
                     error!("Failed to start onion service: {}", err);
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
 
         #[cfg(not(target_arch = "wasm32"))]
         info!(
@@ -4998,6 +5007,8 @@ where
             default_shutdown_script,
             network: myself.clone(),
             control,
+            #[cfg(not(target_arch = "wasm32"))]
+            onion_service_token,
             peer_session_map: Default::default(),
             pending_save_peer_addresses: Default::default(),
             session_channels_map: Default::default(),
@@ -5136,6 +5147,13 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // Cancel the onion service background task if running
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(token) = state.onion_service_token.take() {
+            debug!("Cancelling onion service...");
+            token.cancel();
+        }
+
         myself
             .get_cell()
             .stop_children_and_wait(Some("Network actor stopped".to_string()), None)

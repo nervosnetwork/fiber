@@ -123,13 +123,18 @@ impl OnionService {
             self.config.p2p_listen_address,
         )];
         info!(
-            "Adding onion service v3, forwarding to {}",
-            self.config.p2p_listen_address
+            "Adding onion service v3: external port {} -> {}",
+            self.config.onion_external_port, self.config.p2p_listen_address
         );
         tor_controller
             .add_onion_v3(self.key.clone(), &mut listeners.iter())
             .await
-            .map_err(|err| format!("Failed to add onion service: {:?}", err))?;
+            .map_err(|err| {
+                format!(
+                    "Failed to add onion service (Port={},{}): {:?}",
+                    self.config.onion_external_port, self.config.p2p_listen_address, err
+                )
+            })?;
         info!(
             "Added onion service v3, forwarding to {}",
             self.config.p2p_listen_address
