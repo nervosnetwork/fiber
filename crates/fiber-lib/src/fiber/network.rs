@@ -161,6 +161,61 @@ const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
 
+/// Maximum number of tries for a single funding step (initial try plus follow-up attempts after
+/// transient failures). `retry_count` passed to handlers is zero-based (0 = first try).
+const FUNDING_RETRY_MAX_TOTAL_ATTEMPTS: u32 = 5;
+const FUNDING_RETRY_BASE_MILLIS: u64 = 2000;
+const FUNDING_RETRY_MAX_MILLIS: u64 = 60_000;
+
+fn funding_retry_delay(retry_count: u32) -> Duration {
+    let shift = retry_count.min(63);
+    let factor = 1u64 << shift;
+    let delay = FUNDING_RETRY_BASE_MILLIS.saturating_mul(factor);
+    Duration::from_millis(delay.min(FUNDING_RETRY_MAX_MILLIS))
+}
+
+/// Handles a `FundingError` with retry logic.  If the error is temporary and
+/// retries remain, schedules a delayed retry via `send_after` using the
+/// provided `retry_msg_fn` and returns `false`.  Otherwise logs the exhaustion
+/// and returns `true` so the caller can perform its own abort.
+fn schedule_funding_retry(
+    myself: &ActorRef<NetworkActorMessage>,
+    err: &FundingError,
+    retry_count: u32,
+    channel_id: Hash256,
+    operation: &str,
+    retry_msg_fn: impl FnOnce(u32) -> NetworkActorCommand + Send + 'static,
+) -> bool {
+    let attempt = retry_count + 1;
+    error!(
+        "Failed to {} (attempt {}/{}): {}",
+        operation, attempt, FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, err
+    );
+    if err.is_temporary() && attempt < FUNDING_RETRY_MAX_TOTAL_ATTEMPTS {
+        let delay = funding_retry_delay(retry_count);
+        warn!(
+            "Temporary {} error, scheduling retry in {:?} (next attempt {}/{})",
+            operation,
+            delay,
+            attempt + 1,
+            FUNDING_RETRY_MAX_TOTAL_ATTEMPTS
+        );
+        let myself = myself.clone();
+        myself.send_after(delay, move || {
+            NetworkActorMessage::new_command(retry_msg_fn(retry_count + 1))
+        });
+        false
+    } else {
+        if err.is_temporary() {
+            error!(
+                "Exhausted {} attempts for {}, aborting channel {:?}",
+                FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, operation, channel_id
+            );
+        }
+        true
+    }
+}
+
 static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
 
 pub fn init_chain_hash(chain_hash: Hash256) {
@@ -340,6 +395,8 @@ pub enum NetworkActorCommand {
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     SignFundingTx(Pubkey, Hash256, Transaction, Option<Vec<Vec<u8>>>),
+    RetryUpdateChannelFunding(Hash256, Transaction, FundingRequest, u32),
+    RetrySignFundingTx(Pubkey, Hash256, Transaction, Option<Vec<Vec<u8>>>, u32),
     NotifyFundingTx(Transaction),
     CheckChannelsShutdown,
     CheckChannelShutdown(Hash256, RpcReplyPort<Result<(), String>>),
@@ -1710,40 +1767,7 @@ where
                 }
             }
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
-                let old_tx = transaction.into_view();
-                let mut tx = FundingTx::new();
-                tx.update_for_self(old_tx);
-                let tx = match self.fund(tx, request).await {
-                    Ok(tx) => match tx.into_inner() {
-                        Some(tx) => tx,
-                        _ => {
-                            error!("Obtained empty funding tx");
-                            return Ok(());
-                        }
-                    },
-                    Err(err) => {
-                        error!("Failed to fund channel: {}", err);
-                        if !err.is_temporary() {
-                            state.abort_funding(Either::Left(channel_id)).await;
-                        }
-                        return Ok(());
-                    }
-                };
-                if tracing::enabled!(target: "fnn::fiber::network::funding", tracing::Level::DEBUG)
-                {
-                    let tx_json: ckb_jsonrpc_types::Transaction = tx.data().into();
-                    let tx_json = serde_json::to_string(&tx_json).unwrap_or_default();
-                    debug!(target: "fnn::fiber::network::funding", "Funding transaction updated on our part: {}", tx_json);
-                }
-                state
-                    .send_command_to_channel(
-                        channel_id,
-                        ChannelCommand::TxCollaborationCommand(TxCollaborationCommand::TxUpdate(
-                            TxUpdateCommand {
-                                transaction: tx.data(),
-                            },
-                        )),
-                    )
+                self.do_update_channel_funding(&myself, state, channel_id, 0, transaction, request)
                     .await?
             }
             NetworkActorCommand::VerifyFundingTx {
@@ -1768,141 +1792,59 @@ where
             }
             NetworkActorCommand::SignFundingTx(
                 target,
-                ref channel_id,
+                channel_id,
                 funding_tx,
                 partial_witnesses,
             ) => {
-                let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
-
-                // Check if we have partial witnesses before moving them
-                let has_partial_witnesses = partial_witnesses.is_some();
-
-                // Prepare funding transaction with partial witnesses if provided
-                let funding_tx = match partial_witnesses {
-                    Some(partial_witnesses) => {
-                        debug!(
-                            "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
-                            &funding_tx,
-                            partial_witnesses
-                                .iter()
-                                .map(hex::encode)
-                                .collect::<Vec<_>>()
-                        );
-                        funding_tx
-                            .into_view()
-                            .as_advanced_builder()
-                            .set_witnesses(
-                                partial_witnesses.into_iter().map(|x| x.pack()).collect(),
-                            )
-                            .build()
-                    }
-                    None => {
-                        debug!(
-                            "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
-                            &funding_tx,
-                        );
-                        funding_tx.into_view()
-                    }
-                };
-
-                // Sign the funding transaction
-                let mut signed_funding_tx = match call_t!(
-                    self.chain_actor,
-                    CkbChainMessage::Sign,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    funding_tx.into()
-                )
-                .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-                {
-                    Ok(funding_tx) => funding_tx,
-                    Err(err) => {
-                        error!("Failed to sign funding transaction: {}", err);
-                        // Send TxAbort message to peer
-                        let abort_msg = FiberMessageWithTarget {
-                            target,
-                            message: FiberMessage::ChannelNormalOperation(
-                                FiberChannelMessage::TxAbort(TxAbort {
-                                    channel_id: *channel_id,
-                                    message: format!("Failed to sign funding transaction: {}", err)
-                                        .as_bytes()
-                                        .to_vec(),
-                                }),
-                            ),
-                        };
-                        myself
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(abort_msg),
-                            ))
-                            .expect("network actor alive");
-                        // Abort funding and close the channel
-                        state.abort_funding(Either::Left(*channel_id)).await;
-                        return Ok(());
-                    }
-                };
-                debug!("Funding transaction signed: {:?}", &signed_funding_tx);
-
-                // Extract signed transaction and witnesses
-                let funding_tx = signed_funding_tx.take().expect("take tx");
-                let witnesses = funding_tx.witnesses();
-
-                // If we received partial witnesses, the transaction is fully signed
-                // and we should notify that it's pending confirmation
-                if has_partial_witnesses {
-                    let outpoint = funding_tx
-                        .output_pts_iter()
-                        .next()
-                        .expect("funding tx output exists");
-
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::FundingTransactionPending(
-                                funding_tx.data(),
-                                outpoint,
-                                *channel_id,
-                            ),
-                        ))
-                        .expect("network actor alive");
-                    debug!("Fully signed funding tx {:?}", &funding_tx);
-                } else {
-                    debug!("Partially signed funding tx {:?}", &funding_tx);
-                }
-
-                // Create the message to send to peer
-                let msg = FiberMessageWithTarget {
+                debug!(
+                    "Received SignFundingTx request for transaction {:?} (has_partial_witnesses={})",
+                    &funding_tx,
+                    partial_witnesses.is_some()
+                );
+                self.do_sign_funding_tx(
+                    &myself,
+                    state,
+                    channel_id,
+                    0,
                     target,
-                    message: FiberMessage::ChannelNormalOperation(
-                        FiberChannelMessage::TxSignatures(TxSignatures {
-                            channel_id: *channel_id,
-                            witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                        }),
-                    ),
-                };
-
-                // Before sending the signatures to the peer, start tracing the tx
-                // It should be the first time to trace the tx
-                state
-                    .trace_tx(tx_hash, InFlightCkbTxKind::Funding(*channel_id))
-                    .await?;
-
-                // Notify channel actor to save the signatures
-                if let Err(err) = state
-                    .send_command_to_channel(
-                        *channel_id,
-                        ChannelCommand::FundingTxSigned(funding_tx.data()),
-                    )
-                    .await
-                {
-                    error!(
-                        "Failed to update signed funding tx {:?}: {}",
-                        channel_id, err
-                    );
-                }
-
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(msg),
-                    ))
-                    .expect("network actor alive");
+                    funding_tx,
+                    partial_witnesses,
+                )
+                .await?
+            }
+            NetworkActorCommand::RetryUpdateChannelFunding(
+                channel_id,
+                transaction,
+                request,
+                retry_count,
+            ) => {
+                self.do_update_channel_funding(
+                    &myself,
+                    state,
+                    channel_id,
+                    retry_count,
+                    transaction,
+                    request,
+                )
+                .await?
+            }
+            NetworkActorCommand::RetrySignFundingTx(
+                target,
+                channel_id,
+                funding_tx,
+                partial_witnesses,
+                retry_count,
+            ) => {
+                self.do_sign_funding_tx(
+                    &myself,
+                    state,
+                    channel_id,
+                    retry_count,
+                    target,
+                    funding_tx,
+                    partial_witnesses,
+                )
+                .await?
             }
             NetworkActorCommand::CheckChannelShutdown(channel_id, rpc_reply) => {
                 if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
@@ -2858,6 +2800,213 @@ where
             .build_path(source, command)?;
 
         Ok(PaymentRouter { router_hops })
+    }
+
+    /// Core logic for funding a channel transaction and sending the TxUpdate.
+    /// Used by both `UpdateChannelFunding` (retry_count=0) and
+    /// `RetryUpdateChannelFunding` (retry_count>0).
+    async fn do_update_channel_funding(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S, C>,
+        channel_id: Hash256,
+        retry_count: u32,
+        transaction: Transaction,
+        request: FundingRequest,
+    ) -> crate::Result<()> {
+        let tx_for_retry = transaction.clone();
+        let request_for_retry = request.clone();
+        let old_tx = transaction.into_view();
+        let mut tx = FundingTx::new();
+        tx.update_for_self(old_tx);
+        let tx = match self.fund(tx, request).await {
+            Ok(tx) => match tx.into_inner() {
+                Some(tx) => tx,
+                _ => {
+                    error!("Obtained empty funding tx (attempt {})", retry_count + 1);
+                    return Ok(());
+                }
+            },
+            Err(err) => {
+                let should_abort = schedule_funding_retry(
+                    myself,
+                    &err,
+                    retry_count,
+                    channel_id,
+                    "fund channel",
+                    move |next| {
+                        NetworkActorCommand::RetryUpdateChannelFunding(
+                            channel_id,
+                            tx_for_retry,
+                            request_for_retry,
+                            next,
+                        )
+                    },
+                );
+                if should_abort {
+                    state.abort_funding(Either::Left(channel_id)).await;
+                }
+                return Ok(());
+            }
+        };
+        if tracing::enabled!(target: "fnn::fiber::network::funding", tracing::Level::DEBUG) {
+            let tx_json: ckb_jsonrpc_types::Transaction = tx.data().into();
+            let tx_json = serde_json::to_string(&tx_json).unwrap_or_default();
+            debug!(target: "fnn::fiber::network::funding", "Funding transaction updated on our part (attempt {}/{}): {}", retry_count + 1, FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, tx_json);
+        }
+        state
+            .send_command_to_channel(
+                channel_id,
+                ChannelCommand::TxCollaborationCommand(TxCollaborationCommand::TxUpdate(
+                    TxUpdateCommand {
+                        transaction: tx.data(),
+                    },
+                )),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Core logic for signing a funding transaction and sending TxSignatures.
+    /// Used by both `SignFundingTx` (retry_count=0) and
+    /// `RetrySignFundingTx` (retry_count>0).
+    #[allow(clippy::too_many_arguments)]
+    async fn do_sign_funding_tx(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S, C>,
+        channel_id: Hash256,
+        retry_count: u32,
+        target: Pubkey,
+        funding_tx: Transaction,
+        partial_witnesses: Option<Vec<Vec<u8>>>,
+    ) -> crate::Result<()> {
+        let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
+        let has_partial_witnesses = partial_witnesses.is_some();
+
+        let funding_tx_for_retry = funding_tx.clone();
+        let partial_witnesses_for_retry = partial_witnesses.clone();
+
+        let funding_tx = match partial_witnesses {
+            Some(partial_witnesses) => funding_tx
+                .into_view()
+                .as_advanced_builder()
+                .set_witnesses(partial_witnesses.into_iter().map(|x| x.pack()).collect())
+                .build(),
+            None => funding_tx.into_view(),
+        };
+
+        let mut signed_funding_tx = match call_t!(
+            self.chain_actor,
+            CkbChainMessage::Sign,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            funding_tx.into()
+        )
+        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+        {
+            Ok(funding_tx) => funding_tx,
+            Err(err) => {
+                let should_abort = schedule_funding_retry(
+                    myself,
+                    &err,
+                    retry_count,
+                    channel_id,
+                    "sign funding transaction",
+                    move |next| {
+                        NetworkActorCommand::RetrySignFundingTx(
+                            target,
+                            channel_id,
+                            funding_tx_for_retry,
+                            partial_witnesses_for_retry,
+                            next,
+                        )
+                    },
+                );
+                if should_abort {
+                    let abort_msg = FiberMessageWithTarget {
+                        target,
+                        message: FiberMessage::ChannelNormalOperation(
+                            FiberChannelMessage::TxAbort(TxAbort {
+                                channel_id,
+                                message: format!("Failed to sign funding transaction: {}", err)
+                                    .as_bytes()
+                                    .to_vec(),
+                            }),
+                        ),
+                    };
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(abort_msg),
+                        ))
+                        .expect("network actor alive");
+                    state.abort_funding(Either::Left(channel_id)).await;
+                }
+                return Ok(());
+            }
+        };
+        debug!(
+            "Funding transaction signed (attempt {}/{}): {:?}",
+            retry_count + 1,
+            FUNDING_RETRY_MAX_TOTAL_ATTEMPTS,
+            &signed_funding_tx
+        );
+
+        let funding_tx = signed_funding_tx.take().expect("take tx");
+        let witnesses = funding_tx.witnesses();
+
+        if has_partial_witnesses {
+            let outpoint = funding_tx
+                .output_pts_iter()
+                .next()
+                .expect("funding tx output exists");
+
+            myself
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::FundingTransactionPending(
+                        funding_tx.data(),
+                        outpoint,
+                        channel_id,
+                    ),
+                ))
+                .expect("network actor alive");
+            debug!("Fully signed funding tx {:?}", &funding_tx);
+        } else {
+            debug!("Partially signed funding tx {:?}", &funding_tx);
+        }
+
+        let msg = FiberMessageWithTarget {
+            target,
+            message: FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(
+                TxSignatures {
+                    channel_id,
+                    witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
+                },
+            )),
+        };
+
+        state
+            .trace_tx(tx_hash, InFlightCkbTxKind::Funding(channel_id))
+            .await?;
+
+        if let Err(err) = state
+            .send_command_to_channel(
+                channel_id,
+                ChannelCommand::FundingTxSigned(funding_tx.data()),
+            )
+            .await
+        {
+            error!(
+                "Failed to update signed funding tx {:?}: {}",
+                channel_id, err
+            );
+        }
+
+        myself
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(msg),
+            ))
+            .expect("network actor alive");
+        Ok(())
     }
 
     async fn fund(
