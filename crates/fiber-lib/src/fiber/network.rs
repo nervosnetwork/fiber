@@ -4442,9 +4442,11 @@ where
             )));
         }
         debug_event!(_myself, "PeerInit");
-        for channel_id in self.store.get_active_channel_ids_by_pubkey(&peer_pubkey) {
-            if let Err(e) = self.reestablish_channel(peer_pubkey, channel_id).await {
-                error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
+        if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey).cloned() {
+            for channel_id in channels {
+                if let Err(e) = self.reestablish_channel(peer_pubkey, channel_id).await {
+                    error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
+                }
             }
         }
 
