@@ -124,3 +124,4 @@ jobs:
         with:
           name: e2e-test-${{ env.SAFE_WORKFLOW_NAME }}-${{ hashFiles('matrix.json') }}-logs
           path: tests/nodes/*.log
+
