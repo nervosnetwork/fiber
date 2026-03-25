@@ -1,4 +1,4 @@
-use super::super::{signer::LocalSigner, FundingError};
+use super::super::FundingError;
 use crate::ckb::{
     config::{new_ckb_rpc_async_client, new_default_cell_collector},
     contracts::get_udt_cell_deps,
@@ -149,7 +149,6 @@ pub struct FundingRequest {
 // TODO: trace locked cells
 #[derive(Clone, Debug)]
 pub struct FundingContext {
-    pub signer: LocalSigner,
     pub rpc_url: String,
     pub funding_source_lock_script: packed::Script,
     pub funding_cell_lock_script: packed::Script,

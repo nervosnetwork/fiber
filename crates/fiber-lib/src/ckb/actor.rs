@@ -234,7 +234,6 @@ impl Actor for CkbChainActor {
 impl CkbChainState {
     fn build_funding_context(&self, funding_cell_lock_script: packed::Script) -> FundingContext {
         FundingContext {
-            signer: self.signer.clone(),
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
             funding_cell_lock_script,
