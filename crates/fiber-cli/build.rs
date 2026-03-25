@@ -244,7 +244,7 @@ fn infer_parse_mode(type_name: &str, serde_enums: &HashSet<String>) -> &'static 
         "EpochNumberWithFraction" | "JsonBytes" => "json_quoted",
 
         // Complex types that need JSON parsing
-        "Script" | "OutPoint" => "json",
+        "Script" | "OutPoint" | "ForwardingHistoryAsset" | "PaymentHistoryAsset" => "json",
         "Vec" => "json",
 
         // Check if the type is a known serde enum from the source files

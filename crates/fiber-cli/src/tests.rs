@@ -1372,6 +1372,7 @@ mod info_fee_cli_tests {
         assert!(params.end_time.is_none());
         assert!(params.limit.is_none());
         assert!(params.after.is_none());
+        assert!(params.asset.is_none());
         assert!(params.udt_type_script.is_none());
     }
 
@@ -1409,6 +1410,35 @@ mod info_fee_cli_tests {
     }
 
     #[test]
+    fn test_forwarding_history_with_ckb_asset_filter() {
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &["test", "--asset", r#"{"asset_type":"ckb"}"#],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.asset, Some(ForwardingHistoryAsset::Ckb));
+        assert!(params.udt_type_script.is_none());
+    }
+
+    #[test]
+    fn test_forwarding_history_with_udt_asset_filter() {
+        let matches = parse_args(
+            ForwardingHistoryParams::augment_command,
+            &[
+                "test",
+                "--asset",
+                r#"{"asset_type":"udt","udt_type_script":{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}}"#,
+            ],
+        );
+        let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
+        assert!(matches!(
+            params.asset,
+            Some(ForwardingHistoryAsset::Udt { .. })
+        ));
+        assert!(params.udt_type_script.is_none());
+    }
+
+    #[test]
     fn test_forwarding_history_all_params() {
         let script_json = r#"{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}"#;
         let matches = parse_args(
@@ -1433,6 +1463,91 @@ mod info_fee_cli_tests {
         assert_eq!(params.limit, Some(25));
         assert!(params.after.is_some());
         assert!(params.udt_type_script.is_some());
+    }
+
+    #[test]
+    fn test_payment_history_no_args() {
+        let matches = parse_args(PaymentHistoryParams::augment_command, &["test"]);
+        let params = PaymentHistoryParams::from_arg_matches(&matches).unwrap();
+        assert!(params.start_time.is_none());
+        assert!(params.end_time.is_none());
+        assert!(params.limit.is_none());
+        assert!(params.after.is_none());
+        assert!(params.asset.is_none());
+        assert!(params.event_type.is_none());
+        assert!(params.udt_type_script.is_none());
+    }
+
+    #[test]
+    fn test_payment_history_with_pagination() {
+        let matches = parse_args(
+            PaymentHistoryParams::augment_command,
+            &["test", "--limit", "50", "--after", "0xdeadbeef"],
+        );
+        let params = PaymentHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.limit, Some(50));
+        assert!(params.after.is_some());
+    }
+
+    #[test]
+    fn test_payment_history_with_ckb_asset_filter() {
+        let matches = parse_args(
+            PaymentHistoryParams::augment_command,
+            &["test", "--asset", r#"{"asset_type":"ckb"}"#],
+        );
+        let params = PaymentHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.asset, Some(PaymentHistoryAsset::Ckb));
+        assert!(params.event_type.is_none());
+    }
+
+    #[test]
+    fn test_payment_history_with_udt_asset_filter_and_event_type() {
+        let matches = parse_args(
+            PaymentHistoryParams::augment_command,
+            &[
+                "test",
+                "--asset",
+                r#"{"asset_type":"udt","udt_type_script":{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}}"#,
+                "--event-type",
+                "send",
+            ],
+        );
+        let params = PaymentHistoryParams::from_arg_matches(&matches).unwrap();
+        assert!(matches!(
+            params.asset,
+            Some(PaymentHistoryAsset::Udt { .. })
+        ));
+        assert_eq!(params.event_type, Some(PaymentHistoryEventType::Send));
+        assert!(params.udt_type_script.is_none());
+    }
+
+    #[test]
+    fn test_payment_history_all_params() {
+        let matches = parse_args(
+            PaymentHistoryParams::augment_command,
+            &[
+                "test",
+                "--start-time",
+                "500",
+                "--end-time",
+                "9000",
+                "--limit",
+                "25",
+                "--after",
+                "0xaabbccdd",
+                "--asset",
+                r#"{"asset_type":"ckb"}"#,
+                "--event-type",
+                "receive",
+            ],
+        );
+        let params = PaymentHistoryParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.start_time, Some(500));
+        assert_eq!(params.end_time, Some(9000));
+        assert_eq!(params.limit, Some(25));
+        assert!(params.after.is_some());
+        assert_eq!(params.asset, Some(PaymentHistoryAsset::Ckb));
+        assert_eq!(params.event_type, Some(PaymentHistoryEventType::Receive));
     }
 }
 
