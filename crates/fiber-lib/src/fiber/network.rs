@@ -1280,8 +1280,9 @@ where
                     });
 
                 if let Some(reply) = reply {
-                    // Build the local unsigned tx with the original external funding builder
-                    // so funding source lock and funding cell lock can differ.
+                    // Build the local unsigned tx. External funding passes a custom funding
+                    // source lock and optional extra cell deps; the shared builder handles both
+                    // internal and external funding paths.
                     let request = FundingRequest {
                         script: funding_source_lock_script.clone(),
                         udt_type_script: funding_udt_type_script,

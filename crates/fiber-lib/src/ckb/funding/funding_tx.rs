@@ -151,20 +151,7 @@ pub struct FundingRequest {
 pub struct FundingContext {
     pub rpc_url: String,
     pub funding_source_lock_script: packed::Script,
-    pub funding_cell_lock_script: packed::Script,
-}
-
-/// Context for building unsigned funding transaction for external signing.
-/// Unlike FundingContext, this does not include the secret key since the user
-/// will sign the transaction externally with their own wallet.
-#[derive(Clone, Debug)]
-pub struct ExternalFundingContext {
-    pub rpc_url: String,
-    /// The lock script of the cells to use for funding (user's wallet lock script)
-    pub funding_source_lock_script: packed::Script,
-    /// Optional extra deps required by `funding_source_lock_script`.
     pub funding_source_lock_script_cell_deps: Vec<packed::CellDep>,
-    /// The lock script of the funding cell (channel multisig lock)
     pub funding_cell_lock_script: packed::Script,
 }
 
@@ -186,7 +173,6 @@ impl CellDepResolver for ExternalFundingCellDepResolver {
 }
 
 /// Collect UDT inputs and build change outputs for funding transactions.
-/// This is shared logic used by both FundingTxBuilder and ExternalFundingTxBuilder.
 async fn collect_udt_inputs_outputs(
     request: &FundingRequest,
     funding_source_lock_script: &packed::Script,
@@ -279,8 +265,6 @@ async fn collect_udt_inputs_outputs(
 }
 
 /// Build the funding transaction base from a pre-built funding cell.
-/// This is shared logic used by both FundingTxBuilder and ExternalFundingTxBuilder
-/// in their TxBuilder::build_base_async implementations.
 async fn build_base_from_funding_cell(
     funding_cell_output: packed::CellOutput,
     funding_cell_output_data: packed::Bytes,
@@ -338,7 +322,6 @@ async fn build_base_from_funding_cell(
 }
 
 /// Balance a funding transaction using CKB RPC, build and unlock it (with placeholder signatures).
-/// This is shared logic used by both FundingTxBuilder and ExternalFundingTxBuilder.
 async fn build_and_balance_tx<T: TxBuilder>(
     builder: &T,
     rpc_url: &str,
@@ -430,7 +413,6 @@ async fn build_and_balance_tx<T: TxBuilder>(
 }
 
 /// Finalize the funding transaction by updating FundingTx and the exclusion map.
-/// This is shared logic used by both FundingTxBuilder and ExternalFundingTxBuilder.
 fn finalize_funding_tx_update(
     funding_tx: FundingTx,
     tx: TransactionView,
@@ -444,6 +426,84 @@ fn finalize_funding_tx_update(
     }
     live_cells_exclusion_map.add_funding_tx(&funding_tx);
     funding_tx
+}
+
+fn build_funding_cell(
+    funding_tx: &FundingTx,
+    request: &FundingRequest,
+    funding_cell_lock_script: &packed::Script,
+) -> Result<(packed::CellOutput, packed::Bytes), FundingError> {
+    let remote_funded = funding_tx
+        .tx
+        .as_ref()
+        .map(|tx| !tx.outputs().is_empty())
+        .unwrap_or(false);
+
+    match request.udt_type_script {
+        Some(ref udt_type_script) => {
+            let mut udt_amount = request.local_amount;
+            let mut ckb_amount = request.local_reserved_ckb_amount;
+
+            if remote_funded {
+                udt_amount = udt_amount
+                    .checked_add(request.remote_amount)
+                    .ok_or(FundingError::OverflowError)?;
+                ckb_amount = ckb_amount
+                    .checked_add(request.remote_reserved_ckb_amount)
+                    .ok_or(FundingError::OverflowError)?;
+            }
+
+            let udt_output = packed::CellOutput::new_builder()
+                .capacity(Capacity::shannons(ckb_amount).pack())
+                .type_(Some(udt_type_script.clone()).pack())
+                .lock(funding_cell_lock_script.clone())
+                .build();
+            let mut data = BytesMut::with_capacity(16);
+            data.put(&udt_amount.to_le_bytes()[..]);
+
+            Ok((udt_output, data.freeze().pack()))
+        }
+        None => {
+            let local_amount =
+                u64::try_from(request.local_amount).map_err(|_| FundingError::OverflowError)?;
+            let mut ckb_amount = local_amount
+                .checked_add(request.local_reserved_ckb_amount)
+                .ok_or(FundingError::OverflowError)?;
+
+            if remote_funded {
+                let remote_amount = u64::try_from(request.remote_amount)
+                    .map_err(|_| FundingError::OverflowError)?;
+                ckb_amount = ckb_amount
+                    .checked_add(remote_amount)
+                    .and_then(|amount| amount.checked_add(request.remote_reserved_ckb_amount))
+                    .ok_or(FundingError::OverflowError)?;
+            }
+
+            let ckb_output = packed::CellOutput::new_builder()
+                .capacity(Capacity::shannons(ckb_amount).pack())
+                .lock(funding_cell_lock_script.clone())
+                .build();
+            Ok((ckb_output, packed::Bytes::default()))
+        }
+    }
+}
+
+fn with_extra_cell_deps(
+    tx: TransactionView,
+    funding_source_lock_script_cell_deps: &[packed::CellDep],
+) -> TransactionView {
+    if funding_source_lock_script_cell_deps.is_empty() {
+        return tx;
+    }
+
+    let mut cell_deps: Vec<_> = tx.cell_deps_iter().collect();
+    for cell_dep in funding_source_lock_script_cell_deps {
+        if !cell_deps.contains(cell_dep) {
+            cell_deps.push(cell_dep.clone());
+        }
+    }
+
+    tx.as_advanced_builder().set_cell_deps(cell_deps).build()
 }
 
 #[allow(dead_code)]
@@ -462,9 +522,12 @@ impl TxBuilder for FundingTxBuilder {
         _header_dep_resolver: &dyn HeaderDepResolver,
         _tx_dep_provider: &dyn TransactionDependencyProvider,
     ) -> Result<TransactionView, TxBuilderError> {
-        let (funding_cell_output, funding_cell_output_data) = self
-            .build_funding_cell()
-            .map_err(|err| TxBuilderError::Other(err.into()))?;
+        let (funding_cell_output, funding_cell_output_data) = build_funding_cell(
+            &self.funding_tx,
+            &self.request,
+            &self.context.funding_cell_lock_script,
+        )
+        .map_err(|err| TxBuilderError::Other(err.into()))?;
 
         build_base_from_funding_cell(
             funding_cell_output,
@@ -479,196 +542,6 @@ impl TxBuilder for FundingTxBuilder {
 }
 
 impl FundingTxBuilder {
-    fn build_funding_cell(&self) -> Result<(packed::CellOutput, packed::Bytes), FundingError> {
-        // If outputs is not empty, assume that the remote party has already funded.
-        let remote_funded = self
-            .funding_tx
-            .tx
-            .as_ref()
-            .map(|tx| !tx.outputs().is_empty())
-            .unwrap_or(false);
-
-        match self.request.udt_type_script {
-            Some(ref udt_type_script) => {
-                let mut udt_amount = self.request.local_amount;
-                let mut ckb_amount = self.request.local_reserved_ckb_amount;
-
-                // To make tx building easier, do not include the amount not funded yet in the
-                // funding cell.
-                if remote_funded {
-                    udt_amount = udt_amount
-                        .checked_add(self.request.remote_amount)
-                        .ok_or(FundingError::OverflowError)?;
-                    ckb_amount = ckb_amount
-                        .checked_add(self.request.remote_reserved_ckb_amount)
-                        .ok_or(FundingError::OverflowError)?;
-                }
-
-                let udt_output = packed::CellOutput::new_builder()
-                    .capacity(Capacity::shannons(ckb_amount).pack())
-                    .type_(Some(udt_type_script.clone()).pack())
-                    .lock(self.context.funding_cell_lock_script.clone())
-                    .build();
-                let mut data = BytesMut::with_capacity(16);
-                data.put(&udt_amount.to_le_bytes()[..]);
-
-                // TODO: xudt extension
-                Ok((udt_output, data.freeze().pack()))
-            }
-            None => {
-                let mut ckb_amount = (self.request.local_amount as u64)
-                    .checked_add(self.request.local_reserved_ckb_amount)
-                    .ok_or(FundingError::OverflowError)?;
-                if remote_funded {
-                    ckb_amount = ckb_amount
-                        .checked_add(
-                            self.request.remote_amount as u64
-                                + self.request.remote_reserved_ckb_amount,
-                        )
-                        .ok_or(FundingError::OverflowError)?;
-                }
-                let ckb_output = packed::CellOutput::new_builder()
-                    .capacity(Capacity::shannons(ckb_amount).pack())
-                    .lock(self.context.funding_cell_lock_script.clone())
-                    .build();
-                Ok((ckb_output, packed::Bytes::default()))
-            }
-        }
-    }
-
-    async fn build(
-        self,
-        live_cells_exclusion_map: &mut LiveCellsExclusionMap,
-    ) -> Result<FundingTx, FundingError> {
-        let tx = build_and_balance_tx(
-            &self,
-            &self.context.rpc_url,
-            &self.context.funding_source_lock_script,
-            &[],
-            self.request.funding_fee_rate,
-            live_cells_exclusion_map,
-        )
-        .await?;
-        debug!("final tx_builder: {:?}", tx.as_advanced_builder());
-        Ok(finalize_funding_tx_update(
-            self.funding_tx,
-            tx,
-            live_cells_exclusion_map,
-        ))
-    }
-}
-
-/// Builder for unsigned funding transactions for external signing.
-/// This is similar to FundingTxBuilder but does not sign the transaction.
-struct ExternalFundingTxBuilder {
-    funding_tx: FundingTx,
-    request: FundingRequest,
-    context: ExternalFundingContext,
-}
-
-#[async_trait::async_trait]
-impl TxBuilder for ExternalFundingTxBuilder {
-    async fn build_base_async(
-        &self,
-        cell_collector: &mut dyn CellCollector,
-        _cell_dep_resolver: &dyn CellDepResolver,
-        _header_dep_resolver: &dyn HeaderDepResolver,
-        _tx_dep_provider: &dyn TransactionDependencyProvider,
-    ) -> Result<TransactionView, TxBuilderError> {
-        let (funding_cell_output, funding_cell_output_data) = self
-            .build_funding_cell()
-            .map_err(|err| TxBuilderError::Other(err.into()))?;
-
-        build_base_from_funding_cell(
-            funding_cell_output,
-            funding_cell_output_data,
-            &self.funding_tx,
-            &self.request,
-            &self.context.funding_source_lock_script,
-            cell_collector,
-        )
-        .await
-    }
-}
-
-impl ExternalFundingTxBuilder {
-    fn with_extra_cell_deps(&self, tx: TransactionView) -> TransactionView {
-        if self.context.funding_source_lock_script_cell_deps.is_empty() {
-            return tx;
-        }
-
-        let mut cell_deps: Vec<_> = tx.cell_deps_iter().collect();
-        for cell_dep in &self.context.funding_source_lock_script_cell_deps {
-            if !cell_deps.contains(cell_dep) {
-                cell_deps.push(cell_dep.clone());
-            }
-        }
-
-        tx.as_advanced_builder().set_cell_deps(cell_deps).build()
-    }
-
-    fn build_funding_cell(&self) -> Result<(packed::CellOutput, packed::Bytes), FundingError> {
-        let remote_funded = self
-            .funding_tx
-            .tx
-            .as_ref()
-            .map(|tx| !tx.outputs().is_empty())
-            .unwrap_or(false);
-
-        match self.request.udt_type_script {
-            Some(ref udt_type_script) => {
-                let mut udt_amount = self.request.local_amount;
-                let mut ckb_amount = self.request.local_reserved_ckb_amount;
-
-                if remote_funded {
-                    udt_amount = udt_amount
-                        .checked_add(self.request.remote_amount)
-                        .ok_or(FundingError::OverflowError)?;
-                    ckb_amount = ckb_amount
-                        .checked_add(self.request.remote_reserved_ckb_amount)
-                        .ok_or(FundingError::OverflowError)?;
-                }
-
-                let udt_output = packed::CellOutput::new_builder()
-                    .capacity(Capacity::shannons(ckb_amount).pack())
-                    .type_(Some(udt_type_script.clone()).pack())
-                    .lock(self.context.funding_cell_lock_script.clone())
-                    .build();
-                let mut data = BytesMut::with_capacity(16);
-                data.put(&udt_amount.to_le_bytes()[..]);
-
-                // TODO: xudt extension
-                Ok((udt_output, data.freeze().pack()))
-            }
-            None => {
-                let local_amount = u64::try_from(self.request.local_amount)
-                    .map_err(|_| FundingError::OverflowError)?;
-                let mut ckb_amount = local_amount
-                    .checked_add(self.request.local_reserved_ckb_amount)
-                    .ok_or(FundingError::OverflowError)?;
-
-                if remote_funded {
-                    let remote_amount = u64::try_from(self.request.remote_amount)
-                        .map_err(|_| FundingError::OverflowError)?;
-                    ckb_amount = ckb_amount
-                        .checked_add(remote_amount)
-                        .and_then(|amount| {
-                            amount.checked_add(self.request.remote_reserved_ckb_amount)
-                        })
-                        .ok_or(FundingError::OverflowError)?;
-                }
-
-                let ckb_output = packed::CellOutput::new_builder()
-                    .capacity(Capacity::shannons(ckb_amount).pack())
-                    .lock(self.context.funding_cell_lock_script.clone())
-                    .build();
-                Ok((ckb_output, packed::Bytes::default()))
-            }
-        }
-    }
-
-    /// Build an unsigned funding transaction for external signing.
-    /// This collects cells, balances capacity, but does NOT sign the transaction.
     async fn build(
         self,
         live_cells_exclusion_map: &mut LiveCellsExclusionMap,
@@ -682,8 +555,8 @@ impl ExternalFundingTxBuilder {
             live_cells_exclusion_map,
         )
         .await?;
-        let tx = self.with_extra_cell_deps(tx);
-        debug!("built unsigned funding tx: {:?}", tx);
+        let tx = with_extra_cell_deps(tx, &self.context.funding_source_lock_script_cell_deps);
+        debug!("final tx_builder: {:?}", tx.as_advanced_builder());
         Ok(finalize_funding_tx_update(
             self.funding_tx,
             tx,
@@ -733,15 +606,11 @@ impl FundingTx {
     pub async fn build_unsigned_for_external_funding(
         self,
         request: FundingRequest,
-        context: ExternalFundingContext,
+        context: FundingContext,
         live_cells_exclusion_map: &mut LiveCellsExclusionMap,
     ) -> Result<Self, FundingError> {
-        let builder = ExternalFundingTxBuilder {
-            funding_tx: self,
-            request,
-            context,
-        };
-        builder.build(live_cells_exclusion_map).await
+        self.fulfill(request, context, live_cells_exclusion_map)
+            .await
     }
 
     pub async fn sign(
@@ -964,10 +833,9 @@ impl FundingTx {
 mod tests {
     use super::*;
 
-    /// Build a dummy ExternalFundingContext for unit tests.
-    fn dummy_external_context() -> ExternalFundingContext {
+    fn dummy_funding_context() -> FundingContext {
         let script = Script::default();
-        ExternalFundingContext {
+        FundingContext {
             rpc_url: String::new(),
             funding_source_lock_script: script.clone(),
             funding_source_lock_script_cell_deps: Vec::new(),
@@ -977,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_external_funding_build_ckb_funding_cell() {
-        let context = dummy_external_context();
+        let context = dummy_funding_context();
         let request = FundingRequest {
             script: Script::default(),
             udt_type_script: None,
@@ -988,13 +856,12 @@ mod tests {
             remote_reserved_ckb_amount: 6_200_000_000,
         };
 
-        let builder = ExternalFundingTxBuilder {
-            funding_tx: FundingTx::new(),
-            request: request.clone(),
-            context: context.clone(),
-        };
-
-        let (output, data) = builder.build_funding_cell().expect("build funding cell");
+        let (output, data) = build_funding_cell(
+            &FundingTx::new(),
+            &request,
+            &context.funding_cell_lock_script,
+        )
+        .expect("build funding cell");
 
         // First round only includes the local contribution. The remote contribution is added
         // later during tx collaboration.
@@ -1015,7 +882,7 @@ mod tests {
 
     #[test]
     fn test_external_funding_build_udt_funding_cell() {
-        let context = dummy_external_context();
+        let context = dummy_funding_context();
         let udt_type_script = Script::new_builder()
             .code_hash(packed::Byte32::from_slice(&[1u8; 32]).unwrap())
             .hash_type(packed::Byte::new(0))
@@ -1031,13 +898,12 @@ mod tests {
             remote_reserved_ckb_amount: 14_200_000_000,
         };
 
-        let builder = ExternalFundingTxBuilder {
-            funding_tx: FundingTx::new(),
-            request: request.clone(),
-            context: context.clone(),
-        };
-
-        let (output, data) = builder.build_funding_cell().expect("build funding cell");
+        let (output, data) = build_funding_cell(
+            &FundingTx::new(),
+            &request,
+            &context.funding_cell_lock_script,
+        )
+        .expect("build funding cell");
 
         // First round only includes the local reserved capacity.
         let expected_capacity = request.local_reserved_ckb_amount;
@@ -1064,7 +930,7 @@ mod tests {
 
     #[test]
     fn test_external_funding_build_ckb_funding_cell_after_remote_added() {
-        let context = dummy_external_context();
+        let context = dummy_funding_context();
         let request = FundingRequest {
             script: Script::default(),
             udt_type_script: None,
@@ -1086,13 +952,10 @@ mod tests {
             .set_outputs(vec![existing_funding_output])
             .set_outputs_data(vec![packed::Bytes::default()])
             .build();
-        let builder = ExternalFundingTxBuilder {
-            funding_tx: existing_tx.into(),
-            request: request.clone(),
-            context: context.clone(),
-        };
-
-        let (output, data) = builder.build_funding_cell().expect("build funding cell");
+        let funding_tx: FundingTx = existing_tx.into();
+        let (output, data) =
+            build_funding_cell(&funding_tx, &request, &context.funding_cell_lock_script)
+                .expect("build funding cell");
         let expected_capacity: u64 = request.local_amount as u64
             + request.remote_amount as u64
             + request.local_reserved_ckb_amount
@@ -1105,7 +968,7 @@ mod tests {
 
     #[test]
     fn test_external_funding_build_udt_funding_cell_after_remote_added() {
-        let context = dummy_external_context();
+        let context = dummy_funding_context();
         let udt_type_script = Script::new_builder()
             .code_hash(packed::Byte32::from_slice(&[1u8; 32]).unwrap())
             .hash_type(packed::Byte::new(0))
@@ -1129,13 +992,10 @@ mod tests {
             .set_outputs(vec![existing_funding_output])
             .set_outputs_data(vec![request.local_amount.to_le_bytes().to_vec().pack()])
             .build();
-        let builder = ExternalFundingTxBuilder {
-            funding_tx: existing_tx.into(),
-            request: request.clone(),
-            context,
-        };
-
-        let (output, data) = builder.build_funding_cell().expect("build funding cell");
+        let funding_tx: FundingTx = existing_tx.into();
+        let (output, data) =
+            build_funding_cell(&funding_tx, &request, &context.funding_cell_lock_script)
+                .expect("build funding cell");
         let expected_capacity =
             request.local_reserved_ckb_amount + request.remote_reserved_ckb_amount;
         let actual_capacity: u64 = output.capacity().unpack();
@@ -1157,7 +1017,7 @@ mod tests {
 
     #[test]
     fn test_external_funding_build_funding_cell_overflow() {
-        let context = dummy_external_context();
+        let context = dummy_funding_context();
 
         // Create a request where amounts overflow u64
         let request = FundingRequest {
@@ -1170,13 +1030,11 @@ mod tests {
             remote_reserved_ckb_amount: u64::MAX,
         };
 
-        let builder = ExternalFundingTxBuilder {
-            funding_tx: FundingTx::new(),
-            request,
-            context,
-        };
-
-        let result = builder.build_funding_cell();
+        let result = build_funding_cell(
+            &FundingTx::new(),
+            &request,
+            &context.funding_cell_lock_script,
+        );
         assert!(result.is_err(), "should overflow");
         match result {
             Err(FundingError::OverflowError) => {} // expected
@@ -1186,7 +1044,7 @@ mod tests {
 
     #[test]
     fn test_external_funding_build_udt_funding_cell_overflow() {
-        let context = dummy_external_context();
+        let context = dummy_funding_context();
         let udt_type_script = Script::new_builder()
             .code_hash(packed::Byte32::from_slice(&[1u8; 32]).unwrap())
             .hash_type(packed::Byte::new(0))
@@ -1213,13 +1071,8 @@ mod tests {
             .set_outputs_data(vec![request.local_amount.to_le_bytes().to_vec().pack()])
             .build();
 
-        let builder = ExternalFundingTxBuilder {
-            funding_tx: existing_tx.into(),
-            request,
-            context,
-        };
-
-        let result = builder.build_funding_cell();
+        let funding_tx: FundingTx = existing_tx.into();
+        let result = build_funding_cell(&funding_tx, &request, &context.funding_cell_lock_script);
         assert!(result.is_err(), "should overflow");
         match result {
             Err(FundingError::OverflowError) => {} // expected
@@ -1229,7 +1082,7 @@ mod tests {
 
     #[test]
     fn test_external_funding_build_ckb_funding_cell_amount_cast_overflow() {
-        let context = dummy_external_context();
+        let context = dummy_funding_context();
         let request = FundingRequest {
             script: Script::default(),
             udt_type_script: None,
@@ -1240,13 +1093,11 @@ mod tests {
             remote_reserved_ckb_amount: 0,
         };
 
-        let builder = ExternalFundingTxBuilder {
-            funding_tx: FundingTx::new(),
-            request,
-            context,
-        };
-
-        let result = builder.build_funding_cell();
+        let result = build_funding_cell(
+            &FundingTx::new(),
+            &request,
+            &context.funding_cell_lock_script,
+        );
         match result {
             Err(FundingError::OverflowError) => {}
             other => panic!("expected OverflowError, got {:?}", other),

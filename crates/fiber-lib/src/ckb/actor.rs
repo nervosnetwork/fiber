@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 use super::{
-    funding::{ExternalFundingContext, FundingContext, LiveCellsExclusionMap},
+    funding::{FundingContext, LiveCellsExclusionMap},
     signer::LocalSigner,
     tx_tracing_actor::{
         CkbTxTracer, CkbTxTracingActor, CkbTxTracingArguments, CkbTxTracingMessage,
@@ -149,7 +149,7 @@ impl Actor for CkbChainActor {
                 funding_cell_lock_script,
                 reply,
             } => {
-                let context = ExternalFundingContext {
+                let context = FundingContext {
                     rpc_url: state.config.rpc_url.clone(),
                     funding_source_lock_script,
                     funding_source_lock_script_cell_deps,
@@ -269,6 +269,7 @@ impl CkbChainState {
         FundingContext {
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
+            funding_source_lock_script_cell_deps: Vec::new(),
             funding_cell_lock_script,
         }
     }
