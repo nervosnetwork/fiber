@@ -2,7 +2,7 @@
 
 use crate::schema_helpers::*;
 use crate::serde_utils::{Hash256, U128Hex, U64Hex};
-use ckb_jsonrpc_types::Script;
+use ckb_jsonrpc_types::{JsonBytes, Script};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -74,6 +74,38 @@ pub struct FeeReportParams {
 /// Parameters for the `forwarding_history` RPC method.
 ///
 /// Queries individual forwarding events with time range and pagination.
+/// Uses cursor-based pagination: pass `last_cursor` from a previous response
+/// as `after` to fetch the next page.
+/// Asset selector for `forwarding_history`.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "asset_type")]
+pub enum ForwardingHistoryAsset {
+    /// Match native CKB forwarding events only.
+    Ckb,
+    /// Match forwarding events for the specified UDT type script.
+    Udt { udt_type_script: Script },
+}
+
+/// Asset selector for `payment_history`.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "asset_type")]
+pub enum PaymentHistoryAsset {
+    /// Match native CKB payment events only.
+    Ckb,
+    /// Match payment events for the specified UDT type script.
+    Udt { udt_type_script: Script },
+}
+
+/// Payment direction filter for `payment_history`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentHistoryEventType {
+    /// Match outgoing payment events.
+    Send,
+    /// Match incoming payment events.
+    Receive,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
 pub struct ForwardingHistoryParams {
@@ -89,12 +121,14 @@ pub struct ForwardingHistoryParams {
     #[serde_as(as = "Option<U64Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub limit: Option<u64>,
-    /// Number of events to skip (for pagination). Default is 0.
-    #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "schema_as_uint_hex_optional")]
-    pub offset: Option<u64>,
-    /// Filter by UDT type script. If set, only events for this specific UDT are returned.
-    /// Use `null` or omit to return events for all asset types.
+    /// Opaque cursor for pagination. Pass the `last_cursor` value from a previous
+    /// response to retrieve the next page of results. Omit or set to `null` to
+    /// start from the beginning.
+    pub after: Option<JsonBytes>,
+    /// Filter by asset. Omit or set to `null` to return events for all asset types.
+    pub asset: Option<ForwardingHistoryAsset>,
+    /// Deprecated compatibility field for filtering by a specific UDT type script.
+    /// Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
     pub udt_type_script: Option<Script>,
 }
 
@@ -138,6 +172,10 @@ pub struct ForwardingHistoryResult {
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub total_count: u64,
+    /// Opaque cursor pointing past the last event in this page.
+    /// Pass this value as `after` in the next request to fetch the next page.
+    /// `null` means there are no more results.
+    pub last_cursor: Option<JsonBytes>,
 }
 
 /// Payment amount summary for a single asset type (CKB or a specific UDT).
@@ -197,6 +235,8 @@ pub struct ReceivedPaymentReportResult {
 /// Parameters for the `payment_history` RPC method.
 ///
 /// Queries individual send/receive payment events with time range and pagination.
+/// Uses cursor-based pagination: pass `last_cursor` from a previous response
+/// as `after` to fetch the next page.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
 pub struct PaymentHistoryParams {
@@ -212,11 +252,16 @@ pub struct PaymentHistoryParams {
     #[serde_as(as = "Option<U64Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub limit: Option<u64>,
-    /// Number of events to skip (for pagination). Default is 0.
-    #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "schema_as_uint_hex_optional")]
-    pub offset: Option<u64>,
-    /// Filter by UDT type script.
+    /// Opaque cursor for pagination. Pass the `last_cursor` value from a previous
+    /// response to retrieve the next page of results. Omit or set to `null` to
+    /// start from the beginning.
+    pub after: Option<JsonBytes>,
+    /// Filter by asset. Omit or set to `null` to return events for all asset types.
+    pub asset: Option<PaymentHistoryAsset>,
+    /// Optional filter by payment event type.
+    pub event_type: Option<PaymentHistoryEventType>,
+    /// Deprecated compatibility field for filtering by a specific UDT type script.
+    /// Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
     pub udt_type_script: Option<Script>,
 }
 
@@ -256,4 +301,8 @@ pub struct PaymentHistoryResult {
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub total_count: u64,
+    /// Opaque cursor pointing past the last event in this page.
+    /// Pass this value as `after` in the next request to fetch the next page.
+    /// `null` means there are no more results.
+    pub last_cursor: Option<JsonBytes>,
 }

@@ -1,8 +1,12 @@
 use crate::ckb::CkbConfig;
-use crate::fiber::channel::PaymentEventStore;
+use crate::fiber::channel::{
+    AssetSelector, ForwardingHistoryCursor, ForwardingHistoryQuery, PaymentEventStore,
+    PaymentHistoryCursor, PaymentHistoryQuery,
+};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-use crate::{handle_actor_call, log_and_error, now_timestamp_as_millis_u64};
-use ckb_jsonrpc_types::Script;
+use crate::log_and_error;
+use crate::{handle_actor_call, now_timestamp_as_millis_u64};
+use ckb_jsonrpc_types::{JsonBytes, Script};
 use ckb_types::prelude::Entity;
 use fiber_types::PaymentEventType;
 #[cfg(not(target_arch = "wasm32"))]
@@ -15,15 +19,18 @@ use ractor::{call, ActorRef};
 
 pub use fiber_json_types::{
     AssetFeeReport, AssetPaymentReport, FeeReportParams, FeeReportResult, ForwardingEventInfo,
-    ForwardingHistoryParams, ForwardingHistoryResult, NodeInfoResult, PaymentEventInfo,
-    PaymentHistoryParams, PaymentHistoryResult, ReceivedPaymentReportResult,
-    SentPaymentReportResult,
+    ForwardingHistoryAsset, ForwardingHistoryParams, ForwardingHistoryResult, NodeInfoResult,
+    PaymentEventInfo, PaymentHistoryAsset, PaymentHistoryEventType, PaymentHistoryParams,
+    PaymentHistoryResult, ReceivedPaymentReportResult, SentPaymentReportResult,
 };
 
 const DEFAULT_FORWARDING_HISTORY_LIMIT: u64 = 100;
 const DEFAULT_PAYMENT_HISTORY_LIMIT: u64 = 100;
 const MAX_FORWARDING_HISTORY_LIMIT: u64 = 10000;
 const MAX_PAYMENT_HISTORY_LIMIT: u64 = 10000;
+/// Batch size for streaming full-table scans in report RPCs.
+/// Large enough to amortize RocksDB overhead; small enough to bound memory per batch.
+const REPORT_BATCH_SIZE: usize = 1000;
 pub(crate) const MILLIS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 pub(crate) const MILLIS_PER_WEEK: u64 = 7 * MILLIS_PER_DAY;
 pub(crate) const MILLIS_PER_MONTH: u64 = 30 * MILLIS_PER_DAY;
@@ -232,29 +239,43 @@ pub fn fee_report_impl(
     let day_ago = now.saturating_sub(MILLIS_PER_DAY);
     let week_ago = now.saturating_sub(MILLIS_PER_WEEK);
 
-    let events = store.get_forwarding_events(start_time, end_time, usize::MAX, 0);
-
-    // Group by asset type
+    // Stream events in batches to avoid loading the entire time window into memory at once.
     let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, AssetAccum)> =
         BTreeMap::new();
+    let mut cursor: Option<ForwardingHistoryCursor> = None;
+    loop {
+        let (batch, next_cursor) = store
+            .query_forwarding_events(ForwardingHistoryQuery {
+                asset: AssetSelector::All,
+                start_time,
+                end_time,
+                limit: REPORT_BATCH_SIZE,
+                after: cursor,
+            })
+            .map_err(crate::rpc::utils::rpc_error_no_data)?;
+        let done = next_cursor.is_none() || batch.is_empty();
+        for event in &batch {
+            let key = asset_key(&event.udt_type_script);
+            let entry = accums
+                .entry(key)
+                .or_insert_with(|| (event.udt_type_script.clone(), AssetAccum::default()));
+            let accum = &mut entry.1;
 
-    for event in &events {
-        let key = asset_key(&event.udt_type_script);
-        let entry = accums
-            .entry(key)
-            .or_insert_with(|| (event.udt_type_script.clone(), AssetAccum::default()));
-        let accum = &mut entry.1;
-
-        accum.monthly_fee_sum = accum.monthly_fee_sum.saturating_add(event.fee);
-        accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
-        if event.timestamp >= week_ago {
-            accum.weekly_fee_sum = accum.weekly_fee_sum.saturating_add(event.fee);
-            accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+            accum.monthly_fee_sum = accum.monthly_fee_sum.saturating_add(event.fee);
+            accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
+            if event.timestamp >= week_ago {
+                accum.weekly_fee_sum = accum.weekly_fee_sum.saturating_add(event.fee);
+                accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+            }
+            if event.timestamp >= day_ago {
+                accum.daily_fee_sum = accum.daily_fee_sum.saturating_add(event.fee);
+                accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+            }
         }
-        if event.timestamp >= day_ago {
-            accum.daily_fee_sum = accum.daily_fee_sum.saturating_add(event.fee);
-            accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+        if done {
+            break;
         }
+        cursor = next_cursor;
     }
 
     let asset_reports = accums
@@ -282,7 +303,6 @@ pub fn forwarding_history_impl(
     let start_time = params.start_time.unwrap_or(0);
     let end_time = params.end_time.unwrap_or(now);
     let limit = params.limit.unwrap_or(DEFAULT_FORWARDING_HISTORY_LIMIT) as usize;
-    let offset = params.offset.unwrap_or(0) as usize;
 
     if limit > MAX_FORWARDING_HISTORY_LIMIT as usize {
         return Err(ErrorObjectOwned::owned(
@@ -296,25 +316,28 @@ pub fn forwarding_history_impl(
         ));
     }
 
-    // Convert the optional RPC Script filter to packed::Script for comparison
-    let udt_filter: Option<Option<ckb_types::packed::Script>> =
-        params.udt_type_script.map(|s| Some(s.into()));
+    let asset = forwarding_history_asset_selector(&params)?;
+    let after_cursor = params
+        .after
+        .as_ref()
+        .map(|bytes| ForwardingHistoryCursor::from_bytes(bytes.as_bytes()))
+        .transpose()
+        .map_err(|err| ErrorObjectOwned::owned(INVALID_PARAMS_CODE, err, Some(&params)))?;
 
-    // Fetch enough events to cover offset + limit
-    let fetch_limit = offset.saturating_add(limit);
-    let events = store.get_forwarding_events(start_time, end_time, fetch_limit, 0);
-    let filtered: Vec<_> = events
-        .into_iter()
-        .filter(|e| match &udt_filter {
-            None => true, // no filter, return all
-            Some(script) => &e.udt_type_script == script,
-        })
-        .skip(offset)
-        .take(limit)
-        .collect();
+    let query = ForwardingHistoryQuery {
+        asset,
+        start_time,
+        end_time,
+        limit,
+        after: after_cursor,
+    };
+    let (events, store_cursor) = store
+        .query_forwarding_events(query)
+        .map_err(|err| ErrorObjectOwned::owned(INVALID_PARAMS_CODE, err, Some(&params)))?;
 
-    let total_count = filtered.len() as u64;
-    let events = filtered
+    let total_count = events.len() as u64;
+    let last_cursor = store_cursor.map(|cursor| JsonBytes::from_vec(cursor.to_bytes()));
+    let events = events
         .into_iter()
         .map(|e| ForwardingEventInfo {
             timestamp: e.timestamp,
@@ -331,7 +354,33 @@ pub fn forwarding_history_impl(
     Ok(ForwardingHistoryResult {
         events,
         total_count,
+        last_cursor,
     })
+}
+
+fn forwarding_history_asset_selector(
+    params: &ForwardingHistoryParams,
+) -> Result<AssetSelector, ErrorObjectOwned> {
+    if params.asset.is_some() && params.udt_type_script.is_some() {
+        return Err(ErrorObjectOwned::owned(
+            INVALID_PARAMS_CODE,
+            "use either `asset` or deprecated `udt_type_script`, not both",
+            Some(params),
+        ));
+    }
+
+    let selector = match &params.asset {
+        Some(ForwardingHistoryAsset::Ckb) => AssetSelector::Ckb,
+        Some(ForwardingHistoryAsset::Udt { udt_type_script }) => {
+            AssetSelector::Udt(udt_type_script.clone().into())
+        }
+        None => match &params.udt_type_script {
+            Some(script) => AssetSelector::Udt(script.clone().into()),
+            None => AssetSelector::All,
+        },
+    };
+
+    Ok(selector)
 }
 
 /// Core sent payment report logic.
@@ -360,28 +409,46 @@ fn payment_report_impl(
     let week_ago = now.saturating_sub(MILLIS_PER_WEEK);
     let month_ago = now.saturating_sub(MILLIS_PER_MONTH);
 
-    let events = store.get_payment_events(month_ago, now, usize::MAX, 0);
-
     let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, PaymentAccum)> =
         BTreeMap::new();
 
-    for event in events.iter().filter(|e| e.event_type == event_type) {
-        let key = asset_key(&event.udt_type_script);
-        let entry = accums
-            .entry(key)
-            .or_insert_with(|| (event.udt_type_script.clone(), PaymentAccum::default()));
-        let accum = &mut entry.1;
+    // Stream events in batches to avoid loading the entire month into memory at once.
+    // Only accumulate events matching the requested event_type.
+    let mut cursor: Option<PaymentHistoryCursor> = None;
+    loop {
+        let (batch, next_cursor) = store
+            .query_payment_events(PaymentHistoryQuery {
+                asset: AssetSelector::All,
+                event_type: Some(event_type),
+                start_time: month_ago,
+                end_time: now,
+                limit: REPORT_BATCH_SIZE,
+                after: cursor,
+            })
+            .map_err(crate::rpc::utils::rpc_error_no_data)?;
+        let done = next_cursor.is_none() || batch.is_empty();
+        for event in &batch {
+            let key = asset_key(&event.udt_type_script);
+            let entry = accums
+                .entry(key)
+                .or_insert_with(|| (event.udt_type_script.clone(), PaymentAccum::default()));
+            let accum = &mut entry.1;
 
-        accum.monthly_amount_sum = accum.monthly_amount_sum.saturating_add(event.amount);
-        accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
-        if event.timestamp >= week_ago {
-            accum.weekly_amount_sum = accum.weekly_amount_sum.saturating_add(event.amount);
-            accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+            accum.monthly_amount_sum = accum.monthly_amount_sum.saturating_add(event.amount);
+            accum.monthly_event_count = accum.monthly_event_count.saturating_add(1);
+            if event.timestamp >= week_ago {
+                accum.weekly_amount_sum = accum.weekly_amount_sum.saturating_add(event.amount);
+                accum.weekly_event_count = accum.weekly_event_count.saturating_add(1);
+            }
+            if event.timestamp >= day_ago {
+                accum.daily_amount_sum = accum.daily_amount_sum.saturating_add(event.amount);
+                accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+            }
         }
-        if event.timestamp >= day_ago {
-            accum.daily_amount_sum = accum.daily_amount_sum.saturating_add(event.amount);
-            accum.daily_event_count = accum.daily_event_count.saturating_add(1);
+        if done {
+            break;
         }
+        cursor = next_cursor;
     }
 
     let asset_reports = accums
@@ -409,7 +476,6 @@ pub fn payment_history_impl(
     let start_time = params.start_time.unwrap_or(0);
     let end_time = params.end_time.unwrap_or(now);
     let limit = params.limit.unwrap_or(DEFAULT_PAYMENT_HISTORY_LIMIT) as usize;
-    let offset = params.offset.unwrap_or(0) as usize;
 
     if limit > MAX_PAYMENT_HISTORY_LIMIT as usize {
         return Err(ErrorObjectOwned::owned(
@@ -423,25 +489,30 @@ pub fn payment_history_impl(
         ));
     }
 
-    let udt_filter: Option<Option<ckb_types::packed::Script>> =
-        params.udt_type_script.map(|s| Some(s.into()));
+    let asset = payment_history_asset_selector(&params)?;
+    let event_type = payment_history_event_type(params.event_type);
+    let after_cursor = params
+        .after
+        .as_ref()
+        .map(|bytes| PaymentHistoryCursor::from_bytes(bytes.as_bytes()))
+        .transpose()
+        .map_err(|err| ErrorObjectOwned::owned(INVALID_PARAMS_CODE, err, Some(&params)))?;
 
-    // Fetch enough events to cover offset + limit
-    let fetch_limit = offset.saturating_add(limit);
-    let events = store.get_payment_events(start_time, end_time, fetch_limit, 0);
+    let query = PaymentHistoryQuery {
+        asset,
+        event_type,
+        start_time,
+        end_time,
+        limit,
+        after: after_cursor,
+    };
+    let (events, store_cursor) = store
+        .query_payment_events(query)
+        .map_err(|err| ErrorObjectOwned::owned(INVALID_PARAMS_CODE, err, Some(&params)))?;
 
-    let filtered: Vec<_> = events
-        .into_iter()
-        .filter(|e| match &udt_filter {
-            None => true,
-            Some(script) => &e.udt_type_script == script,
-        })
-        .skip(offset)
-        .take(limit)
-        .collect();
-
-    let total_count = filtered.len() as u64;
-    let events = filtered
+    let total_count = events.len() as u64;
+    let last_cursor = store_cursor.map(|cursor| JsonBytes::from_vec(cursor.to_bytes()));
+    let events = events
         .into_iter()
         .map(|e| PaymentEventInfo {
             event_type: match e.event_type {
@@ -460,7 +531,43 @@ pub fn payment_history_impl(
     Ok(PaymentHistoryResult {
         events,
         total_count,
+        last_cursor,
     })
+}
+
+fn payment_history_asset_selector(
+    params: &PaymentHistoryParams,
+) -> Result<AssetSelector, ErrorObjectOwned> {
+    if params.asset.is_some() && params.udt_type_script.is_some() {
+        return Err(ErrorObjectOwned::owned(
+            INVALID_PARAMS_CODE,
+            "use either `asset` or deprecated `udt_type_script`, not both",
+            Some(params),
+        ));
+    }
+
+    let selector = match &params.asset {
+        Some(PaymentHistoryAsset::Ckb) => AssetSelector::Ckb,
+        Some(PaymentHistoryAsset::Udt { udt_type_script }) => {
+            AssetSelector::Udt(udt_type_script.clone().into())
+        }
+        None => match &params.udt_type_script {
+            Some(script) => AssetSelector::Udt(script.clone().into()),
+            None => AssetSelector::All,
+        },
+    };
+
+    Ok(selector)
+}
+
+fn payment_history_event_type(
+    event_type: Option<PaymentHistoryEventType>,
+) -> Option<PaymentEventType> {
+    match event_type {
+        Some(PaymentHistoryEventType::Send) => Some(PaymentEventType::Send),
+        Some(PaymentHistoryEventType::Receive) => Some(PaymentEventType::Receive),
+        None => None,
+    }
 }
 
 /// Accumulator for per-asset fee aggregation across time windows.

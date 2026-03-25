@@ -20,6 +20,9 @@
 //! | 232          | Payment_hash                            | CchOrder                    |
 //! | 240          | Timestamp | Payment_hash | Channel_id   | ForwardingEvent             |
 //! | 241          | Timestamp | Payment_hash | Channel_id   | PaymentEvent                |
+//! | 242          | Asset_id | Timestamp | Payment_hash...  | ForwardingEvent Asset Index |
+//! | 243          | Asset_id | Timestamp | Payment_hash...  | PaymentEvent Asset Index    |
+//! | 244          | Kind | Timestamp | Payment_hash...      | PaymentEvent Kind Index     |
 //! +--------------+-----------------------------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -55,3 +58,6 @@ pub use watchtower::*;
 pub const CCH_ORDER_PREFIX: u8 = 232;
 pub const FORWARDING_EVENT_PREFIX: u8 = 240;
 pub const PAYMENT_EVENT_PREFIX: u8 = 241;
+pub const FORWARDING_EVENT_ASSET_INDEX_PREFIX: u8 = 242;
+pub const PAYMENT_EVENT_ASSET_INDEX_PREFIX: u8 = 243;
+pub const PAYMENT_EVENT_KIND_INDEX_PREFIX: u8 = 244;

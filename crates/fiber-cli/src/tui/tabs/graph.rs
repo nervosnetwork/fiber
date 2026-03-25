@@ -26,6 +26,7 @@ pub struct GraphTab {
     pub nodes_error: Option<String>,
     pub nodes_table_state: TableState,
     pub nodes_last_cursor: Option<JsonBytes>,
+    pub nodes_current_after: Option<JsonBytes>,
     pub nodes_cursor_stack: Vec<JsonBytes>,
     pub nodes_page: usize,
 
@@ -34,6 +35,7 @@ pub struct GraphTab {
     pub channels_error: Option<String>,
     pub channels_table_state: TableState,
     pub channels_last_cursor: Option<JsonBytes>,
+    pub channels_current_after: Option<JsonBytes>,
     pub channels_cursor_stack: Vec<JsonBytes>,
     pub channels_page: usize,
 }
@@ -46,12 +48,14 @@ impl GraphTab {
             nodes_error: None,
             nodes_table_state: TableState::default(),
             nodes_last_cursor: None,
+            nodes_current_after: None,
             nodes_cursor_stack: Vec::new(),
             nodes_page: 1,
             channels: Vec::new(),
             channels_error: None,
             channels_table_state: TableState::default(),
             channels_last_cursor: None,
+            channels_current_after: None,
             channels_cursor_stack: Vec::new(),
             channels_page: 1,
         }
@@ -60,13 +64,14 @@ impl GraphTab {
     async fn fetch_nodes_page(&mut self, client: &RpcClient, after: Option<JsonBytes>) {
         let params = GraphNodesParams {
             limit: Some(100),
-            after,
+            after: after.clone(),
         };
         match client
             .call_typed::<_, GraphNodesResult>("graph_nodes", &params)
             .await
         {
             Ok(result) => {
+                self.nodes_current_after = after;
                 self.nodes = result.nodes;
                 // last_cursor is always present; treat empty bytes as "no more pages"
                 if result.last_cursor.is_empty() {
@@ -90,13 +95,14 @@ impl GraphTab {
     async fn fetch_channels_page(&mut self, client: &RpcClient, after: Option<JsonBytes>) {
         let params = GraphChannelsParams {
             limit: Some(100),
-            after,
+            after: after.clone(),
         };
         match client
             .call_typed::<_, GraphChannelsResult>("graph_channels", &params)
             .await
         {
             Ok(result) => {
+                self.channels_current_after = after;
                 self.channels = result.channels;
                 if result.last_cursor.is_empty() {
                     self.channels_last_cursor = None;

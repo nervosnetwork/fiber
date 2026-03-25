@@ -194,6 +194,14 @@ pub struct FetchResult {
     pub payment_history: std::result::Result<PaymentHistoryResult, String>,
 }
 
+#[derive(Clone)]
+struct FetchPageState {
+    payments_after: Option<Hash256>,
+    invoices_after: Option<Hash256>,
+    graph_nodes_after: Option<JsonBytes>,
+    graph_channels_after: Option<JsonBytes>,
+}
+
 /// Perform all RPC fetches in the background. This runs on a spawned task
 /// so the main event loop stays responsive.
 async fn fetch_all_rpc(
@@ -202,6 +210,7 @@ async fn fetch_all_rpc(
     only_pending: bool,
     payment_status_filter: Option<PaymentStatus>,
     invoice_status_filter: Option<CkbInvoiceStatus>,
+    page_state: FetchPageState,
 ) -> FetchResult {
     // node_info
     let node_info = client
@@ -237,7 +246,7 @@ async fn fetch_all_rpc(
     let pay_params = ListPaymentsParams {
         status: payment_status_filter,
         limit: None,
-        after: None,
+        after: page_state.payments_after,
     };
     let payments = client
         .call_typed::<_, ListPaymentsResult>("list_payments", &pay_params)
@@ -249,7 +258,7 @@ async fn fetch_all_rpc(
     let inv_params = ListInvoicesParams {
         status: invoice_status_filter,
         limit: None,
-        after: None,
+        after: page_state.invoices_after,
     };
     let invoices = client
         .call_typed::<_, ListInvoicesResult>("list_invoices", &inv_params)
@@ -267,7 +276,7 @@ async fn fetch_all_rpc(
     // graph nodes
     let gn_params = GraphNodesParams {
         limit: Some(100),
-        after: None,
+        after: page_state.graph_nodes_after,
     };
     let graph_nodes = client
         .call_typed::<_, GraphNodesResult>("graph_nodes", &gn_params)
@@ -285,7 +294,7 @@ async fn fetch_all_rpc(
     // graph channels
     let gc_params = GraphChannelsParams {
         limit: Some(100),
-        after: None,
+        after: page_state.graph_channels_after,
     };
     let graph_channels = client
         .call_typed::<_, GraphChannelsResult>("graph_channels", &gc_params)
@@ -485,12 +494,19 @@ impl App {
         let only_pending = self.channels_tab.only_pending;
         let payment_status = self.payments_tab.status_filter;
         let invoice_status = self.invoices_tab.status_filter;
+        let page_state = FetchPageState {
+            payments_after: self.payments_tab.current_after,
+            invoices_after: self.invoices_tab.current_after,
+            graph_nodes_after: self.graph_tab.nodes_current_after.clone(),
+            graph_channels_after: self.graph_tab.channels_current_after.clone(),
+        };
         self.pending_fetch = Some(tokio::spawn(fetch_all_rpc(
             client,
             include_closed,
             only_pending,
             payment_status,
             invoice_status,
+            page_state,
         )));
     }
 

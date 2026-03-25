@@ -28,6 +28,7 @@ pub struct PaymentsTab {
 
     // Pagination
     pub last_cursor: Option<Hash256>,
+    pub current_after: Option<Hash256>,
     pub cursor_stack: Vec<Hash256>,
     pub current_page: usize,
 
@@ -49,6 +50,7 @@ impl PaymentsTab {
             view: PaymentView::List,
             status_message: None,
             last_cursor: None,
+            current_after: None,
             cursor_stack: Vec::new(),
             current_page: 1,
             status_filter: None,
@@ -62,6 +64,7 @@ impl PaymentsTab {
         // Reset to first page
         self.cursor_stack.clear();
         self.current_page = 1;
+        self.current_after = None;
         self.fetch_page(client, None).await;
     }
 
@@ -76,6 +79,7 @@ impl PaymentsTab {
             .await
         {
             Ok(result) => {
+                self.current_after = after;
                 self.payments = result.payments;
                 self.last_cursor = result.last_cursor;
                 self.error = None;

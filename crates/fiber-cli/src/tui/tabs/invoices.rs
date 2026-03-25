@@ -46,6 +46,7 @@ pub struct InvoicesTab {
 
     // Pagination
     pub last_cursor: Option<Hash256>,
+    pub current_after: Option<Hash256>,
     pub cursor_stack: Vec<Hash256>,
     pub current_page: usize,
 
@@ -72,6 +73,7 @@ impl InvoicesTab {
             invoices: Vec::new(),
             error: None,
             last_cursor: None,
+            current_after: None,
             cursor_stack: Vec::new(),
             current_page: 1,
             status_filter: None,
@@ -86,6 +88,7 @@ impl InvoicesTab {
         // Reset to first page
         self.cursor_stack.clear();
         self.current_page = 1;
+        self.current_after = None;
         self.fetch_page(client, None).await;
     }
 
@@ -100,6 +103,7 @@ impl InvoicesTab {
             .await
         {
             Ok(result) => {
+                self.current_after = after;
                 self.invoices = result.invoices;
                 self.last_cursor = result.last_cursor;
                 self.error = None;
