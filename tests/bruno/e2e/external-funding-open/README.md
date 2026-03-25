@@ -64,7 +64,7 @@ npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test
 - Default Bruno environment:
   - `tests/bruno/environments/test.bru`
 - Required environment variable in that file:
-  - `NODE2_PRIVKEY`
+  - `EXTERNAL_FUNDING_PRIVKEY`
 
 ### Funding amount selection
 
@@ -76,5 +76,5 @@ If you want to test a different amount, update the `funding_amount` field in [`0
 
 ## Troubleshooting
 
-- `Missing NODE2_PRIVKEY environment variable`: add it to `tests/bruno/environments/test.bru`, or pass it with `--env-var NODE2_PRIVKEY=...`.
+- `Missing EXTERNAL_FUNDING_PRIVKEY environment variable`: add it to `tests/bruno/environments/test.bru`, or pass it with `--env-var EXTERNAL_FUNDING_PRIVKEY=...`.
 - Failed to open with the selected amount: lower `funding_amount` in [`01-open-channel-with-external-funding.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/01-open-channel-with-external-funding.bru).

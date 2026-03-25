@@ -23,7 +23,7 @@ body:json {
     "params": [
       {
         "unsigned_funding_tx": {},
-        "private_key": "{{NODE2_PRIVKEY}}"
+        "private_key": "{{EXTERNAL_FUNDING_PRIVKEY}}"
       }
     ]
   }
@@ -35,9 +35,9 @@ script:pre-request {
     throw new Error("Missing EXTERNAL_FUNDING_UNSIGNED_TX. Run open_channel_with_external_funding first.");
   }
 
-  const node2Privkey = bru.getEnvVar("NODE2_PRIVKEY");
-  if (!node2Privkey) {
-    throw new Error("Missing NODE2_PRIVKEY environment variable");
+  const externalFundingPrivkey = bru.getEnvVar("EXTERNAL_FUNDING_PRIVKEY");
+  if (!externalFundingPrivkey) {
+    throw new Error("Missing EXTERNAL_FUNDING_PRIVKEY environment variable");
   }
 
   const body = req.getBody();
