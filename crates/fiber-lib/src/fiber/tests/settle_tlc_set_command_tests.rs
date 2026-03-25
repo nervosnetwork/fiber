@@ -973,10 +973,10 @@ fn test_open_invoice_marked_as_received() {
     let command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &store);
     let _settlements = command.run();
 
-    // Check that invoice status was promoted to Paid once a non-MPP settlement is selected.
+    // Check that invoice status was updated to Received
     assert_eq!(
         store.get_invoice_status(&payment_hash),
-        Some(CkbInvoiceStatus::Paid)
+        Some(CkbInvoiceStatus::Received)
     );
 }
 
@@ -1002,7 +1002,7 @@ fn test_received_invoice_not_updated() {
     let command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &store);
     let _settlements = command.run();
 
-    // Immediate settlement rejects Received invoices, so the stored status stays unchanged.
+    // Status should remain Received
     assert_eq!(
         store.get_invoice_status(&payment_hash),
         Some(CkbInvoiceStatus::Received)
