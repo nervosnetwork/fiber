@@ -522,13 +522,34 @@ impl TxBuilder for FundingTxBuilder {
         _header_dep_resolver: &dyn HeaderDepResolver,
         _tx_dep_provider: &dyn TransactionDependencyProvider,
     ) -> Result<TransactionView, TxBuilderError> {
-        let (funding_cell_output, funding_cell_output_data) = build_funding_cell(
+        let (funding_cell_output, funding_cell_output_data) = self
+            .build_funding_cell()
+            .map_err(|err| TxBuilderError::Other(err.into()))?;
+
+        self.build_base_from_funding_cell(
+            funding_cell_output,
+            funding_cell_output_data,
+            cell_collector,
+        )
+        .await
+    }
+}
+
+impl FundingTxBuilder {
+    fn build_funding_cell(&self) -> Result<(packed::CellOutput, packed::Bytes), FundingError> {
+        build_funding_cell(
             &self.funding_tx,
             &self.request,
             &self.context.funding_cell_lock_script,
         )
-        .map_err(|err| TxBuilderError::Other(err.into()))?;
+    }
 
+    async fn build_base_from_funding_cell(
+        &self,
+        funding_cell_output: packed::CellOutput,
+        funding_cell_output_data: packed::Bytes,
+        cell_collector: &mut dyn CellCollector,
+    ) -> Result<TransactionView, TxBuilderError> {
         build_base_from_funding_cell(
             funding_cell_output,
             funding_cell_output_data,
@@ -539,22 +560,27 @@ impl TxBuilder for FundingTxBuilder {
         )
         .await
     }
-}
 
-impl FundingTxBuilder {
-    async fn build(
-        self,
+    async fn build_and_balance_tx(
+        &self,
         live_cells_exclusion_map: &mut LiveCellsExclusionMap,
-    ) -> Result<FundingTx, FundingError> {
-        let tx = build_and_balance_tx(
-            &self,
+    ) -> Result<TransactionView, FundingError> {
+        build_and_balance_tx(
+            self,
             &self.context.rpc_url,
             &self.context.funding_source_lock_script,
             &self.context.funding_source_lock_script_cell_deps,
             self.request.funding_fee_rate,
             live_cells_exclusion_map,
         )
-        .await?;
+        .await
+    }
+
+    async fn build(
+        self,
+        live_cells_exclusion_map: &mut LiveCellsExclusionMap,
+    ) -> Result<FundingTx, FundingError> {
+        let tx = self.build_and_balance_tx(live_cells_exclusion_map).await?;
         let tx = with_extra_cell_deps(tx, &self.context.funding_source_lock_script_cell_deps);
         debug!("final tx_builder: {:?}", tx.as_advanced_builder());
         Ok(finalize_funding_tx_update(
