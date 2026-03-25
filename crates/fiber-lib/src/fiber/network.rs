@@ -799,8 +799,14 @@ where
                         SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
                     }
                     None => {
-                        warn!("No suitable IPv4 listen address found for onion service, using default 127.0.0.1:8115");
-                        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8115)
+                        error!(
+                            "No suitable IPv4 listen address found for onion service; \
+                            please configure `onion.p2p_listen_address` or ensure an IPv4 \
+                            listener on 0.0.0.0 or 127.0.0.1 is present"
+                        );
+                        return Err(
+                            "No suitable IPv4 listen address found for onion service".to_string(),
+                        );
                     }
                 }
             }
@@ -811,17 +817,19 @@ where
         let tor_controller_addr: SocketAddr = tor_controller_str
             .parse()
             .map_err(|err| format!("Failed to parse tor_controller address: {}", err))?;
-        match std::net::TcpStream::connect_timeout(
-            &tor_controller_addr,
+        let tor_connect_result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-        ) {
-            Ok(_) => {
+            tokio::net::TcpStream::connect(tor_controller_addr),
+        )
+        .await;
+        match tor_connect_result {
+            Ok(Ok(_)) => {
                 info!(
                     "Confirmed tor_controller is listening on {}",
                     tor_controller_str
                 );
             }
-            Err(_err) => {
+            Ok(Err(_err)) | Err(_err) => {
                 error!(
                     "tor_controller is not listening on {}, skipping onion service",
                     tor_controller_addr
@@ -4855,14 +4863,23 @@ where
 
             // Set SOCKS5 proxy config
             if let Some(proxy_url) = &config.proxy.proxy_url {
-                super::proxy::check_proxy_url(proxy_url).expect("invalid proxy_url in config");
-                builder = builder
-                    .tcp_proxy_config(proxy_url)
-                    .tcp_proxy_random_auth(config.proxy.proxy_random_auth);
-                info!(
-                    "Set tcp_proxy_config: {:?}, proxy_random_auth: {}",
-                    proxy_url, config.proxy.proxy_random_auth
-                );
+                match super::proxy::check_proxy_url(proxy_url) {
+                    Ok(()) => {
+                        builder = builder
+                            .tcp_proxy_config(proxy_url)
+                            .tcp_proxy_random_auth(config.proxy.proxy_random_auth);
+                        info!(
+                            "Set tcp_proxy_config: {:?}, proxy_random_auth: {}",
+                            proxy_url, config.proxy.proxy_random_auth
+                        );
+                    }
+                    Err(err) => {
+                        error!(
+                            "Invalid proxy_url in config, skipping tcp_proxy_config. proxy_url={:?}, error={}",
+                            proxy_url, err
+                        );
+                    }
+                }
             }
 
             // Set onion proxy config (for .onion address connections via Tor SOCKS5)

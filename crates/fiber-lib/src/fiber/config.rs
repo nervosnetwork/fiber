@@ -451,7 +451,7 @@ pub struct OnionConfig {
     #[serde(default = "default_tor_controller")]
     pub tor_controller: String,
 
-    /// Tor controller hashed password
+    /// Tor controller plaintext password (for Tor's `HashedControlPassword`; Tor stores the hash in `torrc`)
     pub tor_password: Option<String>,
 
     /// The external port that the onion service will expose [default: 8115]
