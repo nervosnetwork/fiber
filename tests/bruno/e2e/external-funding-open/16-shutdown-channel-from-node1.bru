@@ -1,7 +1,7 @@
 meta {
-  name: shutdown external funding channel from node1
+  name: shutdown channel from node1
   type: http
-  seq: 6
+  seq: 16
 }
 
 post {
@@ -30,24 +30,25 @@ body:json {
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].close_script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
 assert {
   res.status: eq 200
 }
 
-script:pre-request {
-  const script = bru.getVar("NODE2_FUNDING_SCRIPT");
-  const body = req.getBody();
-  body.params[0].close_script = script;
-  req.setBody(body);
-}
-
 script:post-response {
   if (res.body.error) {
-    throw new Error(`Assertion failed: shutdown_channel should succeed, got ${res.body.error.message}`);
+    throw new Error(`shutdown_channel failed: ${res.body.error.message}`);
   }
+
   if (res.body.result !== null) {
-    throw new Error("Assertion failed: expected null result for shutdown_channel");
+    throw new Error("shutdown_channel should return null");
   }
-  console.log("[external-funding-open] shutdown_channel accepted on node1");
+
+  bru.setVar("CLOSED_CHECK_ITERATION", 0);
   await new Promise((r) => setTimeout(r, 1000));
 }
