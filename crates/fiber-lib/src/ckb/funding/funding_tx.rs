@@ -3,7 +3,10 @@ use crate::ckb::{
     config::{new_ckb_rpc_async_client, new_default_cell_collector},
     contracts::get_udt_cell_deps,
 };
-use crate::fiber::channel::FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN;
+
+// The lock field size of the WitnessArgs placeholder used for funding transaction fee estimation.
+// This is a conservative upper bound for the witness lock content of the funding source inputs.
+pub const FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN: usize = 170;
 
 use anyhow::anyhow;
 use ckb_sdk::{

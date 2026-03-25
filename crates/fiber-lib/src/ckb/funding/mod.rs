@@ -1,4 +1,4 @@
 mod funding_tx;
 
 pub(crate) use funding_tx::{FundingContext, LiveCellsExclusionMap};
-pub use funding_tx::{FundingRequest, FundingTx};
+pub use funding_tx::{FundingRequest, FundingTx, FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN};

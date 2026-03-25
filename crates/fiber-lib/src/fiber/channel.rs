@@ -17,7 +17,7 @@ use crate::utils::payment::is_invoice_fulfilled;
 use crate::{
     ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
-        FundingRequest,
+        FundingRequest, FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN,
     },
     fiber::{
         config::{DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
@@ -110,10 +110,6 @@ pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 // - `pubkey`: 32 bytes, x only aggregated public key
 // - `signature`: 64 bytes, aggregated signature
 pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
-
-// The lock field size of the WitnessArgs placeholder used for funding transaction fee estimation.
-// This is a conservative upper bound for the witness lock content of the funding source inputs.
-pub const FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN: usize = 170;
 
 // The current goal throughput is about 20 TPS, set interval to 100 to limit retryable task
 // triggered 10 times per second, plus we also trigger `apply_retryable_tlc_operations` when

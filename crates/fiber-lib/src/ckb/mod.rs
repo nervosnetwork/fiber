@@ -11,7 +11,7 @@ pub use client::{GetCellsResponse, GetShutdownTxResponse, GetTxResponse};
 pub use config::{CkbConfig, UdtCfgInfosExt, DEFAULT_CKB_BASE_DIR_NAME};
 pub use error::{CkbChainError, FundingError};
 pub use fiber_types::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtDep, UdtScript};
-pub use funding::{FundingRequest, FundingTx};
+pub use funding::{FundingRequest, FundingTx, FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN};
 pub use signer::LocalSigner;
 pub use tx_tracing_actor::{CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult};
 
