@@ -4965,7 +4965,13 @@ where
         // Start Tor onion hidden service if configured
         #[cfg(not(target_arch = "wasm32"))]
         let onion_service_token = if config.onion.listen_on_onion {
-            match self.start_onion_service(&config, &listening_addr, &my_peer_id, &tracker, myself.clone()) {
+            match self.start_onion_service(
+                &config,
+                &listening_addr,
+                &my_peer_id,
+                &tracker,
+                myself.clone(),
+            ) {
                 Ok(Some((addr, token))) => {
                     info!("Onion service address: {}", addr);
                     announced_addrs.push(addr);
