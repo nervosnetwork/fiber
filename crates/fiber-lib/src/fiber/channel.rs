@@ -7430,32 +7430,289 @@ pub trait ChannelOpenRecordStore {
 pub trait PaymentEventStore {
     /// Insert a new forwarding event into the store.
     fn insert_forwarding_event(&self, event: ForwardingEvent);
-    /// Query forwarding events within a time range, with cursor-based pagination.
-    /// `start_time` and `end_time` are milliseconds since UNIX epoch (inclusive).
-    /// Returns up to `limit` events. Pass the opaque `after_cursor` key returned
-    /// from a previous call to fetch the next page (exclusive — the cursor item
-    /// itself is not included in the result).
-    fn get_forwarding_events(
+    /// Query forwarding events with an explicit asset selector and typed cursor.
+    fn query_forwarding_events(
         &self,
-        start_time: u64,
-        end_time: u64,
-        limit: usize,
-        after_cursor: Option<Vec<u8>>,
-    ) -> (Vec<ForwardingEvent>, Option<Vec<u8>>);
+        query: ForwardingHistoryQuery,
+    ) -> Result<(Vec<ForwardingEvent>, Option<ForwardingHistoryCursor>), String>;
     /// Insert a new payment event (send or receive) into the store.
     fn insert_payment_event(&self, event: PaymentEvent);
-    /// Query payment events within a time range, with cursor-based pagination.
-    /// `start_time` and `end_time` are milliseconds since UNIX epoch (inclusive).
-    /// Returns up to `limit` events. Pass the opaque `after_cursor` key returned
-    /// from a previous call to fetch the next page (exclusive — the cursor item
-    /// itself is not included in the result).
-    fn get_payment_events(
+    /// Query payment events with explicit asset and event-type filters plus a typed cursor.
+    fn query_payment_events(
         &self,
-        start_time: u64,
-        end_time: u64,
-        limit: usize,
-        after_cursor: Option<Vec<u8>>,
-    ) -> (Vec<PaymentEvent>, Option<Vec<u8>>);
+        query: PaymentHistoryQuery,
+    ) -> Result<(Vec<PaymentEvent>, Option<PaymentHistoryCursor>), String>;
+}
+
+pub const FORWARDING_ASSET_ID_LEN: usize = 33;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetSelector {
+    All,
+    Ckb,
+    Udt(Script),
+}
+
+impl AssetSelector {
+    pub fn matches(&self, udt_type_script: &Option<Script>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Ckb => udt_type_script.is_none(),
+            Self::Udt(script) => udt_type_script.as_ref() == Some(script),
+        }
+    }
+
+    pub fn asset_id(&self) -> Option<[u8; FORWARDING_ASSET_ID_LEN]> {
+        match self {
+            Self::All => None,
+            Self::Ckb => {
+                let mut asset_id = [0u8; FORWARDING_ASSET_ID_LEN];
+                asset_id[0] = 0;
+                Some(asset_id)
+            }
+            Self::Udt(script) => {
+                let mut asset_id = [0u8; FORWARDING_ASSET_ID_LEN];
+                asset_id[0] = 1;
+                asset_id[1..].copy_from_slice(&blake2b_256(script.as_slice()));
+                Some(asset_id)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardingHistoryQuery {
+    pub asset: AssetSelector,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub limit: usize,
+    pub after: Option<ForwardingHistoryCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum ForwardingHistoryCursorIndex {
+    Time,
+    Asset { kind: u8, hash: [u8; 32] },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardingHistoryCursor {
+    index: ForwardingHistoryCursorIndex,
+    timestamp: u64,
+    payment_hash: Hash256,
+    incoming_channel_id: Hash256,
+}
+
+impl ForwardingHistoryCursor {
+    const VERSION: u8 = 0;
+
+    pub fn new(asset: &AssetSelector, event: &ForwardingEvent) -> Self {
+        let index = match asset.asset_id() {
+            Some(asset_id) => ForwardingHistoryCursorIndex::Asset {
+                kind: asset_id[0],
+                hash: asset_id[1..]
+                    .try_into()
+                    .expect("forwarding asset hash length is fixed"),
+            },
+            None => ForwardingHistoryCursorIndex::Time,
+        };
+
+        Self {
+            index,
+            timestamp: event.timestamp,
+            payment_hash: event.payment_hash,
+            incoming_channel_id: event.incoming_channel_id,
+        }
+    }
+
+    pub fn validate_for(&self, asset: &AssetSelector) -> Result<(), String> {
+        let expected = match asset.asset_id() {
+            Some(asset_id) => ForwardingHistoryCursorIndex::Asset {
+                kind: asset_id[0],
+                hash: asset_id[1..]
+                    .try_into()
+                    .expect("forwarding asset hash length is fixed"),
+            },
+            None => ForwardingHistoryCursorIndex::Time,
+        };
+
+        if self.index != expected {
+            return Err("cursor does not match the requested asset filter".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    pub fn payment_hash(&self) -> Hash256 {
+        self.payment_hash
+    }
+
+    pub fn incoming_channel_id(&self) -> Hash256 {
+        self.incoming_channel_id
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + 128);
+        bytes.push(Self::VERSION);
+        bytes.extend_from_slice(
+            &bincode::serialize(self).unwrap_or_else(|e| {
+                panic!("serialization of ForwardingHistoryCursor failed: {}", e)
+            }),
+        );
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let Some((&version, payload)) = bytes.split_first() else {
+            return Err("forwarding history cursor is empty".to_string());
+        };
+
+        if version != Self::VERSION {
+            return Err(format!(
+                "unsupported forwarding history cursor version: {}",
+                version
+            ));
+        }
+
+        bincode::deserialize(payload)
+            .map_err(|e| format!("failed to decode forwarding history cursor: {}", e))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentHistoryQuery {
+    pub asset: AssetSelector,
+    pub event_type: Option<PaymentEventType>,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub limit: usize,
+    pub after: Option<PaymentHistoryCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum PaymentHistoryScanIndex {
+    Time,
+    Asset { kind: u8, hash: [u8; 32] },
+    EventType(PaymentEventType),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PaymentHistoryCursorFilter {
+    asset: Option<(u8, [u8; 32])>,
+    event_type: Option<PaymentEventType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentHistoryCursor {
+    scan_index: PaymentHistoryScanIndex,
+    filter: PaymentHistoryCursorFilter,
+    timestamp: u64,
+    payment_hash: Hash256,
+    channel_id: Hash256,
+}
+
+impl PaymentHistoryCursor {
+    const VERSION: u8 = 0;
+
+    pub fn new(query: &PaymentHistoryQuery, event: &PaymentEvent) -> Self {
+        Self {
+            scan_index: payment_history_scan_index(&query.asset, query.event_type),
+            filter: payment_history_filter(&query.asset, query.event_type),
+            timestamp: event.timestamp,
+            payment_hash: event.payment_hash,
+            channel_id: event.channel_id,
+        }
+    }
+
+    pub fn validate_for(&self, query: &PaymentHistoryQuery) -> Result<(), String> {
+        let expected_scan_index = payment_history_scan_index(&query.asset, query.event_type);
+        if self.scan_index != expected_scan_index {
+            return Err("cursor does not match the requested payment query".to_string());
+        }
+
+        let expected_filter = payment_history_filter(&query.asset, query.event_type);
+        if self.filter != expected_filter {
+            return Err("cursor does not match the requested payment filters".to_string());
+        }
+
+        Ok(())
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    pub fn payment_hash(&self) -> Hash256 {
+        self.payment_hash
+    }
+
+    pub fn channel_id(&self) -> Hash256 {
+        self.channel_id
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + 128);
+        bytes.push(Self::VERSION);
+        bytes.extend_from_slice(
+            &bincode::serialize(self)
+                .unwrap_or_else(|e| panic!("serialization of PaymentHistoryCursor failed: {}", e)),
+        );
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let Some((&version, payload)) = bytes.split_first() else {
+            return Err("payment history cursor is empty".to_string());
+        };
+
+        if version != Self::VERSION {
+            return Err(format!(
+                "unsupported payment history cursor version: {}",
+                version
+            ));
+        }
+
+        bincode::deserialize(payload)
+            .map_err(|e| format!("failed to decode payment history cursor: {}", e))
+    }
+}
+
+fn payment_history_scan_index(
+    asset: &AssetSelector,
+    event_type: Option<PaymentEventType>,
+) -> PaymentHistoryScanIndex {
+    if let Some(asset_id) = asset.asset_id() {
+        PaymentHistoryScanIndex::Asset {
+            kind: asset_id[0],
+            hash: asset_id[1..]
+                .try_into()
+                .expect("payment asset hash length is fixed"),
+        }
+    } else if let Some(event_type) = event_type {
+        PaymentHistoryScanIndex::EventType(event_type)
+    } else {
+        PaymentHistoryScanIndex::Time
+    }
+}
+
+fn payment_history_filter(
+    asset: &AssetSelector,
+    event_type: Option<PaymentEventType>,
+) -> PaymentHistoryCursorFilter {
+    PaymentHistoryCursorFilter {
+        asset: asset.asset_id().map(|asset_id| {
+            (
+                asset_id[0],
+                asset_id[1..]
+                    .try_into()
+                    .expect("payment asset hash length is fixed"),
+            )
+        }),
+        event_type,
+    }
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

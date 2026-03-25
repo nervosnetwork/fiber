@@ -1,10 +1,13 @@
 use crate::ckb::CkbConfig;
-use crate::fiber::channel::PaymentEventStore;
+use crate::fiber::channel::{
+    AssetSelector, ForwardingHistoryCursor, ForwardingHistoryQuery, PaymentEventStore,
+    PaymentHistoryCursor, PaymentHistoryQuery,
+};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-use crate::{handle_actor_call, log_and_error, now_timestamp_as_millis_u64};
+use crate::log_and_error;
+use crate::{handle_actor_call, now_timestamp_as_millis_u64};
 use ckb_jsonrpc_types::{JsonBytes, Script};
 use ckb_types::prelude::Entity;
-use fiber_types::schema::{FORWARDING_EVENT_PREFIX, PAYMENT_EVENT_PREFIX};
 use fiber_types::PaymentEventType;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
@@ -16,9 +19,9 @@ use ractor::{call, ActorRef};
 
 pub use fiber_json_types::{
     AssetFeeReport, AssetPaymentReport, FeeReportParams, FeeReportResult, ForwardingEventInfo,
-    ForwardingHistoryParams, ForwardingHistoryResult, NodeInfoResult, PaymentEventInfo,
-    PaymentHistoryParams, PaymentHistoryResult, ReceivedPaymentReportResult,
-    SentPaymentReportResult,
+    ForwardingHistoryAsset, ForwardingHistoryParams, ForwardingHistoryResult, NodeInfoResult,
+    PaymentEventInfo, PaymentHistoryAsset, PaymentHistoryEventType, PaymentHistoryParams,
+    PaymentHistoryResult, ReceivedPaymentReportResult, SentPaymentReportResult,
 };
 
 const DEFAULT_FORWARDING_HISTORY_LIMIT: u64 = 100;
@@ -239,10 +242,17 @@ pub fn fee_report_impl(
     // Stream events in batches to avoid loading the entire time window into memory at once.
     let mut accums: BTreeMap<Vec<u8>, (Option<ckb_types::packed::Script>, AssetAccum)> =
         BTreeMap::new();
-    let mut cursor: Option<Vec<u8>> = None;
+    let mut cursor: Option<ForwardingHistoryCursor> = None;
     loop {
-        let (batch, next_cursor) =
-            store.get_forwarding_events(start_time, end_time, REPORT_BATCH_SIZE, cursor);
+        let (batch, next_cursor) = store
+            .query_forwarding_events(ForwardingHistoryQuery {
+                asset: AssetSelector::All,
+                start_time,
+                end_time,
+                limit: REPORT_BATCH_SIZE,
+                after: cursor,
+            })
+            .map_err(crate::rpc::utils::rpc_error_no_data)?;
         let done = next_cursor.is_none() || batch.is_empty();
         for event in &batch {
             let key = asset_key(&event.udt_type_script);
@@ -306,65 +316,27 @@ pub fn forwarding_history_impl(
         ));
     }
 
-    // Decode the opaque cursor from the request, if present.
-    let after_cursor: Option<Vec<u8>> = params.after.map(|b| b.as_bytes().to_vec());
+    let asset = forwarding_history_asset_selector(&params)?;
+    let after_cursor = params
+        .after
+        .as_ref()
+        .map(|bytes| ForwardingHistoryCursor::from_bytes(bytes.as_bytes()))
+        .transpose()
+        .map_err(|err| ErrorObjectOwned::owned(INVALID_PARAMS_CODE, err, Some(&params)))?;
 
-    // Convert the optional RPC Script filter to packed::Script for comparison
-    let udt_filter: Option<Option<ckb_types::packed::Script>> =
-        params.udt_type_script.map(|s| Some(s.into()));
-
-    // With a UDT filter, some fetched events may be filtered out, so we may need
-    // to fetch more than `limit` events.  We fetch in batches until we have enough
-    // filtered results or exhaust the store.
-    let (events, store_cursor) = if let Some(filter) = &udt_filter {
-        // With filter: fetch in batches to collect `limit` matching events.
-        let mut collected: Vec<fiber_types::ForwardingEvent> = Vec::with_capacity(limit);
-        let mut cursor = after_cursor;
-        let final_store_cursor;
-        loop {
-            // Use at least REPORT_BATCH_SIZE to avoid degenerate single-record fetches
-            // when the UDT hit rate is low.  This keeps RocksDB round-trips bounded.
-            let batch_limit = (limit - collected.len()).max(REPORT_BATCH_SIZE);
-            let (batch, next_cursor) =
-                store.get_forwarding_events(start_time, end_time, batch_limit, cursor.clone());
-            let done = next_cursor.is_none() || batch.is_empty();
-            for event in batch {
-                if &event.udt_type_script == filter {
-                    collected.push(event);
-                    if collected.len() >= limit {
-                        break;
-                    }
-                }
-            }
-            if collected.len() >= limit {
-                // Cursor must point to the last *matching* event so the next page
-                // starts immediately after it, not after some non-matching event.
-                let last = collected.last().expect("collected is non-empty");
-                let key = [
-                    &[FORWARDING_EVENT_PREFIX],
-                    &last.timestamp.to_be_bytes()[..],
-                    last.payment_hash.as_ref(),
-                    last.incoming_channel_id.as_ref(),
-                ]
-                .concat();
-                final_store_cursor = Some(key);
-                break;
-            }
-            if done {
-                // No more data in the store.
-                final_store_cursor = None;
-                break;
-            }
-            cursor = next_cursor;
-        }
-        (collected, final_store_cursor)
-    } else {
-        // No filter: a single store fetch is sufficient.
-        store.get_forwarding_events(start_time, end_time, limit, after_cursor)
+    let query = ForwardingHistoryQuery {
+        asset,
+        start_time,
+        end_time,
+        limit,
+        after: after_cursor,
     };
+    let (events, store_cursor) = store
+        .query_forwarding_events(query)
+        .map_err(|err| ErrorObjectOwned::owned(INVALID_PARAMS_CODE, err, Some(&params)))?;
 
     let total_count = events.len() as u64;
-    let last_cursor = store_cursor.map(JsonBytes::from_vec);
+    let last_cursor = store_cursor.map(|cursor| JsonBytes::from_vec(cursor.to_bytes()));
     let events = events
         .into_iter()
         .map(|e| ForwardingEventInfo {
@@ -384,6 +356,31 @@ pub fn forwarding_history_impl(
         total_count,
         last_cursor,
     })
+}
+
+fn forwarding_history_asset_selector(
+    params: &ForwardingHistoryParams,
+) -> Result<AssetSelector, ErrorObjectOwned> {
+    if params.asset.is_some() && params.udt_type_script.is_some() {
+        return Err(ErrorObjectOwned::owned(
+            INVALID_PARAMS_CODE,
+            "use either `asset` or deprecated `udt_type_script`, not both",
+            Some(params),
+        ));
+    }
+
+    let selector = match &params.asset {
+        Some(ForwardingHistoryAsset::Ckb) => AssetSelector::Ckb,
+        Some(ForwardingHistoryAsset::Udt { udt_type_script }) => {
+            AssetSelector::Udt(udt_type_script.clone().into())
+        }
+        None => match &params.udt_type_script {
+            Some(script) => AssetSelector::Udt(script.clone().into()),
+            None => AssetSelector::All,
+        },
+    };
+
+    Ok(selector)
 }
 
 /// Core sent payment report logic.
@@ -417,12 +414,20 @@ fn payment_report_impl(
 
     // Stream events in batches to avoid loading the entire month into memory at once.
     // Only accumulate events matching the requested event_type.
-    let mut cursor: Option<Vec<u8>> = None;
+    let mut cursor: Option<PaymentHistoryCursor> = None;
     loop {
-        let (batch, next_cursor) =
-            store.get_payment_events(month_ago, now, REPORT_BATCH_SIZE, cursor);
+        let (batch, next_cursor) = store
+            .query_payment_events(PaymentHistoryQuery {
+                asset: AssetSelector::All,
+                event_type: Some(event_type),
+                start_time: month_ago,
+                end_time: now,
+                limit: REPORT_BATCH_SIZE,
+                after: cursor,
+            })
+            .map_err(crate::rpc::utils::rpc_error_no_data)?;
         let done = next_cursor.is_none() || batch.is_empty();
-        for event in batch.iter().filter(|e| e.event_type == event_type) {
+        for event in &batch {
             let key = asset_key(&event.udt_type_script);
             let entry = accums
                 .entry(key)
@@ -484,58 +489,29 @@ pub fn payment_history_impl(
         ));
     }
 
-    // Decode the opaque cursor from the request, if present.
-    let after_cursor: Option<Vec<u8>> = params.after.map(|b| b.as_bytes().to_vec());
+    let asset = payment_history_asset_selector(&params)?;
+    let event_type = payment_history_event_type(params.event_type);
+    let after_cursor = params
+        .after
+        .as_ref()
+        .map(|bytes| PaymentHistoryCursor::from_bytes(bytes.as_bytes()))
+        .transpose()
+        .map_err(|err| ErrorObjectOwned::owned(INVALID_PARAMS_CODE, err, Some(&params)))?;
 
-    let udt_filter: Option<Option<ckb_types::packed::Script>> =
-        params.udt_type_script.map(|s| Some(s.into()));
-
-    let (events, store_cursor) = if let Some(filter) = &udt_filter {
-        let mut collected: Vec<fiber_types::PaymentEvent> = Vec::with_capacity(limit);
-        let mut cursor = after_cursor;
-        let final_store_cursor;
-        loop {
-            // Use at least REPORT_BATCH_SIZE to avoid degenerate single-record fetches
-            // when the UDT hit rate is low.  This keeps RocksDB round-trips bounded.
-            let batch_limit = (limit - collected.len()).max(REPORT_BATCH_SIZE);
-            let (batch, next_cursor) =
-                store.get_payment_events(start_time, end_time, batch_limit, cursor.clone());
-            let done = next_cursor.is_none() || batch.is_empty();
-            for event in batch {
-                if &event.udt_type_script == filter {
-                    collected.push(event);
-                    if collected.len() >= limit {
-                        break;
-                    }
-                }
-            }
-            if collected.len() >= limit {
-                // Cursor must point to the last *matching* event so the next page
-                // starts immediately after it, not after some non-matching event.
-                let last = collected.last().expect("collected is non-empty");
-                let key = [
-                    &[PAYMENT_EVENT_PREFIX],
-                    &last.timestamp.to_be_bytes()[..],
-                    last.payment_hash.as_ref(),
-                    last.channel_id.as_ref(),
-                ]
-                .concat();
-                final_store_cursor = Some(key);
-                break;
-            }
-            if done {
-                final_store_cursor = None;
-                break;
-            }
-            cursor = next_cursor;
-        }
-        (collected, final_store_cursor)
-    } else {
-        store.get_payment_events(start_time, end_time, limit, after_cursor)
+    let query = PaymentHistoryQuery {
+        asset,
+        event_type,
+        start_time,
+        end_time,
+        limit,
+        after: after_cursor,
     };
+    let (events, store_cursor) = store
+        .query_payment_events(query)
+        .map_err(|err| ErrorObjectOwned::owned(INVALID_PARAMS_CODE, err, Some(&params)))?;
 
     let total_count = events.len() as u64;
-    let last_cursor = store_cursor.map(JsonBytes::from_vec);
+    let last_cursor = store_cursor.map(|cursor| JsonBytes::from_vec(cursor.to_bytes()));
     let events = events
         .into_iter()
         .map(|e| PaymentEventInfo {
@@ -557,6 +533,41 @@ pub fn payment_history_impl(
         total_count,
         last_cursor,
     })
+}
+
+fn payment_history_asset_selector(
+    params: &PaymentHistoryParams,
+) -> Result<AssetSelector, ErrorObjectOwned> {
+    if params.asset.is_some() && params.udt_type_script.is_some() {
+        return Err(ErrorObjectOwned::owned(
+            INVALID_PARAMS_CODE,
+            "use either `asset` or deprecated `udt_type_script`, not both",
+            Some(params),
+        ));
+    }
+
+    let selector = match &params.asset {
+        Some(PaymentHistoryAsset::Ckb) => AssetSelector::Ckb,
+        Some(PaymentHistoryAsset::Udt { udt_type_script }) => {
+            AssetSelector::Udt(udt_type_script.clone().into())
+        }
+        None => match &params.udt_type_script {
+            Some(script) => AssetSelector::Udt(script.clone().into()),
+            None => AssetSelector::All,
+        },
+    };
+
+    Ok(selector)
+}
+
+fn payment_history_event_type(
+    event_type: Option<PaymentHistoryEventType>,
+) -> Option<PaymentEventType> {
+    match event_type {
+        Some(PaymentHistoryEventType::Send) => Some(PaymentEventType::Send),
+        Some(PaymentHistoryEventType::Receive) => Some(PaymentEventType::Receive),
+        None => None,
+    }
 }
 
 /// Accumulator for per-asset fee aggregation across time windows.

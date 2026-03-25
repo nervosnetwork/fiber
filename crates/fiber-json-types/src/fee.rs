@@ -76,6 +76,36 @@ pub struct FeeReportParams {
 /// Queries individual forwarding events with time range and pagination.
 /// Uses cursor-based pagination: pass `last_cursor` from a previous response
 /// as `after` to fetch the next page.
+/// Asset selector for `forwarding_history`.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "asset_type")]
+pub enum ForwardingHistoryAsset {
+    /// Match native CKB forwarding events only.
+    Ckb,
+    /// Match forwarding events for the specified UDT type script.
+    Udt { udt_type_script: Script },
+}
+
+/// Asset selector for `payment_history`.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "asset_type")]
+pub enum PaymentHistoryAsset {
+    /// Match native CKB payment events only.
+    Ckb,
+    /// Match payment events for the specified UDT type script.
+    Udt { udt_type_script: Script },
+}
+
+/// Payment direction filter for `payment_history`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentHistoryEventType {
+    /// Match outgoing payment events.
+    Send,
+    /// Match incoming payment events.
+    Receive,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
 pub struct ForwardingHistoryParams {
@@ -95,8 +125,10 @@ pub struct ForwardingHistoryParams {
     /// response to retrieve the next page of results. Omit or set to `null` to
     /// start from the beginning.
     pub after: Option<JsonBytes>,
-    /// Filter by UDT type script. If set, only events for this specific UDT are returned.
-    /// Use `null` or omit to return events for all asset types.
+    /// Filter by asset. Omit or set to `null` to return events for all asset types.
+    pub asset: Option<ForwardingHistoryAsset>,
+    /// Deprecated compatibility field for filtering by a specific UDT type script.
+    /// Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
     pub udt_type_script: Option<Script>,
 }
 
@@ -224,7 +256,12 @@ pub struct PaymentHistoryParams {
     /// response to retrieve the next page of results. Omit or set to `null` to
     /// start from the beginning.
     pub after: Option<JsonBytes>,
-    /// Filter by UDT type script.
+    /// Filter by asset. Omit or set to `null` to return events for all asset types.
+    pub asset: Option<PaymentHistoryAsset>,
+    /// Optional filter by payment event type.
+    pub event_type: Option<PaymentHistoryEventType>,
+    /// Deprecated compatibility field for filtering by a specific UDT type script.
+    /// Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
     pub udt_type_script: Option<Script>,
 }
 

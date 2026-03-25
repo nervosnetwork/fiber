@@ -188,7 +188,17 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     assert_eq!(source_node.get_inflight_payment_count().await, 0);
 
     // Verify PaymentEvent records were created
-    let (send_events, _) = source_node.store.get_payment_events(0, u64::MAX, 100, None);
+    let (send_events, _) = source_node
+        .store
+        .query_payment_events(crate::fiber::channel::PaymentHistoryQuery {
+            asset: crate::fiber::channel::AssetSelector::All,
+            event_type: None,
+            start_time: 0,
+            end_time: u64::MAX,
+            limit: 100,
+            after: None,
+        })
+        .unwrap();
     assert_eq!(send_events.len(), 1);
     assert_eq!(
         send_events[0].event_type,
@@ -197,7 +207,17 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     assert_eq!(send_events[0].payment_hash, payment_hash);
     assert_eq!(send_events[0].channel_id, channel);
 
-    let (recv_events, _) = node_1.store.get_payment_events(0, u64::MAX, 100, None);
+    let (recv_events, _) = node_1
+        .store
+        .query_payment_events(crate::fiber::channel::PaymentHistoryQuery {
+            asset: crate::fiber::channel::AssetSelector::All,
+            event_type: None,
+            start_time: 0,
+            end_time: u64::MAX,
+            limit: 100,
+            after: None,
+        })
+        .unwrap();
     assert_eq!(recv_events.len(), 1);
     assert_eq!(
         recv_events[0].event_type,
@@ -301,7 +321,17 @@ async fn test_send_payment_keysend_without_max_fee() {
 
     // Verify PaymentEvent records for 3-node path: node_0 (Send) -> node_1 (Forward) -> node_2 (Receive)
     // Node 0: should have a Send PaymentEvent
-    let (send_events, _) = source_node.store.get_payment_events(0, u64::MAX, 100, None);
+    let (send_events, _) = source_node
+        .store
+        .query_payment_events(crate::fiber::channel::PaymentHistoryQuery {
+            asset: crate::fiber::channel::AssetSelector::All,
+            event_type: None,
+            start_time: 0,
+            end_time: u64::MAX,
+            limit: 100,
+            after: None,
+        })
+        .unwrap();
     assert_eq!(send_events.len(), 1);
     assert_eq!(
         send_events[0].event_type,
@@ -311,18 +341,47 @@ async fn test_send_payment_keysend_without_max_fee() {
     assert_eq!(send_events[0].channel_id, channels[0]); // first hop channel
 
     // Node 1: should have a ForwardingEvent (not a PaymentEvent)
-    let (node_1_payment_events, _) = node_1.store.get_payment_events(0, u64::MAX, 100, None);
+    let (node_1_payment_events, _) = node_1
+        .store
+        .query_payment_events(crate::fiber::channel::PaymentHistoryQuery {
+            asset: crate::fiber::channel::AssetSelector::All,
+            event_type: None,
+            start_time: 0,
+            end_time: u64::MAX,
+            limit: 100,
+            after: None,
+        })
+        .unwrap();
     assert!(
         node_1_payment_events.is_empty(),
         "Intermediate node should not have PaymentEvents"
     );
-    let (fwd_events, _) = node_1.store.get_forwarding_events(0, u64::MAX, 100, None);
+    let (fwd_events, _) = node_1
+        .store
+        .query_forwarding_events(crate::fiber::channel::ForwardingHistoryQuery {
+            asset: crate::fiber::channel::AssetSelector::All,
+            start_time: 0,
+            end_time: u64::MAX,
+            limit: 100,
+            after: None,
+        })
+        .unwrap();
     assert_eq!(fwd_events.len(), 1);
     assert_eq!(fwd_events[0].payment_hash, payment_hash);
     assert_eq!(fwd_events[0].fee, 10000); // routing fee
 
     // Node 2: should have a Receive PaymentEvent
-    let (recv_events, _) = node_2.store.get_payment_events(0, u64::MAX, 100, None);
+    let (recv_events, _) = node_2
+        .store
+        .query_payment_events(crate::fiber::channel::PaymentHistoryQuery {
+            asset: crate::fiber::channel::AssetSelector::All,
+            event_type: None,
+            start_time: 0,
+            end_time: u64::MAX,
+            limit: 100,
+            after: None,
+        })
+        .unwrap();
     assert_eq!(recv_events.len(), 1);
     assert_eq!(
         recv_events[0].event_type,

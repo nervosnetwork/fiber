@@ -1,10 +1,13 @@
-use crate::fiber::channel::PaymentEventStore;
+use crate::fiber::channel::{
+    ForwardingHistoryCursor, ForwardingHistoryQuery, PaymentEventStore, PaymentHistoryCursor,
+    PaymentHistoryQuery,
+};
 use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use crate::rpc::info::{
     fee_report_impl, forwarding_history_impl, payment_history_impl, received_payment_report_impl,
-    sent_payment_report_impl, FeeReportParams, ForwardingHistoryParams, PaymentHistoryParams,
-    MILLIS_PER_DAY,
+    sent_payment_report_impl, FeeReportParams, ForwardingHistoryAsset, ForwardingHistoryParams,
+    PaymentHistoryAsset, PaymentHistoryEventType, PaymentHistoryParams, MILLIS_PER_DAY,
 };
 use ckb_types::packed::Script;
 use fiber_types::{ForwardingEvent, PaymentEvent, PaymentEventType};
@@ -41,6 +44,14 @@ fn forwarding_cursor_key(event: &ForwardingEvent) -> Vec<u8> {
     key
 }
 
+fn forwarding_cursor_key_from_typed(cursor: &ForwardingHistoryCursor) -> Vec<u8> {
+    let mut key = vec![240u8]; // FORWARDING_EVENT_PREFIX
+    key.extend_from_slice(&cursor.timestamp().to_be_bytes());
+    key.extend_from_slice(cursor.payment_hash().as_ref());
+    key.extend_from_slice(cursor.incoming_channel_id().as_ref());
+    key
+}
+
 /// Build a cursor key for a payment event (mirrors the real key layout:
 /// prefix(1) + timestamp_be(8) + payment_hash(32) + channel_id(32) = 73 bytes).
 fn payment_cursor_key(event: &PaymentEvent) -> Vec<u8> {
@@ -48,6 +59,14 @@ fn payment_cursor_key(event: &PaymentEvent) -> Vec<u8> {
     key.extend_from_slice(&event.timestamp.to_be_bytes());
     key.extend_from_slice(event.payment_hash.as_ref());
     key.extend_from_slice(event.channel_id.as_ref());
+    key
+}
+
+fn payment_cursor_key_from_typed(cursor: &PaymentHistoryCursor) -> Vec<u8> {
+    let mut key = vec![241u8]; // PAYMENT_EVENT_PREFIX
+    key.extend_from_slice(&cursor.timestamp().to_be_bytes());
+    key.extend_from_slice(cursor.payment_hash().as_ref());
+    key.extend_from_slice(cursor.channel_id().as_ref());
     key
 }
 
@@ -59,20 +78,32 @@ impl PaymentEventStore for MockForwardingStore {
         events.sort_by_key(forwarding_cursor_key);
     }
 
-    fn get_forwarding_events(
+    fn query_forwarding_events(
         &self,
-        start_time: u64,
-        end_time: u64,
-        limit: usize,
-        after_cursor: Option<Vec<u8>>,
-    ) -> (Vec<ForwardingEvent>, Option<Vec<u8>>) {
-        let events = self.events.lock().unwrap();
-        let filtered: Vec<ForwardingEvent> = events
+        query: ForwardingHistoryQuery,
+    ) -> Result<(Vec<ForwardingEvent>, Option<ForwardingHistoryCursor>), String> {
+        let ForwardingHistoryQuery {
+            asset,
+            start_time,
+            end_time,
+            limit,
+            after,
+        } = query;
+
+        if let Some(cursor) = &after {
+            cursor.validate_for(&asset)?;
+        }
+
+        let filtered: Vec<ForwardingEvent> = self
+            .events
+            .lock()
+            .unwrap()
             .iter()
             .filter(|e| e.timestamp >= start_time && e.timestamp <= end_time)
+            .filter(|e| asset.matches(&e.udt_type_script))
             .filter(|e| {
-                if let Some(ref cursor) = after_cursor {
-                    forwarding_cursor_key(e) > *cursor
+                if let Some(ref cursor) = after {
+                    forwarding_cursor_key(e) > forwarding_cursor_key_from_typed(cursor)
                 } else {
                     true
                 }
@@ -80,12 +111,16 @@ impl PaymentEventStore for MockForwardingStore {
             .take(limit)
             .cloned()
             .collect();
+
         let last_cursor = if filtered.len() == limit {
-            filtered.last().map(forwarding_cursor_key)
+            filtered
+                .last()
+                .map(|event| ForwardingHistoryCursor::new(&asset, event))
         } else {
             None
         };
-        (filtered, last_cursor)
+
+        Ok((filtered, last_cursor))
     }
 
     fn insert_payment_event(&self, event: PaymentEvent) {
@@ -95,33 +130,47 @@ impl PaymentEventStore for MockForwardingStore {
         events.sort_by_key(payment_cursor_key);
     }
 
-    fn get_payment_events(
+    fn query_payment_events(
         &self,
-        start_time: u64,
-        end_time: u64,
-        limit: usize,
-        after_cursor: Option<Vec<u8>>,
-    ) -> (Vec<PaymentEvent>, Option<Vec<u8>>) {
-        let events = self.payment_events.lock().unwrap();
-        let filtered: Vec<PaymentEvent> = events
+        query: PaymentHistoryQuery,
+    ) -> Result<(Vec<PaymentEvent>, Option<PaymentHistoryCursor>), String> {
+        if let Some(cursor) = &query.after {
+            cursor.validate_for(&query)?;
+        }
+
+        let filtered: Vec<PaymentEvent> = self
+            .payment_events
+            .lock()
+            .unwrap()
             .iter()
-            .filter(|e| e.timestamp >= start_time && e.timestamp <= end_time)
+            .filter(|e| e.timestamp >= query.start_time && e.timestamp <= query.end_time)
+            .filter(|e| query.asset.matches(&e.udt_type_script))
             .filter(|e| {
-                if let Some(ref cursor) = after_cursor {
-                    payment_cursor_key(e) > *cursor
+                query
+                    .event_type
+                    .map(|expected| expected == e.event_type)
+                    .unwrap_or(true)
+            })
+            .filter(|e| {
+                if let Some(ref cursor) = query.after {
+                    payment_cursor_key(e) > payment_cursor_key_from_typed(cursor)
                 } else {
                     true
                 }
             })
-            .take(limit)
+            .take(query.limit)
             .cloned()
             .collect();
-        let last_cursor = if filtered.len() == limit {
-            filtered.last().map(payment_cursor_key)
+
+        let last_cursor = if filtered.len() == query.limit {
+            filtered
+                .last()
+                .map(|event| PaymentHistoryCursor::new(&query, event))
         } else {
             None
         };
-        (filtered, last_cursor)
+
+        Ok((filtered, last_cursor))
     }
 }
 
@@ -352,7 +401,9 @@ async fn test_forwarding_history_filter_by_udt() {
     let result = forwarding_history_impl(
         &store,
         ForwardingHistoryParams {
-            udt_type_script: Some(udt_a.into()),
+            asset: Some(ForwardingHistoryAsset::Udt {
+                udt_type_script: udt_a.into(),
+            }),
             ..Default::default()
         },
     )
@@ -360,6 +411,63 @@ async fn test_forwarding_history_filter_by_udt() {
     assert_eq!(result.total_count, 1);
     assert_eq!(result.events[0].fee, 20);
     assert!(result.events[0].udt_type_script.is_some());
+}
+
+#[tokio::test]
+async fn test_forwarding_history_filter_ckb_only() {
+    let now = now_timestamp_as_millis_u64();
+    let store = MockForwardingStore::new();
+    let udt = dummy_udt_script(9);
+
+    store.insert_forwarding_event(make_event(now - 3000, 10));
+    store.insert_forwarding_event(make_event_with_udt(now - 2000, 20, Some(udt)));
+
+    let result = forwarding_history_impl(
+        &store,
+        ForwardingHistoryParams {
+            asset: Some(ForwardingHistoryAsset::Ckb),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.total_count, 1);
+    assert!(result.events[0].udt_type_script.is_none());
+    assert_eq!(result.events[0].fee, 10);
+}
+
+#[tokio::test]
+async fn test_forwarding_history_cursor_rejects_asset_mismatch() {
+    let now = now_timestamp_as_millis_u64();
+    let store = MockForwardingStore::new();
+    let udt = dummy_udt_script(7);
+
+    store.insert_forwarding_event(make_event_with_udt(now - 2000, 20, Some(udt.clone())));
+    store.insert_forwarding_event(make_event_with_udt(now - 1000, 30, Some(udt.clone())));
+
+    let first_page = forwarding_history_impl(
+        &store,
+        ForwardingHistoryParams {
+            asset: Some(ForwardingHistoryAsset::Udt {
+                udt_type_script: udt.into(),
+            }),
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let err = forwarding_history_impl(
+        &store,
+        ForwardingHistoryParams {
+            asset: Some(ForwardingHistoryAsset::Ckb),
+            after: first_page.last_cursor,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("cursor does not match"));
 }
 
 #[tokio::test]
@@ -727,7 +835,9 @@ async fn test_payment_history_filter_by_udt() {
     let result = payment_history_impl(
         &store,
         PaymentHistoryParams {
-            udt_type_script: Some(udt_a.into()),
+            asset: Some(PaymentHistoryAsset::Udt {
+                udt_type_script: udt_a.into(),
+            }),
             ..Default::default()
         },
     )
@@ -736,6 +846,95 @@ async fn test_payment_history_filter_by_udt() {
     assert_eq!(result.events[0].amount, 200);
     assert_eq!(result.events[0].event_type, "Receive");
     assert!(result.events[0].udt_type_script.is_some());
+}
+
+#[tokio::test]
+async fn test_payment_history_filter_ckb_only() {
+    let now = now_timestamp_as_millis_u64();
+    let store = MockForwardingStore::new();
+    let udt = dummy_udt_script(3);
+
+    store.insert_payment_event(make_payment_event(now - 3000, 100, PaymentEventType::Send));
+    store.insert_payment_event(make_payment_event_with_udt(
+        now - 2000,
+        200,
+        PaymentEventType::Receive,
+        Some(udt),
+    ));
+
+    let result = payment_history_impl(
+        &store,
+        PaymentHistoryParams {
+            asset: Some(PaymentHistoryAsset::Ckb),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.total_count, 1);
+    assert_eq!(result.events[0].amount, 100);
+    assert!(result.events[0].udt_type_script.is_none());
+}
+
+#[tokio::test]
+async fn test_payment_history_filter_by_event_type() {
+    let now = now_timestamp_as_millis_u64();
+    let store = MockForwardingStore::new();
+
+    store.insert_payment_event(make_payment_event(now - 3000, 100, PaymentEventType::Send));
+    store.insert_payment_event(make_payment_event(
+        now - 2000,
+        200,
+        PaymentEventType::Receive,
+    ));
+
+    let result = payment_history_impl(
+        &store,
+        PaymentHistoryParams {
+            event_type: Some(PaymentHistoryEventType::Receive),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.total_count, 1);
+    assert_eq!(result.events[0].event_type, "Receive");
+    assert_eq!(result.events[0].amount, 200);
+}
+
+#[tokio::test]
+async fn test_payment_history_cursor_rejects_filter_mismatch() {
+    let now = now_timestamp_as_millis_u64();
+    let store = MockForwardingStore::new();
+
+    store.insert_payment_event(make_payment_event(now - 3000, 100, PaymentEventType::Send));
+    store.insert_payment_event(make_payment_event(
+        now - 2000,
+        200,
+        PaymentEventType::Receive,
+    ));
+
+    let first_page = payment_history_impl(
+        &store,
+        PaymentHistoryParams {
+            event_type: Some(PaymentHistoryEventType::Receive),
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let err = payment_history_impl(
+        &store,
+        PaymentHistoryParams {
+            event_type: Some(PaymentHistoryEventType::Send),
+            after: first_page.last_cursor,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("cursor does not match"));
 }
 
 #[tokio::test]
