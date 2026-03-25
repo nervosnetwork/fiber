@@ -43,16 +43,6 @@ fn exit_to_js(e: ExitMessage) -> JsValue {
     JsValue::from_str(&e.0)
 }
 
-/// Re-export at crate root so fiber-js worker finds them by simple name.
-#[wasm_bindgen]
-pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
-    api::open_channel_with_external_funding(params).await
-}
-
-#[wasm_bindgen]
-pub async fn submit_signed_funding_tx(params: JsValue) -> Result<JsValue, JsValue> {
-    api::submit_signed_funding_tx(params).await
-}
 /// Convenience: create an `Err(JsValue)` from a string message.
 fn js_err(msg: String) -> Result<(), JsValue> {
     Err(JsValue::from_str(&msg))
