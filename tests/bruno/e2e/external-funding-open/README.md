@@ -12,13 +12,13 @@ The flow verifies that node1 acts as the channel initiator without spending its 
 
 For a quicker read through the main external-funding flow, these are good files to start with:
 
-- [`07-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru): the main entry point; defines `funding_amount`, injects node2's funding/shutdown script, and captures the unsigned funding tx plus channel id.
-- [`08-sign-external-funding-tx.bru`](tests/bruno/e2e/external-funding-open/08-sign-external-funding-tx.bru): signs the unsigned funding tx with `EXTERNAL_FUNDING_PRIVKEY`.
-- [`09-submit-signed-funding-tx.bru`](tests/bruno/e2e/external-funding-open/09-submit-signed-funding-tx.bru): submits the signed funding tx and records the on-chain funding tx hash.
-- [`11-wait-channel-ready.bru`](tests/bruno/e2e/external-funding-open/11-wait-channel-ready.bru): the ready-state polling logic after funding submission.
-- [`15-shutdown-channel-from-node1.bru`](tests/bruno/e2e/external-funding-open/15-shutdown-channel-from-node1.bru): starts cooperative shutdown using node2's close script.
-- [`17-wait-channel-closed-and-capture-shutdown-tx.bru`](tests/bruno/e2e/external-funding-open/17-wait-channel-closed-and-capture-shutdown-tx.bru): the closed-state polling logic and shutdown tx capture.
-- [`18-inspect-shutdown-tx.bru`](tests/bruno/e2e/external-funding-open/18-inspect-shutdown-tx.bru): checks the shutdown refund output returned to node2 and derives the shutdown fee.
+- [`08-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/08-open-channel-with-external-funding.bru): the main entry point; defines `funding_amount`, injects node2's funding/shutdown script, and captures the unsigned funding tx plus channel id.
+- [`09-sign-external-funding-tx.bru`](tests/bruno/e2e/external-funding-open/09-sign-external-funding-tx.bru): signs the unsigned funding tx with `EXTERNAL_FUNDING_PRIVKEY`.
+- [`10-submit-signed-funding-tx.bru`](tests/bruno/e2e/external-funding-open/10-submit-signed-funding-tx.bru): submits the signed funding tx and records the on-chain funding tx hash.
+- [`12-wait-channel-ready.bru`](tests/bruno/e2e/external-funding-open/12-wait-channel-ready.bru): the ready-state polling logic after funding submission.
+- [`16-shutdown-channel-from-node1.bru`](tests/bruno/e2e/external-funding-open/16-shutdown-channel-from-node1.bru): starts cooperative shutdown using node2's close script.
+- [`18-wait-channel-closed-and-capture-shutdown-tx.bru`](tests/bruno/e2e/external-funding-open/18-wait-channel-closed-and-capture-shutdown-tx.bru): the closed-state polling logic and shutdown tx capture.
+- [`19-inspect-shutdown-tx.bru`](tests/bruno/e2e/external-funding-open/19-inspect-shutdown-tx.bru): checks the shutdown refund output returned to node2 and derives the shutdown fee.
 
 The other `.bru` files are mostly support steps for setup, balance snapshots, and per-node assertions.
 
@@ -47,17 +47,17 @@ This test validates the following sequence:
 
 The Bruno collection now follows a more request-oriented layout:
 
-- `00` connects node1 to node3.
-- `01` to `06` fetch the three nodes' funding scripts and pre-open CKB balances.
-- `07` opens the external-funded channel.
-- `08` signs the unsigned funding tx via `sign_external_funding_tx`.
-- `09` submits the signed funding tx.
-- `10` and `11` poll until the channel reaches `ChannelReady`.
-- `12` to `14` check node1/node2/node3 balances after open.
-- `15` initiates cooperative shutdown from node1.
-- `16` and `17` poll until the channel reaches `Closed` and capture the shutdown tx hash.
-- `18` inspects the shutdown transaction and records the refund/fee split.
-- `19` to `21` check node1/node2/node3 balances after close.
+- `01` connects node1 to node3.
+- `02` to `07` fetch the three nodes' funding scripts and pre-open CKB balances.
+- `08` opens the external-funded channel.
+- `09` signs the unsigned funding tx via `sign_external_funding_tx`.
+- `10` submits the signed funding tx.
+- `11` and `12` poll until the channel reaches `ChannelReady`.
+- `13` to `15` check node1/node2/node3 balances after open.
+- `16` initiates cooperative shutdown from node1.
+- `17` and `18` poll until the channel reaches `Closed` and capture the shutdown tx hash.
+- `19` inspects the shutdown transaction and records the refund/fee split.
+- `20` to `22` check node1/node2/node3 balances after close.
 
 ## Running
 
@@ -85,13 +85,13 @@ npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test
 
 ### Funding amount selection
 
-[`07-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru) makes a single open attempt with the `funding_amount` defined in the JSON-RPC request body. In the current checked-in version, that value is `0xba43b7400` (500 CKB).
+[`08-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/08-open-channel-with-external-funding.bru) makes a single open attempt with the `funding_amount` defined in the JSON-RPC request body. In the current checked-in version, that value is `0xba43b7400` (500 CKB).
 
-`EXTERNAL_FUNDING_AMOUNT` is not an input parameter for this collection. Step `07` reads the `funding_amount` from the request body and stores it in the Bruno variable `EXTERNAL_FUNDING_AMOUNT` only so later steps can reuse the same value for assertions.
+`EXTERNAL_FUNDING_AMOUNT` is not an input parameter for this collection. Step `08` reads the `funding_amount` from the request body and stores it in the Bruno variable `EXTERNAL_FUNDING_AMOUNT` only so later steps can reuse the same value for assertions.
 
-If you want to test a different amount, update the `funding_amount` field in [`07-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru).
+If you want to test a different amount, update the `funding_amount` field in [`08-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/08-open-channel-with-external-funding.bru).
 
 ## Troubleshooting
 
 - `Missing EXTERNAL_FUNDING_PRIVKEY environment variable`: add it to `tests/bruno/environments/test.bru`, or pass it with `--env-var EXTERNAL_FUNDING_PRIVKEY=...`.
-- Failed to open with the selected amount: lower `funding_amount` in [`07-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru).
+- Failed to open with the selected amount: lower `funding_amount` in [`08-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/08-open-channel-with-external-funding.bru).
