@@ -273,6 +273,18 @@ impl From<fiber_types::CkbInvoiceStatus> for JsonCkbInvoiceStatus {
     }
 }
 
+impl From<JsonCkbInvoiceStatus> for fiber_types::CkbInvoiceStatus {
+    fn from(status: JsonCkbInvoiceStatus) -> Self {
+        match status {
+            JsonCkbInvoiceStatus::Open => fiber_types::CkbInvoiceStatus::Open,
+            JsonCkbInvoiceStatus::Cancelled => fiber_types::CkbInvoiceStatus::Cancelled,
+            JsonCkbInvoiceStatus::Expired => fiber_types::CkbInvoiceStatus::Expired,
+            JsonCkbInvoiceStatus::Received => fiber_types::CkbInvoiceStatus::Received,
+            JsonCkbInvoiceStatus::Paid => fiber_types::CkbInvoiceStatus::Paid,
+        }
+    }
+}
+
 // ─── CchOrderStatus Conversions ─────────────────────────────────────────────
 
 #[cfg(feature = "cch")]

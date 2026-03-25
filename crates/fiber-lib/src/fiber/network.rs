@@ -52,8 +52,8 @@ use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
     ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
-    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    PaymentEventStore, ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand,
+    StopReason, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::gossip::{
     get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
@@ -728,6 +728,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + PaymentEventStore
         + Clone
         + Send
         + Sync
@@ -3119,6 +3120,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + PaymentEventStore
         + Clone
         + Send
         + Sync
@@ -4627,6 +4629,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + PaymentEventStore
         + Clone
         + Send
         + Sync
@@ -5163,6 +5166,7 @@ pub async fn start_network<
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + PaymentEventStore
         + Clone
         + Send
         + Sync

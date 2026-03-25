@@ -36,12 +36,18 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `graph_channels`](#graph-graph_channels)
     * [Module Info](#module-info)
         * [Method `node_info`](#info-node_info)
+        * [Method `fee_report`](#info-fee_report)
+        * [Method `forwarding_history`](#info-forwarding_history)
+        * [Method `sent_payment_report`](#info-sent_payment_report)
+        * [Method `received_payment_report`](#info-received_payment_report)
+        * [Method `payment_history`](#info-payment_history)
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#invoice-new_invoice)
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
         * [Method `settle_invoice`](#invoice-settle_invoice)
+        * [Method `list_invoices`](#invoice-list_invoices)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -64,6 +70,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `remove_preimage`](#watchtower-remove_preimage)
 * [RPC Types](#rpc-types)
 
+    * [Type `AssetFeeReport`](#type-assetfeereport)
+    * [Type `AssetPaymentReport`](#type-assetpaymentreport)
     * [Type `Attribute`](#type-attribute)
     * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
@@ -74,6 +82,9 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
     * [Type `Currency`](#type-currency)
+    * [Type `ForwardingEventInfo`](#type-forwardingeventinfo)
+    * [Type `ForwardingHistoryAsset`](#type-forwardinghistoryasset)
+    * [Type `GetInvoiceResult`](#type-getinvoiceresult)
     * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
     * [Type `HashAlgorithm`](#type-hashalgorithm)
@@ -83,6 +94,9 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
+    * [Type `PaymentEventInfo`](#type-paymenteventinfo)
+    * [Type `PaymentHistoryAsset`](#type-paymenthistoryasset)
+    * [Type `PaymentHistoryEventType`](#type-paymenthistoryeventtype)
     * [Type `PaymentStatus`](#type-paymentstatus)
     * [Type `PeerInfo`](#type-peerinfo)
     * [Type `Privkey`](#type-privkey)
@@ -536,6 +550,127 @@ Get the node information.
 
 
 
+<a id="info-fee_report"></a>
+#### Method `fee_report`
+
+Returns a summary of forwarding fees earned over day/week/month windows,
+ grouped by asset type (CKB and each UDT).
+
+##### Params
+
+* `days` - <em>`Option<u64>`</em>, Number of days to include in the report (starting from now).
+ Default is 30. This is used when start_time is not specified.
+ Mutually exclusive with start_time/end_time.
+* `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive).
+ Mutually exclusive with days.
+ Default is (end_time - days * 24h) or 30 days ago if end_time is also not specified.
+* `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive).
+ Default is current time.
+
+##### Returns
+
+* `asset_reports` - <em>Vec<[AssetFeeReport](#type-assetfeereport)></em>, Fee reports grouped by asset type.
+ Each entry corresponds to a different token (CKB or a UDT).
+
+---
+
+
+
+<a id="info-forwarding_history"></a>
+#### Method `forwarding_history`
+
+Returns individual forwarding events with optional time range, asset filter,
+ and pagination.
+
+##### Params
+
+* `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive). Default is 0 (the beginning of time).
+* `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive). Default is the current time.
+* `limit` - <em>`Option<u64>`</em>, Maximum number of events to return. Default is 100.
+* `after` - <em>`Option<JsonBytes>`</em>, Opaque cursor for pagination. Pass the `last_cursor` value from a previous
+ response to retrieve the next page of results. Omit or set to `null` to
+ start from the beginning.
+* `asset` - <em>Option<[ForwardingHistoryAsset](#type-forwardinghistoryasset)></em>, Filter by asset. Omit or set to `null` to return events for all asset types.
+* `udt_type_script` - <em>`Option<Script>`</em>, Deprecated compatibility field for filtering by a specific UDT type script.
+ Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
+
+##### Returns
+
+* `events` - <em>Vec<[ForwardingEventInfo](#type-forwardingeventinfo)></em>, The list of forwarding events.
+* `total_count` - <em>`u64`</em>, The total number of forwarding events returned in this result.
+* `last_cursor` - <em>`Option<JsonBytes>`</em>, Opaque cursor pointing past the last event in this page.
+ Pass this value as `after` in the next request to fetch the next page.
+ `null` means there are no more results.
+
+---
+
+
+
+<a id="info-sent_payment_report"></a>
+#### Method `sent_payment_report`
+
+Returns a summary of sent payment amounts over day/week/month windows,
+ grouped by asset type (CKB and each UDT).
+
+##### Params
+* None
+
+##### Returns
+
+* `asset_reports` - <em>Vec<[AssetPaymentReport](#type-assetpaymentreport)></em>, Payment reports grouped by asset type.
+
+---
+
+
+
+<a id="info-received_payment_report"></a>
+#### Method `received_payment_report`
+
+Returns a summary of received payment amounts over day/week/month windows,
+ grouped by asset type (CKB and each UDT).
+
+##### Params
+* None
+
+##### Returns
+
+* `asset_reports` - <em>Vec<[AssetPaymentReport](#type-assetpaymentreport)></em>, Payment reports grouped by asset type.
+
+---
+
+
+
+<a id="info-payment_history"></a>
+#### Method `payment_history`
+
+Returns individual send/receive payment events with optional time range,
+ asset filter, and pagination.
+
+##### Params
+
+* `start_time` - <em>`Option<u64>`</em>, Start time in milliseconds since UNIX epoch (inclusive). Default is 0.
+* `end_time` - <em>`Option<u64>`</em>, End time in milliseconds since UNIX epoch (inclusive). Default is the current time.
+* `limit` - <em>`Option<u64>`</em>, Maximum number of events to return. Default is 100.
+* `after` - <em>`Option<JsonBytes>`</em>, Opaque cursor for pagination. Pass the `last_cursor` value from a previous
+ response to retrieve the next page of results. Omit or set to `null` to
+ start from the beginning.
+* `asset` - <em>Option<[PaymentHistoryAsset](#type-paymenthistoryasset)></em>, Filter by asset. Omit or set to `null` to return events for all asset types.
+* `event_type` - <em>Option<[PaymentHistoryEventType](#type-paymenthistoryeventtype)></em>, Optional filter by payment event type.
+* `udt_type_script` - <em>`Option<Script>`</em>, Deprecated compatibility field for filtering by a specific UDT type script.
+ Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
+
+##### Returns
+
+* `events` - <em>Vec<[PaymentEventInfo](#type-paymenteventinfo)></em>, The list of payment events.
+* `total_count` - <em>`u64`</em>, The total number of events returned in this result.
+* `last_cursor` - <em>`Option<JsonBytes>`</em>, Opaque cursor pointing past the last event in this page.
+ Pass this value as `after` in the next request to fetch the next page.
+ `null` means there are no more results.
+
+---
+
+
+
 <a id="invoice"></a>
 ### Module `Invoice`
 RPC module for invoice management.
@@ -641,6 +776,26 @@ Settles an invoice by saving the preimage to this invoice.
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="invoice-list_invoices"></a>
+#### Method `list_invoices`
+
+Lists all invoices, optionally filtered by status.
+
+##### Params
+
+* `status` - <em>Option<[CkbInvoiceStatus](#type-ckbinvoicestatus)></em>, Filter invoices by status. If not set, all invoices are returned.
+* `limit` - <em>`Option<u64>`</em>, The maximum number of invoices to return. Default is 15.
+* `after` - <em>Option<[Hash256](#type-hash256)></em>, The payment hash to start returning invoices after (exclusive cursor for pagination).
+
+##### Returns
+
+* `invoices` - <em>Vec<[GetInvoiceResult](#type-getinvoiceresult)></em>, The list of invoices.
+* `last_cursor` - <em>Option<[Hash256](#type-hash256)></em>, The last cursor for pagination. Use this as `after` in the next request to get more results.
 
 ---
 
@@ -1094,6 +1249,42 @@ Remove preimage
 ## RPC Types
 
 
+<a id="#type-assetfeereport"></a>
+### Type `AssetFeeReport`
+
+Fee summary for a single asset type (CKB or a specific UDT).
+
+
+#### Fields
+
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script. `None` means native CKB.
+* `daily_fee_sum` - <em>`u128`</em>, Total fees earned in the last 24 hours.
+* `weekly_fee_sum` - <em>`u128`</em>, Total fees earned in the last 7 days.
+* `monthly_fee_sum` - <em>`u128`</em>, Total fees earned in the last 30 days.
+* `daily_event_count` - <em>`u64`</em>, Total number of forwarding events in the last 24 hours.
+* `weekly_event_count` - <em>`u64`</em>, Total number of forwarding events in the last 7 days.
+* `monthly_event_count` - <em>`u64`</em>, Total number of forwarding events in the last 30 days.
+---
+
+<a id="#type-assetpaymentreport"></a>
+### Type `AssetPaymentReport`
+
+Payment amount summary for a single asset type (CKB or a specific UDT).
+
+ Used by both `sent_payment_report` and `received_payment_report` RPCs.
+
+
+#### Fields
+
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script. `None` means native CKB.
+* `daily_amount_sum` - <em>`u128`</em>, Total amount in the last 24 hours.
+* `weekly_amount_sum` - <em>`u128`</em>, Total amount in the last 7 days.
+* `monthly_amount_sum` - <em>`u128`</em>, Total amount in the last 30 days.
+* `daily_event_count` - <em>`u64`</em>, Total number of payment events in the last 24 hours.
+* `weekly_event_count` - <em>`u64`</em>, Total number of payment events in the last 7 days.
+* `monthly_event_count` - <em>`u64`</em>, Total number of payment events in the last 30 days.
+---
+
 <a id="#type-attribute"></a>
 ### Type `Attribute`
 
@@ -1294,6 +1485,54 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Fibd` - The devnet currency of the CKB network.
 ---
 
+<a id="#type-forwardingeventinfo"></a>
+### Type `ForwardingEventInfo`
+
+A single forwarding event as returned by the `forwarding_history` RPC.
+
+
+#### Fields
+
+* `timestamp` - <em>`u64`</em>, Timestamp when this event was recorded, in milliseconds since UNIX epoch.
+* `incoming_channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID through which the inbound TLC arrived.
+* `outgoing_channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID through which the outbound TLC was sent.
+* `incoming_amount` - <em>`u128`</em>, The amount received on the incoming channel.
+* `outgoing_amount` - <em>`u128`</em>, The amount forwarded on the outgoing channel.
+* `fee` - <em>`u128`</em>, The fee earned for this forwarding event.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash associated with this forwarded TLC.
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script. `None` means native CKB.
+---
+
+<a id="#type-forwardinghistoryasset"></a>
+### Type `ForwardingHistoryAsset`
+
+Parameters for the `forwarding_history` RPC method.
+
+ Queries individual forwarding events with time range and pagination.
+ Uses cursor-based pagination: pass `last_cursor` from a previous response
+ as `after` to fetch the next page.
+ Asset selector for `forwarding_history`.
+
+
+#### Enum with values of
+
+* `ckb` - Match native CKB forwarding events only.
+* `udt` - Match forwarding events for the specified UDT type script.
+---
+
+<a id="#type-getinvoiceresult"></a>
+### Type `GetInvoiceResult`
+
+The status of the invoice.
+
+
+#### Fields
+
+* `invoice_address` - <em>`String`</em>, The encoded invoice address.
+* `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+* `status` - <em>[CkbInvoiceStatus](#type-ckbinvoicestatus)</em>, The invoice status
+---
+
 <a id="#type-getpaymentcommandresult"></a>
 ### Type `GetPaymentCommandResult`
 
@@ -1439,6 +1678,47 @@ The custom records to be included in the payment.
 #### Fields
 
 * `data` - <em>`HashMap<u32::Vec<u8>>`</em>, The custom records to be included in the payment.
+---
+
+<a id="#type-paymenteventinfo"></a>
+### Type `PaymentEventInfo`
+
+A single payment event as returned by the `payment_history` RPC.
+
+
+#### Fields
+
+* `event_type` - <em>`String`</em>, The type of this event: "Send" or "Receive".
+* `timestamp` - <em>`u64`</em>, Timestamp when this event was recorded, in milliseconds since UNIX epoch.
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID through which the TLC was sent or received.
+* `amount` - <em>`u128`</em>, The payment amount.
+* `fee` - <em>`u128`</em>, The routing fee (only meaningful for Send events; 0 for Receive).
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash associated with this TLC.
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script. `None` means native CKB.
+---
+
+<a id="#type-paymenthistoryasset"></a>
+### Type `PaymentHistoryAsset`
+
+Asset selector for `payment_history`.
+
+
+#### Enum with values of
+
+* `ckb` - Match native CKB payment events only.
+* `udt` - Match payment events for the specified UDT type script.
+---
+
+<a id="#type-paymenthistoryeventtype"></a>
+### Type `PaymentHistoryEventType`
+
+Payment direction filter for `payment_history`.
+
+
+#### Enum with values of
+
+* `send` - Match outgoing payment events.
+* `receive` - Match incoming payment events.
 ---
 
 <a id="#type-paymentstatus"></a>
