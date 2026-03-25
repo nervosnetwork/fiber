@@ -2,10 +2,6 @@ use std::future::Future;
 
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-/// Spawn a task on wasm32 using wasm_bindgen_futures
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen_futures::spawn_local as wasm_spawn_local;
-
 #[derive(Debug, Clone)]
 pub struct TaskTrackerWithCancellation {
     tracker: TaskTracker,
@@ -62,13 +58,13 @@ where
 }
 
 /// Spawn a task on wasm32
-/// Note: In WASM environment, we use wasm_bindgen_futures::spawn_local instead of
-/// tokio_util's spawn_local because the latter requires a LocalSet context which
-/// is not available in the browser's event loop.
 #[cfg(target_arch = "wasm32")]
 pub fn spawn<F>(fut: F)
 where
-    F: Future<Output = ()> + 'static,
+    F: Future + 'static,
+    F::Output: 'static,
 {
-    wasm_spawn_local(fut);
+    TOKIO_TASK_TRACKER_WITH_CANCELLATION
+        .tracker
+        .spawn_local(fut);
 }
