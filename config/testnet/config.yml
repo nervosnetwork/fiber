@@ -16,27 +16,29 @@ fiber:
 
   ## SOCKS5 proxy settings
   ## Uncomment to route all outbound P2P connections through a SOCKS5 proxy (e.g. Tor).
-  # proxy_url: "socks5://127.0.0.1:9050"
-  ## Use random username/password for each proxy connection to improve Tor stream isolation. [default: true]
-  # proxy_random_auth: true
+  # proxy:
+  #   proxy_url: "socks5://127.0.0.1:9050"
+  #   ## Use random username/password for each proxy connection to improve Tor stream isolation. [default: true]
+  #   proxy_random_auth: true
 
   ## Tor onion hidden service settings
   ## Uncomment to make this node reachable via a .onion address.
   ## Requires a running Tor daemon with ControlPort enabled.
-  # listen_on_onion: false
-  ## Tor SOCKS5 proxy url for routing .onion address connections. e.g. 127.0.0.1:9050
-  # onion_server: "127.0.0.1:9050"
-  ## The local address that the onion service forwards traffic to.
-  ## If not set, it is derived from listening_addr. e.g. "127.0.0.1:8228"
-  # onion_p2p_listen_address: "127.0.0.1:8228"
-  ## Path to store the onion service private key. [default: $BASE_DIR/fiber/onion_private_key]
-  # onion_private_key_path: ""
-  ## Tor controller address. [default: 127.0.0.1:9051]
-  # tor_controller: "127.0.0.1:9051"
-  ## Tor controller hashed password (if HashedControlPassword is set in torrc).
-  # tor_password: ""
-  ## The external port exposed by the onion service. [default: 8115]
-  # onion_external_port: 8115
+  # onion:
+  #   listen_on_onion: false
+  #   ## Tor SOCKS5 proxy url for routing .onion address connections. e.g. 127.0.0.1:9050
+  #   onion_server: "127.0.0.1:9050"
+  #   ## The local address that the onion service forwards traffic to.
+  #   ## If not set, it is derived from listening_addr. e.g. "127.0.0.1:8228"
+  #   p2p_listen_address: "127.0.0.1:8228"
+  #   ## Path to store the onion service private key. [default: $BASE_DIR/fiber/onion_private_key]
+  #   onion_private_key_path: ""
+  #   ## Tor controller address. [default: 127.0.0.1:9051]
+  #   tor_controller: "127.0.0.1:9051"
+  #   ## Tor controller hashed password (if HashedControlPassword is set in torrc).
+  #   tor_password: ""
+  #   ## The external port exposed by the onion service. [default: 8115]
+  #   onion_external_port: 8115
   # lock script configurations related to fiber network
   # https://github.com/nervosnetwork/fiber-scripts/blob/main/deployment/testnet/migrations/2025-02-28-111246.json
   scripts:

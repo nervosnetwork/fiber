@@ -763,12 +763,12 @@ where
     ) -> Result<Option<(MultiAddr, tokio_util::sync::CancellationToken)>, String> {
         use std::net::{Ipv4Addr, SocketAddr};
 
-        if config.onion_server.is_none() && config.proxy_url.is_none() {
+        if config.onion.onion_server.is_none() && config.proxy.proxy_url.is_none() {
             return Ok(None);
         }
 
         // Resolve p2p listen address for onion service forwarding
-        let p2p_listen_address: SocketAddr = match &config.onion_p2p_listen_address {
+        let p2p_listen_address: SocketAddr = match &config.onion.p2p_listen_address {
             Some(addr) => {
                 let addr: SocketAddr = addr
                     .parse()
@@ -806,7 +806,7 @@ where
         };
 
         // Check tor controller is reachable
-        let tor_controller_str = config.tor_controller();
+        let tor_controller_str = config.onion.tor_controller.as_str();
         let tor_controller_addr: SocketAddr = tor_controller_str
             .parse()
             .map_err(|err| format!("Failed to parse tor_controller address: {}", err))?;
@@ -829,20 +829,25 @@ where
             }
         }
 
-        let onion_private_key_path = config.onion_private_key_path.clone().unwrap_or_else(|| {
+        let onion_private_key_path =
             config
-                .base_dir()
-                .join("onion_private_key")
-                .display()
-                .to_string()
-        });
+                .onion
+                .onion_private_key_path
+                .clone()
+                .unwrap_or_else(|| {
+                    config
+                        .base_dir()
+                        .join("onion_private_key")
+                        .display()
+                        .to_string()
+                });
 
         let onion_config = super::onion_service::OnionServiceConfig {
             onion_private_key_path,
             tor_controller: tor_controller_str.to_string(),
-            tor_password: config.tor_password.clone(),
+            tor_password: config.onion.tor_password.clone(),
             p2p_listen_address,
-            onion_external_port: config.onion_external_port(),
+            onion_external_port: config.onion.onion_external_port,
         };
 
         let peer_id_str = my_peer_id.to_base58();
@@ -4825,19 +4830,19 @@ where
             }
 
             // Set SOCKS5 proxy config
-            if let Some(proxy_url) = &config.proxy_url {
+            if let Some(proxy_url) = &config.proxy.proxy_url {
                 super::proxy::check_proxy_url(proxy_url).expect("invalid proxy_url in config");
                 builder = builder
                     .tcp_proxy_config(proxy_url)
-                    .tcp_proxy_random_auth(config.proxy_random_auth);
+                    .tcp_proxy_random_auth(config.proxy.proxy_random_auth);
                 info!(
                     "Set tcp_proxy_config: {:?}, proxy_random_auth: {}",
-                    proxy_url, config.proxy_random_auth
+                    proxy_url, config.proxy.proxy_random_auth
                 );
             }
 
             // Set onion proxy config (for .onion address connections via Tor SOCKS5)
-            let onion_proxy_url = config.onion_server.clone().map(|s| {
+            let onion_proxy_url = config.onion.onion_server.clone().map(|s| {
                 if s.starts_with("socks5://") {
                     s
                 } else {
@@ -4935,7 +4940,7 @@ where
 
         // Start Tor onion hidden service if configured
         #[cfg(not(target_arch = "wasm32"))]
-        let onion_service_token = if config.listen_on_onion() {
+        let onion_service_token = if config.onion.listen_on_onion {
             match self.start_onion_service(&config, &listening_addr, &my_peer_id, &tracker) {
                 Ok(Some((addr, token))) => {
                     info!("Onion service address: {}", addr);

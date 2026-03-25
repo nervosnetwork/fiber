@@ -389,86 +389,39 @@ pub struct FiberConfig {
     )]
     pub metrics_addr: Option<String>,
 
-    #[arg(
-        name = "FIBER_PROXY_URL",
-        long = "proxy-url",
-        env,
-        help = "Socks5 proxy URL for fiber. Like: socks5://username:password@127.0.0.1:1080"
-    )]
+    /// SOCKS5 proxy configuration
+    #[arg(skip)]
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+
+    /// Tor onion hidden service configuration
+    #[arg(skip)]
+    #[serde(default)]
+    pub onion: OnionConfig,
+}
+
+/// SOCKS5 proxy configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    /// Socks5 proxy URL for fiber. e.g. socks5://username:password@127.0.0.1:1080
     pub proxy_url: Option<String>,
 
-    #[default(true)]
-    #[arg(
-        name = "FIBER_PROXY_RANDOM_AUTH",
-        long = "proxy-random-auth",
-        env,
-        help = "Use random auth for each proxy connection"
-    )]
+    /// Use random auth for each proxy connection [default: true]
+    #[serde(default = "default_proxy_random_auth")]
     pub proxy_random_auth: bool,
+}
 
-    /// Automatically create Tor onion service [default: false]
-    #[arg(
-        name = "FIBER_LISTEN_ON_ONION",
-        long = "fiber-listen-on-onion",
-        env,
-        help = "Automatically create Tor onion service [default: false]"
-    )]
-    pub listen_on_onion: Option<bool>,
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            proxy_url: None,
+            proxy_random_auth: true,
+        }
+    }
+}
 
-    /// Tor socks5 server url, e.g. 127.0.0.1:9050
-    #[arg(
-        name = "FIBER_ONION_SERVER",
-        long = "fiber-onion-server",
-        env,
-        help = "Tor socks5 server url, e.g. 127.0.0.1:9050"
-    )]
-    pub onion_server: Option<String>,
-
-    /// The onion service will proxy incoming traffic to this p2p listen address.
-    /// If not set, uses the default 127.0.0.1 with the port from listening_addr.
-    #[arg(
-        name = "FIBER_ONION_P2P_LISTEN_ADDRESS",
-        long = "fiber-onion-p2p-listen-address",
-        env,
-        help = "The address that the onion service will proxy incoming traffic to"
-    )]
-    pub onion_p2p_listen_address: Option<String>,
-
-    /// Path to store onion private key [default: $BASE_DIR/fiber/onion_private_key]
-    #[arg(
-        name = "FIBER_ONION_PRIVATE_KEY_PATH",
-        long = "fiber-onion-private-key-path",
-        env,
-        help = "Path to store onion private key [default: $BASE_DIR/fiber/onion_private_key]"
-    )]
-    pub onion_private_key_path: Option<String>,
-
-    /// Tor controller url [default: 127.0.0.1:9051]
-    #[arg(
-        name = "FIBER_TOR_CONTROLLER",
-        long = "fiber-tor-controller",
-        env,
-        help = "Tor controller url [default: 127.0.0.1:9051]"
-    )]
-    pub tor_controller: Option<String>,
-
-    /// Tor controller hashed password
-    #[arg(
-        name = "FIBER_TOR_PASSWORD",
-        long = "fiber-tor-password",
-        env,
-        help = "Tor controller hashed password"
-    )]
-    pub tor_password: Option<String>,
-
-    /// The external port that the onion service will expose [default: 8115]
-    #[arg(
-        name = "FIBER_ONION_EXTERNAL_PORT",
-        long = "fiber-onion-external-port",
-        env,
-        help = "The external port that the onion service will expose [default: 8115]"
-    )]
-    pub onion_external_port: Option<u16>,
+fn default_proxy_random_auth() -> bool {
+    true
 }
 
 /// Default tor controller address
@@ -476,6 +429,43 @@ pub const DEFAULT_TOR_CONTROLLER: &str = "127.0.0.1:9051";
 
 /// Default onion external port
 pub const DEFAULT_ONION_EXTERNAL_PORT: u16 = 8115;
+
+/// Tor onion hidden service configuration
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct OnionConfig {
+    /// Automatically create Tor onion service [default: false]
+    #[serde(default)]
+    pub listen_on_onion: bool,
+
+    /// Tor socks5 server url, e.g. 127.0.0.1:9050
+    pub onion_server: Option<String>,
+
+    /// The onion service will proxy incoming traffic to this p2p listen address.
+    /// If not set, uses the default 127.0.0.1 with the port from listening_addr.
+    pub p2p_listen_address: Option<String>,
+
+    /// Path to store onion private key [default: $BASE_DIR/fiber/onion_private_key]
+    pub onion_private_key_path: Option<String>,
+
+    /// Tor controller url [default: 127.0.0.1:9051]
+    #[serde(default = "default_tor_controller")]
+    pub tor_controller: String,
+
+    /// Tor controller hashed password
+    pub tor_password: Option<String>,
+
+    /// The external port that the onion service will expose [default: 8115]
+    #[serde(default = "default_onion_external_port")]
+    pub onion_external_port: u16,
+}
+
+fn default_tor_controller() -> String {
+    DEFAULT_TOR_CONTROLLER.to_string()
+}
+
+fn default_onion_external_port() -> u16 {
+    DEFAULT_ONION_EXTERNAL_PORT
+}
 
 #[cfg(not(any(test, feature = "bench")))]
 static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
@@ -616,21 +606,6 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
-    }
-
-    pub fn listen_on_onion(&self) -> bool {
-        self.listen_on_onion.unwrap_or(false)
-    }
-
-    pub fn tor_controller(&self) -> &str {
-        self.tor_controller
-            .as_deref()
-            .unwrap_or(DEFAULT_TOR_CONTROLLER)
-    }
-
-    pub fn onion_external_port(&self) -> u16 {
-        self.onion_external_port
-            .unwrap_or(DEFAULT_ONION_EXTERNAL_PORT)
     }
 
     pub fn gen_node_features(&self) -> FeatureVector {
