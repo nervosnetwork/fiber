@@ -3,6 +3,7 @@ use crate::ckb::{
     config::{new_ckb_rpc_async_client, new_default_cell_collector},
     contracts::get_udt_cell_deps,
 };
+use crate::fiber::channel::FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN;
 
 use anyhow::anyhow;
 use ckb_sdk::{
@@ -208,7 +209,12 @@ impl TxBuilder for FundingTxBuilder {
 
         // set a placeholder_witness for calculating transaction fee according to transaction size
         let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+            .lock(
+                Some(molecule::bytes::Bytes::from(
+                    vec![0u8; FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN],
+                ))
+                .pack(),
+            )
             .build();
 
         let tx_builder = builder
@@ -387,7 +393,12 @@ impl FundingTxBuilder {
         let sender = self.context.funding_source_lock_script.clone();
         // Build CapacityBalancer
         let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+            .lock(
+                Some(molecule::bytes::Bytes::from(
+                    vec![0u8; FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN],
+                ))
+                .pack(),
+            )
             .build();
 
         let balancer = CapacityBalancer::new_simple(

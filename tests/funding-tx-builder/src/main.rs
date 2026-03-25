@@ -22,6 +22,10 @@ use ckb_types::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{DeserializeAs, SerializeAs, serde_as};
 
+// The lock field size of the WitnessArgs placeholder used for funding transaction fee estimation.
+// This is a conservative upper bound for the witness lock content of the funding source inputs.
+const FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN: usize = 170;
+
 pub struct EntityHex;
 
 impl<T> SerializeAs<T> for EntityHex
@@ -121,7 +125,12 @@ impl TxBuilder for FundingTxBuilder {
 
         // set a placeholder_witness for calculating transaction fee according to transaction size
         let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+            .lock(
+                Some(molecule::bytes::Bytes::from(
+                    vec![0u8; FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN],
+                ))
+                .pack(),
+            )
             .build();
 
         let tx_builder = builder
@@ -172,7 +181,12 @@ impl FundingTxBuilder {
 
         // Build CapacityBalancer
         let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+            .lock(
+                Some(molecule::bytes::Bytes::from(
+                    vec![0u8; FUNDING_TX_PLACEHOLDER_WITNESS_LOCK_LEN],
+                ))
+                .pack(),
+            )
             .build();
 
         let balancer = CapacityBalancer::new_simple(
