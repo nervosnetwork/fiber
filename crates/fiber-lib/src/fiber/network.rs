@@ -760,6 +760,7 @@ where
         listening_addrs: &[MultiAddr],
         my_peer_id: &tentacle::secio::PeerId,
         tracker: &tokio_util::task::TaskTracker,
+        myself: ActorRef<NetworkActorMessage>,
     ) -> Result<Option<(MultiAddr, tokio_util::sync::CancellationToken)>, String> {
         use std::net::{Ipv4Addr, SocketAddr};
 
@@ -856,9 +857,32 @@ where
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let token_clone = cancel_token.clone();
+        let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::unbounded_channel();
+
         tracker.spawn(async move {
-            if let Err(err) = onion_service.start(token_clone).await {
+            if let Err(err) = onion_service.start(token_clone, reconnect_tx).await {
                 error!("Onion service stopped with error: {}", err);
+            }
+        });
+
+        // Listen for Tor reconnection events and trigger peer reconnection
+        let cancel_for_listener = cancel_token.clone();
+        tracker.spawn(async move {
+            loop {
+                tokio::select! {
+                    msg = reconnect_rx.recv() => {
+                        if msg.is_none() {
+                            break;
+                        }
+                        info!("Tor reconnected, triggering MaintainConnections");
+                        let _ = myself.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::MaintainConnections,
+                        ));
+                    }
+                    _ = cancel_for_listener.cancelled() => {
+                        break;
+                    }
+                }
             }
         });
 
@@ -4941,7 +4965,7 @@ where
         // Start Tor onion hidden service if configured
         #[cfg(not(target_arch = "wasm32"))]
         let onion_service_token = if config.onion.listen_on_onion {
-            match self.start_onion_service(&config, &listening_addr, &my_peer_id, &tracker) {
+            match self.start_onion_service(&config, &listening_addr, &my_peer_id, &tracker, myself.clone()) {
                 Ok(Some((addr, token))) => {
                     info!("Onion service address: {}", addr);
                     announced_addrs.push(addr);

@@ -69,7 +69,14 @@ impl OnionService {
 
     /// Start the onion service. This will loop and reconnect if the Tor connection drops.
     /// The provided `cancel_token` can be used to gracefully shut down.
-    pub async fn start(&self, cancel_token: CancellationToken) -> Result<(), String> {
+    /// When Tor reconnects after a failure, a notification is sent via `reconnect_notify`
+    /// so the caller can trigger peer reconnection.
+    pub async fn start(
+        &self,
+        cancel_token: CancellationToken,
+        reconnect_notify: tokio::sync::mpsc::UnboundedSender<()>,
+    ) -> Result<(), String> {
+        let mut first_start = true;
         loop {
             let (tor_alive_tx, mut tor_alive_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
             match self
@@ -78,9 +85,17 @@ impl OnionService {
             {
                 Ok(_) => {
                     info!("Onion service started successfully");
+                    if !first_start {
+                        // Tor has reconnected after a failure, notify the network actor
+                        // to re-establish peer connections that were dropped.
+                        info!("Tor reconnected, notifying network to reconnect peers");
+                        let _ = reconnect_notify.send(());
+                    }
+                    first_start = false;
                 }
                 Err(err) => {
                     error!("Failed to start onion service: {}", err);
+                    first_start = false;
                 }
             }
 
