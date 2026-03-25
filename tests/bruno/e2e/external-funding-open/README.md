@@ -12,13 +12,13 @@ The flow verifies that node1 acts as the channel initiator without spending its 
 
 For a quicker read through the main external-funding flow, these are good files to start with:
 
-- [`07-open-channel-with-external-funding.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru): the main entry point; defines `funding_amount`, injects node2's funding/shutdown script, and captures the unsigned funding tx plus channel id.
-- [`08-sign-external-funding-tx.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/08-sign-external-funding-tx.bru): signs the unsigned funding tx with `EXTERNAL_FUNDING_PRIVKEY`.
-- [`09-submit-signed-funding-tx.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/09-submit-signed-funding-tx.bru): submits the signed funding tx and records the on-chain funding tx hash.
-- [`11-wait-channel-ready.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/11-wait-channel-ready.bru): the ready-state polling logic after funding submission.
-- [`15-shutdown-channel-from-node1.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/15-shutdown-channel-from-node1.bru): starts cooperative shutdown using node2's close script.
-- [`17-wait-channel-closed-and-capture-shutdown-tx.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/17-wait-channel-closed-and-capture-shutdown-tx.bru): the closed-state polling logic and shutdown tx capture.
-- [`18-inspect-shutdown-tx.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/18-inspect-shutdown-tx.bru): checks the shutdown refund output returned to node2 and derives the shutdown fee.
+- [`07-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru): the main entry point; defines `funding_amount`, injects node2's funding/shutdown script, and captures the unsigned funding tx plus channel id.
+- [`08-sign-external-funding-tx.bru`](tests/bruno/e2e/external-funding-open/08-sign-external-funding-tx.bru): signs the unsigned funding tx with `EXTERNAL_FUNDING_PRIVKEY`.
+- [`09-submit-signed-funding-tx.bru`](tests/bruno/e2e/external-funding-open/09-submit-signed-funding-tx.bru): submits the signed funding tx and records the on-chain funding tx hash.
+- [`11-wait-channel-ready.bru`](tests/bruno/e2e/external-funding-open/11-wait-channel-ready.bru): the ready-state polling logic after funding submission.
+- [`15-shutdown-channel-from-node1.bru`](tests/bruno/e2e/external-funding-open/15-shutdown-channel-from-node1.bru): starts cooperative shutdown using node2's close script.
+- [`17-wait-channel-closed-and-capture-shutdown-tx.bru`](tests/bruno/e2e/external-funding-open/17-wait-channel-closed-and-capture-shutdown-tx.bru): the closed-state polling logic and shutdown tx capture.
+- [`18-inspect-shutdown-tx.bru`](tests/bruno/e2e/external-funding-open/18-inspect-shutdown-tx.bru): checks the shutdown refund output returned to node2 and derives the shutdown fee.
 
 The other `.bru` files are mostly support steps for setup, balance snapshots, and per-node assertions.
 
@@ -85,13 +85,13 @@ npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test
 
 ### Funding amount selection
 
-[`07-open-channel-with-external-funding.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru) makes a single open attempt with the `funding_amount` defined in the JSON-RPC request body. In the current checked-in version, that value is `0xba43b7400` (500 CKB).
+[`07-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru) makes a single open attempt with the `funding_amount` defined in the JSON-RPC request body. In the current checked-in version, that value is `0xba43b7400` (500 CKB).
 
 `EXTERNAL_FUNDING_AMOUNT` is not an input parameter for this collection. Step `07` reads the `funding_amount` from the request body and stores it in the Bruno variable `EXTERNAL_FUNDING_AMOUNT` only so later steps can reuse the same value for assertions.
 
-If you want to test a different amount, update the `funding_amount` field in [`07-open-channel-with-external-funding.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru).
+If you want to test a different amount, update the `funding_amount` field in [`07-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru).
 
 ## Troubleshooting
 
 - `Missing EXTERNAL_FUNDING_PRIVKEY environment variable`: add it to `tests/bruno/environments/test.bru`, or pass it with `--env-var EXTERNAL_FUNDING_PRIVKEY=...`.
-- Failed to open with the selected amount: lower `funding_amount` in [`07-open-channel-with-external-funding.bru`](/home/joii/code/fiber-dev/fiber/tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru).
+- Failed to open with the selected amount: lower `funding_amount` in [`07-open-channel-with-external-funding.bru`](tests/bruno/e2e/external-funding-open/07-open-channel-with-external-funding.bru).
