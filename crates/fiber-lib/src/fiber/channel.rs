@@ -678,10 +678,7 @@ where
             | ProcessingChannelError::TlcValueInflightExceedLimit => {
                 TlcErrorCode::TemporaryChannelFailure
             }
-            ProcessingChannelError::WaitingTlcAck
-            | ProcessingChannelError::ChannelReestablishing => {
-                TlcErrorCode::TemporaryChannelFailure
-            }
+            ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
             ProcessingChannelError::InvalidState(_) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
@@ -3433,8 +3430,6 @@ pub enum ProcessingChannelError {
     Musig2SigningError(#[from] SigningError),
     #[error("Unable to handle TLC command in waiting TLC ACK state")]
     WaitingTlcAck,
-    #[error("Unable to handle AddTlc while channel is reestablishing")]
-    ChannelReestablishing,
     #[error("Failed to peel onion packet: {0}")]
     PeelingOnionPacketError(String),
     #[error(
@@ -5459,11 +5454,11 @@ impl ChannelActorState {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
 
-        if matches!(action, TlcUpdateAction::AddTlcCommand { .. }) && self.reestablishing {
-            return Err(ProcessingChannelError::ChannelReestablishing);
-        }
-
-        if matches!(action, TlcUpdateAction::RemoveTlcCommand) && self.reestablishing {
+        if matches!(
+            action,
+            TlcUpdateAction::AddTlcCommand { .. } | TlcUpdateAction::RemoveTlcCommand
+        ) && self.reestablishing
+        {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
 
