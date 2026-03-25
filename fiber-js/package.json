@@ -9,10 +9,7 @@
     "esbuild-plugin-inline-worker": "^0.1.1",
     "esbuild-plugin-polyfill-node": "^0.3.0",
     "fiber-wasm": "*",
-    "fiber-wasm-db-worker": "*",
-    "jest": "^30.2.0",
-    "ts-jest": "^29.4.6",
-    "@types/jest": "^30.0.0"
+    "fiber-wasm-db-worker": "*"
   },
   "dependencies": {
     "async-mutex": "^0.5.0",
