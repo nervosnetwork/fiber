@@ -754,7 +754,7 @@ where
     /// Returns the onion multiaddr and a CancellationToken to stop the service,
     /// or None if the required configuration (onion_server or proxy_url) is missing.
     #[cfg(not(target_arch = "wasm32"))]
-    fn start_onion_service(
+    async fn start_onion_service(
         &self,
         config: &FiberConfig,
         listening_addrs: &[MultiAddr],
@@ -805,7 +805,7 @@ where
                             listener on 0.0.0.0 or 127.0.0.1 is present"
                         );
                         return Err(
-                            "No suitable IPv4 listen address found for onion service".to_string(),
+                            "No suitable IPv4 listen address found for onion service".to_string()
                         );
                     }
                 }
@@ -829,7 +829,7 @@ where
                     tor_controller_str
                 );
             }
-            Ok(Err(_err)) | Err(_err) => {
+            Ok(Err(_)) | Err(_) => {
                 error!(
                     "tor_controller is not listening on {}, skipping onion service",
                     tor_controller_addr
@@ -4891,6 +4891,11 @@ where
                 }
             });
             if let Some(ref onion_proxy_url) = onion_proxy_url {
+                use crate::fiber::proxy::check_proxy_url;
+
+                check_proxy_url(onion_proxy_url)
+                    .map_err(|e| anyhow::anyhow!("Invalid onion proxy url: {}", e))?;
+
                 info!("Set tcp_onion_config: {:?}", onion_proxy_url);
                 builder = builder.tcp_onion_config(onion_proxy_url);
             }
@@ -4982,13 +4987,16 @@ where
         // Start Tor onion hidden service if configured
         #[cfg(not(target_arch = "wasm32"))]
         let onion_service_token = if config.onion.listen_on_onion {
-            match self.start_onion_service(
-                &config,
-                &listening_addr,
-                &my_peer_id,
-                &tracker,
-                myself.clone(),
-            ) {
+            match self
+                .start_onion_service(
+                    &config,
+                    &listening_addr,
+                    &my_peer_id,
+                    &tracker,
+                    myself.clone(),
+                )
+                .await
+            {
                 Ok(Some((addr, token))) => {
                     info!("Onion service address: {}", addr);
                     announced_addrs.push(addr);
