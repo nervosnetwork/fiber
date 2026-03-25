@@ -34,6 +34,7 @@ bitflags! {
     pub struct ChannelFlags: u8 {
         const PUBLIC = 1;
         const ONE_WAY = 1 << 1;
+        const EXTERNAL_FUNDING = 1 << 2;
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,6 +56,7 @@ bitflags! {
         const OUR_INIT_SENT = 1;
         const THEIR_INIT_SENT = 1 << 1;
         const INIT_SENT = NegotiatingFundingFlags::OUR_INIT_SENT.bits() | NegotiatingFundingFlags::THEIR_INIT_SENT.bits();
+        const AWAITING_EXTERNAL_FUNDING = 1 << 2;
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +235,9 @@ impl TlcStatus {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
+    /// For channels opened with external funding, this state is also used together with
+    /// `NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING` to indicate that we are waiting
+    /// for the user to sign and submit the funding transaction externally.
     NegotiatingFunding(NegotiatingFundingFlags),
     /// We're collaborating with the other party on the funding transaction.
     CollaboratingFundingTx(CollaboratingFundingTxFlags),
@@ -254,6 +259,14 @@ pub enum ChannelState {
 }
 
 impl ChannelState {
+    pub fn is_awaiting_external_funding(&self) -> bool {
+        matches!(
+            self,
+            ChannelState::NegotiatingFunding(flags)
+                if flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING)
+        )
+    }
+
     pub fn is_closed(&self) -> bool {
         matches!(
             self,
