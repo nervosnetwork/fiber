@@ -204,6 +204,8 @@ pub struct PeerChannelIndex {
     peer_channels_map: HashMap<Pubkey, HashSet<Hash256>>,
     // Map from peer id to pubkey, used for dialing with peer id and maintaining peer reconnect backoff.
     peer_id_to_pubkey_map: HashMap<PeerId, Pubkey>,
+    // Map from channel id to peer pubkey.
+    channel_id_to_peer_map: HashMap<Hash256, Pubkey>,
 }
 
 impl PeerChannelIndex {
@@ -225,9 +227,18 @@ impl PeerChannelIndex {
                 (peer_id, *pubkey)
             })
             .collect();
+        let channel_id_to_peer_map = peer_channels_map
+            .iter()
+            .flat_map(|(pubkey, channels)| {
+                channels
+                    .iter()
+                    .map(move |channel_id| (*channel_id, *pubkey))
+            })
+            .collect();
         Self {
             peer_channels_map,
             peer_id_to_pubkey_map,
+            channel_id_to_peer_map,
         }
     }
 
@@ -238,6 +249,9 @@ impl PeerChannelIndex {
             .insert(channel_id);
         let peer_id = pubkey_to_tentacle(pubkey).peer_id();
         self.peer_id_to_pubkey_map.entry(peer_id).or_insert(pubkey);
+        self.channel_id_to_peer_map
+            .entry(channel_id)
+            .or_insert(pubkey);
     }
 
     fn remove_channel(&mut self, pubkey: &Pubkey, channel_id: &Hash256) {
@@ -248,6 +262,7 @@ impl PeerChannelIndex {
                 is_empty = true;
             }
         }
+        self.channel_id_to_peer_map.remove(channel_id);
         if is_empty {
             let peer_id = pubkey_to_tentacle(*pubkey).peer_id();
             self.peer_channels_map.remove(pubkey);
@@ -274,11 +289,17 @@ impl PeerChannelIndex {
         if let Some(channels) = self.peer_channels_map.get_mut(&pubkey) {
             channels.remove(&old);
             channels.insert(new);
+            self.channel_id_to_peer_map.remove(&old);
+            self.channel_id_to_peer_map.insert(new, pubkey);
         }
     }
 
     fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
         self.peer_id_to_pubkey_map.get(peer_id).cloned()
+    }
+
+    fn get_peer_by_channel_id(&self, channel_id: &Hash256) -> Option<Pubkey> {
+        self.channel_id_to_peer_map.get(channel_id).cloned()
     }
 }
 
@@ -2656,8 +2677,8 @@ where
         let shared_secret = peeled_onion_packet.shared_secret;
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
         let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
-            Some(channel_id) => *channel_id,
-            None => {
+            Some(channel_id) if state.is_channel_online(channel_id) => *channel_id,
+            _ => {
                 error!(
                     "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
                     channel_outpoint
@@ -3595,6 +3616,12 @@ where
         }
 
         Ok((channel, temp_channel_id, new_id))
+    }
+
+    fn is_channel_online(&self, channel_id: &Hash256) -> bool {
+        self.peer_channel_index
+            .get_peer_by_channel_id(channel_id)
+            .is_some_and(|peer| self.peer_session_map.contains_key(&peer))
     }
 
     fn check_feature_compatibility(&self, pubkey: &Pubkey) -> ProcessingChannelResult {
