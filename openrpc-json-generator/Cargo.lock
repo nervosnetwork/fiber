@@ -2049,6 +2049,7 @@ dependencies = [
  "tower-http 0.6.8",
  "tracing",
  "tracing-subscriber",
+ "wasm-bindgen-futures",
  "web-time",
 ]
 
