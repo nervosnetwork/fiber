@@ -899,13 +899,13 @@ dependencies = [
 
 [[package]]
 name = "ckb-jsonrpc-types"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e40fbcbc617d103c446391dac024f648645f04c13df5bd330e906a54e2de8546"
+checksum = "9f91dd4369411d035e8e1020d373ba110fffb27a3635079b626073c8d830de4c"
 dependencies = [
  "ckb-types",
- "ckb_schemars",
  "faster-hex",
+ "schemars 1.2.1",
  "seq-macro",
  "serde",
  "serde_json",
@@ -945,9 +945,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-mock-tx-types"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ebfe8cb9be5d43a2ad2139e4b9757d9aaa4f9ffdddfc0c014894cbcc6c061ce"
+checksum = "5bf88d2ce64e8c3d17d7cd3d0f0ff9038772d35cbe63d1e4f640e0e25428f390"
 dependencies = [
  "ckb-jsonrpc-types",
  "ckb-traits",
@@ -1185,30 +1185,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b436017fd6676bea413d54e07a5a9cc1d7c4b5c02e4ab07d3527225a5de6677"
 dependencies = [
  "paste",
-]
-
-[[package]]
-name = "ckb_schemars"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c37520aaae28169f4b29cd754f414d01ef32b8209c85d4473bc89d760250b990"
-dependencies = [
- "ckb_schemars_derive",
- "dyn-clone",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ckb_schemars_derive"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1506d63311ded0645342c052b1eb21ba272177b32f55d8eb7e11255aed3e74c6"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals 0.26.0",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -4931,7 +4907,7 @@ checksum = "7d115b50f4aaeea07e79c1912f645c7513d81715d0420f8bc77a18c6260b307f"
 dependencies = [
  "proc-macro2",
  "quote",
- "serde_derive_internals 0.29.1",
+ "serde_derive_internals",
  "syn 2.0.117",
 ]
 
@@ -5104,17 +5080,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "serde_derive_internals"
-version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85bf8229e7920a9f636479437026331ce11aa132b4dde37d121944a44d6e5f3c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
