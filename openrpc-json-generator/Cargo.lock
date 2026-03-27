@@ -1882,7 +1882,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-json-types"
-version = "0.7.1"
+version = "0.8.0-rc1"
 dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
@@ -1911,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-store"
-version = "0.7.1"
+version = "0.8.0-rc1"
 dependencies = [
  "anyhow",
  "ckb-rocksdb",
@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-types"
-version = "0.7.1"
+version = "0.8.0-rc1"
 dependencies = [
  "anyhow",
  "arcode",
@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.7.1"
+version = "0.8.0-rc1"
 dependencies = [
  "aes-gcm",
  "anyhow",

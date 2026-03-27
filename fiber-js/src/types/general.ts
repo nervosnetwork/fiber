@@ -8,7 +8,7 @@ interface FiberWorkerInitializationOptions {
     outputBuffer: SharedArrayBuffer;
     logLevel: string;
     fiberKeyPair: Uint8Array;
-    ckbSecretKey: Uint8Array;
+    ckbSecretKey?: Uint8Array;
     config: string;
     chainSpec?: string;
     databasePrefix?: string;

@@ -1,0 +1,52 @@
+meta {
+  name: check node1 balance after close
+  type: http
+  seq: 20
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const afterOpen = BigInt(bru.getVar("NODE1_BALANCE_AFTER"));
+  const afterClose = BigInt(res.body.result.capacity);
+
+  if (afterClose !== afterOpen) {
+    throw new Error(
+      `node1 balance should remain unchanged after close, after_open=${afterOpen}, after_close=${afterClose}`,
+    );
+  }
+}

@@ -96,3 +96,20 @@ pub struct CheckChannelShutdownParams {
     /// Channel ID
     pub channel_id: Hash256,
 }
+
+/// Parameters for signing an external funding transaction.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct SignExternalFundingTxParams {
+    /// The unsigned funding transaction returned from `open_channel_with_external_funding`.
+    pub unsigned_funding_tx: ckb_jsonrpc_types::Transaction,
+    /// The private key to sign the transaction, as a 0x-prefixed 32-byte hex string.
+    /// Note: This is a development-only RPC and the private key is provided directly.
+    pub private_key: String,
+}
+
+/// Result of signing an external funding transaction.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct SignExternalFundingTxResult {
+    /// The signed funding transaction that can be submitted via `submit_signed_funding_tx`.
+    pub signed_funding_tx: ckb_jsonrpc_types::Transaction,
+}

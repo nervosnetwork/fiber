@@ -368,6 +368,10 @@ pub mod server {
                 modules
                     .merge(
                         DevRpcServerImpl::new(
+                            ckb_config
+                                .clone()
+                                .expect("ckb config should be set")
+                                .rpc_url,
                             ckb_chain_actor.expect("ckb_chain_actor should be set"),
                             network_actor.clone(),
                             rpc_dev_module_commitment_txs

@@ -87,11 +87,17 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("list_channels", r#"allow if read("channels");"#);
     b.rule("shutdown_channel", r#"allow if write("channels");"#);
     b.rule("update_channel", r#"allow if write("channels");"#);
+    b.rule(
+        "open_channel_with_external_funding",
+        r#"allow if write("channels");"#,
+    );
+    b.rule("submit_signed_funding_tx", r#"allow if write("channels");"#);
     // dev
     b.rule("commitment_signed", r#"allow if write("messages");"#);
     b.rule("add_tlc", r#"allow if write("channels");"#);
     b.rule("remove_tlc", r#"allow if write("channels");"#);
     b.rule("check_channel_shutdown", r#"allow if write("channels");"#);
+    b.rule("sign_external_funding_tx", r#"allow if write("channels");"#);
     b.rule(
         "submit_commitment_transaction",
         r#"allow if write("chain");"#,
