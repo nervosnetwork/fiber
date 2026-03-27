@@ -26,7 +26,9 @@ use crate::{
             shutdown_tx_size,
         },
         network::SendOnionPacketCommand,
-        network::{get_chain_hash, sign_network_message, FiberMessageWithTarget},
+        network::{
+            get_chain_hash, sign_network_message, FiberMessageWithTarget, CHECK_CHANNELS_INTERVAL,
+        },
         types::{
             peeled_packet_mpp_custom_records, AcceptChannel, AddTlc, AnnouncementSignatures,
             ChannelReady, ClosingSigned, CommitmentSigned, FiberChannelMessage, FiberMessage,
@@ -333,6 +335,9 @@ pub enum ChannelInitializationOperation {
     /// original OpenChannel message and an oneshot
     /// channel to receive the new channel ID must be given.
     AcceptChannel(AcceptChannelParameter),
+    /// Restore a persisted ready channel actor during node startup, keeping it offline
+    /// until the peer reconnects and reestablish resumes message flow.
+    RestoreOfflineChannel(Hash256),
     /// Reestablish a channel with given channel id.
     ReestablishChannel(Hash256),
 }
@@ -2410,6 +2415,157 @@ where
         }
     }
 
+    fn queue_channel_remove_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        command: RemoveTlcCommand,
+    ) {
+        let (send, _recv) = oneshot::channel();
+        let rpc_reply = RpcReplyPort::from(send);
+        myself
+            .send_message(ChannelActorMessage::Command(ChannelCommand::RemoveTlc(
+                command, rpc_reply,
+            )))
+            .expect("myself alive");
+    }
+
+    fn schedule_maintenance_remove_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        command: RemoveTlcCommand,
+    ) {
+        if state.reestablishing {
+            self.register_retryable_tlc_remove(
+                myself,
+                state,
+                TLCId::Received(command.id),
+                command.reason,
+            );
+        } else {
+            self.queue_channel_remove_tlc(myself, command);
+        }
+    }
+
+    async fn run_ready_channel_maintenance(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) {
+        if !state.is_ready() {
+            return;
+        }
+
+        let committed_received_tlcs: Vec<_> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .cloned()
+            .collect();
+
+        for tlc in &committed_received_tlcs {
+            if state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id) {
+                continue;
+            }
+
+            if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
+                if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                    continue;
+                }
+            }
+
+            let Some(payment_preimage) = self.store.get_preimage(&tlc.payment_hash) else {
+                continue;
+            };
+            debug!(
+                "Found payment preimage for channel {:?} tlc {:?}",
+                state.get_id(),
+                tlc.id()
+            );
+            if self
+                .store
+                .get_invoice_status(&tlc.payment_hash)
+                .is_some_and(|status| {
+                    !matches!(status, CkbInvoiceStatus::Open | CkbInvoiceStatus::Received)
+                })
+            {
+                continue;
+            }
+
+            self.schedule_maintenance_remove_tlc(
+                myself,
+                state,
+                RemoveTlcCommand {
+                    id: tlc.id(),
+                    reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                        payment_preimage,
+                    }),
+                },
+            );
+        }
+
+        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
+        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
+        let expect_expiry = now_timestamp_as_millis_u64()
+            + epoch_delay_milliseconds
+            + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
+        let expired_tlcs: Vec<_> = committed_received_tlcs
+            .into_iter()
+            .filter(|tlc| {
+                tlc.forwarding_tlc.is_none()
+                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                    && tlc.expiry < expect_expiry
+            })
+            .collect();
+        for tlc in expired_tlcs {
+            info!(
+                "Removing expired tlc {:?} for channel {:?}",
+                tlc.id(),
+                state.get_id()
+            );
+            self.schedule_maintenance_remove_tlc(
+                myself,
+                state,
+                RemoveTlcCommand {
+                    id: tlc.id(),
+                    reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                        &tlc.shared_secret,
+                    )),
+                },
+            );
+        }
+
+        let expect_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds;
+        if state
+            .tlc_state
+            .get_expired_offered_tlcs(expect_expiry)
+            .next()
+            .is_some()
+        {
+            info!(
+                "Force closing channel {:?} due to expired offered tlc",
+                state.get_id()
+            );
+            if let Err(err) = self
+                .handle_shutdown_command(
+                    state,
+                    ShutdownCommand {
+                        close_script: None,
+                        fee_rate: None,
+                        force: true,
+                    },
+                )
+                .await
+            {
+                error!(
+                    "Failed to force close channel {:?} during maintenance: {:?}",
+                    state.get_id(),
+                    err
+                );
+            }
+        }
+    }
+
     pub async fn handle_event(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -2501,6 +2657,9 @@ where
                     );
                     self.notify_network_actor_shutdown_me(state);
                 }
+            }
+            ChannelEvent::CheckChannelTlcMaintenance => {
+                self.run_ready_channel_maintenance(myself, state).await;
             }
             ChannelEvent::CheckFundingTimeout => {
                 if state.can_abort_funding_on_timeout() {
@@ -2912,6 +3071,18 @@ where
 
                 channel
             }
+            ChannelInitializationOperation::RestoreOfflineChannel(channel_id) => {
+                let mut channel = self
+                    .store
+                    .get_channel_actor_state(&channel_id)
+                    .expect("channel should exist");
+                channel.mark_reestablishing_offline();
+                channel.network = Some(self.network.clone());
+                channel.private_key = Some(args.private_key.clone());
+                self.store.insert_channel_actor_state(channel.clone());
+
+                channel
+            }
         };
 
         state.ephemeral_config = args.ephemeral_config;
@@ -3035,6 +3206,10 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
+            ChannelActorMessage::Event(ChannelEvent::CheckChannelTlcMaintenance)
+        });
+
         // handle funding timeout
         if state.can_abort_funding_on_timeout() {
             let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
@@ -3403,6 +3578,7 @@ pub enum ChannelEvent {
     ForwardTlcResult(ForwardTlcResult),
     RunRetryTask,
     CheckActiveChannel,
+    CheckChannelTlcMaintenance,
     CheckFundingTimeout,
 }
 

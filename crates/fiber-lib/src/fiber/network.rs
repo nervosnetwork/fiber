@@ -75,7 +75,7 @@ use crate::ckb::contracts::{
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
     tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, ShutdownCommand, TxCollaborationCommand, TxUpdateCommand,
+    ChannelInitializationOperation, TxCollaborationCommand, TxUpdateCommand,
     MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
@@ -93,7 +93,7 @@ use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
-use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
+use crate::utils::actor::ActorHandleLogGuard;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
@@ -143,9 +143,9 @@ const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(1200);
 // The duration for which we will check all channels.
 #[cfg(debug_assertions)]
 // use a short interval for debugging build
-const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
 #[cfg(not(debug_assertions))]
-const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
 const CHECK_CHANNELS_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
 
@@ -1529,172 +1529,6 @@ where
 
                             if !state.peer_session_map.contains_key(&pubkey) {
                                 with_channel_down_peers.insert(pubkey);
-                            }
-
-                            // Collect TLC data before async operations to avoid holding iterator across await
-                            let committed_tlcs: Vec<_> = actor_state
-                                .tlc_state
-                                .get_committed_received_tlcs()
-                                .map(|tlc| (tlc.tlc_id, tlc.id(), tlc.payment_hash))
-                                .collect();
-
-                            for (tlc_id, id, payment_hash) in committed_tlcs {
-                                // Do not fulfill a forwarding TLC from a shared preimage
-                                // while its downstream add result is still unresolved.
-                                if actor_state.is_waiting_forward_result_for_received_tlc(tlc_id) {
-                                    continue;
-                                }
-
-                                // skip if tlc amount is not fulfilled invoice
-                                // this may happened if payment is mpp
-                                if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                                    // Re-fetch tlc for is_invoice_fulfilled check
-                                    if let Some(tlc) = actor_state.tlc_state.get(&tlc_id) {
-                                        if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
-                                            continue;
-                                        }
-                                    } else {
-                                        continue;
-                                    }
-                                }
-
-                                let Some(payment_preimage) = self.store.get_preimage(&payment_hash)
-                                else {
-                                    continue;
-                                };
-                                debug!(
-                                    "Found payment preimage for channel {:?} tlc {:?}",
-                                    channel_id, id
-                                );
-                                if self
-                                    .store
-                                    .get_invoice_status(&payment_hash)
-                                    .is_some_and(|s| {
-                                        !matches!(
-                                            s,
-                                            CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
-                                        )
-                                    })
-                                {
-                                    continue;
-                                }
-
-                                let (send, _recv) = oneshot::channel();
-                                let rpc_reply = RpcReplyPort::from(send);
-
-                                if let Err(err) = state
-                                    .send_command_to_channel(
-                                        channel_id,
-                                        ChannelCommand::RemoveTlc(
-                                            RemoveTlcCommand {
-                                                id,
-                                                reason: RemoveTlcReason::RemoveTlcFulfill(
-                                                    RemoveTlcFulfill { payment_preimage },
-                                                ),
-                                            },
-                                            rpc_reply,
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to remove tlc {:?} with preimage for channel {:?}: {}",
-                                        id, channel_id, err
-                                    );
-                                }
-                            }
-
-                            let delay_epoch = EpochNumberWithFraction::from_full_value(
-                                actor_state.commitment_delay_epoch,
-                            );
-                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-                            // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
-                            // to previous hop, even if later hop send backup RemoveTlc message to us later,
-                            // it will be ignored.
-                            let expect_expiry = now
-                                + epoch_delay_milliseconds
-                                + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
-                            let expired_tlcs = actor_state
-                                .tlc_state
-                                .get_committed_received_tlcs()
-                                .filter(|tlc| {
-                                    // Treat TLCs with unresolved forward results as forwarding TLCs
-                                    // even before forwarding_tlc is recorded.
-                                    tlc.forwarding_tlc.is_none()
-                                        && !actor_state
-                                            .is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
-                                        && tlc.expiry < expect_expiry
-                                })
-                                .collect::<Vec<_>>();
-                            for tlc in expired_tlcs {
-                                info!(
-                                    "Removing expired tlc {:?} for channel {:?}",
-                                    tlc.id(),
-                                    channel_id
-                                );
-                                let (send, _recv) = oneshot::channel();
-                                let rpc_reply = RpcReplyPort::from(send);
-                                if let Err(err) = state
-                                    .send_command_to_channel(
-                                        channel_id,
-                                        ChannelCommand::RemoveTlc(
-                                            RemoveTlcCommand {
-                                                id: tlc.id(),
-                                                reason: RemoveTlcReason::RemoveTlcFail(
-                                                    TlcErrPacket::new(
-                                                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                                                        &tlc.shared_secret,
-                                                    ),
-                                                ),
-                                            },
-                                            rpc_reply,
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to remove expired tlc {:?} for channel {:?}: {}",
-                                        tlc.id(),
-                                        channel_id,
-                                        err
-                                    );
-                                }
-                            }
-
-                            // check whether the next hop have already sent us the RemoveTlc message
-                            // for the offered expired tlc, if not we will force close the channel
-                            let expect_expiry = now + epoch_delay_milliseconds;
-                            if actor_state
-                                .tlc_state
-                                .get_expired_offered_tlcs(expect_expiry)
-                                .next()
-                                .is_some()
-                            {
-                                info!(
-                                    "Force closing channel {:?} due to expired offered tlc",
-                                    channel_id
-                                );
-                                let (send, _recv) = oneshot::channel();
-                                let rpc_reply = RpcReplyPort::from(send);
-                                if let Err(err) = state
-                                    .send_command_to_channel(
-                                        channel_id,
-                                        ChannelCommand::Shutdown(
-                                            ShutdownCommand {
-                                                close_script: None,
-                                                fee_rate: None,
-                                                force: true,
-                                            },
-                                            rpc_reply,
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to force close channel {:?}: {}",
-                                        channel_id, err
-                                    );
-                                }
                             }
                         }
                     } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
@@ -4123,6 +3957,69 @@ where
 
         Ok(channel)
     }
+
+    async fn restore_offline_channel(
+        &mut self,
+        remote_pubkey: Pubkey,
+        channel_id: Hash256,
+    ) -> Result<ActorRef<ChannelActorMessage>, Error> {
+        if let Some(actor) = self.channels.get(&channel_id).cloned() {
+            return Ok(actor);
+        }
+
+        let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
+            return Err(Error::ChannelNotFound(channel_id));
+        };
+        if channel_actor_state.is_closed() {
+            return Err(Error::ChannelError(ProcessingChannelError::InvalidState(
+                format!("Channel {:x} is already closed", &channel_id),
+            )));
+        }
+
+        debug!("Restoring offline channel actor {:x}", &channel_id);
+        let (channel, _) = Actor::spawn_linked(
+            Some(generate_channel_actor_name(
+                &self.get_public_key(),
+                &remote_pubkey,
+            )),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                self.network.clone(),
+                self.store.clone(),
+            ),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
+            },
+            self.network.get_cell(),
+        )
+        .await?;
+
+        self.register_channel_actor(channel_id, remote_pubkey, channel.clone());
+        if let Some(outpoint) = channel_actor_state.get_funding_transaction_outpoint() {
+            self.outpoint_channel_map.insert(outpoint, channel_id);
+        }
+        debug!("channel {:x} restored offline successfully", &channel_id);
+
+        Ok(channel)
+    }
+
+    async fn restore_persisted_ready_channels(&mut self) {
+        for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
+            if !matches!(channel_state, ChannelState::ChannelReady) {
+                continue;
+            }
+
+            if let Err(err) = self.restore_offline_channel(pubkey, channel_id).await {
+                error!(
+                    "Failed to restore offline channel actor {:x}: {:?}",
+                    channel_id, err
+                );
+            }
+        }
+    }
     async fn on_peer_connected(&mut self, remote_pubkey: Pubkey, session: &SessionContext) {
         debug!("Peer {:?} connected", remote_pubkey);
         self.peer_session_map.insert(
@@ -4296,7 +4193,7 @@ where
         }
     }
 
-    fn on_channel_created(
+    fn register_channel_actor(
         &mut self,
         id: Hash256,
         pubkey: Pubkey,
@@ -4304,6 +4201,15 @@ where
     ) {
         self.channels.insert(id, actor.clone());
         self.peer_channel_index.add_channel(pubkey, id);
+    }
+
+    fn on_channel_created(
+        &mut self,
+        id: Hash256,
+        pubkey: Pubkey,
+        actor: ActorRef<ChannelActorMessage>,
+    ) {
+        self.register_channel_actor(id, pubkey, actor);
         debug!("Channel {:x} created", &id);
         // Notify outside observers.
         self.network
@@ -5040,8 +4946,10 @@ where
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        state.restore_persisted_ready_channels().await;
+
         // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
         myself
             .send_message(NetworkActorMessage::new_command(
