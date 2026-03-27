@@ -14,6 +14,8 @@ mod network;
 mod path;
 mod payment;
 #[cfg(not(target_arch = "wasm32"))]
+mod peer_reconnect_stress;
+#[cfg(not(target_arch = "wasm32"))]
 mod rpc;
 mod serde_utils;
 mod settle_tlc_set_command_tests;
