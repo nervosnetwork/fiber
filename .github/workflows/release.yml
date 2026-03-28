@@ -48,7 +48,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-22.04, ubuntu-24.04, ubuntu-22.04-arm, macos-15-intel, windows-2022 ]
+        os: [ ubuntu-22.04, ubuntu-24.04, ubuntu-22.04-arm, macos-15, macos-15-intel, windows-2022 ]
         include:
           - os: ubuntu-22.04
             bin_suffix:
@@ -59,9 +59,12 @@ jobs:
           - os: ubuntu-22.04-arm
             bin_suffix:
             pkg_suffix: aarch64-linux-portable
+          - os: macos-15
+            bin_suffix:
+            pkg_suffix: aarch64-apple-darwin-portable
           - os: macos-15-intel
             bin_suffix:
-            pkg_suffix: x86_64-darwin-portable
+            pkg_suffix: x86_64-apple-darwin-portable
           - os: windows-2022
             bin_suffix: .exe
             pkg_suffix: x86_64-windows
@@ -115,11 +118,17 @@ jobs:
     - if: matrix.os == 'ubuntu-24.04'
       name: Build linux
       run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
-    - if: matrix.os == 'macos-15-intel'
+    - if: matrix.os == 'macos-15'
+      name: Setup Homebrew PATH
+      run: |
+        echo /opt/homebrew/bin >> $GITHUB_PATH
+        echo /opt/homebrew/sbin >> $GITHUB_PATH
+    - if: startsWith(matrix.os, 'macos-15')
       name: Build macos portable
       run: |
-        export OPENSSL_LIB_DIR=/usr/local/opt/openssl@1.1/lib
-        export OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@1.1/include
+        export OPENSSL_PREFIX="$(brew --prefix openssl@1.1)"
+        export OPENSSL_LIB_DIR="${OPENSSL_PREFIX}/lib"
+        export OPENSSL_INCLUDE_DIR="${OPENSSL_PREFIX}/include"
         export OPENSSL_STATIC=1
         cargo build --release --locked --features portable && cd migrate && cargo build --release --locked && cd ..
     - if: matrix.os == 'windows-2022'
