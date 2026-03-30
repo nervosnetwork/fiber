@@ -28,7 +28,7 @@ use crate::{
             StopReason,
         },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
-        network::{AcceptChannelCommand, OpenChannelCommand},
+        network::{AcceptChannelCommand, NetworkActorEvent, OpenChannelCommand},
         NetworkActorCommand, NetworkActorMessage,
     },
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
@@ -6870,6 +6870,99 @@ async fn test_channel_one_peer_check_active_fail() {
     if wait_time >= 50 {
         panic!("node_1 channel did not reach ChannelReady state in time");
     }
+}
+
+#[tokio::test]
+async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
+    init_tracing();
+
+    let (node_a, _node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    node_a
+        .send_shutdown(channel_id, true)
+        .await
+        .expect("force shutdown channel");
+
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let state_after_close_confirmation = node_a.get_channel_actor_state(channel_id);
+    assert!(matches!(
+        state_after_close_confirmation.state,
+        ChannelState::Closed(flags)
+            if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+    ));
+
+    let control_result_before_final_settlement = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        control_result_before_final_settlement.is_ok(),
+        "closing channel actor should remain controllable before final settlement"
+    );
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+        ))
+        .expect("network actor alive");
+
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let control_result_after_final_settlement = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        control_result_after_final_settlement.is_err(),
+        "channel actor should stop once final settlement completes"
+    );
 }
 
 /// Test for issue #938: Channel funding is aborted after restart when stuck in NegotiatingFunding
