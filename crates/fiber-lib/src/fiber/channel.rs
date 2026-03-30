@@ -2449,6 +2449,13 @@ where
         }
     }
 
+    fn is_waiting_onchain_settlement(state: &ChannelActorState) -> bool {
+        matches!(
+            state.state,
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    }
+
     async fn run_ready_channel_maintenance(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -2568,6 +2575,107 @@ where
         }
     }
 
+    fn run_onchain_settlement_channel_maintenance(&self, state: &mut ChannelActorState) {
+        if !Self::is_waiting_onchain_settlement(state) {
+            return;
+        }
+
+        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
+        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
+        let expect_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds;
+        let expired_offered_tlcs: Vec<_> = state
+            .tlc_state
+            .get_expired_offered_tlcs(expect_expiry)
+            .filter_map(|tlc| {
+                tlc.forwarding_tlc
+                    .map(|(previous_channel_id, previous_tlc_id)| {
+                        (
+                            previous_channel_id,
+                            previous_tlc_id,
+                            tlc.payment_hash,
+                            tlc.shared_secret,
+                        )
+                    })
+            })
+            .collect();
+
+        for (previous_channel_id, previous_tlc_id, payment_hash, shared_secret) in
+            expired_offered_tlcs
+        {
+            let remove_reason = self
+                .store
+                .get_preimage(&payment_hash)
+                .map(|payment_preimage| {
+                    RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage })
+                })
+                .or_else(|| {
+                    self.store
+                        .is_tlc_settled(&state.get_id(), &payment_hash)
+                        .then(|| {
+                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                                &shared_secret,
+                            ))
+                        })
+                });
+
+            let Some(remove_reason) = remove_reason else {
+                continue;
+            };
+
+            if let Err(err) = self.register_retryable_relay_tlc_remove(
+                TLCId::Received(previous_tlc_id),
+                previous_channel_id,
+                remove_reason,
+            ) {
+                error!(
+                    "Failed to relay on-chain settlement for channel {:?} tlc {:?}: {:?}",
+                    state.get_id(),
+                    previous_tlc_id,
+                    err
+                );
+            }
+        }
+    }
+
+    async fn run_channel_maintenance(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) {
+        if state.is_ready() {
+            self.run_ready_channel_maintenance(myself, state).await;
+        } else {
+            self.run_onchain_settlement_channel_maintenance(state);
+        }
+    }
+
+    fn finalize_onchain_settlement(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) -> ProcessingChannelResult {
+        let ChannelState::Closed(mut flags) = state.state else {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Expecting closed channel for on-chain settlement completion, got {:?}",
+                state.state
+            )));
+        };
+        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Channel {:?} is not waiting on-chain settlement",
+                state.get_id()
+            )));
+        }
+
+        self.run_onchain_settlement_channel_maintenance(state);
+        flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+        state.update_state(ChannelState::Closed(flags));
+        info!("Channel {:?} on-chain settlement completed", state.get_id());
+        myself.stop(Some("OnChainSettlementCompleted".to_string()));
+        Ok(())
+    }
+
     pub async fn handle_event(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -2660,7 +2768,10 @@ where
                 }
             }
             ChannelEvent::CheckChannelTlcMaintenance => {
-                self.run_ready_channel_maintenance(myself, state).await;
+                self.run_channel_maintenance(myself, state).await;
+            }
+            ChannelEvent::OnChainSettlementCompleted => {
+                self.finalize_onchain_settlement(myself, state)?;
             }
             ChannelEvent::CheckFundingTimeout => {
                 if state.can_abort_funding_on_timeout() {
@@ -3597,6 +3708,7 @@ pub enum ChannelEvent {
     RunRetryTask,
     CheckActiveChannel,
     CheckChannelTlcMaintenance,
+    OnChainSettlementCompleted,
     CheckFundingTimeout,
 }
 
