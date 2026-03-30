@@ -1290,6 +1290,39 @@ impl WatchtowerStore for Store {
 }
 
 impl GossipMessageStore for Store {
+    fn get_broadcast_messages(
+        &self,
+        after_cursor: &Cursor,
+        count: Option<u16>,
+    ) -> Vec<crate::fiber::types::BroadcastMessageWithTimestamp> {
+        let count =
+            count.unwrap_or(crate::fiber::gossip::DEFAULT_NUM_OF_BROADCAST_MESSAGE) as usize;
+        let cursor = after_cursor.to_bytes();
+        let prefix = [BROADCAST_MESSAGE_PREFIX];
+        let start = [&prefix, cursor.as_slice()].concat();
+        let start_cloned = start.clone();
+
+        // Apply the requested limit at the storage layer instead of materializing every
+        // remaining broadcast message and truncating in Rust afterwards.
+        self.collect_by_prefix_with(
+            &prefix,
+            PrefixIterOptions::new()
+                .start_key(&start)
+                .skip_while(Box::new(move |key: &[u8]| key == start_cloned))
+                .limit(count + 1),
+        )
+        .into_iter()
+        .map(|kv| {
+            let mut timestamp_bytes = [0u8; 8];
+            timestamp_bytes.copy_from_slice(&kv.key[1..9]);
+            let timestamp = u64::from_be_bytes(timestamp_bytes);
+            let message: BroadcastMessage = deserialize_from(kv.value.as_ref(), "BroadcastMessage");
+            (message, timestamp).into()
+        })
+        .take(count)
+        .collect()
+    }
+
     fn get_broadcast_messages_iter(
         &self,
         after_cursor: &Cursor,
