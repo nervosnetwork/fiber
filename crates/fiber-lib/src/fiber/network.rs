@@ -1189,13 +1189,23 @@ where
                 state.on_payment_actor_stopped(payment_hash).await;
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
-                // Update channel state to remove WAITING_ONCHAIN_SETTLEMENT flag
+                let mut settlement_completed = false;
                 if let Some(mut actor_state) = self.store.get_channel_actor_state(&channel_id) {
                     if let ChannelState::Closed(mut flags) = actor_state.state {
-                        flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
-                        actor_state.state = ChannelState::Closed(flags);
-                        self.store.insert_channel_actor_state(actor_state);
-                        info!("Channel {channel_id:?} on-chain settlement completed");
+                        if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+                            flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+                            actor_state.state = ChannelState::Closed(flags);
+                            self.store.insert_channel_actor_state(actor_state);
+                            settlement_completed = true;
+                            info!("Channel {channel_id:?} on-chain settlement completed");
+                        }
+                    }
+                }
+
+                if settlement_completed {
+                    if let Some(channel_actor) = state.channels.remove(&channel_id) {
+                        state.channels_funding_lock_script_cache.remove(&channel_id);
+                        channel_actor.stop(Some("ChannelSettlementCompleted".to_string()));
                     }
                 }
             }
