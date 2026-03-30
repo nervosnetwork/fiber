@@ -869,6 +869,14 @@ fn test_closed_onchain_settlement_state_round_trips() {
         restored.shutdown_transaction_hash,
         state.shutdown_transaction_hash
     );
+    assert!(restored.waiting_peer_response.is_none());
+    assert!(restored.network.is_none());
+    assert!(restored.scheduled_channel_update_handle.is_none());
+    assert!(restored.pending_notify_settle_tlcs.is_empty());
+    assert!(!restored.pending_reestablish_channel_ready);
+    assert!(!restored.defer_peer_tlc_updates);
+    assert!(restored.deferred_peer_tlc_updates.is_empty());
+    assert!(restored.private_key.is_none());
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]

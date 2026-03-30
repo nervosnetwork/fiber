@@ -4271,11 +4271,17 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
         ))
         .expect("network actor alive");
 
-    tokio::time::timeout(Duration::from_millis(800), node_0.wait_until_failed(payment_hash))
-        .await
-        .expect("closed channel actor should fail the upstream payment without CheckChannels");
+    tokio::time::timeout(
+        Duration::from_millis(800),
+        node_0.wait_until_failed(payment_hash),
+    )
+    .await
+    .expect("closed channel actor should fail the upstream payment without CheckChannels");
 
-    assert_eq!(node_0.get_payment_status(payment_hash).await, PaymentStatus::Failed);
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Failed
+    );
     assert!(matches!(
         node_1
             .get_tlc(channels[0], TLCId::Received(previous_tlc_id))

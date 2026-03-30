@@ -2079,8 +2079,8 @@ where
     ) {
         if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received) {
             // When invoice is marked as received, we ignore the hold TLC timeout and only
-            // remove the TLC when it actually expires. Expired TLCs are removed in the
-            // CheckChannels routine (see NetworkActorCommand::CheckChannels handler).
+            // remove the TLC when it actually expires. Once it is close enough to expiry,
+            // the live ChannelActor removes it during periodic TLC maintenance.
             return;
         }
 
@@ -4602,11 +4602,10 @@ where
             },
             Some(actor) => {
                 // There is a possibility that the channel actor is not alive, but we assume it is
-                // alive for this moment. For example, in force shutdown case, the ChannelActor received
-                // ClosingTransactionConfirmed event then stopped after processing the message,
-                // NetworkActor will remove it from `channels` when receiving ChannelActorStopped from it,
-                // but at the same time, NetworkActor received another ClosingTransactionConfirmed,
-                // we will try to send another event message to the stopped ChannelActor here.
+                // alive for this moment. For example, in force shutdown case, the ChannelActor may
+                // have already finished its on-chain settlement cleanup and stopped, while
+                // NetworkActor has not yet processed ChannelActorStopped and removed it from
+                // `channels`. We may still try to send another event message to that stopped actor.
                 //
                 // In short, it's safer to ignore sending message failure from NetworkActor
                 // to ChannelActor, since NetworkActor is responsible for multiple channels and a lot of stuff.

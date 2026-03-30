@@ -3076,7 +3076,10 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
     );
 
     node_0.wait_until_failed(payment_hash).await;
-    assert_eq!(node_0.get_payment_status(payment_hash).await, PaymentStatus::Failed);
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Failed
+    );
 }
 
 #[tokio::test]
