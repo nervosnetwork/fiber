@@ -338,6 +338,8 @@ pub enum ChannelInitializationOperation {
     /// Restore a persisted ready channel actor during node startup, keeping it offline
     /// until the peer reconnects and reestablish resumes message flow.
     RestoreOfflineChannel(Hash256),
+    /// Restore a persisted closed channel actor that is still waiting for on-chain settlement.
+    RestoreOnchainSettlementChannel(Hash256),
     /// Reestablish a channel with given channel id.
     ReestablishChannel(Hash256),
 }
@@ -3076,6 +3078,23 @@ where
                     .get_channel_actor_state(&channel_id)
                     .expect("channel should exist");
                 channel.mark_reestablishing_offline();
+                channel.network = Some(self.network.clone());
+                channel.private_key = Some(args.private_key.clone());
+                self.store.insert_channel_actor_state(channel.clone());
+
+                channel
+            }
+            ChannelInitializationOperation::RestoreOnchainSettlementChannel(channel_id) => {
+                let mut channel = self
+                    .store
+                    .get_channel_actor_state(&channel_id)
+                    .expect("channel should exist");
+                channel.clear_waiting_peer_response();
+                channel.reestablishing = false;
+                channel.connectivity_state = ChannelConnectivityState::Offline;
+                if let Some(handle) = channel.scheduled_channel_update_handle.take() {
+                    handle.abort();
+                }
                 channel.network = Some(self.network.clone());
                 channel.private_key = Some(args.private_key.clone());
                 self.store.insert_channel_actor_state(channel.clone());

@@ -4016,6 +4016,64 @@ where
         Ok(channel)
     }
 
+    async fn restore_onchain_settlement_channel(
+        &mut self,
+        remote_pubkey: Pubkey,
+        channel_id: Hash256,
+    ) -> Result<ActorRef<ChannelActorMessage>, Error> {
+        if let Some(actor) = self.channels.get(&channel_id).cloned() {
+            return Ok(actor);
+        }
+
+        let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
+            return Err(Error::ChannelNotFound(channel_id));
+        };
+        let ChannelState::Closed(flags) = channel_actor_state.state else {
+            return Err(Error::ChannelError(ProcessingChannelError::InvalidState(
+                format!("Channel {:x} is not closed", &channel_id),
+            )));
+        };
+        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+            return Err(Error::ChannelError(ProcessingChannelError::InvalidState(
+                format!("Channel {:x} is not waiting on-chain settlement", &channel_id),
+            )));
+        }
+
+        debug!("Restoring on-chain settlement channel actor {:x}", &channel_id);
+        let (channel, _) = Actor::spawn_linked(
+            Some(generate_channel_actor_name(
+                &self.get_public_key(),
+                &remote_pubkey,
+            )),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                self.network.clone(),
+                self.store.clone(),
+            ),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOnchainSettlementChannel(
+                    channel_id,
+                ),
+                ephemeral_config: self.channel_ephemeral_config.clone(),
+                private_key: self.private_key.clone(),
+            },
+            self.network.get_cell(),
+        )
+        .await?;
+
+        self.channels.insert(channel_id, channel.clone());
+        if let Some(outpoint) = channel_actor_state.get_funding_transaction_outpoint() {
+            self.outpoint_channel_map.insert(outpoint, channel_id);
+        }
+        debug!(
+            "channel {:x} restored for on-chain settlement successfully",
+            &channel_id
+        );
+
+        Ok(channel)
+    }
+
     async fn restore_persisted_ready_channels(&mut self) {
         for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
             if !matches!(channel_state, ChannelState::ChannelReady) {
@@ -4025,6 +4083,28 @@ where
             if let Err(err) = self.restore_offline_channel(pubkey, channel_id).await {
                 error!(
                     "Failed to restore offline channel actor {:x}: {:?}",
+                    channel_id, err
+                );
+            }
+        }
+    }
+
+    async fn restore_persisted_onchain_settlement_channels(&mut self) {
+        for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
+            if !matches!(
+                channel_state,
+                ChannelState::Closed(flags)
+                    if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+            ) {
+                continue;
+            }
+
+            if let Err(err) = self
+                .restore_onchain_settlement_channel(pubkey, channel_id)
+                .await
+            {
+                error!(
+                    "Failed to restore on-chain settlement channel actor {:x}: {:?}",
                     channel_id, err
                 );
             }
@@ -4959,6 +5039,7 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         state.restore_persisted_ready_channels().await;
+        state.restore_persisted_onchain_settlement_channels().await;
 
         // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
         myself
