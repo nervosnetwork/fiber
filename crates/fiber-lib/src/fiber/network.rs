@@ -4261,7 +4261,23 @@ where
                         .await
                     {
                         Ok(_) => {
+                            let should_restore_onchain_settlement_actor = matches!(
+                                state.state,
+                                ChannelState::Closed(flags)
+                                    if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                            );
                             self.store.insert_channel_actor_state(state);
+                            if should_restore_onchain_settlement_actor {
+                                if let Err(err) = self
+                                    .restore_onchain_settlement_channel(*pubkey, *channel_id)
+                                    .await
+                                {
+                                    error!(
+                                        "failed to restore on-chain settlement actor for {:?}: {:?}",
+                                        channel_id, err
+                                    );
+                                }
+                            }
                         }
                         Err(err) => {
                             error!("failed to update_close_transaction_confirmed {err:?}");

@@ -2456,6 +2456,54 @@ where
         )
     }
 
+    fn onchain_settlement_expect_expiry(state: &ChannelActorState) -> u64 {
+        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
+        now_timestamp_as_millis_u64() + tlc_expiry_delay(&delay_epoch)
+    }
+
+    fn onchain_settlement_remove_reason(
+        &self,
+        channel_id: Hash256,
+        tlc: &TlcInfo,
+        expect_expiry: u64,
+    ) -> Option<RemoveTlcReason> {
+        if tlc.forwarding_tlc.is_none()
+            || tlc.removed_reason.is_some()
+            || tlc.removed_confirmed_at.is_some()
+        {
+            return None;
+        }
+
+        self.store
+            .get_preimage(&tlc.payment_hash)
+            .map(|payment_preimage| {
+                RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage })
+            })
+            .or_else(|| {
+                (tlc.expiry < expect_expiry
+                    && self.store.is_tlc_settled(&channel_id, &tlc.payment_hash))
+                .then(|| {
+                    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                        &tlc.shared_secret,
+                    ))
+                })
+            })
+    }
+
+    fn has_pending_onchain_settlement_relays(&self, state: &ChannelActorState) -> bool {
+        let channel_id = state.get_id();
+        let expect_expiry = Self::onchain_settlement_expect_expiry(state);
+        state.tlc_state.offered_tlcs.tlcs.iter().any(|tlc| {
+            tlc.forwarding_tlc.is_some()
+                && tlc.removed_reason.is_none()
+                && tlc.removed_confirmed_at.is_none()
+                && self
+                    .onchain_settlement_remove_reason(channel_id, tlc, expect_expiry)
+                    .is_none()
+        })
+    }
+
     async fn run_ready_channel_maintenance(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -2580,49 +2628,22 @@ where
             return;
         }
 
-        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
-        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-        let expect_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds;
-        let expired_offered_tlcs: Vec<_> = state
+        let channel_id = state.get_id();
+        let expect_expiry = Self::onchain_settlement_expect_expiry(state);
+        let relayable_offered_tlcs: Vec<_> = state
             .tlc_state
-            .get_expired_offered_tlcs(expect_expiry)
+            .offered_tlcs
+            .tlcs
+            .iter()
             .filter_map(|tlc| {
-                tlc.forwarding_tlc
-                    .map(|(previous_channel_id, previous_tlc_id)| {
-                        (
-                            previous_channel_id,
-                            previous_tlc_id,
-                            tlc.payment_hash,
-                            tlc.shared_secret,
-                        )
-                    })
+                let (previous_channel_id, previous_tlc_id) = tlc.forwarding_tlc?;
+                let remove_reason =
+                    self.onchain_settlement_remove_reason(channel_id, tlc, expect_expiry)?;
+                Some((previous_channel_id, previous_tlc_id, remove_reason))
             })
             .collect();
 
-        for (previous_channel_id, previous_tlc_id, payment_hash, shared_secret) in
-            expired_offered_tlcs
-        {
-            let remove_reason = self
-                .store
-                .get_preimage(&payment_hash)
-                .map(|payment_preimage| {
-                    RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage })
-                })
-                .or_else(|| {
-                    self.store
-                        .is_tlc_settled(&state.get_id(), &payment_hash)
-                        .then(|| {
-                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                                &shared_secret,
-                            ))
-                        })
-                });
-
-            let Some(remove_reason) = remove_reason else {
-                continue;
-            };
-
+        for (previous_channel_id, previous_tlc_id, remove_reason) in relayable_offered_tlcs {
             if let Err(err) = self.register_retryable_relay_tlc_remove(
                 TLCId::Received(previous_tlc_id),
                 previous_channel_id,
@@ -2669,6 +2690,13 @@ where
         }
 
         self.run_onchain_settlement_channel_maintenance(state);
+        if self.has_pending_onchain_settlement_relays(state) {
+            debug!(
+                "Channel {:?} still has pending on-chain settlement relays, keeping actor alive",
+                state.get_id()
+            );
+            return Ok(());
+        }
         flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
         state.update_state(ChannelState::Closed(flags));
         info!("Channel {:?} on-chain settlement completed", state.get_id());

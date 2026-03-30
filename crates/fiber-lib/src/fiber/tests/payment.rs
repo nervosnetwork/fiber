@@ -4291,6 +4291,345 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
 }
 
 #[tokio::test]
+async fn test_closed_channel_waits_for_future_timeout_after_settlement_complete() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build()
+        .expect("build hold invoice");
+    node_2.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    assert_eq!(payment.payment_hash, payment_hash);
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until(|| {
+        node_1
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    })
+    .await;
+
+    let closed_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    let downstream_tlc = closed_downstream_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .cloned()
+        .expect("downstream tlc exists");
+    let (previous_channel_id, previous_tlc_id) = downstream_tlc
+        .forwarding_tlc
+        .expect("downstream tlc should track the upstream forwarding tlc");
+    assert_eq!(previous_channel_id, channels[0]);
+
+    node_1
+        .send_shutdown(channels[1], true)
+        .await
+        .expect("force shutdown downstream channel");
+
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
+        .try_into()
+        .expect("20-byte payment hash prefix");
+    node_1
+        .store
+        .update_tlc_settled(&channels[1], payment_hash_prefix);
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channels[1]),
+        ))
+        .expect("network actor alive");
+
+    let control_result_after_final_settlement = call!(node_1.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_1 alive");
+    assert!(
+        control_result_after_final_settlement.is_ok(),
+        "actor should stay alive until future TLC timeout is relayed upstream"
+    );
+
+    let mut expired_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    expired_downstream_state
+        .tlc_state
+        .get_mut(&TLCId::Offered(downstream_tlc.id()))
+        .expect("closed downstream tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_1
+        .update_channel_actor_state(
+            expired_downstream_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::CheckChannelTlcMaintenance),
+            }),
+        ))
+        .expect("network actor alive");
+
+    tokio::time::timeout(
+        Duration::from_millis(800),
+        node_0.wait_until_failed(payment_hash),
+    )
+    .await
+    .expect("settled closed channel should fail upstream once the TLC expires");
+
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Failed
+    );
+    assert!(matches!(
+        node_1
+            .get_tlc(channels[0], TLCId::Received(previous_tlc_id))
+            .and_then(|tlc| tlc.removed_reason),
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+}
+
+#[tokio::test]
+async fn test_close_confirmed_without_live_actor_restores_onchain_settlement_actor() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build()
+        .expect("build hold invoice");
+    node_2.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    assert_eq!(payment.payment_hash, payment_hash);
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until(|| {
+        node_1
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    })
+    .await;
+
+    let mut shutting_down_state = node_1.get_channel_actor_state(channels[1]);
+    let downstream_tlc = shutting_down_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .cloned()
+        .expect("downstream tlc exists");
+    let (_previous_channel_id, previous_tlc_id) = downstream_tlc
+        .forwarding_tlc
+        .expect("downstream tlc should track the upstream forwarding tlc");
+    shutting_down_state.update_state(ChannelState::ShuttingDown(
+        ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+    ));
+    node_1
+        .update_channel_actor_state(
+            shutting_down_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_1.restart().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let control_result_before_close_confirmation = call!(node_1.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_1 alive");
+    assert!(
+        control_result_before_close_confirmation.is_err(),
+        "shutting down channel should not be restored before close confirmation"
+    );
+
+    node_1
+        .send_channel_shutdown_tx_confirmed_event(node_2.pubkey, channels[1], true)
+        .await;
+
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let control_result_after_close_confirmation = call!(node_1.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_1 alive");
+    assert!(
+        control_result_after_close_confirmation.is_ok(),
+        "close confirmation without a live actor should restore the on-chain settlement actor"
+    );
+
+    let mut closed_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    closed_downstream_state
+        .tlc_state
+        .get_mut(&TLCId::Offered(downstream_tlc.id()))
+        .expect("closed downstream tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_1
+        .update_channel_actor_state(
+            closed_downstream_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
+        .try_into()
+        .expect("20-byte payment hash prefix");
+    node_1
+        .store
+        .update_tlc_settled(&channels[1], payment_hash_prefix);
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::CheckChannelTlcMaintenance),
+            }),
+        ))
+        .expect("network actor alive");
+
+    tokio::time::timeout(
+        Duration::from_millis(800),
+        node_0.wait_until_failed(payment_hash),
+    )
+    .await
+    .expect("restored on-chain settlement actor should relay the upstream timeout");
+
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Failed
+    );
+    assert!(matches!(
+        node_1
+            .get_tlc(channels[0], TLCId::Received(previous_tlc_id))
+            .and_then(|tlc| tlc.removed_reason),
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+}
+
+#[tokio::test]
 async fn test_send_payment_shutdown_cooperative() {
     init_tracing();
 
