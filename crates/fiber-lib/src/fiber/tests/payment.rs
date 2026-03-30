@@ -5229,8 +5229,8 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     // reconnect node_0 and node_1
     node_0.connect_to_nonblocking(&node_1).await;
 
-    // the CheckChannels in network actor will continue to retry RemoveTlc for tlc already with preimage
-    // so all the payments should be succeeded after all
+    // The live channel actor keeps retryable RemoveTlc work and resumes it after reestablishment,
+    // so all the payments should succeed after reconnect.
     let started = SystemTime::now();
 
     loop {
@@ -5331,8 +5331,8 @@ async fn test_send_payment_send_each_other_reestablishing() {
     // reconnect node_0 and node_1
     node_0.connect_to_nonblocking(&node_1).await;
 
-    // the CheckChannels in network actor will continue to retry RemoveTlc for tlc already with preimage
-    // so all the payments should be succeeded after all
+    // The live channel actor keeps retryable RemoveTlc work and resumes it after reestablishment,
+    // so all the payments should succeed after reconnect.
     let started = SystemTime::now();
 
     loop {

@@ -74,9 +74,8 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, TxCollaborationCommand, TxUpdateCommand,
-    MAX_TLC_NUMBER_IN_FLIGHT,
+    AddTlcResponse, ChannelActorState, ChannelEphemeralConfig, ChannelInitializationOperation,
+    TxCollaborationCommand, TxUpdateCommand, MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
@@ -104,8 +103,8 @@ use fiber_types::{
     ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
     FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
+    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RevocationData, RouterHop,
+    SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
     TrampolineContext, UdtCfgInfos,
 };
 
@@ -1528,8 +1527,6 @@ where
                 }
             }
             NetworkActorCommand::CheckChannels => {
-                let now = now_timestamp_as_millis_u64();
-
                 // peer has active channels but down
                 let mut with_channel_down_peers = HashSet::new();
                 let mut ready_channels_count = 0;
@@ -1548,74 +1545,6 @@ where
                         }
                     } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
                         shuttingdown_channels_count += 1;
-                    } else if matches!(
-                        channel_state,
-                        ChannelState::Closed(flags)
-                            if flags.intersects(
-                                CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE
-                            )
-                    ) {
-                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                            let delay_epoch = EpochNumberWithFraction::from_full_value(
-                                actor_state.commitment_delay_epoch,
-                            );
-                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-                            let expect_expiry = now + epoch_delay_milliseconds;
-                            // Collect TLC data before async operations to avoid holding iterator across await
-                            let expired_tlcs: Vec<_> = actor_state
-                                .tlc_state
-                                .get_expired_offered_tlcs(expect_expiry)
-                                .filter_map(|tlc| {
-                                    tlc.forwarding_tlc.map(
-                                        |(forwarding_channel_id, forwarding_tlc_id)| {
-                                            (
-                                                forwarding_channel_id,
-                                                forwarding_tlc_id,
-                                                tlc.payment_hash,
-                                                tlc.shared_secret,
-                                            )
-                                        },
-                                    )
-                                })
-                                .collect();
-                            for (
-                                forwarding_channel_id,
-                                forwarding_tlc_id,
-                                payment_hash,
-                                shared_secret,
-                            ) in expired_tlcs
-                            {
-                                if self.store.is_tlc_settled(&channel_id, &payment_hash) {
-                                    let (send, _recv) = oneshot::channel();
-                                    let rpc_reply = RpcReplyPort::from(send);
-                                    if let Err(err) = state
-                                        .send_command_to_channel(
-                                            forwarding_channel_id,
-                                            ChannelCommand::RemoveTlc(
-                                                RemoveTlcCommand {
-                                                    id: forwarding_tlc_id,
-                                                    reason: RemoveTlcReason::RemoveTlcFail(
-                                                        TlcErrPacket::new(
-                                                            TlcErr::new(
-                                                                TlcErrorCode::ExpiryTooSoon,
-                                                            ),
-                                                            &shared_secret,
-                                                        ),
-                                                    ),
-                                                },
-                                                rpc_reply,
-                                            ),
-                                        )
-                                        .await
-                                    {
-                                        error!(
-                                            "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                                            forwarding_tlc_id, forwarding_channel_id, err
-                                        );
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
 
@@ -3867,45 +3796,6 @@ where
                     Ok(())
                 }
                 None => {
-                    // if it's relay remove tlc, insert it into ChannelActorState's retryable queue
-                    if let ChannelCommand::RemoveTlc(remove_tlc, _) = &command {
-                        if let Some(mut state) = self.store.get_channel_actor_state(&channel_id) {
-                            if matches!(
-                                state.state,
-                                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
-                            ) {
-                                if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                                    payment_preimage,
-                                }) = remove_tlc.reason
-                                {
-                                    if let Some(tlc) =
-                                        state.tlc_state.get(&TLCId::Received(remove_tlc.id))
-                                    {
-                                        let payment_hash = tlc.payment_hash;
-                                        self.store.insert_preimage(payment_hash, payment_preimage);
-                                        self.network
-                                            .send_message(NetworkActorMessage::new_notification(
-                                                NetworkServiceEvent::PreimageCreated(
-                                                    payment_hash,
-                                                    payment_preimage,
-                                                ),
-                                            ))
-                                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                                    }
-                                }
-
-                                let operation = RetryableTlcOperation::RemoveTlc(
-                                    TLCId::Received(remove_tlc.id),
-                                    remove_tlc.reason.clone(),
-                                );
-                                if !state.retryable_tlc_operations.contains(&operation) {
-                                    state.retryable_tlc_operations.push_back(operation);
-                                }
-                                self.store.insert_channel_actor_state(state);
-                            }
-                        }
-                    }
-
                     let error = Error::ChannelNotFound(channel_id);
                     if let Some(rpc_reply) = command.rpc_reply_port() {
                         let _ = rpc_reply.send(Err(error.to_string()));
