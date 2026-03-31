@@ -134,9 +134,7 @@ fn test_store_get_broadcast_messages_iter() {
     let outpoint = channel_announcement.out_point().clone();
     store.save_channel_announcement(timestamp, channel_announcement.clone());
     let default_cursor = Cursor::default();
-    let mut iter = store
-        .get_broadcast_messages_iter(&default_cursor)
-        .into_iter();
+    let mut iter = store.get_broadcast_messages(&default_cursor, 0).into_iter();
     assert_eq!(
         iter.next(),
         Some(BroadcastMessageWithTimestamp::ChannelAnnouncement(
@@ -146,7 +144,7 @@ fn test_store_get_broadcast_messages_iter() {
     );
     assert_eq!(iter.next(), None);
     let cursor = Cursor::new(timestamp, BroadcastMessageID::ChannelAnnouncement(outpoint));
-    let mut iter = store.get_broadcast_messages_iter(&cursor).into_iter();
+    let mut iter = store.get_broadcast_messages(&cursor, 0).into_iter();
     assert_eq!(iter.next(), None);
 }
 
@@ -159,7 +157,7 @@ fn test_store_get_broadcast_messages() {
     let outpoint = channel_announcement.out_point().clone();
     store.save_channel_announcement(timestamp, channel_announcement.clone());
     let default_cursor = Cursor::default();
-    let result = store.get_broadcast_messages(&default_cursor, None);
+    let result = store.get_broadcast_messages(&default_cursor, 0);
     assert_eq!(
         result,
         vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
@@ -168,7 +166,7 @@ fn test_store_get_broadcast_messages() {
         )],
     );
     let cursor = Cursor::new(timestamp, BroadcastMessageID::ChannelAnnouncement(outpoint));
-    let result = store.get_broadcast_messages(&cursor, None);
+    let result = store.get_broadcast_messages(&cursor, 0);
     assert_eq!(result, vec![]);
 }
 

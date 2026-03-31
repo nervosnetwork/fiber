@@ -1290,38 +1290,40 @@ impl WatchtowerStore for Store {
 }
 
 impl GossipMessageStore for Store {
-    fn get_broadcast_messages_iter(
+    fn get_broadcast_messages(
         &self,
         after_cursor: &Cursor,
-    ) -> impl IntoIterator<Item = crate::fiber::types::BroadcastMessageWithTimestamp> {
+        limit: usize,
+    ) -> Vec<crate::fiber::types::BroadcastMessageWithTimestamp> {
         let cursor = after_cursor.to_bytes();
         let prefix = [BROADCAST_MESSAGE_PREFIX];
         let start = [&prefix, cursor.as_slice()].concat();
         let start_cloned = start.clone();
-        // We should skip the value with the same cursor (after_cursor is exclusive).
-        self.collect_by_prefix_with(
-            &prefix,
-            PrefixIterOptions::new()
-                .start_key(&start)
-                .skip_while(Box::new(move |key: &[u8]| key == start_cloned)),
-        )
-        .into_iter()
-        .map(|kv| {
-            debug_assert_eq!(kv.key.len(), 1 + CURSOR_SIZE);
-            let mut timestamp_bytes = [0u8; 8];
-            timestamp_bytes.copy_from_slice(&kv.key[1..9]);
-            let timestamp = u64::from_be_bytes(timestamp_bytes);
-            let message: BroadcastMessage = deserialize_from(kv.value.as_ref(), "BroadcastMessage");
-            (message, timestamp).into()
-        })
-        .collect::<Vec<_>>()
+        let mut options = PrefixIterOptions::new()
+            .start_key(&start)
+            .skip_while(Box::new(move |key: &[u8]| key == start_cloned));
+        if limit > 0 {
+            options = options.limit(limit);
+        }
+        self.collect_by_prefix_with(&prefix, options)
+            .into_iter()
+            .map(|kv| {
+                debug_assert_eq!(kv.key.len(), 1 + CURSOR_SIZE);
+                let mut timestamp_bytes = [0u8; 8];
+                timestamp_bytes.copy_from_slice(&kv.key[1..9]);
+                let timestamp = u64::from_be_bytes(timestamp_bytes);
+                let message: BroadcastMessage =
+                    deserialize_from(kv.value.as_ref(), "BroadcastMessage");
+                (message, timestamp).into()
+            })
+            .collect::<Vec<_>>()
     }
 
-    fn get_broadcast_messages_iter_reverse(
+    fn get_broadcast_messages_reverse(
         &self,
         before_cursor: Option<&Cursor>,
         limit: usize,
-    ) -> impl IntoIterator<Item = crate::fiber::types::BroadcastMessageWithTimestamp> {
+    ) -> Vec<crate::fiber::types::BroadcastMessageWithTimestamp> {
         let prefix = [BROADCAST_MESSAGE_PREFIX];
         let mut options = PrefixIterOptions::new().reverse().limit(limit);
 
