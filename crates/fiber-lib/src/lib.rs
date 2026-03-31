@@ -58,6 +58,7 @@ pub fn get_node_prefix() -> &'static str {
     static INSTANCE: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
     INSTANCE.get_or_init(|| std::env::var("LOG_PREFIX").unwrap_or_else(|_| "".to_string()))
 }
+
 pub fn now_timestamp_as_millis_u64() -> u64 {
     time::SystemTime::now()
         .duration_since(time::UNIX_EPOCH)

@@ -57,12 +57,13 @@ use fiber_types::{
     ChannelAnnouncement, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
     ChannelOpenRecord, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
     ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
-    EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
-    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
-    PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
-    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr,
-    TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+    EcdsaSignature, ForwardingEvent, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
+    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PaymentEvent,
+    PaymentEventType, PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey,
+    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
+    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -412,7 +413,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + PaymentEventStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -1673,6 +1674,20 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
+            // Record a Receive payment event when this node is the final recipient
+            // of a payment (i.e., the TLC was received, fulfilled, and NOT forwarded).
+            // If forwarding_tlc is Some, this node is an intermediary, not the payee.
+            if tlc_info.is_received() && tlc_info.forwarding_tlc.is_none() {
+                self.store.insert_payment_event(PaymentEvent {
+                    event_type: PaymentEventType::Receive,
+                    timestamp: now_timestamp_as_millis_u64(),
+                    channel_id: state.get_id(),
+                    amount: tlc_info.amount,
+                    fee: 0,
+                    payment_hash: tlc_info.payment_hash,
+                    udt_type_script: state.funding_udt_type_script.clone(),
+                });
+            }
             // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
             // incase watchtower may need preimage to settledown
             if tlc_info.is_received() || tlc_info.forwarding_tlc.is_none() {
@@ -1682,6 +1697,36 @@ where
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
+                // Record forwarding event if this TLC was successfully fulfilled.
+                // This node acted as an intermediary: inbound TLC on previous_channel_id
+                // was forwarded as outbound TLC on this channel.
+                if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+                    let incoming_amount = self
+                        .store
+                        .get_channel_actor_state(&previous_channel_id)
+                        .and_then(|prev_state| {
+                            prev_state
+                                .tlc_state
+                                .get(&TLCId::Received(previous_tlc_id))
+                                .map(|tlc| tlc.amount)
+                        });
+
+                    if let Some(incoming_amount) = incoming_amount {
+                        let outgoing_amount = tlc_info.amount;
+                        let fee = incoming_amount.saturating_sub(outgoing_amount);
+                        self.store.insert_forwarding_event(ForwardingEvent {
+                            timestamp: now_timestamp_as_millis_u64(),
+                            incoming_channel_id: previous_channel_id,
+                            outgoing_channel_id: state.get_id(),
+                            incoming_amount,
+                            outgoing_amount,
+                            fee,
+                            payment_hash: tlc_info.payment_hash,
+                            udt_type_script: state.funding_udt_type_script.clone(),
+                        });
+                    }
+                }
+
                 // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
                 // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
                 // into a new error created with the *outer* shared secret (for this hop).
@@ -3033,7 +3078,13 @@ where
 #[async_trait::async_trait]
 impl<S> Actor for ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + InvoiceStore
+        + PreimageStore
+        + PaymentEventStore
+        + Send
+        + Sync
+        + 'static,
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;
@@ -8159,6 +8210,302 @@ pub trait ChannelOpenRecordStore {
     fn insert_channel_open_record(&self, record: ChannelOpenRecord);
     /// Delete the record for the given channel ID.
     fn delete_channel_open_record(&self, channel_id: &Hash256);
+}
+
+/// Store trait for persisting and querying forwarding events and payment events.
+///
+/// Forwarding events are recorded when this node successfully relays a TLC
+/// (payment) between two channels, earning a fee. Payment events are recorded
+/// when this node sends or receives a payment as an end user.
+///
+/// Events are keyed by timestamp (big-endian u64 milliseconds) to support
+/// efficient time-range queries.
+pub trait PaymentEventStore {
+    /// Insert a new forwarding event into the store.
+    fn insert_forwarding_event(&self, event: ForwardingEvent);
+    /// Query forwarding events with an explicit asset selector and typed cursor.
+    fn query_forwarding_events(
+        &self,
+        query: ForwardingHistoryQuery,
+    ) -> Result<(Vec<ForwardingEvent>, Option<ForwardingHistoryCursor>), String>;
+    /// Insert a new payment event (send or receive) into the store.
+    fn insert_payment_event(&self, event: PaymentEvent);
+    /// Query payment events with explicit asset and event-type filters plus a typed cursor.
+    fn query_payment_events(
+        &self,
+        query: PaymentHistoryQuery,
+    ) -> Result<(Vec<PaymentEvent>, Option<PaymentHistoryCursor>), String>;
+}
+
+pub const FORWARDING_ASSET_ID_LEN: usize = 33;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetSelector {
+    All,
+    Ckb,
+    Udt(Script),
+}
+
+impl AssetSelector {
+    pub fn matches(&self, udt_type_script: &Option<Script>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Ckb => udt_type_script.is_none(),
+            Self::Udt(script) => udt_type_script.as_ref() == Some(script),
+        }
+    }
+
+    pub fn asset_id(&self) -> Option<[u8; FORWARDING_ASSET_ID_LEN]> {
+        match self {
+            Self::All => None,
+            Self::Ckb => {
+                let mut asset_id = [0u8; FORWARDING_ASSET_ID_LEN];
+                asset_id[0] = 0;
+                Some(asset_id)
+            }
+            Self::Udt(script) => {
+                let mut asset_id = [0u8; FORWARDING_ASSET_ID_LEN];
+                asset_id[0] = 1;
+                asset_id[1..].copy_from_slice(&blake2b_256(script.as_slice()));
+                Some(asset_id)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardingHistoryQuery {
+    pub asset: AssetSelector,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub limit: usize,
+    pub after: Option<ForwardingHistoryCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum ForwardingHistoryCursorIndex {
+    Time,
+    Asset { kind: u8, hash: [u8; 32] },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardingHistoryCursor {
+    index: ForwardingHistoryCursorIndex,
+    timestamp: u64,
+    payment_hash: Hash256,
+    incoming_channel_id: Hash256,
+}
+
+impl ForwardingHistoryCursor {
+    const VERSION: u8 = 0;
+
+    pub fn new(asset: &AssetSelector, event: &ForwardingEvent) -> Self {
+        let index = match asset.asset_id() {
+            Some(asset_id) => ForwardingHistoryCursorIndex::Asset {
+                kind: asset_id[0],
+                hash: asset_id[1..]
+                    .try_into()
+                    .expect("forwarding asset hash length is fixed"),
+            },
+            None => ForwardingHistoryCursorIndex::Time,
+        };
+
+        Self {
+            index,
+            timestamp: event.timestamp,
+            payment_hash: event.payment_hash,
+            incoming_channel_id: event.incoming_channel_id,
+        }
+    }
+
+    pub fn validate_for(&self, asset: &AssetSelector) -> Result<(), String> {
+        let expected = match asset.asset_id() {
+            Some(asset_id) => ForwardingHistoryCursorIndex::Asset {
+                kind: asset_id[0],
+                hash: asset_id[1..]
+                    .try_into()
+                    .expect("forwarding asset hash length is fixed"),
+            },
+            None => ForwardingHistoryCursorIndex::Time,
+        };
+
+        if self.index != expected {
+            return Err("cursor does not match the requested asset filter".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    pub fn payment_hash(&self) -> Hash256 {
+        self.payment_hash
+    }
+
+    pub fn incoming_channel_id(&self) -> Hash256 {
+        self.incoming_channel_id
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + 128);
+        bytes.push(Self::VERSION);
+        bytes.extend_from_slice(
+            &bincode::serialize(self).unwrap_or_else(|e| {
+                panic!("serialization of ForwardingHistoryCursor failed: {}", e)
+            }),
+        );
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let Some((&version, payload)) = bytes.split_first() else {
+            return Err("forwarding history cursor is empty".to_string());
+        };
+
+        if version != Self::VERSION {
+            return Err(format!(
+                "unsupported forwarding history cursor version: {}",
+                version
+            ));
+        }
+
+        bincode::deserialize(payload)
+            .map_err(|e| format!("failed to decode forwarding history cursor: {}", e))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentHistoryQuery {
+    pub asset: AssetSelector,
+    pub event_type: Option<PaymentEventType>,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub limit: usize,
+    pub after: Option<PaymentHistoryCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum PaymentHistoryScanIndex {
+    Time,
+    Asset { kind: u8, hash: [u8; 32] },
+    EventType(PaymentEventType),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PaymentHistoryCursorFilter {
+    asset: Option<(u8, [u8; 32])>,
+    event_type: Option<PaymentEventType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentHistoryCursor {
+    scan_index: PaymentHistoryScanIndex,
+    filter: PaymentHistoryCursorFilter,
+    timestamp: u64,
+    payment_hash: Hash256,
+    channel_id: Hash256,
+}
+
+impl PaymentHistoryCursor {
+    const VERSION: u8 = 0;
+
+    pub fn new(query: &PaymentHistoryQuery, event: &PaymentEvent) -> Self {
+        Self {
+            scan_index: payment_history_scan_index(&query.asset, query.event_type),
+            filter: payment_history_filter(&query.asset, query.event_type),
+            timestamp: event.timestamp,
+            payment_hash: event.payment_hash,
+            channel_id: event.channel_id,
+        }
+    }
+
+    pub fn validate_for(&self, query: &PaymentHistoryQuery) -> Result<(), String> {
+        let expected_scan_index = payment_history_scan_index(&query.asset, query.event_type);
+        if self.scan_index != expected_scan_index {
+            return Err("cursor does not match the requested payment query".to_string());
+        }
+
+        let expected_filter = payment_history_filter(&query.asset, query.event_type);
+        if self.filter != expected_filter {
+            return Err("cursor does not match the requested payment filters".to_string());
+        }
+
+        Ok(())
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    pub fn payment_hash(&self) -> Hash256 {
+        self.payment_hash
+    }
+
+    pub fn channel_id(&self) -> Hash256 {
+        self.channel_id
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + 128);
+        bytes.push(Self::VERSION);
+        bytes.extend_from_slice(
+            &bincode::serialize(self)
+                .unwrap_or_else(|e| panic!("serialization of PaymentHistoryCursor failed: {}", e)),
+        );
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let Some((&version, payload)) = bytes.split_first() else {
+            return Err("payment history cursor is empty".to_string());
+        };
+
+        if version != Self::VERSION {
+            return Err(format!(
+                "unsupported payment history cursor version: {}",
+                version
+            ));
+        }
+
+        bincode::deserialize(payload)
+            .map_err(|e| format!("failed to decode payment history cursor: {}", e))
+    }
+}
+
+fn payment_history_scan_index(
+    asset: &AssetSelector,
+    event_type: Option<PaymentEventType>,
+) -> PaymentHistoryScanIndex {
+    if let Some(asset_id) = asset.asset_id() {
+        PaymentHistoryScanIndex::Asset {
+            kind: asset_id[0],
+            hash: asset_id[1..]
+                .try_into()
+                .expect("payment asset hash length is fixed"),
+        }
+    } else if let Some(event_type) = event_type {
+        PaymentHistoryScanIndex::EventType(event_type)
+    } else {
+        PaymentHistoryScanIndex::Time
+    }
+}
+
+fn payment_history_filter(
+    asset: &AssetSelector,
+    event_type: Option<PaymentEventType>,
+) -> PaymentHistoryCursorFilter {
+    PaymentHistoryCursorFilter {
+        asset: asset.asset_id().map(|asset_id| {
+            (
+                asset_id[0],
+                asset_id[1..]
+                    .try_into()
+                    .expect("payment asset hash length is fixed"),
+            )
+        }),
+        event_type,
+    }
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
