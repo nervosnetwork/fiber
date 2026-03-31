@@ -2830,9 +2830,11 @@ where
                         error!("Failed to check chain hash: {:?}", e);
                         return Ok(());
                     }
-                    if get_broadcast_messages.count > MAX_NUM_OF_BROADCAST_MESSAGES {
+                    if get_broadcast_messages.count == 0
+                        || get_broadcast_messages.count > MAX_NUM_OF_BROADCAST_MESSAGES
+                    {
                         warn!(
-                            "Received GetBroadcastMessages with too many messages: {:?}",
+                            "Received GetBroadcastMessages with invalid count: {:?}",
                             get_broadcast_messages.count
                         );
                         return Ok(());
