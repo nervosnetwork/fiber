@@ -3,7 +3,7 @@ import DbWorker from "./db.worker.ts";
 import FiberWorker from "./fiber.worker.ts";
 import { Mutex } from "async-mutex";
 import { DbWorkerInitializationOptions, FiberInvokeRequest, FiberInvokeResponse, FiberWorkerInitializationOptions } from "./types/general.ts";
-import { AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult, ShutdownChannelParams, UpdateChannelParams } from "./types/channel.ts";
+import { AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult, OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult, ShutdownChannelParams, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult, UpdateChannelParams } from "./types/channel.ts";
 import { GraphChannelsParams, GraphChannelsResult, GraphNodesParams, GraphNodesResult } from "./types/graph.ts";
 import { NodeInfoResult } from "./types/info.ts";
 import { GetInvoiceResult, InvoiceParams, InvoiceResult, NewInvoiceParams, ParseInvoiceParams, ParseInvoiceResult } from "./types/invoice.ts";
@@ -38,7 +38,7 @@ class Fiber {
      * Start the Fiber Wasm instance.
      * @param config Config file for fiber
      * @param fiberKeyPair keypair used for fiber
-     * @param ckbSecretKey secret key for CKB
+     * @param ckbSecretKey secret key for CKB (optional, signing may not require it)
      * @param chainSpec Chain spec if chain is neither testnet nor mainnet
      * @param logLevel log level, such as `trace`, `debug`, `info`, `error`
      * @param databasePrefix Name prefix of IndexedDB store. Defaults to `/wasm`
@@ -47,7 +47,7 @@ class Fiber {
     async start(
         config: string,
         fiberKeyPair: Uint8Array,
-        ckbSecretKey: Uint8Array,
+        ckbSecretKey?: Uint8Array,
         chainSpec?: string,
         logLevel: "trace" | "debug" | "info" | "error" = "info",
         databasePrefix?: string) {
@@ -118,6 +118,23 @@ class Fiber {
     }
     async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
         return await this.invokeCommand("open_channel", [params]);
+    }
+    /**
+     * Open a channel with external funding and return the final negotiated unsigned
+     * funding transaction. The caller should sign this tx once, without changing its
+     * structure, then submit it with submitSignedFundingTx. When `funding_lock_script`
+     * uses a custom wallet lock, pass `funding_lock_script_cell_deps` so the node can
+     * build the initial unsigned transaction.
+     */
+    async openChannelWithExternalFunding(params: OpenChannelWithExternalFundingParams): Promise<OpenChannelWithExternalFundingResult> {
+        return await this.invokeCommand("open_channel_with_external_funding", [params]);
+    }
+    /**
+     * Submit the externally signed funding transaction. The transaction must match the
+     * unsigned_funding_tx returned by openChannelWithExternalFunding, except witnesses.
+     */
+    async submitSignedFundingTx(params: SubmitSignedFundingTxParams): Promise<SubmitSignedFundingTxResult> {
+        return await this.invokeCommand("submit_signed_funding_tx", [params]);
     }
     async acceptChannel(params: AcceptChannelParams): Promise<AcceptChannelResult> {
         return await this.invokeCommand("accept_channel", [params]);

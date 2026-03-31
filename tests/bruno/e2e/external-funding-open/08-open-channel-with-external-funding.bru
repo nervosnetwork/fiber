@@ -1,0 +1,65 @@
+meta {
+  name: open channel with external funding
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "open_channel_with_external_funding",
+    "params": [
+      {
+        "pubkey": "{{NODE3_PUBKEY}}",
+        "funding_amount": "0xba43b7400",
+        "public": true,
+        "shutdown_script": {},
+        "funding_lock_script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const node2Script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  const body = req.getBody();
+  const fundingAmount = body.params[0].funding_amount;
+
+  body.params[0].shutdown_script = node2Script;
+  body.params[0].funding_lock_script = node2Script;
+  req.setBody(body);
+
+  bru.setVar("EXTERNAL_FUNDING_AMOUNT", fundingAmount);
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  if (res.body.error) {
+    throw new Error(
+      `open_channel_with_external_funding failed with funding_amount=${bru.getVar("EXTERNAL_FUNDING_AMOUNT")}: ${res.body.error.message}`,
+    );
+  }
+
+  const tx = res.body.result.unsigned_funding_tx;
+  if (!tx || !Array.isArray(tx.outputs) || tx.outputs.length === 0) {
+    throw new Error("unsigned_funding_tx.outputs should not be empty");
+  }
+
+  bru.setVar("EXTERNAL_FUNDING_CHANNEL_ID", res.body.result.channel_id);
+  bru.setVar("EXTERNAL_FUNDING_UNSIGNED_TX", tx);
+}

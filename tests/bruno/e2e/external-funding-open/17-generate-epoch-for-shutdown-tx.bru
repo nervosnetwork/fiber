@@ -1,0 +1,34 @@
+meta {
+  name: generate epoch for shutdown tx
+  type: http
+  seq: 17
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "generate_epochs",
+    "params": ["0x1"]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  await new Promise((r) => setTimeout(r, 5000));
+}

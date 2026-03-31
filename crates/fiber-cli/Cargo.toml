@@ -1,6 +1,6 @@
 [package]
 name = "fnn-cli"
-version = "0.7.1"
+version = "0.8.0-rc1"
 edition = "2021"
 description = "Command-line interface for Fiber Network Node (FNN)"
 
