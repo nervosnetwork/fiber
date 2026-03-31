@@ -44,8 +44,8 @@ use ckb_types::{
 use fiber_types::{
     derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelConstraints, ChannelState,
     HashAlgorithm, InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData,
-    PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, TLCId,
-    TlcErrPacket, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    ShuttingDownFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
@@ -2959,6 +2959,65 @@ async fn test_restart_restores_ready_channel_actor_offline() {
 }
 
 #[tokio::test]
+async fn test_restart_restores_shutting_down_channel_actor_for_reestablish() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    state.update_state(ChannelState::ShuttingDown(
+        ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+    ));
+    node_a
+        .update_channel_actor_state(
+            state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_b.stop().await;
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        state.reestablishing,
+        "restarted shutting-down channel should reestablish with the peer"
+    );
+    assert_eq!(
+        state.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "restarted shutting-down channel should be restored as offline"
+    );
+
+    let update_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(false),
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        update_result.is_ok(),
+        "restored shutting-down channel actor should accept control commands"
+    );
+}
+
+#[tokio::test]
 async fn test_closed_channel_restores_after_restart_mid_settlement() {
     init_tracing();
 
@@ -3052,6 +3111,17 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
 
     node_1.restart().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let restored_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    assert!(
+        !restored_downstream_state.reestablishing,
+        "restarted on-chain-settlement channel should not reenter reestablishing"
+    );
+    assert_eq!(
+        restored_downstream_state.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "restarted on-chain-settlement channel should stay offline"
+    );
 
     let restored_control_result = call!(node_1.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
