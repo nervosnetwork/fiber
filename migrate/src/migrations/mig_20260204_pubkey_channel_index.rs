@@ -68,7 +68,12 @@ impl Migration for MigrationObj {
             };
 
             let pubkey_bytes = state.remote_pubkey.serialize();
-            let index_key = [&[PUBKEY_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..], channel_id].concat();
+            let index_key = [
+                &[PUBKEY_CHANNEL_ID_PREFIX][..],
+                &pubkey_bytes[..],
+                channel_id,
+            ]
+            .concat();
             let index_value =
                 bincode::serialize(&state.state).expect("serialize ChannelState should be OK");
             batch.put(index_key, index_value);
