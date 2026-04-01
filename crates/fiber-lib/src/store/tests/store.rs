@@ -134,9 +134,7 @@ fn test_store_get_broadcast_messages_iter() {
     let outpoint = channel_announcement.out_point().clone();
     store.save_channel_announcement(timestamp, channel_announcement.clone());
     let default_cursor = Cursor::default();
-    let mut iter = store
-        .get_broadcast_messages_iter(&default_cursor)
-        .into_iter();
+    let mut iter = store.get_broadcast_messages(&default_cursor, 0).into_iter();
     assert_eq!(
         iter.next(),
         Some(BroadcastMessageWithTimestamp::ChannelAnnouncement(
@@ -146,7 +144,7 @@ fn test_store_get_broadcast_messages_iter() {
     );
     assert_eq!(iter.next(), None);
     let cursor = Cursor::new(timestamp, BroadcastMessageID::ChannelAnnouncement(outpoint));
-    let mut iter = store.get_broadcast_messages_iter(&cursor).into_iter();
+    let mut iter = store.get_broadcast_messages(&cursor, 0).into_iter();
     assert_eq!(iter.next(), None);
 }
 
@@ -159,7 +157,7 @@ fn test_store_get_broadcast_messages() {
     let outpoint = channel_announcement.out_point().clone();
     store.save_channel_announcement(timestamp, channel_announcement.clone());
     let default_cursor = Cursor::default();
-    let result = store.get_broadcast_messages(&default_cursor, None);
+    let result = store.get_broadcast_messages(&default_cursor, 0);
     assert_eq!(
         result,
         vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
@@ -168,7 +166,7 @@ fn test_store_get_broadcast_messages() {
         )],
     );
     let cursor = Cursor::new(timestamp, BroadcastMessageID::ChannelAnnouncement(outpoint));
-    let result = store.get_broadcast_messages(&cursor, None);
+    let result = store.get_broadcast_messages(&cursor, 0);
     assert_eq!(result, vec![]);
 }
 
@@ -1237,4 +1235,49 @@ fn test_store_channel_open_record() {
 #[cfg(not(target_arch = "wasm32"))]
 fn deterministic_hash256(seed: u64, index: u32) -> fiber_types::Hash256 {
     crate::store::sample::deterministic_hash(seed, index).into()
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_get_broadcast_messages_reverse_excludes_cursor() {
+    let (store, _dir) = generate_store();
+    let first_timestamp = now_timestamp_as_millis_u64();
+    let first_channel_announcement = mock_channel();
+    let first_outpoint = first_channel_announcement.out_point().clone();
+    store.save_channel_announcement(first_timestamp, first_channel_announcement.clone());
+
+    let second_timestamp = first_timestamp + 1;
+    let second_channel_announcement = mock_channel();
+    let second_outpoint = second_channel_announcement.out_point().clone();
+    store.save_channel_announcement(second_timestamp, second_channel_announcement.clone());
+
+    let latest = store.get_broadcast_messages_reverse(None, 1);
+    assert_eq!(
+        latest,
+        vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
+            second_timestamp,
+            second_channel_announcement.clone(),
+        )],
+    );
+
+    let before_cursor = Cursor::new(
+        second_timestamp,
+        BroadcastMessageID::ChannelAnnouncement(second_outpoint),
+    );
+    let previous = store.get_broadcast_messages_reverse(Some(&before_cursor), 1);
+    assert_eq!(
+        previous,
+        vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
+            first_timestamp,
+            first_channel_announcement,
+        )],
+    );
+
+    let first_cursor = Cursor::new(
+        first_timestamp,
+        BroadcastMessageID::ChannelAnnouncement(first_outpoint),
+    );
+    assert!(store
+        .get_broadcast_messages_reverse(Some(&first_cursor), 1)
+        .is_empty());
 }

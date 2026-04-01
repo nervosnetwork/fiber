@@ -1,9 +1,6 @@
 use fiber_store::backend::StorageBackend;
 use fiber_store::iterator::{IteratorDirection, KVPair};
 
-/// Type alias for the `skip_while` predicate used by [`PrefixIterOptions`].
-pub type SkipWhileFn = Box<dyn Fn(&[u8]) -> bool + Send + 'static>;
-
 /// Builder for prefix iteration options, modelled after `std::fs::OpenOptions`.
 ///
 /// # Examples
@@ -15,27 +12,25 @@ pub type SkipWhileFn = Box<dyn Fn(&[u8]) -> bool + Send + 'static>;
 /// // Reverse scan with limit:
 /// self.collect_by_prefix_with(&prefix, PrefixIterOptions::new().reverse().limit(1))
 ///
-/// // Paginated forward scan, skipping the cursor key:
-/// let start = cursor_key.clone();
+/// // Paginated forward scan with exclusive cursor:
 /// self.collect_by_prefix_with(&prefix, PrefixIterOptions::new()
 ///     .start_key(&cursor_key)
-///     .skip_while(Box::new(move |key| key == start)))
+///     .start_key_exclusive())
 /// ```
 pub struct PrefixIterOptions<'a> {
     pub(crate) direction: IteratorDirection,
     pub(crate) start_key: Option<&'a [u8]>,
-    pub(crate) skip_while: Option<SkipWhileFn>,
+    pub(crate) start_key_exclusive: bool,
     pub(crate) limit: usize,
 }
 
 impl<'a> PrefixIterOptions<'a> {
-    /// Create options with defaults: forward direction, no start key,
-    /// no skip_while, no limit.
+    /// Create options with defaults: forward direction, no start key, no limit.
     pub fn new() -> Self {
         Self {
             direction: IteratorDirection::Forward,
             start_key: None,
-            skip_while: None,
+            start_key_exclusive: false,
             limit: 0,
         }
     }
@@ -52,10 +47,10 @@ impl<'a> PrefixIterOptions<'a> {
         self
     }
 
-    /// Skip entries at the start while the predicate returns true.
-    /// Once a key fails the predicate, all subsequent entries are kept.
-    pub fn skip_while(mut self, f: SkipWhileFn) -> Self {
-        self.skip_while = Some(f);
+    /// Make the start key exclusive — the entry matching start_key itself
+    /// will be skipped. Only meaningful when `start_key` is set.
+    pub fn start_key_exclusive(mut self) -> Self {
+        self.start_key_exclusive = true;
         self
     }
 
@@ -102,7 +97,7 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
         let PrefixIterOptions {
             direction,
             start_key,
-            skip_while,
+            start_key_exclusive,
             limit,
         } = options;
 
@@ -134,32 +129,41 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
             }
         };
 
-        let results = self.collect_iterator(
+        // When start_key_exclusive is set, fetch one extra entry so the cursor
+        // entry doesn't consume a slot that should belong to real results.
+        let fetch_limit = if start_key_exclusive && start_key.is_some() && limit > 0 {
+            limit + 1
+        } else {
+            limit
+        };
+
+        let start_key_owned = if start_key_exclusive {
+            start_key.map(|k| k.to_vec())
+        } else {
+            None
+        };
+
+        let mut results = self.collect_iterator(
             start,
             direction,
             Box::new(move |key: &[u8]| key.starts_with(&prefix_owned)),
-            limit,
+            fetch_limit,
         );
 
-        // Apply skip_while post-collection, if provided.
-        match skip_while {
-            None => results,
-            Some(predicate) => {
-                let mut skipping = true;
-                results
-                    .into_iter()
-                    .filter(move |kv| {
-                        if skipping {
-                            if predicate(&kv.key) {
-                                return false;
-                            }
-                            skipping = false;
-                        }
-                        true
-                    })
-                    .collect()
+        // Strip the cursor entry itself when exclusive.
+        // The cursor key is always the first element returned by collect_iterator
+        // because iteration starts from start_key in both forward and reverse.
+        if let Some(ref cursor_key) = start_key_owned {
+            if results.first().is_some_and(|kv| kv.key == *cursor_key) {
+                results.remove(0);
+            }
+            // Truncate back to the original limit.
+            if limit > 0 && results.len() > limit {
+                results.truncate(limit);
             }
         }
+
+        results
     }
 }
 

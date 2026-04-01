@@ -734,9 +734,8 @@ async fn test_gossip_store_prune_all_messages() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages_iter(&Cursor::default())
-            .into_iter()
-            .count(),
+            .get_broadcast_messages(&Cursor::default(), 0)
+            .len(),
         num_messages
     );
 
@@ -751,9 +750,8 @@ async fn test_gossip_store_prune_all_messages() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages_iter(&Cursor::default())
-            .into_iter()
-            .count(),
+            .get_broadcast_messages(&Cursor::default(), 0)
+            .len(),
         0
     );
 }
@@ -791,7 +789,7 @@ async fn test_gossip_store_prune_channel_announcement() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         1
     );
@@ -813,7 +811,7 @@ async fn test_gossip_store_prune_channel_announcement() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None),
+            .get_broadcast_messages(&Cursor::default(), 0),
         vec![]
     );
 }
@@ -883,7 +881,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -922,7 +920,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -961,7 +959,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -1000,7 +998,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None),
+            .get_broadcast_messages(&Cursor::default(), 0),
         vec![]
     );
 }
