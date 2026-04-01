@@ -115,6 +115,24 @@ pub mod channel {
             .await
             .map_err(error)
     }
+    #[wasm_bindgen]
+    pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .channel
+            .open_channel_with_external_funding(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn submit_signed_funding_tx(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .channel
+            .submit_signed_funding_tx(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
 }
 
 pub mod graph {

@@ -2,7 +2,7 @@
 build = "src/build.rs"
 edition = "2021"
 name = "fnn"
-version = "0.7.1"
+version = "0.8.0-rc1"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -107,6 +107,7 @@ tentacle = { version = "0.7", default-features = false, features = [
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
 tracing = { version = "0.1", features = ["log"] }
 web-time = { version = "1.1.0", features = ["serde"] }
+wasm-bindgen-futures = "0.4"
 
 [features]
 bench = ["tempfile", "ckb-testtool"]

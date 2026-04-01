@@ -1,0 +1,59 @@
+meta {
+  name: sign external funding tx
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "sign_external_funding_tx",
+    "params": [
+      {
+        "unsigned_funding_tx": {},
+        "private_key": "{{EXTERNAL_FUNDING_PRIVKEY}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const unsignedTx = bru.getVar("EXTERNAL_FUNDING_UNSIGNED_TX");
+  if (!unsignedTx) {
+    throw new Error("Missing EXTERNAL_FUNDING_UNSIGNED_TX. Run the open step first.");
+  }
+
+  if (!bru.getEnvVar("EXTERNAL_FUNDING_PRIVKEY")) {
+    throw new Error("Missing EXTERNAL_FUNDING_PRIVKEY environment variable");
+  }
+
+  const body = req.getBody();
+  body.params[0].unsigned_funding_tx = unsignedTx;
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.signed_funding_tx: isDefined
+}
+
+script:post-response {
+  const signedTx = res.body.result.signed_funding_tx;
+  if (!signedTx || !Array.isArray(signedTx.witnesses)) {
+    throw new Error("signed_funding_tx must be a transaction object with witnesses");
+  }
+
+  bru.setVar("EXTERNAL_FUNDING_SIGNED_TX", signedTx);
+}

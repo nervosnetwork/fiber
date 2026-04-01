@@ -1,0 +1,69 @@
+meta {
+  name: wait channel closed and capture shutdown tx
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE1_PUBKEY}}",
+        "include_closed": true
+      }
+    ]
+  }
+}
+
+vars:post-response {
+  CLOSED_CHECK_MAX_ITERATIONS: 10
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const channelId = bru.getVar("EXTERNAL_FUNDING_CHANNEL_ID");
+  const channels = res.body.result.channels || [];
+  const channel = channels.find((item) => item.channel_id === channelId);
+  const stateName = channel && channel.state && channel.state.state_name;
+  const iteration = Number(bru.getVar("CLOSED_CHECK_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("CLOSED_CHECK_MAX_ITERATIONS"));
+
+  if (stateName === "Closed") {
+    if (!channel.shutdown_transaction_hash) {
+      throw new Error(`closed channel ${channelId} is missing shutdown_transaction_hash`);
+    }
+
+    bru.setVar("EXTERNAL_FUNDING_SHUTDOWN_TX_HASH", channel.shutdown_transaction_hash);
+    bru.setVar("CLOSED_CHECK_ITERATION", 0);
+    return;
+  }
+
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("CLOSED_CHECK_ITERATION", iteration + 1);
+    bru.setNextRequest("generate epoch for shutdown tx");
+    return;
+  }
+
+  bru.setVar("CLOSED_CHECK_ITERATION", 0);
+  throw new Error(
+    `channel did not reach Closed, channel_id=${channelId}, last_state=${String(stateName)}`,
+  );
+}
