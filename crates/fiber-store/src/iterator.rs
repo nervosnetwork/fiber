@@ -13,7 +13,7 @@ pub struct KVPair {
 }
 
 /// Default batch size for [`PrefixIterator`].
-const PREFIX_ITER_BATCH_SIZE: usize = 1000;
+const PREFIX_ITER_BATCH_SIZE: usize = 100;
 
 /// A lazy, batched iterator over all key-value pairs whose keys share a common
 /// prefix.

@@ -52,6 +52,11 @@ pub trait StorageBackend: Send + Sync {
     /// Return a lazy iterator over all key-value pairs whose keys start with
     /// `prefix`.
     ///
+    /// This is primarily used by the migration tool (`fnn-migrate`) and
+    /// `check_validate` to scan store prefixes without loading every entry into
+    /// memory at once. Normal business logic should use higher-level query
+    /// methods instead.
+    ///
     /// The default implementation batches calls to [`Self::collect_iterator`]
     /// so that only a bounded number of entries are held in memory at any time.
     fn prefix_iterator(&self, prefix: &[u8]) -> PrefixIterator<'_, Self> {
