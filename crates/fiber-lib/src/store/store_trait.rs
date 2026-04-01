@@ -151,18 +151,11 @@ pub trait FiberStore: StorageBackend + Clone + std::fmt::Debug {
         );
 
         // Strip the cursor entry itself when exclusive.
+        // The cursor key is always the first element returned by collect_iterator
+        // because iteration starts from start_key in both forward and reverse.
         if let Some(ref cursor_key) = start_key_owned {
-            match direction {
-                IteratorDirection::Forward => {
-                    if results.first().is_some_and(|kv| kv.key == *cursor_key) {
-                        results.remove(0);
-                    }
-                }
-                IteratorDirection::Reverse => {
-                    if results.last().is_some_and(|kv| kv.key == *cursor_key) {
-                        results.pop();
-                    }
-                }
+            if results.first().is_some_and(|kv| kv.key == *cursor_key) {
+                results.remove(0);
             }
             // Truncate back to the original limit.
             if limit > 0 && results.len() > limit {
