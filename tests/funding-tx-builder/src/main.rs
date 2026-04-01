@@ -22,6 +22,20 @@ use ckb_types::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{DeserializeAs, SerializeAs, serde_as};
 
+const SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES: usize = 65;
+
+fn secp_sighash_placeholder_witness() -> packed::WitnessArgs {
+    packed::WitnessArgs::new_builder()
+        .lock(
+            Some(molecule::bytes::Bytes::from(vec![
+                0u8;
+                SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES
+            ]))
+            .pack(),
+        )
+        .build()
+}
+
 pub struct EntityHex;
 
 impl<T> SerializeAs<T> for EntityHex
@@ -120,14 +134,10 @@ impl TxBuilder for FundingTxBuilder {
         let builder = tx.as_advanced_builder();
 
         // set a placeholder_witness for calculating transaction fee according to transaction size
-        let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-            .build();
-
         let tx_builder = builder
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
-            .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
+            .set_witnesses(vec![secp_sighash_placeholder_witness().as_bytes().pack()]);
         let tx = tx_builder.build();
         Ok(tx)
     }
@@ -171,13 +181,9 @@ impl FundingTxBuilder {
         let sender = self.funding_source_lock_script.clone();
 
         // Build CapacityBalancer
-        let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-            .build();
-
         let balancer = CapacityBalancer::new_simple(
             sender.clone(),
-            placeholder_witness,
+            secp_sighash_placeholder_witness(),
             self.request.funding_fee_rate,
         );
 
