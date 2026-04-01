@@ -77,7 +77,13 @@ pub async fn main() -> Result<(), ExitMessage> {
         let parsed_fiber_config = config
             .parsed_fiber()
             .ok_or(ExitMessage("fiber config must be set".to_string()))?;
-        let store_path = parsed_fiber_config.store_path();
+        let store_path = parsed_fiber_config.base_dir().join("store");
+        if !store_path.exists() {
+            return Err(ExitMessage(format!(
+                "store path does not exist: {}",
+                store_path.display()
+            )));
+        }
         if let Err(err) = fnn::store::check_validate(&store_path) {
             eprintln!("db validate failed:\n{}", err);
             std::process::exit(1);
