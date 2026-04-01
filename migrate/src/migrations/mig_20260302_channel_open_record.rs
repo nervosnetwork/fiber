@@ -1,7 +1,4 @@
-use fiber_v070::{
-    store::{migration::Migration, Store},
-    Error,
-};
+use fiber_store::{migration::Migration, BatchWriter, StorageBackend, Store, StoreError};
 use indicatif::ProgressBar;
 use std::sync::Arc;
 use tracing::info;
@@ -40,7 +37,7 @@ impl Migration for MigrationObj {
         &self,
         db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a Store, StoreError> {
         info!(
             "MigrationObj::migrate to {} - clearing channel open record entries ...",
             MIGRATION_DB_VERSION

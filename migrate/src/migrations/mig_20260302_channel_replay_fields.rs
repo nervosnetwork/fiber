@@ -1,8 +1,5 @@
-use fiber_v070::{
-    fiber::channel::ChannelActorState,
-    store::{migration::Migration, Store},
-    Error,
-};
+use fiber_store::{migration::Migration, StorageBackend, Store, StoreError};
+use fiber_v070::fiber::channel::ChannelActorState;
 use indicatif::ProgressBar;
 use std::sync::Arc;
 use tracing::info;
@@ -49,7 +46,7 @@ impl Migration for MigrationObj {
         &self,
         db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a Store, StoreError> {
         info!(
             "MigrationObj::migrate to {} - appending replay fields to channel actor state ...",
             MIGRATION_DB_VERSION

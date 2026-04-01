@@ -1,7 +1,4 @@
-use fiber_v070::{
-    store::{migration::Migration, Store},
-    Error,
-};
+use fiber_store::{migration::Migration, StorageBackend, Store, StoreError};
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,6 +25,12 @@ pub struct MigrationObj {
     version: String,
 }
 
+impl Default for MigrationObj {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MigrationObj {
     pub fn new() -> Self {
         Self {
@@ -41,7 +44,7 @@ impl Migration for MigrationObj {
         &self,
         db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a Store, StoreError> {
         info!(
             "MigrationObj::migrate to {} ...........",
             MIGRATION_DB_VERSION
