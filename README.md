@@ -66,7 +66,7 @@ FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' RUST_LOG='info' ./fnn -c config.yml -d
 
 ## Run with Docker
 
-Fiber release tags now publish a container image to `ghcr.io/nervosnetwork/fiber`. Release tags are published as image tags with the same version, and stable releases also update the `latest` tag.
+Fiber release tags publish official container images to Docker Hub at `nervos/fiber` and mirror the same tags to GHCR at `ghcr.io/nervosnetwork/fiber`. Release tags are published as image tags with the same version, and stable releases also update the `latest` tag.
 
 To build the image locally from this repository:
 
@@ -85,8 +85,10 @@ docker run --rm -it \
   -e RUST_LOG='info' \
   -v "$(pwd)/fiber-node:/fiber" \
   -p 8228:8228 \
-  ghcr.io/nervosnetwork/fiber:<release-tag>
+  nervos/fiber:<release-tag>
 ```
+
+If you prefer GHCR, replace the image reference with `ghcr.io/nervosnetwork/fiber:<release-tag>`.
 
 On first start, the image copies the bundled testnet config to `/fiber/config.yml` if the file does not already exist. To bootstrap from the bundled mainnet config instead, set `FIBER_CONFIG_TEMPLATE=/usr/local/share/fiber/config/mainnet/config.yml`. The image also includes `fnn-cli` and `fnn-migrate` for administration and data migration tasks.
 
