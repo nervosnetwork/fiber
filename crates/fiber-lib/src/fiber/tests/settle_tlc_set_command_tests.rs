@@ -12,8 +12,8 @@ use crate::time::SystemTime;
 use ckb_types::packed::{OutPoint, Script};
 use fiber_types::{
     AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelState, ChannelTlcInfo,
-    CommitmentNumbers, InMemorySigner, PaymentCustomRecords, TLCId, TlcInfo, TlcState, TlcStatus,
-    NO_SHARED_SECRET,
+    CommitmentNumbers, ExternalFundingRecoveryState, InMemorySigner, PaymentCustomRecords, TLCId,
+    TlcInfo, TlcState, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
 use fiber_types::{HashAlgorithm, TlcErrorCode};
@@ -27,6 +27,7 @@ struct MockStore {
     preimages: RefCell<HashMap<Hash256, Hash256>>,
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
+    external_funding_recovery_states: RefCell<HashMap<Hash256, ExternalFundingRecoveryState>>,
 }
 
 impl MockStore {
@@ -37,6 +38,7 @@ impl MockStore {
             preimages: RefCell::new(HashMap::new()),
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
+            external_funding_recovery_states: RefCell::new(HashMap::new()),
         }
     }
 
@@ -130,6 +132,12 @@ impl ChannelActorStateStore for MockStore {
         self.channel_states.borrow_mut().insert(channel_id, state);
     }
 
+    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
+        self.channel_states.borrow_mut().remove(old_id);
+        let channel_id = state.id;
+        self.channel_states.borrow_mut().insert(channel_id, state);
+    }
+
     fn delete_channel_actor_state(&self, id: &Hash256) {
         self.channel_states.borrow_mut().remove(id);
     }
@@ -201,6 +209,32 @@ impl ChannelActorStateStore for MockStore {
 
     fn delete_pending_commit_diff(&self, _channel_id: &Hash256) {
         // No-op for tests
+    }
+
+    fn get_external_funding_recovery_state(
+        &self,
+        channel_id: &Hash256,
+    ) -> Option<ExternalFundingRecoveryState> {
+        self.external_funding_recovery_states
+            .borrow()
+            .get(channel_id)
+            .cloned()
+    }
+
+    fn insert_external_funding_recovery_state(
+        &self,
+        channel_id: Hash256,
+        external_funding_recovery_state: ExternalFundingRecoveryState,
+    ) {
+        self.external_funding_recovery_states
+            .borrow_mut()
+            .insert(channel_id, external_funding_recovery_state);
+    }
+
+    fn delete_external_funding_recovery_state(&self, channel_id: &Hash256) {
+        self.external_funding_recovery_states
+            .borrow_mut()
+            .remove(channel_id);
     }
 }
 

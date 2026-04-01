@@ -17,6 +17,7 @@
 //! | 194          | Hash256              | PaymentCustomRecords        |
 //! | 224          | Hash256              | ChannelData                 |
 //! | 201          | Hash256              | ChannelOpenRecord           |
+//! | 202          | Hash256              | ExternalFundingRecoveryState |
 //! | 232          | Payment_hash         | CchOrder                    |
 //! +--------------+----------------------+-----------------------------+
 
@@ -41,6 +42,7 @@ pub const HOLD_TLC_PREFIX: u8 = 197;
 // A shared prefix for watchtower and channel store
 pub const WATCHTOWER_TLC_SETTLED_PREFIX: u8 = 200;
 pub const CHANNEL_OPEN_RECORD_PREFIX: u8 = 201;
+pub const EXTERNAL_FUNDING_STATE_PREFIX: u8 = 202;
 #[cfg(feature = "watchtower")]
 mod watchtower {
     pub const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;

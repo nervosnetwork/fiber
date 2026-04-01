@@ -74,6 +74,47 @@ cd tests/bruno
 npm exec -- @usebruno/cli@1.20.0 run e2e/external-funding-open -r --env test
 ```
 
+### Restart regression script
+
+[`run-restart-test.sh`](tests/bruno/e2e/external-funding-open/run-restart-test.sh) is a restart regression test for the external funding flow. It specifically verifies that after node1 has already:
+
+- opened an external-funded channel and received the unsigned funding transaction;
+- signed the funding transaction off-chain;
+
+the process can be restarted before `submit_signed_funding_tx`, and the restarted node1 can still:
+
+- recover the pending external funding state;
+- accept `submit_signed_funding_tx` successfully;
+- continue the channel to `ChannelReady`;
+- cooperatively close the channel afterward.
+
+If you want to run this restart-specific regression check, keep the node environment running in one terminal:
+
+```bash
+REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/external-funding-open
+```
+
+Then run the restart regression script in another terminal:
+
+```bash
+tests/bruno/e2e/external-funding-open/run-restart-test.sh
+```
+
+This script does not start the environment by itself. It assumes the above `start.sh` command is already running, then executes this sequence:
+
+- connect node1 to node3;
+- open an external-funded channel from node1 to node3 using node2 funding;
+- sign the unsigned funding transaction;
+- restart node1 before `submit_signed_funding_tx`;
+- submit the signed funding transaction after restart;
+- wait until the channel reaches `ChannelReady`;
+- cooperatively close the channel and wait until it reaches `Closed`.
+
+If the script fails while waiting for node1 RPC after restart, check:
+
+- whether `./tests/nodes/start.sh e2e/external-funding-open` is still running in the other terminal;
+- [`tests/bruno/e2e/external-funding-open/logs/external-funding-open-node1-restart.log`](tests/bruno/e2e/external-funding-open/logs/external-funding-open-node1-restart.log) for restart output.
+
 ### Prerequisites
 
 - Required commands:

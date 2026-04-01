@@ -265,6 +265,20 @@ pub enum ChannelConnectivityState {
     Syncing,
 }
 
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExternalFundingRecoveryState {
+    #[serde_as(as = "EntityHex")]
+    pub unsigned_funding_tx: Transaction,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_lock_script: Option<Script>,
+    #[serde_as(as = "Vec<EntityHex>")]
+    pub funding_lock_script_cell_deps: Vec<ckb_types::packed::CellDep>,
+    pub started_at_ms: u64,
+    pub signed_submitted: bool,
+    pub peer_commitment_signed_received: bool,
+}
+
 impl ChannelState {
     pub fn is_awaiting_external_funding(&self) -> bool {
         matches!(
