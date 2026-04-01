@@ -855,15 +855,11 @@ impl NetworkGraphStateStore for Store {
             Some(after_hash) => {
                 let start_key = [&[PAYMENT_SESSION_PREFIX], after_hash.as_ref()].concat();
                 // Start from the `after` key and skip it (exclusive cursor)
-                let after_hash_owned = after_hash;
                 self.collect_by_prefix_with(
                     &prefix,
                     PrefixIterOptions::new()
                         .start_key(&start_key)
-                        .skip_while(Box::new(move |key| {
-                            // Skip the cursor key itself (keys are [prefix][hash])
-                            key.len() > 1 && key[1..] == *after_hash_owned.as_ref()
-                        })),
+                        .start_key_exclusive(),
                 )
                 .into_iter()
                 .filter_map(|kv| {
@@ -1298,10 +1294,9 @@ impl GossipMessageStore for Store {
         let cursor = after_cursor.to_bytes();
         let prefix = [BROADCAST_MESSAGE_PREFIX];
         let start = [&prefix, cursor.as_slice()].concat();
-        let start_cloned = start.clone();
         let mut options = PrefixIterOptions::new()
             .start_key(&start)
-            .skip_while(Box::new(move |key: &[u8]| key == start_cloned));
+            .start_key_exclusive();
         if limit > 0 {
             options = options.limit(limit);
         }
@@ -1333,10 +1328,7 @@ impl GossipMessageStore for Store {
         });
 
         if let Some(start) = start_cloned.as_ref() {
-            options = options.start_key(start).skip_while(Box::new({
-                let start = start.clone();
-                move |key: &[u8]| key == start
-            }));
+            options = options.start_key(start).start_key_exclusive();
         }
 
         self.collect_by_prefix_with(&prefix, options)
