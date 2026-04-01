@@ -29,6 +29,7 @@ use crate::rpc::invoice::NewInvoiceParams;
 use crate::tasks::cancel_tasks_and_wait_for_completion;
 use crate::test_utils::init_tracing;
 use crate::tests::test_utils::*;
+#[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;
 use ckb_types::packed::Script;
@@ -4164,6 +4165,7 @@ async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }
 
+#[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channels() {
     init_tracing();
@@ -4338,6 +4340,7 @@ async fn test_forwarded_payment_relays_remove_to_upstream() {
     );
 }
 
+#[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_actor() {
     init_tracing();

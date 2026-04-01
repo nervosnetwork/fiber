@@ -22,6 +22,7 @@ use crate::fiber::ChannelConnectivityState;
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::*;
+#[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
@@ -3064,6 +3065,7 @@ async fn test_restart_restores_shutting_down_channel_actor_for_reestablish() {
     );
 }
 
+#[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_closed_channel_restores_after_restart_mid_settlement() {
     init_tracing();
