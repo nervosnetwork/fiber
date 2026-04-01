@@ -1022,21 +1022,17 @@ where
 
                 // If a channel message arrives before the live actor has processed the reconnect,
                 // attempt to nudge reestablishment on-the-fly so the message is not dropped.
-                if !found {
-                    if state.peer_session_map.contains_key(&peer_pubkey) {
-                        if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id)
+                if !found && state.peer_session_map.contains_key(&peer_pubkey) {
+                    if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id) {
+                        let _peer_id =
+                            PeerId::from_public_key(&super::types::pubkey_to_tentacle(peer_pubkey));
+                        if !actor_state.is_closed()
+                            && actor_state.get_remote_pubkey() == peer_pubkey
                         {
-                            let _peer_id = PeerId::from_public_key(
-                                &super::types::pubkey_to_tentacle(peer_pubkey),
-                            );
-                            if !actor_state.is_closed()
-                                && actor_state.get_remote_pubkey() == peer_pubkey
-                            {
-                                let channel_ready = state.channels.contains_key(&channel_id)
-                                    || state.reestablish_channel(channel_id).await.is_ok();
-                                if channel_ready {
-                                    found = true;
-                                }
+                            let channel_ready = state.channels.contains_key(&channel_id)
+                                || state.reestablish_channel(channel_id).await.is_ok();
+                            if channel_ready {
+                                found = true;
                             }
                         }
                     }
