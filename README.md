@@ -64,6 +64,34 @@ rm ./ckb/exported-key
 FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' RUST_LOG='info' ./fnn -c config.yml -d .
 ```
 
+## Run with Docker
+
+Fiber release tags now publish a container image to `ghcr.io/nervosnetwork/fiber`. Release tags are published as image tags with the same version, and stable releases also update the `latest` tag.
+
+To build the image locally from this repository:
+
+```bash
+docker build -f docker/Dockerfile -t fiber:local .
+```
+
+To run the published image:
+
+```bash
+mkdir -p ./fiber-node/ckb
+# Put your CKB private key in ./fiber-node/ckb/key before starting the node.
+
+docker run --rm -it \
+  -e FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' \
+  -e RUST_LOG='info' \
+  -v "$(pwd)/fiber-node:/fiber" \
+  -p 8228:8228 \
+  ghcr.io/nervosnetwork/fiber:<release-tag>
+```
+
+On first start, the image copies the bundled testnet config to `/fiber/config.yml` if the file does not already exist. To bootstrap from the bundled mainnet config instead, set `FIBER_CONFIG_TEMPLATE=/usr/local/share/fiber/config/mainnet/config.yml`. The image also includes `fnn-cli` and `fnn-migrate` for administration and data migration tasks.
+
+The RPC service listens on `127.0.0.1:8227` in the bundled configs, so publishing port `8227` from the container is not enough by itself. If you need remote RPC access, update `rpc.listening_addr` in your mounted config first.
+
 ## Testnet compatibility issues
 
 FNN is still under development, the protocol and storage format may changed between versions. We strongly recommend you to close the channel before upgrading the node, otherwise, you may lose channel data and funds!
