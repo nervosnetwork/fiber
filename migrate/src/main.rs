@@ -33,9 +33,9 @@ fn init_db_migrate(db: Store) -> DbAndDbMigrate {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the database
-    #[arg(short, long)]
-    path: String,
+    /// Fiber data directory (the store is at <dir>/store)
+    #[arg(short = 'd', long = "dir")]
+    dir: String,
 
     /// Skip confirmation prompts
     #[arg(short, long, default_value_t = false)]
@@ -98,13 +98,13 @@ fn main() {
         .init();
 
     let args = Args::parse();
-    let path = Path::new(&args.path);
+    let store_path = Path::new(&args.dir).join("store");
     let skip_confirm = args.skip_confirm;
 
-    let db = Store::open_db(path).expect("failed to open db");
+    let db = Store::open_db(&store_path).expect("failed to open db");
     let migrate = init_db_migrate(db);
 
-    if let Err(err) = run_migrate(migrate, path, skip_confirm) {
+    if let Err(err) = run_migrate(migrate, &store_path, skip_confirm) {
         eprintln!("{}", err);
         exit(1);
     }
