@@ -949,9 +949,7 @@ where
             }
             Err(_) => {
                 cancel_token.cancel();
-                return Err(
-                    "Onion service task exited before signaling readiness".to_string(),
-                );
+                return Err("Onion service task exited before signaling readiness".to_string());
             }
         }
 
