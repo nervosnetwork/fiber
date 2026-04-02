@@ -1,8 +1,5 @@
-use fiber_v070::{
-    fiber::channel::ChannelActorState,
-    store::{migration::Migration, Store},
-    Error,
-};
+use fiber_store::{migration::Migration, BatchWriter, StorageBackend, Store, StoreError};
+use fiber_v070::fiber::channel::ChannelActorState;
 use indicatif::ProgressBar;
 use std::sync::Arc;
 use tracing::info;
@@ -13,6 +10,12 @@ const PUBKEY_CHANNEL_ID_PREFIX: u8 = 64;
 
 pub struct MigrationObj {
     version: String,
+}
+
+impl Default for MigrationObj {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MigrationObj {
@@ -28,7 +31,7 @@ impl Migration for MigrationObj {
         &self,
         db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a Store, StoreError> {
         info!(
             "MigrationObj::migrate to {} - rebuilding peer/channel index with pubkey keys ...",
             MIGRATION_DB_VERSION
@@ -44,7 +47,7 @@ impl Migration for MigrationObj {
             .prefix_iterator(index_prefix.as_slice())
             .take_while(|(key, _)| key.starts_with(index_prefix.as_slice()))
         {
-            batch.delete(key.to_vec());
+            batch.delete(&key);
             deleted_old_index_count += 1;
         }
 
@@ -68,7 +71,12 @@ impl Migration for MigrationObj {
             };
 
             let pubkey_bytes = state.remote_pubkey.serialize();
-            let index_key = [&[PUBKEY_CHANNEL_ID_PREFIX][..], &pubkey_bytes[..], channel_id].concat();
+            let index_key = [
+                &[PUBKEY_CHANNEL_ID_PREFIX][..],
+                &pubkey_bytes[..],
+                channel_id,
+            ]
+            .concat();
             let index_value =
                 bincode::serialize(&state.state).expect("serialize ChannelState should be OK");
             batch.put(index_key, index_value);

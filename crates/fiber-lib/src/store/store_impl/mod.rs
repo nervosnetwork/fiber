@@ -162,7 +162,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         }
     }
 
-    for KVPair { key, value } in store.collect_by_prefix(&[]) {
+    for (key, value) in store.prefix_iterator(&[]) {
         if key.is_empty() {
             errors.insert("Encountered empty key".to_string());
             continue;

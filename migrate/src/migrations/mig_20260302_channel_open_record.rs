@@ -3,8 +3,16 @@ use indicatif::ProgressBar;
 use std::sync::Arc;
 use tracing::info;
 
-const MIGRATION_DB_VERSION: &str = "20260301103357";
-const PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;
+/// Delete all `ChannelOpenRecord` entries (prefix 201).
+///
+/// These are ephemeral records that track in-progress channel openings.
+/// The v0.8.0-rc1 schema changed the `peer_id: PeerId` field to
+/// `pubkey: Pubkey`, making the old binary format incompatible.
+/// Since these records are transient status indicators (not long-lived data),
+/// deleting them is safe—any ongoing channel opens will simply lose their
+/// progress-tracking state and will be re-created on the next attempt.
+const MIGRATION_DB_VERSION: &str = "20260302100001";
+const CHANNEL_OPEN_RECORD_PREFIX: u8 = 201;
 
 pub struct MigrationObj {
     version: String,
@@ -31,11 +39,11 @@ impl Migration for MigrationObj {
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
     ) -> Result<&'a Store, StoreError> {
         info!(
-            "MigrationObj::migrate to {} - clearing legacy network actor state entries ...",
+            "MigrationObj::migrate to {} - clearing channel open record entries ...",
             MIGRATION_DB_VERSION
         );
 
-        let prefix = vec![PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX];
+        let prefix = vec![CHANNEL_OPEN_RECORD_PREFIX];
         let mut batch = db.batch();
         let mut deleted_count = 0;
         for (key, _) in db
@@ -48,7 +56,7 @@ impl Migration for MigrationObj {
         batch.commit();
 
         info!(
-            "MigrationObj::migrate to {} - removed {} legacy network actor state entries",
+            "MigrationObj::migrate to {} - removed {} channel open record entries",
             MIGRATION_DB_VERSION, deleted_count
         );
         Ok(db)

@@ -4,7 +4,7 @@ pub mod iterator;
 
 pub use backend::{BatchWriter, StorageBackend};
 pub use error::StoreError;
-pub use iterator::{IteratorDirection, KVPair};
+pub use iterator::{IteratorDirection, KVPair, PrefixIterator};
 
 // db_migrate and migration require a concrete Store backend
 #[cfg(any(feature = "rocksdb", feature = "sqlite", target_arch = "wasm32"))]

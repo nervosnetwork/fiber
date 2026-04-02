@@ -1,7 +1,4 @@
-use fiber_v070::{
-    store::{migration::Migration, Store},
-    Error,
-};
+use fiber_store::{migration::Migration, Store, StoreError};
 use indicatif::ProgressBar;
 use std::sync::Arc;
 
@@ -10,6 +7,12 @@ const MIGRATION_DB_VERSION: &str = "20250724111111";
 
 pub struct MigrationObj {
     version: String,
+}
+
+impl Default for MigrationObj {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MigrationObj {
@@ -25,7 +28,7 @@ impl Migration for MigrationObj {
         &self,
         db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a Store, StoreError> {
         eprintln!("MigrationObj::migrate .....{}....", MIGRATION_DB_VERSION);
         Ok(db)
     }
