@@ -5219,6 +5219,70 @@ async fn test_peer_disconnect_with_active_channel_enters_backoff_reconnect() {
 }
 
 #[tokio::test]
+async fn test_peer_disconnect_with_active_channel_disabled_backoff_skips_reconnect() {
+    init_tracing();
+
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| config.enable_peer_reconnect_backoff = Some(false))
+            .build(),
+    )
+    .await;
+    let mut node_b = NetworkNode::new().await;
+
+    node_a.connect_to(&mut node_b).await;
+
+    let (_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: 100000000000,
+            node_b_funding_amount: 100000000000,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let saw_seeded = std::cell::Cell::new(false);
+    let saw_scheduled = std::cell::Cell::new(false);
+    let saw_disconnect = std::cell::Cell::new(false);
+
+    node_b.stop().await;
+
+    node_a
+        .expect_to_process_event(|event| {
+            match event {
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffSeededByDisconnect" =>
+                {
+                    saw_seeded.set(true);
+                }
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffScheduled" =>
+                {
+                    saw_scheduled.set(true);
+                }
+                NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey => {
+                    saw_disconnect.set(true);
+                }
+                _ => {}
+            }
+            saw_disconnect.get().then_some(())
+        })
+        .await;
+
+    assert!(
+        !saw_seeded.get(),
+        "disabled reconnect backoff should not seed reconnect attempts"
+    );
+    assert!(
+        !saw_scheduled.get(),
+        "disabled reconnect backoff should not schedule reconnect attempts"
+    );
+}
+
+#[tokio::test]
 async fn test_startup_dial_error_with_active_channel_enters_backoff_reconnect() {
     init_tracing();
 

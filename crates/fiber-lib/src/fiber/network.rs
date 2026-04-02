@@ -3400,6 +3400,7 @@ pub struct NetworkActorState<S, C> {
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+    enable_peer_reconnect_backoff: bool,
     peer_reconnect_backoff_attempts: HashMap<Pubkey, u32>,
     requested_disconnect_peers: HashSet<Pubkey>,
     // The features of the node, used to indicate the capabilities of the node.
@@ -4267,6 +4268,11 @@ where
         peer_id: &PeerId,
         trigger: PeerReconnectTrigger,
     ) {
+        if !self.enable_peer_reconnect_backoff {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedDisabled");
+            return;
+        }
+
         let Some(pubkey) = self.peer_channel_index.get_pubkey(peer_id) else {
             debug_event!(self.network, "PeerReconnectBackoffSkippedNoDirectChannel");
             return;
@@ -5454,6 +5460,7 @@ where
             gossip_actor,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            enable_peer_reconnect_backoff: config.enable_peer_reconnect_backoff(),
             peer_reconnect_backoff_attempts: Default::default(),
             requested_disconnect_peers: Default::default(),
             features,

@@ -258,6 +258,15 @@ pub struct FiberConfig {
     )]
     pub(crate) min_outbound_peers: Option<usize>,
 
+    /// Whether to automatically schedule reconnect backoff for peers with active channels. [default: true]
+    #[arg(
+        name = "FIBER_ENABLE_PEER_RECONNECT_BACKOFF",
+        long = "fiber-enable-peer-reconnect-backoff",
+        env,
+        help = "Whether to automatically schedule reconnect backoff for peers with active channels. [default: true]"
+    )]
+    pub(crate) enable_peer_reconnect_backoff: Option<bool>,
+
     /// Gossip store maintenance interval, in milli-seconds. [default: 20000]
     /// This is the interval to maintain the gossip store, including saving messages whose complete dependencies
     /// are available, etc.
@@ -532,6 +541,10 @@ impl FiberConfig {
     pub fn min_outbound_peers(&self) -> usize {
         self.min_outbound_peers
             .unwrap_or(DEFAULT_MIN_OUTBOUND_PEERS)
+    }
+
+    pub fn enable_peer_reconnect_backoff(&self) -> bool {
+        self.enable_peer_reconnect_backoff.unwrap_or(true)
     }
 
     pub fn gossip_store_maintenance_interval_ms(&self) -> u64 {
