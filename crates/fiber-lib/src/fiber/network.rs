@@ -830,10 +830,6 @@ where
     ) -> Result<Option<(MultiAddr, tokio_util::sync::CancellationToken)>, String> {
         use std::net::{Ipv4Addr, SocketAddr};
 
-        if config.onion.onion_server.is_none() && config.proxy.proxy_url.is_none() {
-            return Ok(None);
-        }
-
         // Resolve p2p listen address for onion service forwarding
         let p2p_listen_address: SocketAddr = match &config.onion.p2p_listen_address {
             Some(addr) => {
@@ -932,12 +928,32 @@ where
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let token_clone = cancel_token.clone();
         let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
         tracker.spawn(async move {
-            if let Err(err) = onion_service.start(token_clone, reconnect_tx).await {
+            if let Err(err) = onion_service
+                .start(token_clone, reconnect_tx, ready_tx)
+                .await
+            {
                 error!("Onion service stopped with error: {}", err);
             }
         });
+
+        // Wait for the onion service to successfully register with Tor before
+        // returning the address, so callers don't advertise an unreachable address.
+        match ready_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                cancel_token.cancel();
+                return Err(err);
+            }
+            Err(_) => {
+                cancel_token.cancel();
+                return Err(
+                    "Onion service task exited before signaling readiness".to_string(),
+                );
+            }
+        }
 
         // Listen for Tor reconnection events and trigger peer reconnection
         let cancel_for_listener = cancel_token.clone();
