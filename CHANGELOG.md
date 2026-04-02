@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [v0.8.0-rc1] - 2026-03-28
+## [v0.8.0] - 2026-03-28
 
 ### Breaking Changes
 
@@ -85,7 +85,7 @@ Run `fnn-migrate` to apply all data migrations automatically. See the [migration
 - Use upstream ractor release ([#1214])
 - Cleanup unused fields ([#1231])
 
-[v0.8.0-rc1]: https://github.com/nervosnetwork/fiber/compare/v0.7.1...v0.8.0-rc1
+[v0.8.0]: https://github.com/nervosnetwork/fiber/compare/v0.7.1...v0.8.0
 [#979]: https://github.com/nervosnetwork/fiber/pull/979
 [#977]: https://github.com/nervosnetwork/fiber/pull/977
 [#1111]: https://github.com/nervosnetwork/fiber/pull/1111
