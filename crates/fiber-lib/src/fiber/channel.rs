@@ -2145,10 +2145,6 @@ where
             return;
         };
 
-        if state.check_remove_tlc_with_reason(tlc_id, reason).is_err() {
-            return;
-        }
-
         if let Some(tlc) = state.tlc_state.get(&tlc_id) {
             self.store_preimage(tlc.payment_hash, *payment_preimage);
         }
