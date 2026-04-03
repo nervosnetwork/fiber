@@ -6,7 +6,7 @@ use tracing::info;
 /// Delete all `ChannelOpenRecord` entries (prefix 201).
 ///
 /// These are ephemeral records that track in-progress channel openings.
-/// The v0.8.0-rc1 schema changed the `peer_id: PeerId` field to
+/// The v0.8.0 schema changed the `peer_id: PeerId` field to
 /// `pubkey: Pubkey`, making the old binary format incompatible.
 /// Since these records are transient status indicators (not long-lived data),
 /// deleting them is safe—any ongoing channel opens will simply lose their
