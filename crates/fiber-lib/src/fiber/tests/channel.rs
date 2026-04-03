@@ -45,6 +45,8 @@ use fiber_types::{
     PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason, ShuttingDownFlags,
     SigningCommitmentFlags, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::{ChannelAuditInfo, RestoreAuditMap, RestoreAuditStore};
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
 use musig2::KeyAggContext;
@@ -7361,6 +7363,214 @@ async fn test_ring_self_payments_then_restart_two_nodes() {
     debug!("test_ring_self_payments_then_restart_two_nodes completed successfully");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_channel_restore_audit_failure_closes_channel() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    let original_cn = state.commitment_numbers.local;
+
+    // The backup simulating the loss of the last update
+    state.commitment_numbers.local = original_cn - 1;
+    node_a.store.insert_channel_actor_state(state);
+
+    let mut audit_map = RestoreAuditMap::new();
+    audit_map.add_channel(
+        channel_id,
+        ChannelAuditInfo {
+            local_commitment_number: original_cn - 1,
+        },
+    );
+    node_a.store.insert_restore_audit_map(audit_map);
+
+    // Reestablish
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("disconnect sent");
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    node_a.connect_to(&mut node_b).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+
+    assert_eq!(current_state.get_id(), channel_id);
+
+    assert!(
+        current_state.reestablishing,
+        "Channel should still be in reestablishing state due to audit failure"
+    );
+
+    // Audit marker is not resolved
+    assert!(
+        node_a.store.get_restore_audit_map().is_some(),
+        "Audit map must persist in DB when rollback is detected"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_channel_restore_audit_success_resolves() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    let current_cn = state.commitment_numbers.local;
+
+    let mut audit_map = RestoreAuditMap::new();
+    audit_map.add_channel(
+        channel_id,
+        ChannelAuditInfo {
+            local_commitment_number: current_cn,
+        },
+    );
+    node_a.store.insert_restore_audit_map(audit_map);
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("disconnect sent");
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    node_a.connect_to(&mut node_b).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+
+    assert!(
+        !current_state.reestablishing,
+        "Channel should finish reestablishing"
+    );
+
+    assert!(
+        node_a.store.get_restore_audit_map().is_none(),
+        "Audit map should be cleared after successful reestablishment"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_channel_restore_audit_peer_lagging_is_safe() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+
+    state.commitment_numbers.local = 10;
+    node_a.store.insert_channel_actor_state(state);
+
+    let mut audit_map = RestoreAuditMap::new();
+    audit_map.add_channel(
+        channel_id,
+        ChannelAuditInfo {
+            local_commitment_number: 10,
+        },
+    );
+    node_a.store.insert_restore_audit_map(audit_map);
+
+    let mut state_b = node_b.get_channel_actor_state(channel_id);
+    state_b.commitment_numbers.remote = 5;
+    node_b.store.insert_channel_actor_state(state_b);
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("disconnect sent");
+    node_a.connect_to(&mut node_b).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    assert!(node_a.store.get_restore_audit_map().is_none());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_channel_restore_audit_multi_channel_isolation() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((0, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_a, mut node_b, mut node_c] = nodes.try_into().expect("expected nodes");
+
+    let mut audit_map = RestoreAuditMap::new();
+    audit_map.add_channel(
+        channels[0],
+        ChannelAuditInfo {
+            local_commitment_number: 0,
+        },
+    );
+
+    let state_ac = node_a.get_channel_actor_state(channels[1]);
+    audit_map.add_channel(
+        channels[1],
+        ChannelAuditInfo {
+            local_commitment_number: state_ac.commitment_numbers.local,
+        },
+    );
+
+    node_a.store.insert_restore_audit_map(audit_map);
+
+    for peer in &[node_b.pubkey, node_c.pubkey] {
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::DisconnectPeer(*peer, PeerDisconnectReason::Requested, None),
+            ))
+            .expect("disconnect sent");
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    node_a.connect_to(&mut node_b).await;
+    node_a.connect_to(&mut node_c).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let map = node_a
+        .store
+        .get_restore_audit_map()
+        .expect("Map should still exist because one channel failed");
+
+    assert!(
+        map.channels.contains_key(&channels[0]),
+        "Channel A-B should be blocked and remain in audit map"
+    );
+
+    assert!(
+        !map.channels.contains_key(&channels[1]),
+        "Channel A-C should have passed audit and been resolved"
 // ============================================================================
 // External Funding Tests
 // ============================================================================

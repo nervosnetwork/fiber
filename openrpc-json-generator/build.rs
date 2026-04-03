@@ -59,7 +59,7 @@ fn main() {
             .open(current_output_dir.join("rpc_openrpc.rs"))
             .unwrap();
         generated_rpc_defs
-            .write(format!("use fnn::rpc::{}::*;", file_name.replace(".rs", "")).as_bytes())
+            .write(format!("#[allow(unused_imports)]\nuse fnn::rpc::{}::*;\n#[allow(unused_imports)]\nuse fiber_json_types::*;", file_name.replace(".rs", "")).as_bytes())
             .unwrap();
     }
     root_mod_file.write(format!("pub const API_METHODS: [ (&str, &::phf::Map<&str, openrpsee::openrpc::RpcMethod>); {}] = [",rpc_mods.len()).as_bytes()).unwrap();

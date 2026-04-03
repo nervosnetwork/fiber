@@ -32,7 +32,8 @@ use fiber_types::CchOrder;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
     Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
+    PersistentNetworkActorState, Pubkey, RestoreAuditMap, RestoreAuditStore, TimedResult,
+    CURSOR_SIZE,
 };
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
@@ -75,6 +76,13 @@ impl Store {
             watcher(change);
         }
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn create_checkpoint(&self, path: &Path) -> Result<(), String> {
+        self.inner
+            .create_checkpoint(path)
+            .map_err(|e| e.to_string())
+    }
 }
 
 impl StorageBackend for Store {
@@ -105,6 +113,17 @@ impl StorageBackend for Store {
     ) -> Vec<KVPair> {
         self.inner
             .collect_iterator(start, direction, take_while_fn, limit)
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub trait KVStore {
+    fn get_inner(&self) -> &fiber_store::Store;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl KVStore for Store {
+    fn get_inner(&self) -> &fiber_store::Store {
+        &self.inner
     }
 }
 
@@ -312,6 +331,8 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
+    #[cfg(not(target_arch = "wasm32"))]
+    RestoreAuditMap(&'static str, RestoreAuditMap),
 }
 
 /// Recorded store changes.
@@ -435,6 +456,10 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyValue::RestoreAuditMap(key, _map) => {
+                [&[RESTORE_AUDIT_PREFIX], key.as_bytes()].concat()
+            }
         }
     }
 
@@ -477,6 +502,10 @@ impl StoreKeyValue for KeyValue {
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyValue::RestoreAuditMap(_key, audit_map) => {
+                serialize_to_vec(audit_map, "RestoreAuditMap")
+            }
         }
     }
 }
@@ -583,6 +612,14 @@ impl ChannelActorStateStore for Store {
         self.get(key)
             .map(|channel_id| deserialize_from(channel_id.as_ref(), "Hash256"))
             .and_then(|channel_id: Hash256| self.get_channel_actor_state(&channel_id))
+    }
+
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState> {
+        let prefix = &[CHANNEL_ACTOR_STATE_PREFIX];
+        self.collect_by_prefix(prefix)
+            .into_iter()
+            .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelActorState"))
+            .collect()
     }
 
     fn insert_payment_custom_records(
@@ -1626,6 +1663,53 @@ impl CchOrderStore for Store {
         batch.delete(key);
         batch.commit();
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RestoreAuditStore for Store {
+    fn get_restore_audit_map(&self) -> Option<RestoreAuditMap> {
+        let kv = KeyValue::RestoreAuditMap("audit_map", RestoreAuditMap::default());
+        self.get(kv.key())
+            .map(|v| deserialize_from(v.as_ref(), "RestoreAuditMap"))
+    }
+
+    fn insert_restore_audit_map(&self, map: RestoreAuditMap) {
+        let mut batch = self.batch();
+        let kv = KeyValue::RestoreAuditMap("audit_map", map);
+        batch.put(kv.key(), kv.value());
+        batch.commit();
+    }
+
+    fn delete_restore_audit_map(&self) {
+        let kv = KeyValue::RestoreAuditMap("audit_map", RestoreAuditMap::default());
+        let key = kv.key();
+
+        let mut batch = self.batch();
+        batch.delete(key);
+        batch.commit();
+    }
+
+    fn resolve_channel_audit(&self, channel_id: &Hash256) {
+        if let Some(mut map) = self.get_restore_audit_map() {
+            if map.channels.remove(channel_id).is_some() {
+                if map.channels.is_empty() {
+                    self.delete_restore_audit_map();
+                } else {
+                    self.insert_restore_audit_map(map);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl RestoreAuditStore for Store {
+    fn get_restore_audit_map(&self) -> Option<RestoreAuditMap> {
+        None
+    }
+    fn insert_restore_audit_map(&self, _map: RestoreAuditMap) {}
+    fn delete_restore_audit_map(&self) {}
+    fn resolve_channel_audit(&self, _channel_id: &Hash256) {}
 }
 
 // All timestamps are saved in a 24-byte array, with BroadcastMessageID::ChannelAnnouncement(outpoint) as the key.

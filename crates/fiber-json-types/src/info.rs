@@ -81,3 +81,15 @@ pub struct NodeInfoResult {
     /// Configuration information for User-Defined Tokens (UDT) associated with the node.
     pub udt_cfg_infos: UdtCfgInfos,
 }
+
+/// The result of a backup operation.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct BackupResult {
+    /// The path of backup file
+    pub path: String,
+    /// The timestamp of backup
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub timestamp: u64,
+}
