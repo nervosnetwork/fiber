@@ -69,13 +69,15 @@ jobs:
     - name: Checkout the Repository
       uses: actions/checkout@v6
     - if: matrix.os == 'windows-2022'
+      name: Install LLVM
+      uses: KyleMayes/install-llvm-action@v2
+      with:
+        version: "17"
+    - if: matrix.os == 'windows-2022'
       name: Windows Dependencies
       run: |
-        iwr -useb get.scoop.sh -outfile 'install-scoop.ps1'
-        .\install-scoop.ps1 -RunAsAdmin
-        echo "LIBCLANG_PATH=$($HOME)/scoop/apps/llvm/current/bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "$env:USERPROFILE\scoop\shims" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-        scoop install llvm yasm
+        echo "LIBCLANG_PATH=${{ env.LLVM_PATH }}/bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        choco install yasm -y
         vcpkg integrate install
         vcpkg install openssl:x64-windows-static-md
     - if: matrix.os == 'ubuntu-22.04'
