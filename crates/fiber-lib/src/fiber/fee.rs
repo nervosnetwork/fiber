@@ -27,13 +27,13 @@ fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
         let output = CellOutput::new_builder()
             .lock(commitment_lock_script)
             .type_(Some(type_script.clone()).pack())
-            .capacity(0.pack())
+            .capacity(0u64)
             .build();
         let output_data = (0_u128).to_le_bytes().pack();
         (output, output_data)
     } else {
         let output = CellOutput::new_builder()
-            .capacity(0.pack())
+            .capacity(0u64)
             .lock(commitment_lock_script)
             .build();
         (output, Bytes::default())
@@ -61,12 +61,12 @@ pub(crate) fn shutdown_tx_size(
         let output_a = CellOutput::new_builder()
             .lock(script_a)
             .type_(Some(type_script.clone()).pack())
-            .capacity(0.pack())
+            .capacity(0u64)
             .build();
         let output_b = CellOutput::new_builder()
             .lock(script_b)
             .type_(Some(type_script.clone()).pack())
-            .capacity(0.pack())
+            .capacity(0u64)
             .build();
         let dummy_output_data = (0_u128).to_le_bytes().pack();
 
@@ -75,11 +75,11 @@ pub(crate) fn shutdown_tx_size(
         (outputs, outputs_data.to_vec())
     } else {
         let output_a = CellOutput::new_builder()
-            .capacity(0.pack())
+            .capacity(0u64)
             .lock(script_a)
             .build();
         let output_b = CellOutput::new_builder()
-            .capacity(0.pack())
+            .capacity(0u64)
             .lock(script_b)
             .build();
         let outputs = [output_a, output_b];

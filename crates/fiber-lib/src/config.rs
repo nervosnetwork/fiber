@@ -12,6 +12,9 @@ use serde::Serialize;
 pub struct Config {
     // fiber config, None represents that we should not run fiber service
     pub fiber: Option<FiberConfig>,
+    // fiber config saved when the fiber service is not enabled,
+    // so other services (e.g. CCH) can still read store_path and currency
+    pub disabled_fiber: Option<FiberConfig>,
     // cch config, None represents that we should not run cch service
     #[cfg(not(target_arch = "wasm32"))]
     pub cch: Option<CchConfig>,
@@ -20,6 +23,15 @@ pub struct Config {
     // ckb actor config, None represents that we should not run ckb actor
     pub ckb: Option<CkbConfig>,
     pub base_dir: PathBuf,
+    /// When true, validate the database and exit without starting services.
+    pub check_validate: bool,
+}
+
+impl Config {
+    /// Returns the fiber config regardless of whether the fiber service is enabled.
+    pub fn parsed_fiber(&self) -> Option<&FiberConfig> {
+        self.fiber.as_ref().or(self.disabled_fiber.as_ref())
+    }
 }
 
 #[derive(Serialize, Deserialize, Parser, Copy, Clone, Debug, PartialEq)]
@@ -99,6 +111,10 @@ pub mod native {
         #[arg(short, long, value_parser, num_args = 0.., value_delimiter = ',')]
         services: Vec<Service>,
 
+        /// Run database validation and exit
+        #[arg(long, default_value_t = false)]
+        check_validate: bool,
+
         /// config for fiber network
         #[command(flatten)]
         pub fiber: <FiberConfig as ClapSerde>::Opt,
@@ -146,6 +162,7 @@ pub mod native {
 
             // Base directory for all things to be stored to disk
             let base_dir = args.base_dir.clone().unwrap_or(get_default_base_dir());
+            let check_validate = args.check_validate;
 
             // Get config file by
             // 1. Using the explicitly set command line argument `config`
@@ -184,7 +201,7 @@ pub mod native {
                 args.services
             };
 
-            if services.is_empty() {
+            if services.is_empty() && !check_validate {
                 error!("Must run at least one service. Specifying services to run by command line or config file.");
                 print_help_and_exit(1);
             };
@@ -217,17 +234,23 @@ pub mod native {
                 ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
             );
 
-            let fiber = services.contains(&Service::FIBER).then_some(fiber);
+            let (fiber, disabled_fiber) = if services.contains(&Service::FIBER) {
+                (Some(fiber), None)
+            } else {
+                (None, Some(fiber))
+            };
             let cch = services.contains(&Service::CCH).then_some(cch);
             let rpc = services.contains(&Service::RPC).then_some(rpc);
             let ckb = services.contains(&Service::CkbChain).then_some(ckb);
 
             Self {
                 fiber,
+                disabled_fiber,
                 cch,
                 rpc,
                 ckb,
                 base_dir,
+                check_validate,
             }
         }
     }
@@ -273,10 +296,12 @@ mod wasm {
                 )
             };
 
-            let fiber = services
-                .contains(&Service::FIBER)
-                .then_some(fiber)
-                .map(FiberConfig::from);
+            let fiber_config = Some(FiberConfig::from(fiber));
+            let (fiber, disabled_fiber) = if services.contains(&Service::FIBER) {
+                (fiber_config, None)
+            } else {
+                (None, fiber_config)
+            };
             let rpc = services
                 .contains(&Service::RPC)
                 .then_some(rpc)
@@ -288,9 +313,11 @@ mod wasm {
 
             Self {
                 fiber,
+                disabled_fiber,
                 rpc,
                 ckb,
                 base_dir: PathBuf::from_str(&database_prefix).unwrap(),
+                check_validate: false,
             }
         }
     }

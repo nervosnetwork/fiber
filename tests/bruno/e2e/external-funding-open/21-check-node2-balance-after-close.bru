@@ -1,0 +1,76 @@
+meta {
+  name: check node2 balance after close
+  type: http
+  seq: 21
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const before = BigInt(bru.getVar("NODE2_BALANCE_BEFORE"));
+  const afterOpen = BigInt(bru.getVar("NODE2_BALANCE_AFTER"));
+  const afterClose = BigInt(res.body.result.capacity);
+  const shutdownRefund = BigInt(bru.getVar("EXTERNAL_FUNDING_SHUTDOWN_REFUND"));
+  const shutdownFee = BigInt(bru.getVar("EXTERNAL_FUNDING_SHUTDOWN_FEE"));
+  const fundingAmount = BigInt(bru.getVar("EXTERNAL_FUNDING_AMOUNT"));
+  const returnedFromClose = afterClose - afterOpen;
+  const totalLost = before - afterClose;
+
+  if (afterClose >= before) {
+    throw new Error(`node2 should still be lower than initial balance, before=${before}, after_close=${afterClose}`);
+  }
+
+  if (afterClose <= afterOpen) {
+    throw new Error(`node2 balance should increase after close, after_open=${afterOpen}, after_close=${afterClose}`);
+  }
+
+  if (returnedFromClose !== shutdownRefund) {
+    throw new Error(
+      `node2 close delta should equal shutdown refund, returned_from_close=${returnedFromClose}, shutdown_refund=${shutdownRefund}`,
+    );
+  }
+
+  if (shutdownRefund !== fundingAmount - shutdownFee) {
+    throw new Error(
+      `shutdown refund should equal funding_amount - shutdown_fee, refund=${shutdownRefund}, funding_amount=${fundingAmount}, shutdown_fee=${shutdownFee}`,
+    );
+  }
+
+  if (totalLost <= BigInt(0)) {
+    throw new Error(`node2 should still pay some fees overall, before=${before}, after_close=${afterClose}`);
+  }
+}

@@ -4,7 +4,6 @@ pub mod biscuit;
 pub mod cch;
 pub mod channel;
 pub mod config;
-pub mod context;
 #[cfg(debug_assertions)]
 pub mod dev;
 pub mod graph;
@@ -16,6 +15,8 @@ pub mod payment;
 pub mod peer;
 #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
 pub mod prof;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pubsub;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
@@ -42,7 +43,7 @@ pub mod server {
     use crate::{
         cch::CchMessage,
         fiber::{
-            channel::ChannelActorStateStore,
+            channel::{ChannelActorStateStore, ChannelOpenRecordStore},
             graph::{NetworkGraph, NetworkGraphStateStore},
             NetworkActorMessage,
         },
@@ -71,14 +72,18 @@ pub mod server {
     use std::sync::Arc;
     use tokio::net::TcpListener;
     use tokio::sync::RwLock;
-    use tower::Service;
+    use tower::{Service, ServiceExt};
+    use tower_http::cors::{Any, CorsLayer};
     use tracing::debug;
 
     use super::biscuit::BiscuitAuth;
+    use crate::store::store_impl::StoreChange;
+    use ractor::{ActorCell, OutputPort};
 
     #[cfg(feature = "watchtower")]
     pub trait RpcServerStore:
         ChannelActorStateStore
+        + ChannelOpenRecordStore
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
@@ -89,6 +94,7 @@ pub mod server {
     #[cfg(feature = "watchtower")]
     impl<T> RpcServerStore for T where
         T: ChannelActorStateStore
+            + ChannelOpenRecordStore
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
@@ -98,12 +104,20 @@ pub mod server {
     }
     #[cfg(not(feature = "watchtower"))]
     pub trait RpcServerStore:
-        ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+        ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + InvoiceStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
     impl<T> RpcServerStore for T where
-        T: ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + GossipMessageStore
+        T: ChannelActorStateStore
+            + ChannelOpenRecordStore
+            + InvoiceStore
+            + NetworkGraphStateStore
+            + GossipMessageStore
     {
     }
 
@@ -111,6 +125,8 @@ pub mod server {
         addr: &str,
         auth: Option<BiscuitAuth>,
         methods: impl Into<Methods>,
+        cors_enabled: bool,
+        cors_allowed_origins: Vec<String>,
     ) -> Result<(ServerHandle, SocketAddr)> {
         let listener = TcpListener::bind(addr).await?;
         let listen_addr = listener.local_addr().expect("get local address");
@@ -186,6 +202,38 @@ pub mod server {
                         .build(methods, stop_handle);
                     async move { svc.call(req).await }
                 });
+
+                // Conditionally wrap the service with CORS layer if enabled
+                let svc = if cors_enabled {
+                    // Configure CORS to allow configured origins and handle preflight requests
+                    // Note: CORS must be the outermost layer to handle OPTIONS preflight requests
+                    // before authentication, as required by the CORS specification.
+                    let cors_layer = if cors_allowed_origins.is_empty() {
+                        // If no specific origins configured, allow all origins
+                        CorsLayer::new()
+                            .allow_origin(Any)
+                            .allow_methods(Any)
+                            .allow_headers(Any)
+                    } else {
+                        // Allow specific configured origins
+                        use tower_http::cors::AllowOrigin;
+                        let origins: Vec<_> = cors_allowed_origins
+                            .iter()
+                            .filter_map(|o| o.parse().ok())
+                            .collect();
+                        CorsLayer::new()
+                            .allow_origin(AllowOrigin::list(origins))
+                            .allow_methods(Any)
+                            .allow_headers(Any)
+                    };
+                    tower::ServiceBuilder::new()
+                        .layer(cors_layer)
+                        .service(svc)
+                        .boxed_clone()
+                } else {
+                    tower::ServiceBuilder::new().service(svc).boxed_clone()
+                };
+
                 tokio::spawn(serve_with_graceful_shutdown(
                     sock,
                     svc,
@@ -225,7 +273,9 @@ pub mod server {
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
         store: S,
-        network_graph: Arc<RwLock<NetworkGraph<S>>>,
+        network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
+        supervisor: ActorCell,
+        store_change_port: Option<Arc<OutputPort<StoreChange>>>,
         #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -255,9 +305,11 @@ pub mod server {
                 .unwrap();
         }
         if config.is_module_enabled("graph") {
-            modules
-                .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
-                .unwrap();
+            if let Some(ref network_graph) = network_graph {
+                modules
+                    .merge(GraphRpcServerImpl::new(network_graph.clone(), store.clone()).into_rpc())
+                    .unwrap();
+            }
         }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {
@@ -306,6 +358,10 @@ pub mod server {
                 modules
                     .merge(
                         DevRpcServerImpl::new(
+                            ckb_config
+                                .clone()
+                                .expect("ckb config should be set")
+                                .rpc_url,
                             ckb_chain_actor.expect("ckb_chain_actor should be set"),
                             network_actor.clone(),
                             rpc_dev_module_commitment_txs
@@ -328,8 +384,25 @@ pub mod server {
                     .unwrap();
             }
         }
+        if config.is_module_enabled("pubsub") {
+            if let Some(ref store_change_port) = store_change_port {
+                crate::rpc::pubsub::register_pub_sub_rpc(
+                    &mut modules,
+                    store_change_port,
+                    supervisor,
+                )
+                .await?;
+            }
+        }
 
-        let (handle, addr) = start_server(listening_addr, auth, modules).await?;
+        let (handle, addr) = start_server(
+            listening_addr,
+            auth,
+            modules,
+            config.cors_enabled,
+            config.cors_allowed_origins.clone(),
+        )
+        .await?;
         debug!("started listen to RPC addr {:?}", &listening_addr);
         Ok((handle, addr))
     }

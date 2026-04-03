@@ -1,57 +1,41 @@
 //!
 //! A full request consists of:
-//! [4byte InputCommand] [4byte of payload length (can be zero)] [payload-length bytes of payload (can ib ignored if payload length is zero)]
+//! [4byte InputCommand] [4byte of payload length (can be zero)] [payload-length bytes of payload (can be ignored if payload length is zero)]
 //!
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use web_sys::js_sys::{Atomics, Int32Array, Uint8Array};
-pub enum IteratorMode<'a> {
-    Start,
-    End,
-    From(&'a [u8], DbDirection),
-}
 
-impl IteratorMode<'_> {
-    pub fn to_owned(&self) -> IteratorModeOwned {
-        match self {
-            IteratorMode::Start => IteratorModeOwned::Start,
-            IteratorMode::End => IteratorModeOwned::End,
-            IteratorMode::From(items, db_direction) => {
-                IteratorModeOwned::From(items.to_vec(), db_direction.clone())
-            }
-        }
-    }
-}
+// ── Iterator types (matching the StorageBackend trait) ──
 
-#[derive(Serialize, Debug, Deserialize)]
-pub enum IteratorModeOwned {
-    Start,
-    End,
-    From(Vec<u8>, DbDirection),
-}
-#[derive(Serialize, Debug, Deserialize, Clone)]
-pub enum DbDirection {
+/// Direction for iteration (forward or backward).
+#[derive(Serialize, Deserialize, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IteratorDirection {
+    #[default]
     Forward,
     Reverse,
 }
+
+// ── IPC commands ──
+
 #[repr(i32)]
 pub enum InputCommand {
-    /// Indicates that there is no command and light client is waiting for next call
+    /// Indicates that there is no command and light client is waiting for next call.
     /// Payload: None
     Waiting = 0,
-    /// Open database,
+    /// Open database.
     /// Payload: database name (string), bincode encoded
     OpenDatabase = 1,
-    /// Execute a database command
+    /// Execute a database command.
     /// Payload: DbCommandRequest, bincode encoded
     DbRequest = 2,
-    /// Shutdown db worker, exiting main loop
+    /// Shutdown db worker, exiting main loop.
     /// Payload: None
-    /// Note: There won't be a response for [`crate::InputCommand::Shutdown`]
+    /// Note: There won't be a response for [`InputCommand::Shutdown`]
     Shutdown = 3,
-    /// Used for response from take_while, not for users
+    /// Response from the client for a take_while callback.
     /// Payload: result of the call, in bool, bincode-encoded
-    PrefixIteratorResponse = 20,
+    ResponseTakeWhile = 20,
 }
 
 impl TryFrom<i32> for InputCommand {
@@ -63,7 +47,7 @@ impl TryFrom<i32> for InputCommand {
             1 => Self::OpenDatabase,
             2 => Self::DbRequest,
             3 => Self::Shutdown,
-            20 => Self::PrefixIteratorResponse,
+            20 => Self::ResponseTakeWhile,
             s => {
                 bail!("Invalid input command: {}", s);
             }
@@ -72,30 +56,26 @@ impl TryFrom<i32> for InputCommand {
 }
 
 #[repr(i32)]
+#[derive(Debug)]
 /// Represent a 4-byte command which will be put in output buffer
 pub enum OutputCommand {
-    /// Waiting for db worker to handle the command
+    /// Waiting for db worker to handle the command.
     /// Payload: None
     Waiting = 0,
-    /// Successful response of OpenDatabase
+    /// Successful response of OpenDatabase.
     /// Payload: None
     OpenDatabaseResponse = 1,
-    /// Successful response of DbRequest
+    /// Successful response of DbRequest.
     /// Payload: bincode-encoded DbCommandResponse
     DbResponse = 2,
-    /// Error of OpenDatabaseRequest or DbRequest
+    /// Error of OpenDatabaseRequest or DbRequest.
     /// Payload: bincode-encoded string
     Error = 10,
-    /// DbWorker wants to call take_while and yield one entry
-    /// Payload: bincode-encoded bytes, argument of take_while
-    PrefixIteratorRequestForNextEntry = 20,
+    /// Worker wants the client to evaluate `take_while` for a key.
+    /// Payload: bincode-encoded bytes (the key)
+    RequestTakeWhile = 20,
 }
-#[derive(Serialize, Deserialize, Debug)]
-/// Represent a key-value pair
-pub struct KV {
-    pub key: Vec<u8>,
-    pub value: Vec<u8>,
-}
+
 impl TryFrom<i32> for OutputCommand {
     type Error = anyhow::Error;
 
@@ -105,15 +85,70 @@ impl TryFrom<i32> for OutputCommand {
             1 => Self::OpenDatabaseResponse,
             2 => Self::DbResponse,
             10 => Self::Error,
-            20 => Self::PrefixIteratorRequestForNextEntry,
+            20 => Self::RequestTakeWhile,
             s => {
                 bail!("Invalid output command: {}", s);
             }
         })
     }
 }
-/// Fill a input buffer/output buffer with a [`crate::InputCommand`]/[`crate::OutputCommand`] and the buffer
-/// The buffer would be in 4byte command + 4byte payload length + payload
+
+// ── Key-value pair ──
+
+#[derive(Serialize, Deserialize, Debug)]
+/// Represent a key-value pair
+pub struct KV {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+// ── Database command request/response ──
+
+#[derive(Serialize, Deserialize, Debug)]
+/// Response of DbCommandRequest.
+pub enum DbCommandResponse {
+    Read {
+        values: Vec<Option<Vec<u8>>>,
+    },
+    Put,
+    Delete,
+    /// Response for Iterator command: the collected key-value pairs.
+    Iterator {
+        kvs: Vec<KV>,
+    },
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+/// Represent a database command
+pub enum DbCommandRequest {
+    /// Read the value corresponding to a series of keys.
+    /// Input: A series of keys
+    /// Output: A series of values corresponding to keys, None if the key wasn't found in database
+    Read { keys: Vec<Vec<u8>> },
+    /// Write a series of key-value pairs into database.
+    /// Input: A series of key-value pairs
+    /// Output: None
+    Put { kvs: Vec<KV> },
+    /// Remove a series of entries from database.
+    /// Input: Keys to remove
+    /// Output: None
+    Delete { keys: Vec<Vec<u8>> },
+    /// Iterate over key-value pairs, with `take_while` evaluated via IPC callback.
+    /// The worker iterates from `start` in `direction`, calling back to the client
+    /// for each key to evaluate `take_while`. Stops when `take_while` returns false
+    /// or `limit` entries have been collected (0 = no limit).
+    /// Output: Key value pairs fetched
+    Iterator {
+        start: Vec<u8>,
+        direction: IteratorDirection,
+        limit: usize,
+    },
+}
+
+// ── Serialization helpers ──
+
+/// Fill a input buffer/output buffer with a [`InputCommand`]/[`OutputCommand`] and the buffer.
+/// The buffer would be in 4byte command + 4byte payload length + payload.
 ///
 /// cmd: Command in i32
 /// data: The payload of command
@@ -137,7 +172,7 @@ pub fn write_command_with_payload<T: Serialize>(
     Ok(())
 }
 
-/// Read the payload from the given input buffer/output buffer
+/// Read the payload from the given input buffer/output buffer.
 /// i32arr: Int32Array view of the buffer
 /// u8arr: Uint8Array view of the buffer
 pub fn read_command_payload<T: DeserializeOwned>(
@@ -151,36 +186,4 @@ pub fn read_command_payload<T: DeserializeOwned>(
     let (result, _) = bincode::serde::decode_from_slice::<T, _>(&buf, bincode::config::standard())
         .with_context(|| anyhow!("Failed to decode command"))?;
     Ok(result)
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-/// Response of DbCommandRequest. For details, please refer to the doc of DbCommandRequest
-pub enum DbCommandResponse {
-    Read { values: Vec<Option<Vec<u8>>> },
-    Put,
-    Delete,
-    PrefixIterator { data: Vec<KV> },
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-/// Represent a database command
-pub enum DbCommandRequest {
-    /// Read the value corresponding to a series of keys
-    /// Input: A series of keys
-    /// Output: A series of values corresponding to keys, None if the key wasn't found in database
-    Read { keys: Vec<Vec<u8>> },
-    /// Write a series of key-value pairs into database
-    /// Input: A series of key-value pairs
-    /// Output: None
-    Put { kvs: Vec<KV> },
-    /// Remove a series of entries from database
-    /// Input: Keys to remove
-    /// Output: None
-    Delete { keys: Vec<Vec<u8>> },
-    /// Gets at most `limit` entries, starting from `start_key_bound`, skipping the first `skip` entries, keep fetching until `take_while` evals to false
-    /// Output: Key value pairs fetched
-    PrefixIterator {
-        prefix: Vec<u8>,
-        mode: IteratorModeOwned,
-    },
 }

@@ -44,6 +44,7 @@ script:pre-request {
 
 script:post-response {
   console.log("generated result: ", res.body.result);
-  // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 1000));
+  // Sleep for sometime to make sure the commitment round-trip (AddTlc -> CommitmentSigned ->
+  // RevokeAndAck) finishes before next add_tlc request, avoiding WaitingTlcAck errors.
+  await new Promise(r => setTimeout(r, 2000));
 }

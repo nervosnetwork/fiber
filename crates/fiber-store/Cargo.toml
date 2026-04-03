@@ -1,0 +1,43 @@
+[package]
+name = "fiber-store"
+version = "0.8.0"
+edition = "2021"
+description = "Key-value store backends and migration framework for Fiber Network"
+build = "build.rs"
+
+[dependencies]
+# Logging
+tracing = "0.1"
+
+# Migration progress UI
+indicatif = "0.18"
+
+# Error handling
+thiserror = "1.0.58"
+
+# SQLite backend (optional)
+rusqlite = { version = "0.34", features = ["bundled"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+console = "0.16.0"
+rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
+  "lz4",
+], default-features = false, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+anyhow = "1.0.81"
+console_error_panic_hook = "0.1.7"
+fiber-wasm-db-common = { path = "../fiber-wasm-db-common" }
+wasm-bindgen = "0.2.84"
+web-sys = "0.3.72"
+
+[features]
+default = []
+portable = ["rocksdb/portable"]
+browser-test = []
+sqlite = ["dep:rusqlite"]
+
+[lints.clippy]
+expect-fun-call = "allow"
+needless-return = "allow"
+upper-case-acronyms = "allow"

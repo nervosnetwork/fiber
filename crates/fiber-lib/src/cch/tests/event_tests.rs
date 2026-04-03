@@ -5,11 +5,10 @@
 //! - CkbInvoiceStatus -> CchOrderStatus mappings
 //! - PaymentStatus -> CchOrderStatus mappings
 
-use crate::cch::order::{state_machine::CchOrderEvent, CchOrderStatus};
+use crate::cch::order::state_machine::CchOrderEvent;
 use crate::cch::trackers::CchTrackingEvent;
-use crate::fiber::payment::PaymentStatus;
-use crate::fiber::types::Hash256;
-use crate::invoice::CkbInvoiceStatus;
+use fiber_types::invoice::CkbInvoiceStatus;
+use fiber_types::{CchOrderStatus, Hash256, PaymentStatus};
 
 /// Helper function to create a test payment hash
 fn test_payment_hash(value: u8) -> Hash256 {
@@ -158,9 +157,9 @@ fn test_invoice_status_received_maps_to_incoming_accepted() {
 }
 
 #[test]
-fn test_invoice_status_paid_maps_to_succeeded() {
+fn test_invoice_status_paid_maps_to_success() {
     let order_status: CchOrderStatus = CkbInvoiceStatus::Paid.into();
-    assert_eq!(order_status, CchOrderStatus::Succeeded);
+    assert_eq!(order_status, CchOrderStatus::Success);
 }
 
 #[test]
@@ -192,9 +191,9 @@ fn test_payment_status_inflight_maps_to_outgoing_in_flight() {
 }
 
 #[test]
-fn test_payment_status_success_maps_to_outgoing_succeeded() {
+fn test_payment_status_success_maps_to_outgoing_success() {
     let order_status: CchOrderStatus = PaymentStatus::Success.into();
-    assert_eq!(order_status, CchOrderStatus::OutgoingSucceeded);
+    assert_eq!(order_status, CchOrderStatus::OutgoingSuccess);
 }
 
 #[test]

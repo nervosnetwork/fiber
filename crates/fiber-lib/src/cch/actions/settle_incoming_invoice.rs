@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use lnd_grpc_tonic_client::invoicesrpc;
-use ractor::{call, ActorRef};
+use ractor::ActorRef;
 
 use crate::{
     cch::{
@@ -10,11 +10,11 @@ use crate::{
         },
         actor::CchState,
         trackers::{CchTrackingEvent, LndConnectionInfo},
-        CchMessage, CchOrder, CchOrderStatus, CchOrderStore,
+        CchFiberAgentRef, CchMessage, CchOrderStore,
     },
-    fiber::{types::Hash256, NetworkActorCommand, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE},
-    invoice::{CkbInvoiceStatus, SettleInvoiceError},
+    invoice::CkbInvoiceStatus,
 };
+use fiber_types::{CchOrder, CchOrderStatus, Hash256};
 
 pub struct SettleIncomingInvoiceDispatcher;
 
@@ -22,7 +22,7 @@ pub struct SettleFiberIncomingInvoiceExecutor {
     payment_hash: Hash256,
     payment_preimage: Hash256,
     cch_actor_ref: ActorRef<CchMessage>,
-    network_actor_ref: ActorRef<NetworkActorMessage>,
+    fiber_agent_ref: CchFiberAgentRef,
 }
 
 #[async_trait::async_trait]
@@ -30,43 +30,43 @@ impl ActionExecutor for SettleFiberIncomingInvoiceExecutor {
     async fn execute(self: Box<Self>) -> Result<()> {
         let payment_hash = self.payment_hash;
         let payment_preimage = self.payment_preimage;
-        let command = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
-                payment_hash,
-                payment_preimage,
-                rpc_reply,
-            ))
-        };
-        if let Err(err) = call!(self.network_actor_ref, command).expect(ASSUME_NETWORK_ACTOR_ALIVE)
+
+        match self
+            .fiber_agent_ref
+            .call_settle_invoice(payment_hash, payment_preimage)
+            .await
         {
-            let failure_reason = format!("SettleFiberIncomingInvoiceExecutor failure: {:?}", err);
-            if Self::is_permanent_error(err) {
-                self.cch_actor_ref.send_message(CchMessage::TrackingEvent(
-                    CchTrackingEvent::InvoiceChanged {
-                        payment_hash,
-                        status: CkbInvoiceStatus::Cancelled,
-                        failure_reason: Some(failure_reason),
-                    },
-                ))?;
-            } else {
-                return Err(anyhow!(failure_reason));
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let failure_reason =
+                    format!("SettleFiberIncomingInvoiceExecutor failure: {:?}", err);
+                let err_str = err.to_string();
+                if Self::is_permanent_error_str(&err_str) {
+                    self.cch_actor_ref.send_message(CchMessage::TrackingEvent(
+                        CchTrackingEvent::InvoiceChanged {
+                            payment_hash,
+                            status: CkbInvoiceStatus::Cancelled,
+                            failure_reason: Some(failure_reason),
+                        },
+                    ))?;
+                    Ok(())
+                } else {
+                    Err(anyhow!(failure_reason))
+                }
             }
         }
-        Ok(())
     }
 }
 
 impl SettleFiberIncomingInvoiceExecutor {
-    fn is_permanent_error(err: SettleInvoiceError) -> bool {
-        matches!(
-            err,
-            SettleInvoiceError::InvoiceNotFound
-                | SettleInvoiceError::HashMismatch
-                | SettleInvoiceError::InvoiceStillOpen
-                | SettleInvoiceError::InvoiceAlreadyCancelled
-                | SettleInvoiceError::InvoiceAlreadyExpired
-                | SettleInvoiceError::InvoiceAlreadyPaid
-        )
+    fn is_permanent_error_str(err: &str) -> bool {
+        let err_lower = err.to_lowercase();
+        err_lower.contains("not found")
+            || err_lower.contains("hash mismatch")
+            || err_lower.contains("still open")
+            || err_lower.contains("already cancelled")
+            || err_lower.contains("already expired")
+            || err_lower.contains("already paid")
     }
 }
 
@@ -122,7 +122,7 @@ impl SettleLightningIncomingInvoiceExecutor {
 
 impl SettleIncomingInvoiceDispatcher {
     pub fn should_dispatch(order: &CchOrder) -> bool {
-        order.status == CchOrderStatus::OutgoingSucceeded
+        order.status == CchOrderStatus::OutgoingSuccess
     }
 
     pub fn dispatch<S: CchOrderStore>(
@@ -141,7 +141,7 @@ impl SettleIncomingInvoiceDispatcher {
             InvoiceHandlerType::Fiber => Some(Box::new(SettleFiberIncomingInvoiceExecutor {
                 payment_preimage,
                 payment_hash: order.payment_hash,
-                network_actor_ref: state.network_actor.clone(),
+                fiber_agent_ref: state.fiber_agent_ref.clone(),
                 cch_actor_ref: cch_actor_ref.clone(),
             })),
             InvoiceHandlerType::Lightning => {

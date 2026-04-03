@@ -5,12 +5,16 @@ use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::network::*;
 use crate::fiber::payment::*;
 use crate::fiber::types::*;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
+use crate::fiber::{
+    AddTlcCommand, ChannelState, CloseFlags, Hash256, PaymentHopData, PaymentStatus,
+    PeeledPaymentOnionPacket, SendPaymentData, ShuttingDownFlags, TLCId, TlcErrorCode,
+    NO_SHARED_SECRET,
+};
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
@@ -27,6 +31,12 @@ use crate::tests::test_utils::*;
 use crate::NetworkServiceEvent;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::Hash256 as InternalHash256;
+use fiber_types::HashAlgorithm;
+use fiber_types::HopHint;
+use fiber_types::RemoveTlcFulfill;
+use fiber_types::SessionRoute;
 use ractor::call;
 use secp256k1::SECP256K1;
 use std::collections::{HashMap, HashSet};
@@ -4051,7 +4061,7 @@ async fn test_send_payment_shutdown_with_force() {
             let _ = node_3.send_shutdown(channels[2], true).await;
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             node_3
-                .send_channel_shutdown_tx_confirmed_event(node_2.peer_id.clone(), channels[2], true)
+                .send_channel_shutdown_tx_confirmed_event(node_2.pubkey, channels[2], true)
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let channel_actor_state = node_3.get_channel_actor_state(channels[2]);
@@ -4103,11 +4113,7 @@ async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
         // send multiple shutdown transaction confirmed events
         for _k in 0..5 {
             nodes[i]
-                .send_channel_shutdown_tx_confirmed_event(
-                    nodes[i + 1].peer_id.clone(),
-                    channels[i],
-                    true,
-                )
+                .send_channel_shutdown_tx_confirmed_event(nodes[i + 1].pubkey, channels[i], true)
                 .await;
         }
         let channel_actor_state = nodes[i].get_channel_actor_state(channels[i]);
@@ -5038,19 +5044,22 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
         }
     }
 
-    let node1_id = node_1.peer_id.clone();
-    let node0_id = node_0.peer_id.clone();
+    let node1_pubkey = node_1.pubkey;
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node1_pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
     node_1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node0_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_0.pubkey);
                 true
             }
             _ => false,
@@ -5088,19 +5097,19 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
             .as_secs();
         if elapsed > 50 {
             let node0_state = node_0.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
+            eprintln!("peer {:?} node_0_state:", node_0.pubkey);
             node0_state.tlc_state.debug();
 
             let node1_state = node_1.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node1_left_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_left_actor_state:", node_1.pubkey);
             node1_state.tlc_state.debug();
 
             let node1_right_state = node_1.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node1_right_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_right_actor_state:", node_1.pubkey);
             node1_right_state.tlc_state.debug();
 
             let node2_state = node_2.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node_2_state:", node_2.get_peer_id());
+            eprintln!("peer {:?} node_2_state:", node_2.pubkey);
             node2_state.tlc_state.debug();
 
             panic!("timeout");
@@ -5137,19 +5146,22 @@ async fn test_send_payment_send_each_other_reestablishing() {
         }
     }
 
-    let node1_id = node_1.peer_id.clone();
-    let node0_id = node_0.peer_id.clone();
+    let node1_pubkey = node_1.pubkey;
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(node1_id.clone(), PeerDisconnectReason::Requested),
+            NetworkActorCommand::DisconnectPeer(
+                node1_pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
         ))
         .expect("node_a alive");
 
     node_1
         .expect_event(|event| match event {
-            NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                assert_eq!(peer_id, &node0_id);
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_0.pubkey);
                 true
             }
             _ => false,
@@ -5186,15 +5198,15 @@ async fn test_send_payment_send_each_other_reestablishing() {
             .as_secs();
         if elapsed > 50 {
             let node0_state = node_0.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node_0_state:", node_0.get_peer_id());
+            eprintln!("peer {:?} node_0_state:", node_0.pubkey);
             node0_state.tlc_state.debug();
 
             let node1_state = node_1.get_channel_actor_state(channels[0]);
-            eprintln!("peer {:?} node1_left_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_left_actor_state:", node_1.pubkey);
             node1_state.tlc_state.debug();
 
             let node1_right_state = node_1.get_channel_actor_state(channels[1]);
-            eprintln!("peer {:?} node1_right_actor_state:", node_1.get_peer_id());
+            eprintln!("peer {:?} node1_right_actor_state:", node_1.pubkey);
             node1_right_state.tlc_state.debug();
 
             panic!("timeout");
@@ -5773,22 +5785,22 @@ async fn test_send_payment_with_reconnect_two_times() {
         }
 
         // disconnect peer
-        let node1_id = node1.peer_id.clone();
-        let node0_id = node0.peer_id.clone();
+        let node1_pubkey = node1.pubkey;
         node0
             .network_actor
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::DisconnectPeer(
-                    node1_id.clone(),
+                    node1_pubkey,
                     PeerDisconnectReason::Requested,
+                    None,
                 ),
             ))
             .expect("node_a alive");
 
         node1
             .expect_event(|event| match event {
-                NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
-                    assert_eq!(peer_id, &node0_id);
+                NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                    assert_eq!(pubkey, &node0.pubkey);
                     true
                 }
                 _ => false,
@@ -6956,7 +6968,7 @@ async fn test_send_payment_direct_channel_error_from_node_stop() {
         })
         .await;
 
-    assert!(payment.unwrap_err().contains("no path found"));
+    assert!(payment.unwrap_err().contains("Insufficient balance"));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7135,14 +7147,14 @@ async fn test_tlc_removed_while_waiting_for_forwarding_result() {
 
     let invoice_params = NewInvoiceParams {
         amount,
-        payment_preimage: Some(preimage),
+        payment_preimage: Some(preimage.into()),
         description: Some("Description".to_string()),
         ..Default::default()
     };
 
     let invoice_result = node_2.gen_invoice(invoice_params).await;
     let invoice = invoice_result.invoice;
-    let payment_hash = invoice.data.payment_hash;
+    let payment_hash: InternalHash256 = invoice.data.payment_hash.into();
     let invoice_address = invoice_result.invoice_address;
 
     let res = node_0
@@ -7189,7 +7201,7 @@ async fn test_tlc_removed_while_waiting_for_forwarding_result() {
     };
     let invoice_result2 = node_2.gen_invoice(invoice_params2).await;
     let invoice2 = invoice_result2.invoice;
-    let payment_hash2 = invoice2.data.payment_hash;
+    let payment_hash2: InternalHash256 = invoice2.data.payment_hash.into();
     let invoice_address2 = invoice_result2.invoice_address;
 
     let res2 = node_0

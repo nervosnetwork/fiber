@@ -1,5 +1,5 @@
 meta {
-  name: disconnect NODE2 from NODE1
+  name: disconnect NODE3 from NODE1
   type: http
   seq: 11
 }
@@ -21,7 +21,7 @@ body:json {
     "jsonrpc": "2.0",
     "method": "disconnect_peer",
     "params": [
-      {"peer_id": "{{NODE2_PEERID}}"}
+      {"pubkey": "{{NODE3_PUBKEY}}"}
     ]
   }
 }
@@ -33,5 +33,5 @@ assert {
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise(r => setTimeout(r, 2000));
 }

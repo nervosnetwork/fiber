@@ -15,11 +15,13 @@ jobs:
       matrix:
         workflow:
           - 3-nodes-transfer
+          - external-funding-open
           - invoice-ops
           - open-use-close-a-channel
           - udt
           - reestablish
           - cross-chain-hub
+          - cross-chain-hub-separate
           - router-pay
           - udt-router-pay
           - watchtower/force-close
@@ -68,7 +70,7 @@ jobs:
 
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e-${{ matrix.workflow }}-${{ runner.os }}
@@ -77,11 +79,11 @@ jobs:
         uses: ./.github/actions/setup-dependencies
         with:
           ckb-version: ${{ matrix.release }}
-          install-bitcoin-lnd: ${{ matrix.workflow == 'cross-chain-hub' }}
+          install-bitcoin-lnd: ${{ matrix.workflow == 'cross-chain-hub' || matrix.workflow == 'cross-chain-hub-separate' }}
           cache-prefix: 'e2e'
 
       - name: Cache build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             target/

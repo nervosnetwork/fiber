@@ -22,6 +22,10 @@ case "$testcase_name" in
   "e2e/cross-chain-hub")
     ./tests/deploy/lnd-init/setup-lnd.sh
     ;;
+  "e2e/cross-chain-hub-separate")
+    ./tests/deploy/lnd-init/setup-lnd.sh
+    export CCH_SEPARATE=y
+    ;;
   "e2e/router-pay")
     export START_BOOTNODE=y
     ;;
@@ -84,6 +88,11 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
     FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' start_fnn -d 1 &
     FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start_fnn -d 2 &
     FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start_fnn -d 3 &
+    if [[ -n "${CCH_SEPARATE:-}" ]]; then
+        # Wait for node 3 to start so CCH can connect to it
+        sleep 3
+        FIBER_SECRET_KEY_PASSWORD='password4' LOG_PREFIX=$'[node cch]' start_fnn -d cch &
+    fi
 else
     for id in "${start_node_ids[@]}"; do
         FIBER_SECRET_KEY_PASSWORD="password$id" LOG_PREFIX="[$id]"$'' start_fnn -d "$id" &

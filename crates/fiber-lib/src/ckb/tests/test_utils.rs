@@ -19,13 +19,13 @@ use tokio::sync::RwLock as TokioRwLock;
 
 use crate::{
     ckb::{
-        config::{UdtArgInfo, UdtCfgInfos, UdtScript},
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
         CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError, GetTxResponse,
     },
-    fiber::types::Hash256,
     now_timestamp_as_millis_u64,
 };
+use fiber_types::{Hash256, UdtCfgInfos};
+use fiber_types::{UdtArgInfo, UdtScript};
 
 use crate::ckb::CkbChainMessage;
 
@@ -152,7 +152,7 @@ impl MockContext {
             contract_default_scripts.insert(contract, script);
             let cell_dep = CellDep::new_builder()
                 .out_point(out_point)
-                .dep_type(DepType::Code.into())
+                .dep_type(DepType::Code)
                 .build();
 
             let cell_deps = if matches!(contract, Contract::FundingLock)
@@ -213,8 +213,7 @@ impl TraceTxReplier {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl Actor for TraceTxReplier {
     type Msg = CkbTxTracingResult;
     type Arguments = (
@@ -260,8 +259,7 @@ impl Actor for TraceTxReplier {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     /// Returns Ok(None) if the message is handled by the middleware, otherwise the message
     /// will be forwarded to the underlying MockChainActor.
@@ -358,8 +356,7 @@ impl MockChainActor {
         .expect("start trace tx replier");
     }
 }
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl Actor for MockChainActor {
     type Msg = CkbChainMessage;
     type State = MockChainActorState;
@@ -443,21 +440,13 @@ impl Actor for MockChainActor {
                             }
 
                             let mut outputs_builder = outputs.as_builder();
-                            outputs_builder.replace(
-                                0,
-                                output
-                                    .as_builder()
-                                    .capacity((capacity as u64).pack())
-                                    .build(),
-                            );
+                            outputs_builder
+                                .replace(0, output.as_builder().capacity(capacity as u64).build());
                             outputs_builder.build()
                         }
                     }
                     None => [CellOutput::new_builder()
-                        .capacity(
-                            (request.local_amount as u64 + request.local_reserved_ckb_amount)
-                                .pack(),
-                        )
+                        .capacity(request.local_amount as u64 + request.local_reserved_ckb_amount)
                         .lock(request.script.clone())
                         .build()]
                     .pack(),
@@ -655,6 +644,103 @@ impl Actor for MockChainActor {
                 }
             }
 
+            BuildUnsignedFundingTx {
+                funding_tx,
+                request,
+                funding_source_lock_script: _,
+                funding_source_lock_script_cell_deps: _,
+                funding_cell_lock_script,
+                reply,
+            } => {
+                // Mock implementation: build a simple unsigned funding tx similar to Fund handler.
+                let mut fulfilled_tx = funding_tx.clone();
+
+                let (outputs, outputs_data) = if let Some(ref udt_script) = request.udt_type_script
+                {
+                    let ckb_amount = match request
+                        .local_reserved_ckb_amount
+                        .checked_add(request.remote_reserved_ckb_amount)
+                    {
+                        Some(value) => value,
+                        None => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let udt_amount = match request.local_amount.checked_add(request.remote_amount) {
+                        Some(value) => value,
+                        None => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let mut data = BytesMut::with_capacity(16);
+                    data.put(&udt_amount.to_le_bytes()[..]);
+                    let output = CellOutput::new_builder()
+                        .capacity(Capacity::shannons(ckb_amount).pack())
+                        .type_(Some(udt_script.clone()).pack())
+                        .lock(funding_cell_lock_script)
+                        .build();
+                    (vec![output], vec![data.freeze().pack()])
+                } else {
+                    let local_amount = match u64::try_from(request.local_amount) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let remote_amount = match u64::try_from(request.remote_amount) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let total = match local_amount
+                        .checked_add(request.local_reserved_ckb_amount)
+                        .and_then(|value| value.checked_add(remote_amount))
+                        .and_then(|value| value.checked_add(request.remote_reserved_ckb_amount))
+                    {
+                        Some(value) => value,
+                        None => {
+                            let _ = reply.send(Err(FundingError::OverflowError));
+                            return Ok(());
+                        }
+                    };
+                    let output = CellOutput::new_builder()
+                        .capacity(Capacity::shannons(total).pack())
+                        .lock(funding_cell_lock_script)
+                        .build();
+                    (vec![output], vec![packed::Bytes::default()])
+                };
+
+                let tx_builder = fulfilled_tx
+                    .take()
+                    .map(|x| x.as_advanced_builder())
+                    .unwrap_or_default();
+
+                fulfilled_tx.update_for_self(
+                    tx_builder
+                        .set_outputs(outputs)
+                        .set_outputs_data(outputs_data)
+                        .build(),
+                );
+
+                debug!(
+                    "Built unsigned funding tx for external funding: {:?}",
+                    &fulfilled_tx
+                );
+
+                if let Err(e) = reply.send(Ok(fulfilled_tx)) {
+                    error!(
+                        "[{}] send reply failed: {:?}",
+                        myself.get_name().unwrap_or_default(),
+                        e
+                    );
+                }
+            }
+
             ReportRejected(_) => {
                 // ignore
             }
@@ -735,8 +821,7 @@ impl MockCkbChainClient {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl CkbChainClient for MockCkbChainClient {
     async fn get_transaction(&self, hash: ckb_types::H256) -> Result<GetTxResponse, anyhow::Error> {
         let hash: Hash256 = hash.into();

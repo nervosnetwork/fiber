@@ -1,17 +1,10 @@
-use super::channel::{ChannelActorState, ChannelActorStateStore, ChannelTlcInfo};
-use super::config::AnnouncedNodeName;
-use super::features::FeatureVector;
+use super::channel::{ChannelActorState, ChannelActorStateStore};
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, BuildRouterCommand};
 use super::path::NodeHeap;
-use super::payment::{HopHint, SendPaymentData};
-use super::types::{
-    BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
-    NodeAnnouncement,
-};
-use super::types::{Cursor, Pubkey, TlcErr};
-use crate::ckb::config::UdtCfgInfos;
+use super::payment::SendPaymentDataExt;
+use super::types::BroadcastMessageWithTimestamp;
 use crate::fiber::channel::DEFAULT_FEE_RATE;
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
@@ -20,14 +13,16 @@ use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
-use crate::fiber::payment::{Attempt, PaymentSession, PaymentStatus};
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::PaymentHopData;
-use crate::fiber::types::Privkey;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::ChannelUpdateInfo;
+use fiber_types::{
+    Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, FeatureVector,
+    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus, Privkey,
+    Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
+};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use secp256k1::SECP256K1;
@@ -38,7 +33,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
-use tentacle::secio::PeerId;
 use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
@@ -146,14 +140,6 @@ impl ChannelInfo {
         self.node2
     }
 
-    pub fn node1_peerid(&self) -> PeerId {
-        self.node1.tentacle_peer_id()
-    }
-
-    pub fn node2_peerid(&self) -> PeerId {
-        self.node2.tentacle_peer_id()
-    }
-
     pub fn udt_type_script(&self) -> &Option<Script> {
         &self.udt_type_script
     }
@@ -244,67 +230,6 @@ impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
             udt_type_script: channel_announcement.udt_type_script,
             update_of_node2: None,
             update_of_node1: None,
-        }
-    }
-}
-
-/// The channel update info with a single direction of channel
-#[serde_as]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ChannelUpdateInfo {
-    /// The timestamp is the time when the channel update was received by the node.
-    #[serde_as(as = "U64Hex")]
-    pub timestamp: u64,
-    /// Whether the channel can be currently used for payments (in this one direction).
-    pub enabled: bool,
-    /// The exact amount of balance that we can send to the other party via the channel.
-    #[serde_as(as = "Option<U128Hex>")]
-    pub outbound_liquidity: Option<u128>,
-    /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
-    #[serde_as(as = "U64Hex")]
-    pub tlc_expiry_delta: u64,
-    /// The minimum value, which must be relayed to the next hop via the channel
-    #[serde_as(as = "U128Hex")]
-    pub tlc_minimum_value: u128,
-    /// The forwarding fee rate for the channel.
-    #[serde_as(as = "U64Hex")]
-    pub fee_rate: u64,
-}
-
-impl From<&ChannelTlcInfo> for ChannelUpdateInfo {
-    fn from(info: &ChannelTlcInfo) -> Self {
-        Self {
-            timestamp: info.timestamp,
-            enabled: info.enabled,
-            outbound_liquidity: None,
-            tlc_expiry_delta: info.tlc_expiry_delta,
-            tlc_minimum_value: info.tlc_minimum_value,
-            fee_rate: info.tlc_fee_proportional_millionths as u64,
-        }
-    }
-}
-
-impl From<ChannelTlcInfo> for ChannelUpdateInfo {
-    fn from(info: ChannelTlcInfo) -> Self {
-        Self::from(&info)
-    }
-}
-
-impl From<ChannelUpdate> for ChannelUpdateInfo {
-    fn from(update: ChannelUpdate) -> Self {
-        Self::from(&update)
-    }
-}
-
-impl From<&ChannelUpdate> for ChannelUpdateInfo {
-    fn from(update: &ChannelUpdate) -> Self {
-        Self {
-            timestamp: update.timestamp,
-            enabled: !update.is_disabled(),
-            outbound_liquidity: None,
-            tlc_expiry_delta: update.tlc_expiry_delta,
-            tlc_minimum_value: update.tlc_minimum_value,
-            fee_rate: update.tlc_fee_proportional_millionths as u64,
         }
     }
 }
@@ -453,6 +378,53 @@ impl GraphChannelStat {
     }
 }
 
+/// A wrapper that combines `SendPaymentData` (the user's payment request) with
+/// `GraphChannelStat` (runtime channel usage state for path-finding).
+///
+/// Graph methods accept `&SendPaymentState` instead of `&SendPaymentData`.
+/// Thanks to `Deref<Target = SendPaymentData>`, all payment data fields
+/// are accessible directly (e.g., `state.target_pubkey`), while the
+/// runtime-only `channel_stats` field lives on this wrapper.
+#[derive(Clone, Debug)]
+pub struct SendPaymentState {
+    /// The underlying payment request data.
+    pub request: SendPaymentData,
+    /// Runtime channel usage statistics for path-finding (overlay on global stats).
+    pub channel_stats: GraphChannelStat,
+}
+
+impl SendPaymentState {
+    /// Create a new `SendPaymentState` with default (empty) channel stats.
+    pub fn new(request: SendPaymentData) -> Self {
+        Self {
+            request,
+            channel_stats: Default::default(),
+        }
+    }
+
+    /// Create a new `SendPaymentState` with specific channel stats.
+    pub fn with_channel_stats(request: SendPaymentData, channel_stats: GraphChannelStat) -> Self {
+        Self {
+            request,
+            channel_stats,
+        }
+    }
+}
+
+impl std::ops::Deref for SendPaymentState {
+    type Target = SendPaymentData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+impl From<SendPaymentData> for SendPaymentState {
+    fn from(request: SendPaymentData) -> Self {
+        Self::new(request)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
     // Whether to always process gossip messages for our own channels.
@@ -515,28 +487,6 @@ pub enum PathFindError {
     TlcMinValue(u128),
     #[error("Graph other error: {0}")]
     Other(String),
-}
-
-/// A router hop information for a payment, a paymenter router is an array of RouterHop,
-/// a router hop generally implies hop `target` will receive `amount_received` with `channel_outpoint` of channel.
-/// Improper hop hint may make payment fail, for example the specified channel do not have enough capacity.
-#[serde_as]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RouterHop {
-    /// The node that is sending the TLC to the next node.
-    pub(crate) target: Pubkey,
-    /// The channel of this hop used to receive TLC
-    #[serde_as(as = "EntityHex")]
-    pub(crate) channel_outpoint: OutPoint,
-    /// The amount that the source node will transfer to the target node.
-    /// We have already added up all the fees along the path, so this amount can be used directly for the TLC.
-    #[serde_as(as = "U128Hex")]
-    pub(crate) amount_received: u128,
-    /// The expiry for the TLC that the source node sends to the target node.
-    /// We have already added up all the expiry deltas along the path,
-    /// the only thing missing is current time. So the expiry is the current time plus the expiry delta.
-    #[serde_as(as = "U64Hex")]
-    pub(crate) incoming_tlc_expiry: u64,
 }
 
 #[derive(Debug)]
@@ -706,7 +656,7 @@ where
     // Process them and set nodes and channels accordingly.
     pub(crate) fn load_from_store(&mut self) {
         loop {
-            let messages = self.store.get_broadcast_messages(&self.latest_cursor, None);
+            let messages = self.store.get_broadcast_messages(&self.latest_cursor, 0);
             if messages.is_empty() {
                 break;
             }
@@ -921,14 +871,14 @@ where
         self.nodes.len()
     }
 
-    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<MultiAddr>> {
+    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<Pubkey, Vec<MultiAddr>> {
         // TODO: we may need to shuffle the nodes before selecting the first n nodes,
         // to avoid some malicious nodes from being always selected.
         self.nodes
             .iter()
             .filter(|(k, _)| **k != self.source)
             .take(n)
-            .map(|(k, v)| (k.tentacle_peer_id(), v.addresses.clone()))
+            .map(|(k, v)| (*k, v.addresses.clone()))
             .collect()
     }
 
@@ -937,18 +887,27 @@ where
     }
 
     pub fn get_nodes_with_params(&self, limit: usize, after: Option<Cursor>) -> Vec<NodeInfo> {
-        let cursor = after.unwrap_or_default();
-        self.store
-            .get_broadcast_messages_iter(&cursor)
-            .into_iter()
-            .filter_map(|message| match message {
-                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
-                    Some(NodeInfo::from(node_announcement))
+        let mut cursor = after.unwrap_or_default();
+        let mut result = Vec::new();
+        loop {
+            let batch = self
+                .store
+                .get_broadcast_messages(&cursor, if limit > 0 { limit - result.len() } else { 0 });
+            if batch.is_empty() {
+                break;
+            }
+            for message in batch {
+                cursor = message.cursor();
+                if let BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) = message
+                {
+                    result.push(NodeInfo::from(node_announcement));
+                    if limit > 0 && result.len() >= limit {
+                        return result;
+                    }
                 }
-                _ => None,
-            })
-            .take(limit)
-            .collect()
+            }
+        }
+        result
     }
 
     pub fn get_node(&self, node_id: &Pubkey) -> Option<&NodeInfo> {
@@ -999,31 +958,36 @@ where
         limit: usize,
         after: Option<Cursor>,
     ) -> Vec<ChannelInfo> {
-        let cursor = after.unwrap_or_default();
-        self.store
-            .get_broadcast_messages_iter(&cursor)
-            .into_iter()
-            .filter_map(|message| match message {
-                BroadcastMessageWithTimestamp::ChannelAnnouncement(
+        let mut cursor = after.unwrap_or_default();
+        let mut result = Vec::new();
+        loop {
+            let batch = self
+                .store
+                .get_broadcast_messages(&cursor, if limit > 0 { limit - result.len() } else { 0 });
+            if batch.is_empty() {
+                break;
+            }
+            for message in batch {
+                cursor = message.cursor();
+                if let BroadcastMessageWithTimestamp::ChannelAnnouncement(
                     timestamp,
                     channel_announcement,
-                ) => {
+                ) = message
+                {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-
-                    // assuming channel is closed if disabled from the both side
                     let is_closed = channel_info.update_of_node1.is_some_and(|u| !u.enabled)
                         && channel_info.update_of_node2.is_some_and(|u| !u.enabled);
                     if !is_closed {
-                        Some(channel_info)
-                    } else {
-                        None
+                        result.push(channel_info);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
                     }
                 }
-                _ => None,
-            })
-            .take(limit)
-            .collect()
+            }
+        }
+        result
     }
 
     pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {
@@ -1245,7 +1209,7 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
         info!(
             "entered build_route: amount: {}, amount_low_bound: {:?}, max_fee_amount: {:?}",
@@ -1258,6 +1222,41 @@ where
             return Err(PathFindError::FeatureNotEnabled(
                 "allow_self_payment is not enabled, can not pay to self".to_string(),
             ));
+        }
+
+        // Early fail: verify the source node's outbound liquidity can cover the payment amount
+        // before spending time on path-finding. This check is skipped when an explicit router
+        // is provided (the caller is responsible).
+        if payment_data.router.is_empty() {
+            let outbound_liquidities: Vec<u128> = self
+                .get_node_outbounds(source)
+                .filter(|(_, channel_info, _)| {
+                    channel_info.udt_type_script() == &payment_data.udt_type_script
+                })
+                .map(|(_, channel_info, channel_update)| {
+                    channel_update
+                        .outbound_liquidity
+                        .unwrap_or_else(|| channel_info.capacity())
+                })
+                .collect();
+
+            if payment_data.allow_mpp() {
+                // For MPP the payment can be split across all channels, so the total is the bound.
+                let total: u128 = outbound_liquidities.iter().sum();
+                if total < amount {
+                    return Err(PathFindError::InsufficientBalance(format!(
+                        "total outbound liquidity {total} is insufficient, required amount: {amount}"
+                    )));
+                }
+            } else {
+                // For a single-path payment the entire amount must flow through one channel.
+                let max = outbound_liquidities.iter().copied().max().unwrap_or(0);
+                if max < amount {
+                    return Err(PathFindError::InsufficientBalance(format!(
+                        "max outbound liquidity {max} is insufficient, required amount: {amount}"
+                    )));
+                }
+            }
         }
 
         let path = self.resolve_route(
@@ -1290,7 +1289,7 @@ where
         amount: u128,
         amount_low_bound: Option<u128>,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<ResolvedRoute, PathFindError> {
         if !payment_data.router.is_empty() {
             // If a router is explicitly provided, use it.
@@ -1348,7 +1347,7 @@ where
         source: Pubkey,
         final_amount: u128,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<ResolvedRoute, PathFindError> {
         let target = payment_data.target_pubkey;
         let max_fee_amount = max_fee_amount.or(payment_data.max_fee_amount);
@@ -1563,7 +1562,7 @@ where
         source: Pubkey,
         amount: u128,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<Vec<RouterHop>, PathFindError> {
         #[cfg(any(feature = "metrics", test))]
         {
@@ -1588,7 +1587,7 @@ where
 
     pub fn find_path_max_capacity(
         &self,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<u128, PathFindError> {
         #[cfg(any(feature = "metrics", test))]
         {
@@ -1622,7 +1621,7 @@ where
         amount: u128,
         amount_low_bound: u128,
         max_fee_amount: Option<u128>,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<(Vec<RouterHop>, u128), PathFindError> {
         debug!(
             "find_path_in_range (max capacity) for amount: {} low_bound: {} max_fee_amount: {:?}",
@@ -1706,7 +1705,7 @@ where
         source: Pubkey,
         lower_bound: u128,
         upper_bound: u128,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> (Vec<RouterHop>, u128) {
         if let Ok(res) = self.probe_max_capacity_for_route(source, upper_bound, route, payment_data)
         {
@@ -1737,7 +1736,7 @@ where
         source: Pubkey,
         amount: u128,
         route: &[RouterHop],
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
     ) -> Result<std::vec::Vec<RouterHop>, PathFindError> {
         self.inner_find_path(
             source,
@@ -1759,7 +1758,7 @@ where
         &self,
         route: &Vec<RouterHop>,
         amount: u128,
-        payment_data: &SendPaymentData,
+        payment_data: &SendPaymentState,
         trampoline_payload: Option<Vec<u8>>,
         final_hop_expiry_delta_override: Option<u64>,
     ) -> Vec<PaymentHopData> {
@@ -2384,9 +2383,6 @@ where
         }
 
         if result.is_empty() || current != target {
-            // TODO check total outbound balance and return error if it's not enough
-            // this can help us early return if the payment is not possible to be sent
-            // otherwise when PathFind error is returned, we need to retry with half amount
             error!(
                 "no path found from {:?} to {:?} for amount: {:?} max_fee_amount: {:?}",
                 source, target, amount, max_fee_amount
@@ -2687,7 +2683,19 @@ where
 
 pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
+    fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
+    /// Get payment sessions with pagination support.
+    /// `limit`: maximum number of results to return.
+    /// `after`: if provided, start after this payment_hash (exclusive cursor).
+    /// `status`: optional status filter.
+    /// Returns (sessions, has_more) where has_more indicates if there are more results.
+    fn get_payment_sessions_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<PaymentStatus>,
+    ) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
     fn insert_payment_history_result(
         &mut self,

@@ -6,7 +6,7 @@ pub use config::Config;
 #[cfg(any(test, feature = "bench"))]
 pub mod tests;
 
-use fiber::types::Hash256;
+use fiber_types::Hash256;
 use rand::Rng;
 #[cfg(any(test, feature = "bench"))]
 pub use tests::*;
@@ -30,9 +30,13 @@ pub use errors::{Error, Result};
 
 pub mod actors;
 
+pub mod event_handler;
+pub use event_handler::ExitMessage;
+
 pub mod tasks;
 
 pub mod utils;
+pub use fiber_types;
 
 use git_version::git_version;
 

@@ -1,5 +1,5 @@
-use crate::{cch::CchOrderStatus, fiber::types::Hash256, time::SystemTimeError};
-
+use crate::time::SystemTimeError;
+use fiber_types::{CchOrderStatus, Currency, Hash256};
 use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
 use thiserror::Error;
 
@@ -14,6 +14,8 @@ pub enum CchStoreError {
 
 #[derive(Error, Debug)]
 pub enum CchError {
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
     #[error("Store error: {0}")]
     StoreError(#[from] CchStoreError),
     #[error("Outgoing invoice expiry time is too short")]
@@ -36,8 +38,15 @@ pub enum CchError {
     CKBInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("CKB invoice hash algorithm is not SHA256, which is required for LND compatibility")]
     CKBInvoiceIncompatibleHashAlgorithm,
-    #[error("ReceiveBTC order payment amount is too small")]
-    ReceiveBTCOrderAmountTooSmall,
+    #[error("BTC invoice network mismatch: expected {expected}, got {actual}")]
+    BTCInvoiceNetworkMismatch { expected: String, actual: String },
+    #[error("CKB invoice network mismatch: expected {expected}, got {actual}")]
+    CKBInvoiceNetworkMismatch {
+        expected: Currency,
+        actual: Currency,
+    },
+    #[error("SendBTC order payment amount is too large")]
+    SendBTCOrderAmountTooLarge,
     #[error("ReceiveBTC order payment amount is too large")]
     ReceiveBTCOrderAmountTooLarge,
     #[error("Wrapped BTC type script mismatch")]
@@ -58,6 +67,8 @@ pub enum CchError {
     LndChannelError(#[from] lnd_grpc_tonic_client::channel::Error),
     #[error("Lnd RPC error: {0}")]
     LndRpcError(String),
+    #[error("Fiber node error: {0}")]
+    FiberNodeError(anyhow::Error),
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;

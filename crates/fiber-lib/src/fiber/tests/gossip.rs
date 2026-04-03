@@ -7,7 +7,6 @@ use ckb_types::{
 };
 use molecule::prelude::Byte;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
-use tentacle::secio::PeerId;
 use tokio::sync::RwLock;
 
 use crate::tests::test_utils::{establish_channel_between_nodes, ChannelParameters, NetworkNode};
@@ -29,7 +28,7 @@ use crate::{
         types::{BroadcastMessage, BroadcastMessageWithTimestamp, Cursor},
     },
     gen_node_announcement_from_privkey, gen_rand_node_announcement,
-    store::Store,
+    store::{open_store, Store},
 };
 use crate::{create_invalid_ecdsa_signature, now_timestamp_as_millis_u64, ChannelTestContext};
 
@@ -44,7 +43,7 @@ struct GossipTestingContext {
 impl GossipTestingContext {
     async fn new() -> Self {
         let dir = TempDir::new("test-gossip-store");
-        let store = Store::new(dir).expect("created store failed");
+        let store = open_store(dir).expect("created store failed");
         let shared_state = Arc::new(std::sync::RwLock::new(MockChainState::new()));
         let chain_actor = Actor::spawn(None, MockChainActor::new(), (None, shared_state.clone()))
             .await
@@ -98,7 +97,7 @@ impl GossipTestingContext {
     fn save_message(&self, message: BroadcastMessage) {
         self.get_extended_actor()
             .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
-                PeerId::random(),
+                crate::gen_rand_fiber_public_key(),
                 vec![message],
             ))
             .expect("send message");
@@ -138,8 +137,7 @@ enum SubscriberMessage {
     Update(GossipMessageUpdates),
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl Actor for Subscriber {
     type Msg = SubscriberMessage;
     type State = ();
@@ -736,9 +734,8 @@ async fn test_gossip_store_prune_all_messages() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages_iter(&Cursor::default())
-            .into_iter()
-            .count(),
+            .get_broadcast_messages(&Cursor::default(), 0)
+            .len(),
         num_messages
     );
 
@@ -753,9 +750,8 @@ async fn test_gossip_store_prune_all_messages() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages_iter(&Cursor::default())
-            .into_iter()
-            .count(),
+            .get_broadcast_messages(&Cursor::default(), 0)
+            .len(),
         0
     );
 }
@@ -793,7 +789,7 @@ async fn test_gossip_store_prune_channel_announcement() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         1
     );
@@ -815,7 +811,7 @@ async fn test_gossip_store_prune_channel_announcement() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None),
+            .get_broadcast_messages(&Cursor::default(), 0),
         vec![]
     );
 }
@@ -885,7 +881,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -924,7 +920,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -963,7 +959,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -1002,7 +998,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None),
+            .get_broadcast_messages(&Cursor::default(), 0),
         vec![]
     );
 }

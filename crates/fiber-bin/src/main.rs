@@ -2,32 +2,29 @@ use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use core::default::Default;
 use fnn::actors::RootActor;
-use fnn::cch::{CchArgs, CchFiberStoreWatcher};
+use fnn::cch::CchArgs;
 use fnn::ckb::client::CkbRpcClient;
 use fnn::ckb::contracts::TypeIDResolver;
 #[cfg(debug_assertions)]
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
+use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
 use fnn::rpc::server::start_rpc;
-use fnn::rpc::watchtower::{
-    CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
-    UpdateLocalSettlementParams, UpdateRevocationParams, WatchtowerRpcClient,
-};
-use fnn::store::Store;
+use fnn::store::open_store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use fnn::watchtower::{
     WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS,
 };
+use fnn::ExitMessage;
 use fnn::{start_network, CchActor, Config, NetworkServiceEvent};
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,9 +36,6 @@ use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
-const ASSUME_WATCHTOWER_CLIENT_CALL_OK: &str = "watchtower client call should be ok";
-
-pub struct ExitMessage(String);
 
 #[tokio::main]
 pub async fn main() -> Result<(), ExitMessage> {
@@ -79,20 +73,50 @@ pub async fn main() -> Result<(), ExitMessage> {
 
     let config = Config::parse();
 
-    let store_path = config
-        .fiber
-        .as_ref()
-        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
-        .store_path();
+    if config.check_validate {
+        let parsed_fiber_config = config
+            .parsed_fiber()
+            .ok_or(ExitMessage("fiber config must be set".to_string()))?;
+        let store_path = parsed_fiber_config.base_dir().join("store");
+        if !store_path.exists() {
+            return Err(ExitMessage(format!(
+                "store path does not exist: {}",
+                store_path.display()
+            )));
+        }
+        if let Err(err) = fnn::store::check_validate(&store_path) {
+            eprintln!("db validate failed:\n{}", err);
+            std::process::exit(1);
+        } else {
+            println!("db validate success");
+            std::process::exit(0);
+        }
+    }
 
-    let mut store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
-    let cch_fiber_store_event_port = config.cch.is_some().then(|| {
+    let parsed_fiber_config = config
+        .parsed_fiber()
+        .ok_or(ExitMessage("fiber config must be set".to_string()))?;
+
+    // Derive store_path: prefer fiber config, fall back to base_dir/fiber/store
+    let store_path = parsed_fiber_config.store_path();
+    let raw_store = open_store(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+
+    if config.cch.is_some() || config.rpc.is_some() {
         let port = Arc::new(OutputPort::default());
-        let store_watcher = CchFiberStoreWatcher::new(store.clone(), port.clone());
-        store.set_watcher(Arc::new(store_watcher));
-        port
-    });
+        let port_clone = port.clone();
+        let mut store = raw_store;
+        store.set_watcher(Arc::new(move |change| port_clone.send(change)));
+        run_node(store, Some(port), config).await
+    } else {
+        run_node(raw_store, None, config).await
+    }
+}
 
+async fn run_node(
+    store: fnn::store::Store,
+    store_change_port: Option<Arc<OutputPort<fnn::store::store_impl::StoreChange>>>,
+    config: Config,
+) -> Result<(), ExitMessage> {
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
@@ -156,7 +180,7 @@ pub async fn main() -> Result<(), ExitMessage> {
 
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
-                node_public_key.clone().into(),
+                fnn::fiber::types::pubkey_from_tentacle(node_public_key.clone()),
                 fiber_config.announce_private_addr(),
             )));
 
@@ -315,21 +339,40 @@ pub async fn main() -> Result<(), ExitMessage> {
         None => (None, None, None),
     };
 
-    let cch_actor = match (config.cch, &network_actor) {
-        (Some(cch_config), Some(network_actor)) => {
+    let cch_currency = config
+        .parsed_fiber()
+        .map(|fc| fc.currency())
+        .unwrap_or_default();
+    let cch_actor = match config.cch {
+        Some(cch_config) => {
+            // CCH can run either:
+            // 1. In-process with a co-located Fiber node (network_actor is Some)
+            // 2. As a separate service connecting to Fiber via RPC (fiber_rpc_url is configured)
+            if network_actor.is_none() && cch_config.fiber_rpc_url.is_none() {
+                return ExitMessage::err(
+                    "CCH requires either a running Fiber service or a configured fiber_rpc_url"
+                        .to_string(),
+                );
+            }
+
+            // In standalone mode (no Fiber service) the contracts context is never
+            // initialized, so the wrapped BTC type script must be supplied via config.
+            if network_actor.is_none() {
+                cch_config.validate_standalone().map_err(ExitMessage)?;
+            }
+
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;
-            let node_keypair = config
-                .fiber
-                .as_ref()
-                .ok_or_else(|| {
-                    ExitMessage(
-                        "failed to read secret key because fiber config is not available"
-                            .to_string(),
-                    )
-                })?
-                .read_or_generate_secret_key()
-                .map_err(|err| ExitMessage(format!("failed to read secret key: {}", err)))?;
+
+            let node_keypair =
+                if let Some(fiber_config) = config.fiber.as_ref() {
+                    Some(fiber_config.read_or_generate_secret_key().map_err(|err| {
+                        ExitMessage(format!("failed to read secret key: {}", err))
+                    })?)
+                } else {
+                    None
+                };
+
             match Actor::spawn_linked(
                 Some("cch actor".to_string()),
                 CchActor::default(),
@@ -338,8 +381,9 @@ pub async fn main() -> Result<(), ExitMessage> {
                     tracker: new_tokio_task_tracker(),
                     token: new_tokio_cancellation_token(),
                     network_actor: network_actor.clone(),
-                    node_keypair,
+                    currency: cch_currency,
                     store: store.clone(),
+                    node_keypair,
                 },
                 root_actor.get_cell(),
             )
@@ -357,9 +401,13 @@ pub async fn main() -> Result<(), ExitMessage> {
                     }
                 }
                 Ok((actor, _handle)) => {
-                    if let Some(port) = cch_fiber_store_event_port {
-                        actor.subscribe_to_port(&port);
+                    // In-process mode: subscribe CCH actor to store change port for change notifications
+                    if network_actor.is_some() {
+                        if let Some(ref port) = store_change_port {
+                            actor.subscribe_to_port(port);
+                        }
                     }
+                    // In separate service mode, the WebSocket subscription is set up in the actor's pre_start
 
                     info!("cch started successfully ...");
                     Some(actor)
@@ -370,8 +418,8 @@ pub async fn main() -> Result<(), ExitMessage> {
     };
 
     // Start rpc service
-    let rpc_server_handle = match (config.rpc, network_graph) {
-        (Some(rpc_config), Some(network_graph)) => {
+    let rpc_server_handle = match config.rpc {
+        Some(rpc_config) => {
             match start_rpc(
                 rpc_config,
                 config.ckb,
@@ -380,20 +428,21 @@ pub async fn main() -> Result<(), ExitMessage> {
                 cch_actor,
                 store,
                 network_graph,
-                #[cfg(debug_assertions)] ckb_chain_actor,
-                #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
+                root_actor.get_cell(),
+                store_change_port,
+                #[cfg(debug_assertions)]
+                ckb_chain_actor,
+                #[cfg(debug_assertions)]
+                rpc_dev_module_commitment_txs,
             )
-            .await {
+            .await
+            {
                 Ok(handle) => Some(handle),
                 Err(err) => {
                     return ExitMessage::err(format!("rpc server failed to start: {}", err));
                 }
             }
-        },
-        (Some(_), None) => return ExitMessage::err(
-            "RPC requires network graph in the fiber service which is not enabled in the config file"
-            .to_string()
-        ),
+        }
         _ => None,
     };
 
@@ -492,103 +541,6 @@ fn forward_event_to_actor(
         _ => {
             // ignore other non-watchtower related events
         }
-    }
-}
-
-async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
-    event: NetworkServiceEvent,
-    watchtower_client: &T,
-) {
-    match event {
-        NetworkServiceEvent::RemoteTxComplete(
-            _peer_id,
-            channel_id,
-            funding_udt_type_script,
-            local_settlement_key,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .create_watch_channel(CreateWatchChannelParams {
-                    channel_id,
-                    funding_udt_type_script: funding_udt_type_script.map(Into::into),
-                    local_settlement_key,
-                    remote_settlement_key,
-                    local_funding_pubkey,
-                    remote_funding_pubkey,
-                    settlement_data,
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::ChannelClosed(_, channel_id, _)
-        | NetworkServiceEvent::ChannelAbandon(channel_id) => {
-            watchtower_client
-                .remove_watch_channel(RemoveWatchChannelParams { channel_id })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::RevokeAndAckReceived(
-            _peer_id,
-            channel_id,
-            revocation_data,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .update_revocation(UpdateRevocationParams {
-                    channel_id,
-                    revocation_data,
-                    settlement_data,
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::RemoteCommitmentSigned(
-            _peer_id,
-            channel_id,
-            _commitment_tx,
-            settlement_data,
-        ) => {
-            watchtower_client
-                .update_local_settlement(UpdateLocalSettlementParams {
-                    channel_id,
-                    settlement_data,
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
-            watchtower_client
-                .create_preimage(CreatePreimageParams {
-                    payment_hash,
-                    preimage,
-                })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
-            watchtower_client
-                .remove_preimage(RemovePreimageParams { payment_hash })
-                .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
-        }
-        _ => {
-            // ignore other non-watchtower related events
-        }
-    }
-}
-
-impl Debug for ExitMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Exit because {}", self.0)
-    }
-}
-
-impl ExitMessage {
-    pub fn err(message: String) -> Result<(), ExitMessage> {
-        Err(ExitMessage(message))
     }
 }
 

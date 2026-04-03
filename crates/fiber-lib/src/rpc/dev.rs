@@ -1,27 +1,27 @@
 // #[cfg(not(target_arch = "wasm32"))]
 // use crate::watchtower::WatchtowerStore;
-use crate::{
-    fiber::{
-        channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
-        hash_algorithm::HashAlgorithm,
-        serde_utils::{U128Hex, U64Hex},
-        types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET},
-        NetworkActorCommand, NetworkActorMessage,
-    },
-    handle_actor_cast,
+use crate::fiber::{
+    channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
+    NetworkActorCommand, NetworkActorMessage,
 };
+use crate::rpc::utils::rpc_error;
+use ckb_sdk::util::blake160;
 use ckb_types::core::TransactionView;
+use ckb_types::prelude::{Entity, Unpack};
+use fiber_json_types::serde_utils::Hash256 as JsonHash256;
+use fiber_types::{
+    AddTlcCommand, Hash256, HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode,
+    NO_SHARED_SECRET,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
-use jsonrpsee::types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned};
+use jsonrpsee::types::ErrorObjectOwned;
 
 use ractor::call;
 use std::str::FromStr;
 use std::{collections::HashMap, sync::Arc};
 
 use ractor::{call_t, ActorRef};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use tokio::sync::RwLock;
 
 use crate::{
@@ -29,85 +29,11 @@ use crate::{
     log_and_error,
 };
 
-// TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
-#[derive(Serialize, Deserialize, Debug)]
-pub struct CommitmentSignedParams {
-    /// The channel ID of the channel to send the commitment_signed message to
-    pub channel_id: Hash256,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AddTlcParams {
-    /// The channel ID of the channel to add the TLC to
-    pub channel_id: Hash256,
-    /// The amount of the TLC
-    #[serde_as(as = "U128Hex")]
-    pub amount: u128,
-    /// The payment hash of the TLC
-    pub payment_hash: Hash256,
-    /// The expiry of the TLC
-    #[serde_as(as = "U64Hex")]
-    pub expiry: u64,
-    /// The hash algorithm of the TLC
-    pub hash_algorithm: Option<HashAlgorithm>,
-}
-
-#[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AddTlcResult {
-    /// The ID of the TLC
-    #[serde_as(as = "U64Hex")]
-    pub tlc_id: u64,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RemoveTlcParams {
-    /// The channel ID of the channel to remove the TLC from
-    pub channel_id: Hash256,
-    #[serde_as(as = "U64Hex")]
-    /// The ID of the TLC to remove
-    pub tlc_id: u64,
-    /// The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
-    pub reason: RemoveTlcReason,
-}
-
-/// The reason for removing a TLC
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum RemoveTlcReason {
-    /// The reason for removing the TLC is that it was fulfilled
-    RemoveTlcFulfill { payment_preimage: Hash256 },
-    /// The reason for removing the TLC is that it failed
-    RemoveTlcFail { error_code: String },
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SubmitCommitmentTransactionParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-    /// Commitment number
-    #[serde_as(as = "U64Hex")]
-    pub commitment_number: u64,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-
-pub struct SubmitCommitmentTransactionResult {
-    /// Submitted commitment transaction hash
-    pub tx_hash: Hash256,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CheckChannelShutdownParams {
-    /// Channel ID
-    pub channel_id: Hash256,
-}
+pub use fiber_json_types::{
+    AddTlcParams, AddTlcResult, CheckChannelShutdownParams, CommitmentSignedParams,
+    RemoveTlcParams, RemoveTlcReason, SignExternalFundingTxParams, SignExternalFundingTxResult,
+    SubmitCommitmentTransactionParams, SubmitCommitmentTransactionResult,
+};
 
 /// RPC module for development purposes, this module is not intended to be used in production.
 /// This module will be disabled in release build.
@@ -142,9 +68,21 @@ trait DevRpc {
         &self,
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned>;
+
+    /// Sign an external funding transaction with a provided private key.
+    ///
+    /// This is a development-only RPC that signs an unsigned funding transaction
+    /// (returned from `open_channel_with_external_funding`) using the provided private key.
+    /// The signed transaction can then be submitted via `submit_signed_funding_tx`.
+    #[method(name = "sign_external_funding_tx")]
+    async fn sign_external_funding_tx(
+        &self,
+        params: SignExternalFundingTxParams,
+    ) -> Result<SignExternalFundingTxResult, ErrorObjectOwned>;
 }
 
 pub struct DevRpcServerImpl {
+    ckb_rpc_url: String,
     ckb_chain_actor: ActorRef<CkbChainMessage>,
     network_actor: ActorRef<NetworkActorMessage>,
     commitment_txs: Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -152,11 +90,13 @@ pub struct DevRpcServerImpl {
 
 impl DevRpcServerImpl {
     pub fn new(
+        ckb_rpc_url: String,
         ckb_chain_actor: ActorRef<CkbChainMessage>,
         network_actor: ActorRef<NetworkActorMessage>,
         commitment_txs: Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
     ) -> Self {
         Self {
+            ckb_rpc_url,
             ckb_chain_actor,
             network_actor,
             commitment_txs,
@@ -199,33 +139,50 @@ impl DevRpcServer for DevRpcServerImpl {
     ) -> Result<(), ErrorObjectOwned> {
         self.check_channel_shutdown(params).await
     }
+
+    async fn sign_external_funding_tx(
+        &self,
+        params: SignExternalFundingTxParams,
+    ) -> Result<SignExternalFundingTxResult, ErrorObjectOwned> {
+        self.sign_external_funding_tx(params).await
+    }
 }
 impl DevRpcServerImpl {
     pub async fn commitment_signed(
         &self,
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id: params.channel_id,
-                command: ChannelCommand::CommitmentSigned(),
-            },
-        ));
-        handle_actor_cast!(self.network_actor, message, params)
+        let channel_id = params.channel_id.into();
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::CommitmentSigned(Some(rpc_reply)),
+                },
+            ))
+        };
+        handle_actor_call!(self.network_actor, message, params)
     }
 
     pub async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
+        let channel_id = params.channel_id.into();
+        let payment_hash = params.payment_hash.into();
+        let hash_algorithm = params
+            .hash_algorithm
+            .map(HashAlgorithm::from)
+            .unwrap_or_default();
+
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
-                    channel_id: params.channel_id,
+                    channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
                             amount: params.amount,
-                            payment_hash: params.payment_hash,
+                            payment_hash,
                             attempt_id: None,
                             expiry: params.expiry,
-                            hash_algorithm: params.hash_algorithm.unwrap_or_default(),
+                            hash_algorithm,
                             onion_packet: None,
                             shared_secret: NO_SHARED_SECRET,
                             is_trampoline_hop: false,
@@ -242,6 +199,7 @@ impl DevRpcServerImpl {
     }
 
     pub async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
+        let channel_id = params.channel_id.into();
         let err_code = match &params.reason {
             RemoveTlcReason::RemoveTlcFail { error_code } => {
                 let Ok(err) = TlcErrorCode::from_str(error_code) else {
@@ -251,33 +209,31 @@ impl DevRpcServerImpl {
             }
             _ => None,
         };
+        let reason = match &params.reason {
+            RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
+                let preimage = (*payment_preimage).into();
+                crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                    payment_preimage: preimage,
+                })
+            }
+            RemoveTlcReason::RemoveTlcFail { .. } => {
+                // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
+                crate::fiber::types::RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(err_code.expect("expect error code")),
+                    // Do not encrypt the error message when removing the TLC via RPC.
+                    // TODO: use tlc id to look up the shared secret in the store
+                    &NO_SHARED_SECRET,
+                ))
+            }
+        };
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
-                    channel_id: params.channel_id,
+                    channel_id,
                     command: ChannelCommand::RemoveTlc(
                         RemoveTlcCommand {
                             id: params.tlc_id,
-                            reason: match &params.reason {
-                                RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
-                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(
-                                        RemoveTlcFulfill {
-                                            payment_preimage: *payment_preimage,
-                                        },
-                                    )
-                                }
-                                RemoveTlcReason::RemoveTlcFail { .. } => {
-                                    // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
-                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
-                                        TlcErrPacket::new(
-                                            TlcErr::new(err_code.expect("expect error code")),
-                                            // Do not encrypt the error message when removing the TLC via RPC.
-                                            // TODO: use tlc id to look up the shared secret in the store
-                                            &NO_SHARED_SECRET,
-                                        ),
-                                    )
-                                }
-                            },
+                            reason,
                         },
                         rpc_reply,
                     ),
@@ -292,11 +248,12 @@ impl DevRpcServerImpl {
         &self,
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned> {
+        let channel_id = params.channel_id.into();
         if let Some(tx) = self
             .commitment_txs
             .read()
             .await
-            .get(&(params.channel_id, params.commitment_number))
+            .get(&(channel_id, params.commitment_number))
         {
             if let Err(err) = call_t!(
                 &self.ckb_chain_actor,
@@ -306,21 +263,18 @@ impl DevRpcServerImpl {
             )
             .unwrap()
             {
-                Err(ErrorObjectOwned::owned(
-                    CALL_EXECUTION_FAILED_CODE,
-                    err.to_string(),
-                    Some(params),
-                ))
+                Err(rpc_error(err.to_string(), params))
             } else {
                 Ok(SubmitCommitmentTransactionResult {
-                    tx_hash: tx.hash().into(),
+                    tx_hash: JsonHash256(
+                        tx.hash().as_slice().try_into().expect("Byte32 is 32 bytes"),
+                    ),
                 })
             }
         } else {
-            Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
+            Err(rpc_error(
                 "Commitment transaction not found".to_string(),
-                Some(params),
+                params,
             ))
         }
     }
@@ -329,10 +283,183 @@ impl DevRpcServerImpl {
         &self,
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(
-            params.channel_id,
-        ));
+        let channel_id = params.channel_id.into();
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(
+                channel_id, rpc_reply,
+            ))
+        };
 
-        handle_actor_cast!(self.network_actor, message, params)
+        handle_actor_call!(self.network_actor, message, params)
+    }
+
+    pub async fn sign_external_funding_tx(
+        &self,
+        params: SignExternalFundingTxParams,
+    ) -> Result<SignExternalFundingTxResult, ErrorObjectOwned> {
+        use ckb_sdk::{
+            traits::{SecpCkbRawKeySigner, Signer},
+            types::ScriptGroup,
+            unlock::generate_message,
+        };
+        use ckb_types::{
+            bytes::Bytes,
+            packed::{self, WitnessArgs},
+            prelude::{Builder, Entity, IntoTransactionView, Pack},
+        };
+        use secp256k1::SecretKey;
+        use std::collections::hash_map::Entry;
+
+        // Parse the private key
+        let private_key_hex = params
+            .private_key
+            .strip_prefix("0x")
+            .unwrap_or(&params.private_key);
+        let private_key_bytes = hex::decode(private_key_hex)
+            .map_err(|e| rpc_error(format!("invalid private key hex: {}", e), &params))?;
+        if private_key_bytes.len() != 32 {
+            return Err(rpc_error(
+                format!(
+                    "invalid private key length: expected 32 bytes, got {}",
+                    private_key_bytes.len()
+                ),
+                &params,
+            ));
+        }
+        let secret_key = SecretKey::from_slice(&private_key_bytes)
+            .map_err(|e| rpc_error(format!("invalid private key: {}", e), &params))?;
+
+        // Convert the JSON transaction to a packed transaction
+        let packed_tx: ckb_types::packed::Transaction = params.unsigned_funding_tx.clone().into();
+        let tx_view = packed_tx.into_view();
+
+        // Create signer for secp256k1 sighash
+        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![std::str::FromStr::from_str(
+            hex::encode(secret_key.as_ref()).as_ref(),
+        )
+        .map_err(|e| rpc_error(format!("failed to create signer: {}", e), &params))?]);
+
+        let pubkey_hash = blake160(
+            secret_key
+                .public_key(secp256k1::SECP256K1)
+                .serialize()
+                .as_ref(),
+        );
+        let ckb_client = crate::ckb::config::new_ckb_rpc_async_client(&self.ckb_rpc_url);
+
+        // Resolve each input's previous output lock and keep only the secp sighash locks
+        // owned by the provided private key. Inputs sharing the same lock script must be
+        // signed as one script group.
+        let mut signing_groups: Vec<ScriptGroup> = Vec::new();
+        let mut group_index_by_lock: HashMap<Vec<u8>, usize> = HashMap::new();
+        for (input_idx, input) in tx_view.inputs().into_iter().enumerate() {
+            let previous_output = input.previous_output();
+            let tx_hash: ckb_types::H256 = previous_output.tx_hash().unpack();
+            let output_index: u32 = previous_output.index().unpack();
+            let output_index = output_index as usize;
+            let previous_tx = ckb_client
+                .get_transaction(tx_hash.clone())
+                .await
+                .map_err(|e| {
+                    rpc_error(
+                        format!("failed to fetch previous transaction: {}", e),
+                        &params,
+                    )
+                })?;
+            let previous_tx = previous_tx.and_then(|response| {
+                response.transaction.map(|tx| match tx.inner {
+                    ckb_jsonrpc_types::Either::Left(json) => {
+                        let packed_tx: packed::Transaction = json.inner.into();
+                        packed_tx.into_view()
+                    }
+                    ckb_jsonrpc_types::Either::Right(_) => {
+                        panic!("bytes response format not used");
+                    }
+                })
+            });
+            let previous_tx = previous_tx.ok_or_else(|| {
+                rpc_error(
+                    format!(
+                        "previous transaction not found for input {}: {}",
+                        input_idx, tx_hash
+                    ),
+                    &params,
+                )
+            })?;
+            let previous_output = previous_tx.outputs().get(output_index).ok_or_else(|| {
+                rpc_error(
+                    format!(
+                        "previous output index {} out of bounds for input {}",
+                        output_index, input_idx
+                    ),
+                    &params,
+                )
+            })?;
+            let lock_script = previous_output.lock();
+            if lock_script.args().raw_data().as_ref() != pubkey_hash.as_bytes() {
+                continue;
+            }
+
+            let lock_script_key = lock_script.as_slice().to_vec();
+            match group_index_by_lock.entry(lock_script_key) {
+                Entry::Occupied(entry) => {
+                    signing_groups[*entry.get()].input_indices.push(input_idx);
+                }
+                Entry::Vacant(entry) => {
+                    let mut script_group = ScriptGroup::from_lock_script(&lock_script);
+                    script_group.input_indices.push(input_idx);
+                    let group_index = signing_groups.len();
+                    signing_groups.push(script_group);
+                    entry.insert(group_index);
+                }
+            }
+        }
+
+        if signing_groups.is_empty() {
+            return Err(rpc_error(
+                "no transaction inputs matched the provided private key".to_string(),
+                &params,
+            ));
+        }
+
+        let mut witnesses: Vec<packed::Bytes> = tx_view.witnesses().into_iter().collect();
+        for script_group in signing_groups {
+            let input_idx = *script_group
+                .input_indices
+                .first()
+                .expect("script group should contain at least one input");
+            let zero_lock = Bytes::from(vec![0u8; 65]);
+            let message = generate_message(&tx_view, &script_group, zero_lock).map_err(|e| {
+                rpc_error(
+                    format!("failed to generate sighash message: {}", e),
+                    &params,
+                )
+            })?;
+
+            let signature = signer
+                .sign(pubkey_hash.as_bytes(), &message, true, &tx_view)
+                .map_err(|e| rpc_error(format!("failed to sign message: {}", e), &params))?;
+
+            while witnesses.len() <= input_idx {
+                witnesses.push(Default::default());
+            }
+
+            let witness_data = witnesses[input_idx].raw_data();
+            let witness: WitnessArgs = WitnessArgs::from_slice(&witness_data).unwrap_or_default();
+
+            let updated_witness = witness.as_builder().lock(Some(signature).pack()).build();
+            witnesses[input_idx] = updated_witness.as_bytes().pack();
+        }
+
+        // Build the signed transaction
+        let signed_tx = tx_view
+            .as_advanced_builder()
+            .set_witnesses(witnesses)
+            .build();
+
+        // Convert back to JSON transaction
+        let signed_funding_tx = ckb_jsonrpc_types::Transaction::from(signed_tx.data());
+
+        Ok(SignExternalFundingTxResult { signed_funding_tx })
     }
 }

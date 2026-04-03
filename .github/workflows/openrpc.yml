@@ -1,0 +1,17 @@
+on: [push, pull_request]
+
+name: Test OpenRPC Spec generating
+
+jobs:
+  generating:
+    name: Generate OpenRPC Spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: openrpc-${{ runner.os }}
+      - run: |
+          cd openrpc-json-generator
+          cargo run --locked
