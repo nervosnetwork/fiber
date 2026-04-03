@@ -8,6 +8,7 @@ env:
 permissions:
   contents: write
   id-token: write
+  packages: write
 jobs:
   release-npm:
     name: Build & Release fiber-js
@@ -147,3 +148,53 @@ jobs:
         draft: true
         files: |
           ${{ steps.get_package.outputs.PKGNAME }}
+  release-docker:
+    name: Build & Publish Docker Images
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Checkout the Repository
+      uses: actions/checkout@v6
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Extract Docker metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: |
+          ghcr.io/${{ github.repository }}
+          nervos/fiber
+        flavor: |
+          latest=false
+        tags: |
+          type=raw,value=edge,enable=${{ github.ref == 'refs/heads/playground/release' }}
+          type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+          type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+          type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+          type=sha,format=short
+    - name: Build and Push Docker Images
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./docker/Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        provenance: true
+        sbom: true
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        labels: ${{ steps.meta.outputs.labels }}
+        tags: ${{ steps.meta.outputs.tags }}
