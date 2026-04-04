@@ -2702,10 +2702,34 @@ where
         let expect_expiry = now_timestamp_as_millis_u64()
             + epoch_delay_milliseconds
             + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
+
+        let queued_remove_tlc_ids: HashSet<TLCId> = state
+            .retryable_tlc_operations
+            .iter()
+            .filter_map(|op| {
+                if let RetryableTlcOperation::RemoveTlc(tlc_id, _) = op {
+                    Some(*tlc_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
         let expired_tlcs: Vec<_> = state
             .tlc_state
             .get_committed_received_tlcs()
             .filter(|tlc| tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry)
+            .filter(|tlc| {
+                if queued_remove_tlc_ids.contains(&tlc.tlc_id) {
+                    debug!(
+                        "Skipping received tlc auto-expiry for channel {:?} tlc {:?}: retryable remove already queued",
+                        state.get_id(),
+                        tlc.tlc_id
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
             .collect();
         for tlc in expired_tlcs {
             info!(
