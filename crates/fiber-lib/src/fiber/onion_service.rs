@@ -67,7 +67,7 @@ impl OnionService {
         Ok((OnionService { config, key }, onion_multi_addr))
     }
 
-    /// Start the onion service. This will loop and reconnect if the Tor connection drops.
+    /// Start the onion service. This will loop and reconnect if the connection to Tor Server drops.
     /// The provided `cancel_token` can be used to gracefully shut down.
     /// When Tor reconnects after a failure, a notification is sent via `reconnect_notify`
     /// so the caller can trigger peer reconnection.
