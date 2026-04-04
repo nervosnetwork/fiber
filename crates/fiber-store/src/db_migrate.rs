@@ -87,7 +87,7 @@ impl<'a> DbMigrate<'a> {
                                 .to_string(),
                         );
                     }
-                    return Err(format!("Fiber need to run some database migrations, please run `fnn-migrate -p {}` to start migrations.", path.as_ref().display()));
+                    return Err(format!("Fiber need to run some database migrations, please run `fnn-migrate -d {}` to start migrations.", path.as_ref().display()));
                 }
             }
         }
