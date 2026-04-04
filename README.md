@@ -88,7 +88,7 @@ If you want to keep the channel state, you may try to migrate the storage format
 3. Run the fnn-migrate (it can be found in the release binary package) to migrate the storage format:
 
 ```
-fnn-migrate -d /folder-to/my-fnn
+fnn-migrate -d /folder-to/my-fnn/fiber
 ```
 
 4. Replace the fnn binary with the new version and start the node again.
