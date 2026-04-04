@@ -905,7 +905,11 @@ async fn test_rpc_shutdown_following_disconnect() {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if let Err(err) = &res {
-            assert!(err.contains("Channel not found error"));
+            assert!(
+                err.contains("Channel not found error")
+                    || err.contains("Trying to send shutdown message while in invalid state"),
+                "unexpected shutdown error after disconnect: {err}"
+            );
             break;
         }
     }

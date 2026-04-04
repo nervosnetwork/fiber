@@ -258,6 +258,13 @@ pub enum ChannelState {
     Closed(CloseFlags),
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelConnectivityState {
+    Online,
+    Offline,
+    Syncing,
+}
+
 impl ChannelState {
     pub fn is_awaiting_external_funding(&self) -> bool {
         matches!(
@@ -1525,6 +1532,7 @@ pub struct ChannelActorData {
     /// A flag to indicate whether the channel is reestablishing,
     /// we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
+    pub connectivity_state: ChannelConnectivityState,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
     pub created_at: SystemTime,

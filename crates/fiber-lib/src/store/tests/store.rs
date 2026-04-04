@@ -38,6 +38,7 @@ use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
 use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::CloseFlags;
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
@@ -663,6 +664,7 @@ fn test_channel_actor_state_store() {
             local_constraints: ChannelConstraints::default(),
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
+            connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![TlcReplayUpdate::Add(AddTlc {
                 channel_id,
@@ -724,9 +726,10 @@ fn test_channel_actor_state_store() {
         .is_none());
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_serde_channel_actor_state_ciborium() {
+fn sample_channel_actor_state(
+    state: ChannelState,
+    shutdown_transaction_hash: Option<H256>,
+) -> ChannelActorState {
     let seed = [0u8; 32];
     let signer = InMemorySigner::generate_from_seed(&seed);
 
@@ -737,9 +740,9 @@ fn test_serde_channel_actor_state_ciborium() {
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
 
-    let state = ChannelActorState {
+    ChannelActorState {
         core: ChannelActorData {
-            state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+            state,
             public_channel_info: Some(PublicChannelInfo {
                 local_channel_announcement_signature: Some((
                     mock_ecdsa_signature(),
@@ -799,13 +802,14 @@ fn test_serde_channel_actor_state_ciborium() {
             ],
             local_shutdown_info: None,
             remote_shutdown_info: None,
-            shutdown_transaction_hash: None,
+            shutdown_transaction_hash,
             local_reserved_ckb_amount: 100,
             remote_reserved_ckb_amount: 100,
             latest_commitment_transaction: None,
             local_constraints: ChannelConstraints::default(),
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
+            connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
@@ -820,12 +824,57 @@ fn test_serde_channel_actor_state_ciborium() {
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
         private_key: None,
-    };
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_serde_channel_actor_state_ciborium() {
+    let state = sample_channel_actor_state(
+        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+        None,
+    );
 
     let mut serialized = Vec::new();
     ciborium::into_writer(&state, &mut serialized).unwrap();
     let _new_channel_state: ChannelActorState =
         ciborium::from_reader(serialized.as_slice()).expect("deserialize to new state");
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_closed_onchain_settlement_state_round_trips() {
+    let state = sample_channel_actor_state(
+        ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        ),
+        Some(H256::default()),
+    );
+    let (store, _dir) = generate_store();
+
+    store.insert_channel_actor_state(state.clone());
+
+    let restored = store
+        .get_channel_actor_state(&state.id)
+        .expect("restored closed channel state");
+    assert!(matches!(
+        restored.state,
+        ChannelState::Closed(flags)
+            if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+    ));
+    assert_eq!(
+        restored.shutdown_transaction_hash,
+        state.shutdown_transaction_hash
+    );
+    assert!(restored.waiting_peer_response.is_none());
+    assert!(restored.network.is_none());
+    assert!(restored.scheduled_channel_update_handle.is_none());
+    assert!(restored.pending_notify_settle_tlcs.is_empty());
+    assert!(!restored.pending_reestablish_channel_ready);
+    assert!(!restored.defer_peer_tlc_updates);
+    assert!(restored.deferred_peer_tlc_updates.is_empty());
+    assert!(restored.private_key.is_none());
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]

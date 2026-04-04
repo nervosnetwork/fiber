@@ -34,6 +34,9 @@ case "$testcase_name" in
     export FIBER_FUNDING_TX_SHELL_BUILDER="$(dirname "$script_dir")/funding-tx-builder/target/debug/funding-tx-builder ${EXTRA_BRU_ARGS:-}"
     echo "FIBER_FUNDING_TX_SHELL_BUILDER=\"$FIBER_FUNDING_TX_SHELL_BUILDER\""
     ;;
+  "e2e/watchtower/force-close-preimage-multiple")
+    export FIBER_ENABLE_PEER_RECONNECT_BACKOFF=false
+    ;;
   "unit")
     start_node_ids=(3)
     ;;

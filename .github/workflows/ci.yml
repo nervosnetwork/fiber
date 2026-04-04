@@ -7,6 +7,30 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  changes:
+    name: Detect channel_restart_stress Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      channel_restart_stress: ${{ steps.filter.outputs.channel_restart_stress }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            channel_restart_stress:
+              - '.github/workflows/ci.yml'
+              - '.config/nextest.toml'
+              - 'crates/fiber-lib/src/fiber/channel.rs'
+              - 'crates/fiber-lib/src/fiber/network.rs'
+              - 'crates/fiber-lib/src/fiber/payment.rs'
+              - 'crates/fiber-lib/src/fiber/tests/channel_restart_stress.rs'
+              - 'crates/fiber-lib/src/fiber/tests/utils.rs'
+
   check:
     name: Check
     runs-on: ubuntu-latest
@@ -56,6 +80,27 @@ jobs:
       - name: Run tests (sqlite)
         run: |
           RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast --no-default-features --features sqlite
+        env:
+          RUST_TEST_THREADS: 2
+
+  channel_restart_stress:
+    name: channel_restart_stress
+    needs: [changes]
+    if: needs.changes.outputs.channel_restart_stress == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: channel-restart-stress-${{ runner.os }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Run channel_restart_stress tests
+        run: |
+          RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run -p fnn --lib --features rocksdb --run-ignored only --no-fail-fast -j 1 -- fiber::tests::channel_restart_stress::test_node_restart --exact
         env:
           RUST_TEST_THREADS: 2
 

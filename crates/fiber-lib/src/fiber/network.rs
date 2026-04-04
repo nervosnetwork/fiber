@@ -75,8 +75,9 @@ use crate::ckb::contracts::{
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
     tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, OpenChannelWithExternalFundingParameter, ShutdownCommand,
-    TxCollaborationCommand, TxUpdateCommand, MAX_TLC_NUMBER_IN_FLIGHT,
+    ChannelInitializationOperation, OfflineChannelRestoreMode,
+    OpenChannelWithExternalFundingParameter, TxCollaborationCommand, TxUpdateCommand,
+    MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
@@ -86,13 +87,14 @@ use crate::fiber::payment::{
     SendPaymentDataBuilder, SendPaymentWithRouterCommand,
 };
 use crate::fiber::types::{
-    FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort, TxSignatures,
+    pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
+    TxSignatures,
 };
 use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
-use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
+use crate::utils::actor::ActorHandleLogGuard;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
@@ -142,14 +144,20 @@ const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(1200);
 // The duration for which we will check all channels.
 #[cfg(debug_assertions)]
 // use a short interval for debugging build
-const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
 #[cfg(not(debug_assertions))]
-const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
 const CHECK_CHANNELS_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
 
 // The duration for which we will check peer init messages.
 const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
+
+#[cfg(debug_assertions)]
+const PEER_RECONNECT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+#[cfg(not(debug_assertions))]
+const PEER_RECONNECT_BACKOFF_BASE: Duration = Duration::from_secs(2);
+const PEER_RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 // While creating a network graph from the gossip messages, we will load current gossip messages
 // in the store and process them. We will load all current messages and get the latest cursor.
@@ -236,6 +244,121 @@ pub(crate) fn check_chain_hash(chain_hash: &Hash256) -> Result<(), Error> {
     }
 }
 
+fn compute_peer_reconnect_delay(attempt: u32) -> Duration {
+    let shift = attempt.min(10);
+    let factor = 1u32 << shift;
+    PEER_RECONNECT_BACKOFF_BASE
+        .checked_mul(factor)
+        .unwrap_or(PEER_RECONNECT_BACKOFF_MAX)
+        .min(PEER_RECONNECT_BACKOFF_MAX)
+}
+
+/// The index of active channels for each peer.
+/// Note we maintain peer to channel index no matter the peer is connected or not.
+pub struct PeerChannelIndex {
+    // Map from peer pubkey to the set of active channel ids
+    peer_channels_map: HashMap<Pubkey, HashSet<Hash256>>,
+    // Map from peer id to pubkey, used for dialing with peer id and maintaining peer reconnect backoff.
+    peer_id_to_pubkey_map: HashMap<PeerId, Pubkey>,
+    // Map from channel id to peer pubkey.
+    channel_id_to_peer_map: HashMap<Hash256, Pubkey>,
+}
+
+impl PeerChannelIndex {
+    fn build<S>(store: &S) -> Self
+    where
+        S: ChannelActorStateStore,
+    {
+        let mut peer_channels_map = HashMap::<Pubkey, HashSet<Hash256>>::new();
+        for (pubkey, channel_id, _channel_state) in store.get_active_channel_states(None) {
+            peer_channels_map
+                .entry(pubkey)
+                .or_default()
+                .insert(channel_id);
+        }
+        let peer_id_to_pubkey_map = peer_channels_map
+            .keys()
+            .map(|pubkey| {
+                let peer_id = pubkey_to_tentacle(*pubkey).peer_id();
+                (peer_id, *pubkey)
+            })
+            .collect();
+        let channel_id_to_peer_map = peer_channels_map
+            .iter()
+            .flat_map(|(pubkey, channels)| {
+                channels
+                    .iter()
+                    .map(move |channel_id| (*channel_id, *pubkey))
+            })
+            .collect();
+        Self {
+            peer_channels_map,
+            peer_id_to_pubkey_map,
+            channel_id_to_peer_map,
+        }
+    }
+
+    fn add_channel(&mut self, pubkey: Pubkey, channel_id: Hash256) {
+        self.peer_channels_map
+            .entry(pubkey)
+            .or_default()
+            .insert(channel_id);
+        let peer_id = pubkey_to_tentacle(pubkey).peer_id();
+        self.peer_id_to_pubkey_map.entry(peer_id).or_insert(pubkey);
+        self.channel_id_to_peer_map
+            .entry(channel_id)
+            .or_insert(pubkey);
+    }
+
+    fn remove_channel(&mut self, pubkey: &Pubkey, channel_id: &Hash256) {
+        let mut is_empty = false;
+        if let Some(channels) = self.peer_channels_map.get_mut(pubkey) {
+            channels.remove(channel_id);
+            if channels.is_empty() {
+                is_empty = true;
+            }
+        }
+        self.channel_id_to_peer_map.remove(channel_id);
+        if is_empty {
+            let peer_id = pubkey_to_tentacle(*pubkey).peer_id();
+            self.peer_channels_map.remove(pubkey);
+            self.peer_id_to_pubkey_map.remove(&peer_id);
+        }
+    }
+
+    fn has_channels(&self, pubkey: &Pubkey) -> bool {
+        self.peer_channels_map.contains_key(pubkey)
+    }
+
+    fn has_channel(&self, pubkey: &Pubkey, channel_id: &Hash256) -> bool {
+        self.peer_channels_map
+            .get(pubkey)
+            .map(|channels| channels.contains(channel_id))
+            .unwrap_or(false)
+    }
+
+    fn get_channels(&self, pubkey: &Pubkey) -> Option<&HashSet<Hash256>> {
+        self.peer_channels_map.get(pubkey)
+    }
+
+    fn replace_channel(&mut self, pubkey: Pubkey, old: Hash256, new: Hash256) {
+        if let Some(channels) = self.peer_channels_map.get_mut(&pubkey) {
+            channels.remove(&old);
+            channels.insert(new);
+            self.channel_id_to_peer_map.remove(&old);
+            self.channel_id_to_peer_map.insert(new, pubkey);
+        }
+    }
+
+    fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
+        self.peer_id_to_pubkey_map.get(peer_id).cloned()
+    }
+
+    fn get_peer_by_channel_id(&self, channel_id: &Hash256) -> Option<Pubkey> {
+        self.channel_id_to_peer_map.get(channel_id).cloned()
+    }
+}
+
 #[derive(Debug)]
 pub enum PeerDisconnectReason {
     /// User request disconnection.
@@ -244,6 +367,12 @@ pub enum PeerDisconnectReason {
     InitMessageTimeout,
     /// Chain hash mismatch.
     ChainHashMismatch,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PeerReconnectTrigger {
+    Disconnected,
+    DialError,
 }
 
 #[derive(Debug)]
@@ -349,6 +478,8 @@ pub enum NetworkActorCommand {
         PeerDisconnectReason,
         Option<RpcReplyPort<Result<(), String>>>,
     ),
+    SeedPeerReconnectBackoff(PeerId, PeerReconnectTrigger),
+    PeerReconnectBackoffTick(PeerId, u32),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
     SavePeerAddress(Multiaddr),
@@ -356,7 +487,7 @@ pub enum NetworkActorCommand {
     RemovePendingSavePeerAddress(PeerId),
     // We need to maintain a certain number of peers connections to keep the network running.
     MaintainConnections,
-    // Check all channels and see if we need to force close any of them or settle down tlc with preimage.
+    // Check hold tlcs that have expired and need to be removed.
     CheckChannels,
     // Timeout a hold tlc
     TimeoutHoldTlc(Hash256, Hash256, u64),
@@ -607,6 +738,10 @@ pub enum NetworkServiceEvent {
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(Pubkey, Hash256, OutPoint),
+    // The channel connectivity is online and normal operations may resume.
+    ChannelOnline(Pubkey, Hash256, OutPoint),
+    // The channel connectivity is offline and normal operations are paused.
+    ChannelOffline(Pubkey, Hash256, OutPoint),
     ChannelClosed(Pubkey, Hash256, Byte32),
     ChannelAbandon(Hash256),
     ChannelFundingAborted(Hash256),
@@ -882,42 +1017,22 @@ where
                 state.check_feature_compatibility(&peer_pubkey)?;
                 let channel_id = msg.get_channel_id();
                 let mut found = state
-                    .peer_session_map
-                    .get(&peer_pubkey)
-                    .and_then(|peer| state.session_channels_map.get(&peer.session_id))
-                    .is_some_and(|channels| channels.contains(&channel_id));
+                    .peer_channel_index
+                    .has_channel(&peer_pubkey, &channel_id);
 
-                // If a channel message arrives for a channel not yet tracked in session_channels_map
-                // (e.g. after reconnect), attempt to reestablish it on-the-fly so the message
-                // is not dropped. This can happen when the peer sends a message before we have
-                // completed the reestablish handshake.
-                if !found {
-                    if let Some(session) = state
-                        .peer_session_map
-                        .get(&peer_pubkey)
-                        .map(|p| p.session_id)
-                    {
-                        if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id)
+                // If a channel message arrives before the live actor has processed the reconnect,
+                // attempt to nudge reestablishment on-the-fly so the message is not dropped.
+                if !found && state.peer_session_map.contains_key(&peer_pubkey) {
+                    if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id) {
+                        let _peer_id =
+                            PeerId::from_public_key(&super::types::pubkey_to_tentacle(peer_pubkey));
+                        if !actor_state.is_closed()
+                            && actor_state.get_remote_pubkey() == peer_pubkey
                         {
-                            let _peer_id = PeerId::from_public_key(
-                                &super::types::pubkey_to_tentacle(peer_pubkey),
-                            );
-                            if !actor_state.is_closed()
-                                && actor_state.get_remote_pubkey() == peer_pubkey
-                            {
-                                let channel_ready = state.channels.contains_key(&channel_id)
-                                    || state
-                                        .reestablish_channel(peer_pubkey, channel_id)
-                                        .await
-                                        .is_ok();
-                                if channel_ready {
-                                    state
-                                        .session_channels_map
-                                        .entry(session)
-                                        .or_default()
-                                        .insert(channel_id);
-                                    found = true;
-                                }
+                            let channel_ready = state.channels.contains_key(&channel_id)
+                                || state.reestablish_channel(channel_id).await.is_ok();
+                            if channel_ready {
+                                found = true;
                             }
                         }
                     }
@@ -925,9 +1040,9 @@ where
 
                 if !found {
                     error!(
-                            "Received a channel message for a channel that is not created with peer: {:?}",
-                            channel_id
-                        );
+                        "Received a channel message for a channel that is not created with peer: {:?}",
+                        channel_id
+                    );
                     return Err(Error::ChannelNotFound(channel_id));
                 }
                 state
@@ -959,7 +1074,7 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorEvent::PeerDisconnected(pubkey, session) => {
-                state.on_peer_disconnected(pubkey);
+                state.on_peer_disconnected(pubkey, session.id);
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_notification(
@@ -980,44 +1095,39 @@ where
                 funding_fee_rate,
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
-                if let Some(session) = state.peer_session_map.get(&pubkey).map(|p| p.session_id) {
-                    if let Some(channel) = state.channels.remove(&old) {
-                        debug!("Channel accepted: {:?} -> {:?}", old, new);
-                        state.channels.insert(new, channel);
-                        if let Some(set) = state.session_channels_map.get_mut(&session) {
-                            set.remove(&old);
-                            set.insert(new);
-                        };
+                if let Some(channel) = state.channels.remove(&old) {
+                    debug!("Channel accepted: {:?} -> {:?}", old, new);
+                    state.channels.insert(new, channel);
+                    state.peer_channel_index.replace_channel(pubkey, old, new);
 
-                        // Update the opening record: rename from temp ID to final ID and advance status.
-                        if let Some(mut record) = state.store.get_channel_open_record(&old) {
-                            state.store.delete_channel_open_record(&old);
-                            record.channel_id = new;
-                            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
-                            state.store.insert_channel_open_record(record);
-                        }
-
-                        debug!("Starting funding channel");
-                        // TODO: Here we implies the one who receives AcceptChannel message
-                        //  (i.e. the channel initiator) will send TxUpdate message first.
-                        myself
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::UpdateChannelFunding(
-                                    new,
-                                    Default::default(),
-                                    FundingRequest {
-                                        script,
-                                        udt_type_script: udt_funding_script,
-                                        local_amount: local,
-                                        funding_fee_rate,
-                                        remote_amount: remote,
-                                        local_reserved_ckb_amount,
-                                        remote_reserved_ckb_amount,
-                                    },
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    // Update the opening record: rename from temp ID to final ID and advance status.
+                    if let Some(mut record) = state.store.get_channel_open_record(&old) {
+                        state.store.delete_channel_open_record(&old);
+                        record.channel_id = new;
+                        record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+                        state.store.insert_channel_open_record(record);
                     }
+
+                    debug!("Starting funding channel");
+                    // TODO: Here we implies the one who receives AcceptChannel message
+                    //  (i.e. the channel initiator) will send TxUpdate message first.
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::UpdateChannelFunding(
+                                new,
+                                Default::default(),
+                                FundingRequest {
+                                    script,
+                                    udt_type_script: udt_funding_script,
+                                    local_amount: local,
+                                    funding_fee_rate,
+                                    remote_amount: remote,
+                                    local_reserved_ckb_amount,
+                                    remote_reserved_ckb_amount,
+                                },
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             }
             NetworkActorEvent::ChannelReady(channel_id, pubkey, channel_outpoint) => {
@@ -1221,13 +1331,28 @@ where
                 state.on_payment_actor_stopped(payment_hash).await;
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
-                // Update channel state to remove WAITING_ONCHAIN_SETTLEMENT flag
-                if let Some(mut actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                if let Some(channel_actor) = state.channels.get(&channel_id) {
+                    if let Err(err) = channel_actor.send_message(ChannelActorMessage::Event(
+                        ChannelEvent::OnChainSettlementCompleted,
+                    )) {
+                        error!(
+                            "Failed to notify channel {:?} about on-chain settlement completion: {:?}",
+                            channel_id, err
+                        );
+                    }
+                } else if let Some(mut actor_state) =
+                    self.store.get_channel_actor_state(&channel_id)
+                {
                     if let ChannelState::Closed(mut flags) = actor_state.state {
-                        flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
-                        actor_state.state = ChannelState::Closed(flags);
-                        self.store.insert_channel_actor_state(actor_state);
-                        info!("Channel {channel_id:?} on-chain settlement completed");
+                        if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+                            flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+                            actor_state.state = ChannelState::Closed(flags);
+                            self.store.insert_channel_actor_state(actor_state);
+                            state.channels_funding_lock_script_cache.remove(&channel_id);
+                            info!(
+                                "Channel {channel_id:?} on-chain settlement completed without a live actor"
+                            );
+                        }
                     }
                 }
             }
@@ -1251,20 +1376,18 @@ where
                 );
 
                 // Update channel mapping
-                let peer_pubkey = state.get_connected_peer_pubkey(&peer_id);
-                if let Some(session) = peer_pubkey
-                    .and_then(|pubkey| state.peer_session_map.get(&pubkey).map(|p| p.session_id))
-                {
+                if let Some(peer_pubkey) = state.get_connected_peer_pubkey(&peer_id) {
                     if let Some(channel) = state.channels.remove(&old_channel_id) {
                         debug!(
                             "Channel accepted for external funding: {:?} -> {:?}",
                             old_channel_id, new_channel_id
                         );
                         state.channels.insert(new_channel_id, channel);
-                        if let Some(set) = state.session_channels_map.get_mut(&session) {
-                            set.remove(&old_channel_id);
-                            set.insert(new_channel_id);
-                        }
+                        state.peer_channel_index.replace_channel(
+                            peer_pubkey,
+                            old_channel_id,
+                            new_channel_id,
+                        );
                     }
                 }
 
@@ -1466,9 +1589,21 @@ where
                 }
             }
             NetworkActorCommand::DisconnectPeer(pubkey, reason, reply) => {
-                if let Some(session) = state.peer_session_map.get(&pubkey).map(|p| p.session_id) {
+                let session = state
+                    .peer_session_map
+                    .get(&pubkey)
+                    .map(|peer| peer.session_id);
+                if matches!(reason, PeerDisconnectReason::Requested) {
+                    state.peer_reconnect_backoff_attempts.remove(&pubkey);
+                    if session.is_some() {
+                        state.requested_disconnect_peers.insert(pubkey);
+                    } else {
+                        state.requested_disconnect_peers.remove(&pubkey);
+                    }
+                }
+                if let Some(session) = session {
                     debug!(
-                        "Disconnecting peer {:?} session w {:?}ith reason {:?}",
+                        "Disconnecting peer {:?} session {:?} with reason {:?}",
                         &pubkey, &session, &reason
                     );
                     state.control.disconnect(session).await?;
@@ -1478,6 +1613,57 @@ where
                 } else if let Some(reply) = reply {
                     let _ = reply.send(Err(format!("peer {:?} is not connected", pubkey)));
                 }
+            }
+            NetworkActorCommand::SeedPeerReconnectBackoff(peer_id, trigger) => {
+                state.seed_peer_reconnect_backoff_if_needed(&peer_id, trigger);
+            }
+            NetworkActorCommand::PeerReconnectBackoffTick(peer_id, attempt) => {
+                let Some(pubkey) = state.peer_channel_index.get_pubkey(&peer_id) else {
+                    debug_event!(myself, "PeerReconnectBackoffSkippedNoDirectChannel");
+                    return Ok(());
+                };
+
+                if state.peer_session_map.contains_key(&pubkey) {
+                    state.peer_reconnect_backoff_attempts.remove(&pubkey);
+                    return Ok(());
+                }
+
+                if state.requested_disconnect_peers.contains(&pubkey) {
+                    state.peer_reconnect_backoff_attempts.remove(&pubkey);
+                    debug_event!(myself, "PeerReconnectBackoffSkippedRequested");
+                    return Ok(());
+                }
+
+                let Some(current_attempt) =
+                    state.peer_reconnect_backoff_attempts.get(&pubkey).copied()
+                else {
+                    return Ok(());
+                };
+                if current_attempt != attempt {
+                    return Ok(());
+                }
+
+                debug_event!(myself, "PeerReconnectBackoffAttempt");
+
+                let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
+                if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
+                        ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                } else {
+                    debug!(
+                        "No known address to reconnect peer {:?} on backoff attempt {}",
+                        peer_id, current_attempt
+                    );
+                }
+
+                let next_attempt = current_attempt.saturating_add(1);
+                state
+                    .peer_reconnect_backoff_attempts
+                    .insert(pubkey, next_attempt);
+                state.schedule_peer_reconnect_backoff(peer_id, next_attempt);
             }
             NetworkActorCommand::SavePeerAddress(addr) => {
                 state.enqueue_peer_address_to_save(addr);
@@ -1663,181 +1849,8 @@ where
                 let now = now_timestamp_as_millis_u64();
 
                 // peer has active channels but down
-                let mut with_channel_down_peers = HashSet::new();
-                let mut ready_channels_count = 0;
-                let mut shuttingdown_channels_count = 0;
-                for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
-                    if matches!(channel_state, ChannelState::ChannelReady) {
-                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                            ready_channels_count += 1;
-                            if actor_state.reestablishing {
-                                continue;
-                            }
-
-                            if !state.peer_session_map.contains_key(&pubkey) {
-                                with_channel_down_peers.insert(pubkey);
-                            }
-
-                            // Collect TLC data before async operations to avoid holding iterator across await
-                            let committed_tlcs: Vec<_> = actor_state
-                                .tlc_state
-                                .get_committed_received_tlcs()
-                                .map(|tlc| (tlc.tlc_id, tlc.id(), tlc.payment_hash))
-                                .collect();
-
-                            for (tlc_id, id, payment_hash) in committed_tlcs {
-                                // skip if tlc amount is not fulfilled invoice
-                                // this may happened if payment is mpp
-                                if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                                    // Re-fetch tlc for is_invoice_fulfilled check
-                                    if let Some(tlc) = actor_state.tlc_state.get(&tlc_id) {
-                                        if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
-                                            continue;
-                                        }
-                                    } else {
-                                        continue;
-                                    }
-                                }
-
-                                let Some(payment_preimage) = self.store.get_preimage(&payment_hash)
-                                else {
-                                    continue;
-                                };
-                                debug!(
-                                    "Found payment preimage for channel {:?} tlc {:?}",
-                                    channel_id, id
-                                );
-                                if self
-                                    .store
-                                    .get_invoice_status(&payment_hash)
-                                    .is_some_and(|s| {
-                                        !matches!(
-                                            s,
-                                            CkbInvoiceStatus::Open | CkbInvoiceStatus::Received
-                                        )
-                                    })
-                                {
-                                    continue;
-                                }
-
-                                let (send, _recv) = oneshot::channel();
-                                let rpc_reply = RpcReplyPort::from(send);
-
-                                if let Err(err) = state
-                                    .send_command_to_channel(
-                                        channel_id,
-                                        ChannelCommand::RemoveTlc(
-                                            RemoveTlcCommand {
-                                                id,
-                                                reason: RemoveTlcReason::RemoveTlcFulfill(
-                                                    RemoveTlcFulfill { payment_preimage },
-                                                ),
-                                            },
-                                            rpc_reply,
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to remove tlc {:?} with preimage for channel {:?}: {}",
-                                        id,
-                                        channel_id,
-                                        err
-                                    );
-                                }
-                            }
-
-                            let delay_epoch = EpochNumberWithFraction::from_full_value(
-                                actor_state.commitment_delay_epoch,
-                            );
-                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-                            // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
-                            // to previous hop, even if later hop send backup RemoveTlc message to us later,
-                            // it will be ignored.
-                            let expect_expiry = now
-                                + epoch_delay_milliseconds
-                                + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
-                            let expired_tlcs = actor_state
-                                .tlc_state
-                                .get_committed_received_tlcs()
-                                .filter(|tlc| {
-                                    tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry
-                                })
-                                .collect::<Vec<_>>();
-                            for tlc in expired_tlcs {
-                                info!(
-                                    "Removing expired tlc {:?} for channel {:?}",
-                                    tlc.id(),
-                                    channel_id
-                                );
-                                let (send, _recv) = oneshot::channel();
-                                let rpc_reply = RpcReplyPort::from(send);
-                                if let Err(err) = state
-                                    .send_command_to_channel(
-                                        channel_id,
-                                        ChannelCommand::RemoveTlc(
-                                            RemoveTlcCommand {
-                                                id: tlc.id(),
-                                                reason: RemoveTlcReason::RemoveTlcFail(
-                                                    TlcErrPacket::new(
-                                                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                                                        &tlc.shared_secret,
-                                                    ),
-                                                ),
-                                            },
-                                            rpc_reply,
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to remove expired tlc {:?} for channel {:?}: {}",
-                                        tlc.id(),
-                                        channel_id,
-                                        err
-                                    );
-                                }
-                            }
-
-                            // check whether the next hop have already sent us the RemoveTlc message
-                            // for the offered expired tlc, if not we will force close the channel
-                            let expect_expiry = now + epoch_delay_milliseconds;
-                            if actor_state
-                                .tlc_state
-                                .get_expired_offered_tlcs(expect_expiry)
-                                .next()
-                                .is_some()
-                            {
-                                info!(
-                                    "Force closing channel {:?} due to expired offered tlc",
-                                    channel_id
-                                );
-                                let (send, _recv) = oneshot::channel();
-                                let rpc_reply = RpcReplyPort::from(send);
-                                if let Err(err) = state
-                                    .send_command_to_channel(
-                                        channel_id,
-                                        ChannelCommand::Shutdown(
-                                            ShutdownCommand {
-                                                close_script: None,
-                                                fee_rate: None,
-                                                force: true,
-                                            },
-                                            rpc_reply,
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to force close channel {:?}: {}",
-                                        channel_id, err
-                                    );
-                                }
-                            }
-                        }
-                    } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
-                        shuttingdown_channels_count += 1;
-                    } else if matches!(
+                for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    if matches!(
                         channel_state,
                         ChannelState::Closed(flags)
                             if flags.intersects(
@@ -1907,39 +1920,6 @@ where
                         }
                     }
                 }
-
-                // update metrics
-                #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-                {
-                    // channels
-                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
-                        .set(with_channel_down_peers.len() as u32);
-                    metrics::gauge!(crate::metrics::TOTAL_CHANNEL_COUNT)
-                        .set((ready_channels_count + shuttingdown_channels_count) as u32);
-                    metrics::gauge!(crate::metrics::READY_CHANNEL_COUNT)
-                        .set(ready_channels_count as u32);
-                    metrics::gauge!(crate::metrics::SHUTTING_DOWN_CHANNEL_COUNT)
-                        .set(shuttingdown_channels_count as u32);
-                    metrics::gauge!(crate::metrics::INFLIGHT_PAYMENTS_COUNT)
-                        .set(state.inflight_payments.len() as u32);
-
-                    // peers
-                    let total_peers = state.peer_session_map.len();
-                    let outbound_peers = state
-                        .peer_session_map
-                        .iter()
-                        .filter(|(_id, peer)| peer.session_type.is_outbound())
-                        .count();
-                    let inbound_peers = total_peers - outbound_peers;
-                    metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).set(total_peers as u32);
-                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).set(inbound_peers as u32);
-                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).set(outbound_peers as u32);
-                }
-                debug!(
-                    "Check channels: {} ready channels {} shutting down channels, found {} peers down with channels",
-                    ready_channels_count, shuttingdown_channels_count,
-                    with_channel_down_peers.len()
-                );
 
                 // Due to channel offline or network issues, remove hold tlc maybe failed,
                 // we retry timeout these tlcs.
@@ -2385,8 +2365,8 @@ where
     ) {
         if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received) {
             // When invoice is marked as received, we ignore the hold TLC timeout and only
-            // remove the TLC when it actually expires. Expired TLCs are removed in the
-            // CheckChannels routine (see NetworkActorCommand::CheckChannels handler).
+            // remove the TLC when it actually expires. Once it is close enough to expiry,
+            // the live ChannelActor removes it during periodic TLC maintenance.
             return;
         }
 
@@ -2761,11 +2741,11 @@ where
         let shared_secret = peeled_onion_packet.shared_secret;
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
         let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
-            Some(channel_id) => channel_id,
-            None => {
+            Some(channel_id) if state.is_channel_online(channel_id) => *channel_id,
+            _ => {
                 error!(
                     "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
-                     channel_outpoint
+                    channel_outpoint
                 );
                 let tlc_err = TlcErr::new_channel_fail(
                     TlcErrorCode::UnknownNextPeer,
@@ -2796,11 +2776,11 @@ where
         );
         trace!(
             "Sending AddTlcCommand to {}, command {:?}",
-            *channel_id,
+            channel_id,
             command
         );
         // we have already checked the channel_id is valid,
-        match state.send_command_to_channel(*channel_id, command).await {
+        match state.send_command_to_channel(channel_id, command).await {
             Ok(_) => {
                 return Ok(());
             }
@@ -3054,8 +3034,8 @@ where
         if let Some(actor) = state.inflight_payments.get(&payment_hash) {
             if let Err(err) = actor.send_message(message) {
                 debug!(
-                            "PaymentActor message dropped because payment actor is likely stopping, error: {err}"
-                        );
+                    "PaymentActor message dropped because payment actor is likely stopping, error: {err}"
+                );
             }
         } else {
             debug!(
@@ -3388,12 +3368,13 @@ pub struct NetworkActorState<S, C> {
     control: ServiceAsyncControl,
     peer_session_map: HashMap<Pubkey, ConnectedPeer>,
     pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
-    session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
+    peer_channel_index: PeerChannelIndex,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     // Channels funding lock script cache
     channels_funding_lock_script_cache: HashMap<Hash256, Script>,
-    // Outpoint to channel id mapping, only contains channels with state of Ready.
-    // We need to remove the channel from this map when the channel is closed or peer disconnected.
+    // Outpoint to channel id mapping for channels that have reached ChannelReady.
+    // Keep this mapping across transient disconnects so retries / reconnect flows can still
+    // resolve a channel id while the actor is offline or syncing.
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
@@ -3419,6 +3400,9 @@ pub struct NetworkActorState<S, C> {
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
+    enable_peer_reconnect_backoff: bool,
+    peer_reconnect_backoff_attempts: HashMap<Pubkey, u32>,
+    requested_disconnect_peers: HashSet<Pubkey>,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     channel_ephemeral_config: ChannelEphemeralConfig,
@@ -3574,18 +3558,13 @@ where
             } else {
                 warn!(
                     "Opening channel to peer {:?} (node: {:?}) with UDT {:?} (name: {:?}). Peer has this UDT configured but auto-accept is not enabled. The channel may not be auto-accepted.",
-                    pubkey,
-                    node_info.node_name,
-                    udt_type_script,
-                    udt_cfg_info.name
+                    pubkey, node_info.node_name, udt_type_script, udt_cfg_info.name
                 );
             }
         } else {
             warn!(
                 "Opening channel to peer {:?} (node: {:?}) with UDT {:?}. UDT type not found in peer's udt_cfg_infos. The channel may not be auto-accepted.",
-                pubkey,
-                node_info.node_name,
-                udt_type_script
+                pubkey, node_info.node_name, udt_type_script
             );
         }
     }
@@ -3602,9 +3581,7 @@ where
         if node_info.auto_accept_min_ckb_funding_amount == 0 {
             warn!(
                 "Opening channel to peer {:?} (node: {:?}) with CKB funding amount {}. Auto-accept is disabled (auto_accept_min_ckb_funding_amount is 0). The channel may not be auto-accepted.",
-                pubkey,
-                node_info.node_name,
-                funding_amount
+                pubkey, node_info.node_name, funding_amount
             );
         } else if funding_amount < node_info.auto_accept_min_ckb_funding_amount as u128 {
             warn!(
@@ -3670,18 +3647,13 @@ where
             } else {
                 warn!(
                     "Received OpenChannel request from peer {:?} with UDT {:?} (name: {:?}). Auto-accept is not enabled for this UDT. Channel {:?} will not be auto-accepted and is pending manual acceptance.",
-                    pubkey,
-                    udt_type_script,
-                    udt_info.name,
-                    temp_channel_id
+                    pubkey, udt_type_script, udt_info.name, temp_channel_id
                 );
             }
         } else {
             warn!(
                 "Received OpenChannel request from peer {:?} with UDT {:?} that is not configured for auto-accept. Channel {:?} will not be auto-accepted and is pending manual acceptance.",
-                pubkey,
-                udt_type_script,
-                temp_channel_id
+                pubkey, udt_type_script, temp_channel_id
             );
         }
     }
@@ -3700,9 +3672,7 @@ where
         if auto_accept_channel_ckb_funding_amount == 0 {
             warn!(
                 "Received OpenChannel request from peer {:?} with CKB funding amount {}. Auto-accept is disabled (auto_accept_channel_ckb_funding_amount is 0). Channel {:?} will not be auto-accepted and is pending manual acceptance.",
-                pubkey,
-                funding_amount,
-                temp_channel_id
+                pubkey, funding_amount, temp_channel_id
             );
         } else {
             warn!(
@@ -4035,6 +4005,12 @@ where
         Ok((channel, temp_channel_id, new_id))
     }
 
+    fn is_channel_online(&self, channel_id: &Hash256) -> bool {
+        self.peer_channel_index
+            .get_peer_by_channel_id(channel_id)
+            .is_some_and(|peer| self.peer_session_map.contains_key(&peer))
+    }
+
     fn check_feature_compatibility(&self, pubkey: &Pubkey) -> ProcessingChannelResult {
         if let Some(peer_features) = self
             .peer_session_map
@@ -4187,9 +4163,10 @@ where
     }
 
     fn session_has_channels(&self, session_id: &SessionId) -> bool {
-        self.session_channels_map
-            .get(session_id)
-            .is_some_and(|channels| !channels.is_empty())
+        self.peer_session_map
+            .iter()
+            .find_map(|(pubkey, peer)| (peer.session_id == *session_id).then_some(pubkey))
+            .is_some_and(|pubkey| self.peer_channel_index.has_channels(pubkey))
     }
 
     fn inbound_no_channel_peers_in_connected_order(&self) -> Vec<(Pubkey, SessionId)> {
@@ -4226,7 +4203,6 @@ where
                     ) {
                         self.peer_session_map.remove(&pubkey);
                     }
-                    self.session_channels_map.remove(&session_id);
                 }
                 Err(err) => {
                     error!(
@@ -4277,6 +4253,54 @@ where
         }
     }
 
+    fn schedule_peer_reconnect_backoff(&self, peer_id: PeerId, attempt: u32) {
+        let delay = compute_peer_reconnect_delay(attempt);
+        debug_event!(self.network, "PeerReconnectBackoffScheduled");
+        self.network.send_after(delay, move || {
+            NetworkActorMessage::new_command(NetworkActorCommand::PeerReconnectBackoffTick(
+                peer_id, attempt,
+            ))
+        });
+    }
+
+    fn seed_peer_reconnect_backoff_if_needed(
+        &mut self,
+        peer_id: &PeerId,
+        trigger: PeerReconnectTrigger,
+    ) {
+        if !self.enable_peer_reconnect_backoff {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedDisabled");
+            return;
+        }
+
+        let Some(pubkey) = self.peer_channel_index.get_pubkey(peer_id) else {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedNoDirectChannel");
+            return;
+        };
+
+        if self.requested_disconnect_peers.contains(&pubkey) {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedRequested");
+            return;
+        }
+        if self.peer_session_map.contains_key(&pubkey) {
+            return;
+        }
+        if self.peer_reconnect_backoff_attempts.contains_key(&pubkey) {
+            return;
+        }
+
+        self.peer_reconnect_backoff_attempts.insert(pubkey, 0);
+        match trigger {
+            PeerReconnectTrigger::Disconnected => {
+                debug_event!(self.network, "PeerReconnectBackoffSeededByDisconnect");
+            }
+            PeerReconnectTrigger::DialError => {
+                debug_event!(self.network, "PeerReconnectBackoffSeededByDialError");
+            }
+        }
+        self.schedule_peer_reconnect_backoff(peer_id.clone(), 0);
+    }
+
     pub fn get_n_peer_sessions(&self, n: usize) -> Vec<SessionId> {
         self.peer_session_map
             .values()
@@ -4308,7 +4332,7 @@ where
     }
 
     async fn send_command_to_channel(
-        &self,
+        &mut self,
         channel_id: Hash256,
         command: ChannelCommand,
     ) -> crate::Result<()> {
@@ -4329,7 +4353,10 @@ where
                                     debug!("Handling force shutdown command in ChannelReady state");
                                 }
                                 ChannelState::ShuttingDown(flags) => {
-                                    debug!("Handling force shutdown command in ShuttingDown state, flags: {:?}", &flags);
+                                    debug!(
+                                        "Handling force shutdown command in ShuttingDown state, flags: {:?}",
+                                        &flags
+                                    );
                                 }
                                 _ => {
                                     let error = Error::ChannelError(
@@ -4434,31 +4461,46 @@ where
 
     async fn reestablish_channel(
         &mut self,
+        channel_id: Hash256,
+    ) -> Result<ActorRef<ChannelActorMessage>, Error> {
+        if let Some(actor) = self.channels.get(&channel_id).cloned() {
+            debug!(
+                "Channel {:x} already exists, reusing live actor for reestablishment",
+                &channel_id
+            );
+            if let Err(err) =
+                actor.send_message(ChannelActorMessage::Event(ChannelEvent::PeerReconnected))
+            {
+                error!("Failed to send PeerReconnected error: {err:?}");
+            }
+            Ok(actor)
+        } else {
+            Err(Error::ChannelNotFound(channel_id))
+        }
+    }
+
+    async fn restore_offline_channel(
+        &mut self,
         remote_pubkey: Pubkey,
         channel_id: Hash256,
     ) -> Result<ActorRef<ChannelActorMessage>, Error> {
-        if let Some(actor) = self.channels.get(&channel_id) {
-            debug!(
-                "Channel {:x} already exists, skipping reestablishment",
-                &channel_id
-            );
-            return Ok(actor.clone());
+        if let Some(actor) = self.channels.get(&channel_id).cloned() {
+            return Ok(actor);
         }
 
-        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
-            // this function is also called from `send_message_to_channel_actor`,
-            // which may happened when peer received a message from a channel that is not in the channel map.
-            // we should not restart the channel actor in a closed state.
-            if channel_actor_state.is_closed() {
-                return Err(Error::ChannelError(ProcessingChannelError::InvalidState(
-                    format!("Channel {:x} is already closed", &channel_id),
-                )));
-            }
-        } else {
+        let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
             return Err(Error::ChannelNotFound(channel_id));
-        }
+        };
+        let Some(restore_mode) = channel_actor_state.offline_restore_mode() else {
+            return Err(Error::ChannelError(ProcessingChannelError::InvalidState(
+                format!(
+                    "Channel {:x} cannot be restored offline from state {:?}",
+                    &channel_id, channel_actor_state.state
+                ),
+            )));
+        };
 
-        debug!("Reestablishing channel {:x}", &channel_id);
+        debug!("Restoring persisted channel actor {:x}", &channel_id);
         let (channel, _) = Actor::spawn_linked(
             Some(generate_channel_actor_name(
                 &self.get_public_key(),
@@ -4471,17 +4513,47 @@ where
                 self.store.clone(),
             ),
             ChannelInitializationParameter {
-                operation: ChannelInitializationOperation::ReestablishChannel(channel_id),
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
             },
             self.network.get_cell(),
         )
         .await?;
-        info!("channel {:x} reestablished successfully", &channel_id);
-        self.on_channel_created(channel_id, remote_pubkey, channel.clone());
+
+        if channel_actor_state
+            .offline_restore_mode()
+            .is_some_and(|mode| mode == OfflineChannelRestoreMode::ReestablishPeer)
+        {
+            self.register_channel_actor(channel_id, remote_pubkey, channel.clone());
+        } else {
+            debug_assert_eq!(restore_mode, OfflineChannelRestoreMode::WatchChain);
+            self.channels.insert(channel_id, channel.clone());
+        }
+        if let Some(outpoint) = channel_actor_state.get_funding_transaction_outpoint() {
+            self.outpoint_channel_map.insert(outpoint, channel_id);
+        }
+        debug!("channel {:x} restored offline successfully", &channel_id);
 
         Ok(channel)
+    }
+
+    async fn restore_persisted_offline_channels(&mut self) {
+        for (pubkey, channel_id, _channel_state) in self.store.get_channel_states(None) {
+            let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
+                continue;
+            };
+            if channel_actor_state.offline_restore_mode().is_none() {
+                continue;
+            }
+
+            if let Err(err) = self.restore_offline_channel(pubkey, channel_id).await {
+                error!(
+                    "Failed to restore persisted channel actor {:x}: {:?}",
+                    channel_id, err
+                );
+            }
+        }
     }
 
     async fn on_peer_connected(&mut self, remote_pubkey: Pubkey, session: &SessionContext) {
@@ -4495,6 +4567,8 @@ where
                 features: None,
             },
         );
+        self.peer_reconnect_backoff_attempts.remove(&remote_pubkey);
+        self.requested_disconnect_peers.remove(&remote_pubkey);
         let remote_peer_id =
             PeerId::from_public_key(&super::types::pubkey_to_tentacle(remote_pubkey));
         if let Some(addresses) = self.pending_save_peer_addresses.remove(&remote_peer_id) {
@@ -4559,16 +4633,30 @@ where
         });
     }
 
-    fn on_peer_disconnected(&mut self, pubkey: Pubkey) {
-        debug!("Peer {pubkey:?} disconnected");
-        let peer = self.peer_session_map.remove(&pubkey);
-        if let Some(peer) = peer {
-            if let Some(channel_ids) = self.session_channels_map.remove(&peer.session_id) {
-                for channel_id in channel_ids {
-                    if let Some(channel) = self.channels.get(&channel_id) {
-                        let _ = channel.send_message(ChannelActorMessage::Event(
-                            ChannelEvent::Stop(StopReason::PeerDisConnected),
-                        ));
+    fn on_peer_disconnected(&mut self, pubkey: Pubkey, session_id: SessionId) {
+        debug!("Peer {pubkey:?} disconnected on session {session_id:?}");
+
+        let Some(current_peer) = self.peer_session_map.get(&pubkey).cloned() else {
+            debug!("Ignoring disconnect for peer {pubkey:?} on unknown session {session_id:?}");
+            return;
+        };
+
+        if current_peer.session_id != session_id {
+            debug!(
+                "Ignoring stale disconnect for peer {pubkey:?}: old session {session_id:?}, current session {:?}",
+                current_peer.session_id
+            );
+            return;
+        }
+
+        self.peer_session_map.remove(&pubkey);
+        if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
+            for channel_id in channel_ids {
+                if let Some(channel) = self.channels.get(channel_id) {
+                    if let Err(err) = channel
+                        .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected))
+                    {
+                        error!("Failed to send PeerDisconnected event to channel actor: {err:?}");
                     }
                 }
             }
@@ -4590,6 +4678,13 @@ where
             }
             self.to_be_accepted_channels.remove(&channel_id);
         }
+
+        let peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
+        if self.requested_disconnect_peers.remove(&pubkey) {
+            debug_event!(self.network, "PeerReconnectBackoffSkippedRequested");
+            return;
+        }
+        self.seed_peer_reconnect_backoff_if_needed(&peer_id, PeerReconnectTrigger::Disconnected);
     }
 
     pub(crate) fn get_peer_addresses_by_pubkey(&self, pubkey: &Pubkey) -> HashSet<Multiaddr> {
@@ -4619,23 +4714,38 @@ where
             .insert_network_actor_state(&self.get_public_key(), self.state_to_be_persisted.clone());
     }
 
+    fn persist_live_channels_offline_for_shutdown(&self) {
+        for channel_id in self.channels.keys().copied().collect::<Vec<_>>() {
+            let Some(mut channel_state) = self.store.get_channel_actor_state(&channel_id) else {
+                continue;
+            };
+
+            if channel_state.is_closed() {
+                continue;
+            }
+
+            channel_state.mark_reestablishing_offline();
+            self.store.insert_channel_actor_state(channel_state);
+        }
+    }
+
+    fn register_channel_actor(
+        &mut self,
+        id: Hash256,
+        pubkey: Pubkey,
+        actor: ActorRef<ChannelActorMessage>,
+    ) {
+        self.channels.insert(id, actor.clone());
+        self.peer_channel_index.add_channel(pubkey, id);
+    }
+
     fn on_channel_created(
         &mut self,
         id: Hash256,
         pubkey: Pubkey,
         actor: ActorRef<ChannelActorMessage>,
     ) {
-        if let Some(session) = self
-            .peer_session_map
-            .get(&pubkey)
-            .map(|peer| peer.session_id)
-        {
-            self.channels.insert(id, actor.clone());
-            self.session_channels_map
-                .entry(session)
-                .or_default()
-                .insert(id);
-        }
+        self.register_channel_actor(id, pubkey, actor);
         debug!("Channel {:x} created", &id);
         // Notify outside observers.
         self.network
@@ -4696,7 +4806,22 @@ where
                         .await
                     {
                         Ok(_) => {
+                            let should_restore_onchain_settlement_actor = matches!(
+                                state.state,
+                                ChannelState::Closed(flags)
+                                    if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                            );
                             self.store.insert_channel_actor_state(state);
+                            if should_restore_onchain_settlement_actor {
+                                if let Err(err) =
+                                    self.restore_offline_channel(*pubkey, *channel_id).await
+                                {
+                                    error!(
+                                        "failed to restore on-chain settlement actor for {:?}: {:?}",
+                                        channel_id, err
+                                    );
+                                }
+                            }
                         }
                         Err(err) => {
                             error!("failed to update_close_transaction_confirmed {err:?}");
@@ -4706,11 +4831,7 @@ where
             }
         }
 
-        if let Some(session) = self.peer_session_map.get(pubkey).map(|p| p.session_id) {
-            if let Some(set) = self.session_channels_map.get_mut(&session) {
-                set.remove(channel_id);
-            }
-        }
+        self.peer_channel_index.remove_channel(pubkey, channel_id);
         if !force {
             // Notify outside observers.
             self.network
@@ -4723,6 +4844,10 @@ where
 
     async fn on_channel_actor_stopped(&mut self, channel_id: Hash256, reason: StopReason) {
         // all check passed, now begin to remove from memory and DB
+        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+            self.peer_channel_index
+                .remove_channel(&channel_actor_state.remote_pubkey, &channel_id);
+        }
         self.channels.remove(&channel_id);
         self.channels_funding_lock_script_cache.remove(&channel_id);
         if let Some(reply) = self.pending_external_funding_replies.remove(&channel_id) {
@@ -4732,14 +4857,6 @@ where
             );
             warn!("{}", err);
             let _ = reply.send(Err(err));
-        }
-        for (_pubkey, connected_peer) in self.peer_session_map.iter() {
-            if let Some(session_channels) = self
-                .session_channels_map
-                .get_mut(&connected_peer.session_id)
-            {
-                session_channels.remove(&channel_id);
-            }
         }
 
         if reason == StopReason::Abandon || reason == StopReason::AbortFunding {
@@ -4817,9 +4934,11 @@ where
             )));
         }
         debug_event!(_myself, "PeerInit");
-        for channel_id in self.store.get_active_channel_ids_by_pubkey(&peer_pubkey) {
-            if let Err(e) = self.reestablish_channel(peer_pubkey, channel_id).await {
-                error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
+        if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey).cloned() {
+            for channel_id in channels {
+                if let Err(e) = self.reestablish_channel(channel_id).await {
+                    error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
+                }
             }
         }
 
@@ -4881,7 +5000,10 @@ where
         // Just a sanity check to ensure that no two channels are associated with the same outpoint.
         if let Some(old) = self.pending_channels.remove(&outpoint) {
             if old != channel_id {
-                panic!("Trying to associate a new channel id {:?} with the same outpoint {:?} when old channel id is {:?}. Rejecting.", channel_id, outpoint, old);
+                panic!(
+                    "Trying to associate a new channel id {:?} with the same outpoint {:?} when old channel id is {:?}. Rejecting.",
+                    channel_id, outpoint, old
+                );
             }
         }
         self.pending_channels.insert(outpoint.clone(), channel_id);
@@ -5022,8 +5144,14 @@ where
                     ChannelActorMessage::PeerMessage(FiberChannelMessage::ReestablishChannel(r)),
                     Some(remote_pubkey),
                 ) if self.store.get_channel_actor_state(&channel_id).is_some() => {
-                    debug!("Received a ReestablishChannel message for channel {:?} which has persisted state, but no corresponding channel actor, starting it now", &channel_id);
-                    match self.reestablish_channel(remote_pubkey, channel_id).await {
+                    debug!(
+                        "Received a ReestablishChannel message for channel {:?} which has persisted state, but no corresponding channel actor, starting it now",
+                        &channel_id
+                    );
+                    match self
+                        .restore_offline_channel(remote_pubkey, channel_id)
+                        .await
+                    {
                         Ok(actor) => {
                             actor
                                 .send_message(ChannelActorMessage::PeerMessage(
@@ -5038,18 +5166,17 @@ where
                 }
                 (message, _) => {
                     error!(
-                            "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
-                            &channel_id, &message,
-                        );
+                        "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
+                        &channel_id, &message,
+                    );
                 }
             },
             Some(actor) => {
                 // There is a possibility that the channel actor is not alive, but we assume it is
-                // alive for this moment. For example, in force shutdown case, the ChannelActor received
-                // ClosingTransactionConfirmed event then stopped after processing the message,
-                // NetworkActor will remove it from `channels` when receiving ChannelActorStopped from it,
-                // but at the same time, NetworkActor received another ClosingTransactionConfirmed,
-                // we will try to send another event message to the stopped ChannelActor here.
+                // alive for this moment. For example, in force shutdown case, the ChannelActor may
+                // have already finished its on-chain settlement cleanup and stopped, while
+                // NetworkActor has not yet processed ChannelActorStopped and removed it from
+                // `channels`. We may still try to send another event message to that stopped actor.
                 //
                 // In short, it's safer to ignore sending message failure from NetworkActor
                 // to ChannelActor, since NetworkActor is responsible for multiple channels and a lot of stuff.
@@ -5235,7 +5362,10 @@ where
                 Some(Protocol::P2P(c)) => {
                     // If the announced listen addr has a peer id, it must match our peer id.
                     if c.as_ref() != my_peer_id.as_bytes() {
-                        panic!("Announced listen addr is using invalid peer id: announced addr {}, actual peer id {:?}", announced_addr, my_peer_id);
+                        panic!(
+                            "Announced listen addr is using invalid peer id: announced addr {}, actual peer id {:?}",
+                            announced_addr, my_peer_id
+                        );
                     }
                 }
                 Some(component) => {
@@ -5297,6 +5427,7 @@ where
 
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
+        let peer_channel_index = PeerChannelIndex::build(&self.store);
 
         let mut state = NetworkActorState {
             store: self.store.clone(),
@@ -5312,7 +5443,7 @@ where
             control,
             peer_session_map: Default::default(),
             pending_save_peer_addresses: Default::default(),
-            session_channels_map: Default::default(),
+            peer_channel_index,
             channels: Default::default(),
             outpoint_channel_map: Default::default(),
             channels_funding_lock_script_cache: Default::default(),
@@ -5329,6 +5460,9 @@ where
             gossip_actor,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
+            enable_peer_reconnect_backoff: config.enable_peer_reconnect_backoff(),
+            peer_reconnect_backoff_attempts: Default::default(),
+            requested_disconnect_peers: Default::default(),
             features,
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
@@ -5377,8 +5511,10 @@ where
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        state.restore_persisted_offline_channels().await;
+
         // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
         myself
             .send_message(NetworkActorMessage::new_command(
@@ -5451,6 +5587,7 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        state.persist_live_channels_offline_for_shutdown();
         myself
             .get_cell()
             .stop_children_and_wait(Some("Network actor stopped".to_string()), None)
@@ -5595,13 +5732,31 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
 impl ServiceHandle for NetworkServiceHandle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
         debug!("Service error: {:?}", error);
-        if let ServiceError::DialerError { address, .. } = &error {
+        if let ServiceError::DialerError { address, error } = &error {
             if let Some(peer_id) = extract_peer_id(address) {
                 try_send_actor_message(
                     &self.actor,
                     NetworkActorMessage::new_command(
-                        NetworkActorCommand::RemovePendingSavePeerAddress(peer_id),
+                        NetworkActorCommand::RemovePendingSavePeerAddress(peer_id.clone()),
                     ),
+                );
+                debug!(
+                    "DialerError for peer {:?} address {:?}: {:?}",
+                    peer_id, address, error
+                );
+                try_send_actor_message(
+                    &self.actor,
+                    NetworkActorMessage::new_command(
+                        NetworkActorCommand::SeedPeerReconnectBackoff(
+                            peer_id,
+                            PeerReconnectTrigger::DialError,
+                        ),
+                    ),
+                );
+            } else {
+                debug!(
+                    "DialerError on address {:?} without peer id: {:?}",
+                    address, error
                 );
             }
         }
