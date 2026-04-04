@@ -88,7 +88,7 @@ If you want to keep the channel state, you may try to migrate the storage format
 3. Run the fnn-migrate (it can be found in the release binary package) to migrate the storage format:
 
 ```
-fnn-migrate -d /folder-to/my-fnn/fiber
+./fnn-migrate -d /path/to/fiber-dir
 ```
 The `-d` / `--dir` flag takes the Fiber data directory (same as `fnn -d`). The tool opens the RocksDB store at `<dir>/store` automatically.
 
