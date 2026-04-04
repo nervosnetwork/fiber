@@ -98,7 +98,6 @@ impl OnionService {
                         info!("Tor reconnected, notifying network to reconnect peers");
                         let _ = reconnect_notify.send(());
                     }
-                    first_start = false;
                 }
                 Err(err) => {
                     error!("Failed to start onion service: {}", err);
@@ -106,10 +105,9 @@ impl OnionService {
                         let _ = tx.send(Err(err));
                         return Ok(());
                     }
-                    first_start = false;
                 }
             }
-
+            first_start = false;
             // Wait until tor connection drops or cancellation
             tokio::select! {
                 _ = tor_alive_rx.recv() => {}
