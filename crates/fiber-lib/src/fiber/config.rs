@@ -441,7 +441,7 @@ fn default_proxy_random_auth() -> bool {
 pub const DEFAULT_TOR_CONTROLLER: &str = "127.0.0.1:9051";
 
 /// Default onion external port
-pub const DEFAULT_ONION_EXTERNAL_PORT: u16 = 8115;
+pub const DEFAULT_ONION_EXTERNAL_PORT: u16 = 8228;
 
 /// Tor onion hidden service configuration
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
