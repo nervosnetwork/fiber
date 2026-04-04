@@ -90,7 +90,9 @@ If you want to keep the channel state, you may try to migrate the storage format
 ```
 ./fnn-migrate -d /path/to/fiber-dir
 ```
-The `-d` / `--dir` flag takes the Fiber data directory (same as `fnn -d`). The tool opens the RocksDB store at `<dir>/store` automatically.
+
+The `-d` / `--dir` flag takes the Fiber data directory (same as `fnn -d`).
+The tool opens the RocksDB store at `<dir>/store` automatically.
 
 4. Replace the fnn binary with the new version and start the node again.
 
