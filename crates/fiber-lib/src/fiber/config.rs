@@ -401,6 +401,83 @@ pub struct FiberConfig {
         help = "Address for metrics endpoint (e.g., 127.0.0.1:9090). Requires binary to be compiled with RUSTFLAGS=\"--cfg tokio_unstable\" and metrics feature enabled"
     )]
     pub metrics_addr: Option<String>,
+
+    /// SOCKS5 proxy configuration
+    #[arg(skip)]
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+
+    /// Tor onion hidden service configuration
+    #[arg(skip)]
+    #[serde(default)]
+    pub onion: OnionConfig,
+}
+
+/// SOCKS5 proxy configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    /// Socks5 proxy URL for fiber. e.g. socks5://username:password@127.0.0.1:1080
+    pub proxy_url: Option<String>,
+
+    /// Use random auth for each proxy connection [default: true]
+    #[serde(default = "default_proxy_random_auth")]
+    pub proxy_random_auth: bool,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            proxy_url: None,
+            proxy_random_auth: true,
+        }
+    }
+}
+
+fn default_proxy_random_auth() -> bool {
+    true
+}
+
+/// Default tor controller address
+pub const DEFAULT_TOR_CONTROLLER: &str = "127.0.0.1:9051";
+
+/// Default onion external port
+pub const DEFAULT_ONION_EXTERNAL_PORT: u16 = 8228;
+
+/// Tor onion hidden service configuration
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct OnionConfig {
+    /// Automatically create Tor onion service [default: false]
+    #[serde(default)]
+    pub listen_on_onion: bool,
+
+    /// Tor socks5 server url, e.g. 127.0.0.1:9050
+    pub onion_server: Option<String>,
+
+    /// The onion service will proxy incoming traffic to this p2p listen address.
+    /// If not set, uses the default 127.0.0.1 with the port from listening_addr.
+    pub p2p_listen_address: Option<String>,
+
+    /// Path to store onion private key [default: $BASE_DIR/fiber/onion_private_key]
+    pub onion_private_key_path: Option<String>,
+
+    /// Tor controller url [default: 127.0.0.1:9051]
+    #[serde(default = "default_tor_controller")]
+    pub tor_controller: String,
+
+    /// Tor controller plaintext password (for Tor's `HashedControlPassword`; Tor stores the hash in `torrc`)
+    pub tor_password: Option<String>,
+
+    /// The external port that the onion service will expose [default: 8115]
+    #[serde(default = "default_onion_external_port")]
+    pub onion_external_port: u16,
+}
+
+fn default_tor_controller() -> String {
+    DEFAULT_TOR_CONTROLLER.to_string()
+}
+
+fn default_onion_external_port() -> u16 {
+    DEFAULT_ONION_EXTERNAL_PORT
 }
 
 #[cfg(not(any(test, feature = "bench")))]
