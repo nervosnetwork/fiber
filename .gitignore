@@ -34,3 +34,9 @@ target
 baseline.json
 current.json
 comparison_report.txt
+gossip_baseline.json
+gossip_current.json
+gossip_comparison_report.txt
+gossip_steady_baseline.json
+gossip_burst_baseline.json
+gossip_benchmark_params.txt

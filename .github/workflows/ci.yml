@@ -151,7 +151,7 @@ jobs:
         run: cargo build --locked --verbose --profile ${{ matrix.profile }}
 
   benchmark:
-    name: Benchmark
+    name: Benchmark (Non-Gossip)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     if: github.event_name == 'pull_request'

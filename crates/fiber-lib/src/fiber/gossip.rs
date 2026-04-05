@@ -98,9 +98,242 @@ const MAX_NUM_CONCURRENT_QUERY_TASKS: usize = 10;
 
 const QUERY_BROADCAST_MESSAGES_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_PEER_FILTER_RETRY_DELAY: Duration = Duration::from_millis(500);
+const GOSSIP_INGRESS_PASSIVE: &str = "passive";
+const GOSSIP_INGRESS_ACTIVE_GET: &str = "active_get";
+const GOSSIP_INGRESS_QUERY: &str = "query";
 
 fn max_acceptable_gossip_message_timestamp() -> u64 {
     now_timestamp_as_millis_u64() + MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS
+}
+
+fn broadcast_message_type(message: &BroadcastMessage) -> &'static str {
+    match message {
+        BroadcastMessage::ChannelAnnouncement(_) => "channel_announcement",
+        BroadcastMessage::ChannelUpdate(_) => "channel_update",
+        BroadcastMessage::NodeAnnouncement(_) => "node_announcement",
+    }
+}
+
+fn broadcast_message_with_timestamp_type(message: &BroadcastMessageWithTimestamp) -> &'static str {
+    match message {
+        BroadcastMessageWithTimestamp::ChannelAnnouncement(_, _) => "channel_announcement",
+        BroadcastMessageWithTimestamp::ChannelUpdate(_) => "channel_update",
+        BroadcastMessageWithTimestamp::NodeAnnouncement(_) => "node_announcement",
+    }
+}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_gossip_received_bytes(bytes: usize) {
+    metrics::counter!(crate::metrics::GOSSIP_RECEIVED_BYTES_TOTAL).increment(bytes as u64);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_gossip_received_bytes(_bytes: usize) {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_gossip_sent_bytes(bytes: usize) {
+    metrics::counter!(crate::metrics::GOSSIP_SENT_BYTES_TOTAL).increment(bytes as u64);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_gossip_sent_bytes(_bytes: usize) {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_received_broadcast_messages(count: usize) {
+    metrics::counter!(crate::metrics::GOSSIP_RECEIVED_BROADCAST_MESSAGES_TOTAL)
+        .increment(count as u64);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_received_broadcast_messages(_count: usize) {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_applied_broadcast_message() {
+    metrics::counter!(crate::metrics::GOSSIP_APPLIED_BROADCAST_MESSAGES_TOTAL).increment(1);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_applied_broadcast_message() {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_duplicate_broadcast_message() {
+    metrics::counter!(crate::metrics::GOSSIP_DUPLICATE_BROADCAST_MESSAGES_TOTAL).increment(1);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_duplicate_broadcast_message() {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_rejected_broadcast_message(reason: &'static str) {
+    metrics::counter!(
+        crate::metrics::GOSSIP_REJECTED_BROADCAST_MESSAGES_TOTAL,
+        "reason" => reason
+    )
+    .increment(1);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_rejected_broadcast_message(_reason: &'static str) {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_gossip_propagation_received_latency(
+    message_type: &'static str,
+    ingress: &'static str,
+    latency_ms: u64,
+) {
+    metrics::histogram!(
+        crate::metrics::GOSSIP_PROPAGATION_RECEIVED_LATENCY_MS,
+        "message_type" => message_type,
+        "ingress" => ingress
+    )
+    .record(latency_ms as f64);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_gossip_propagation_received_latency(
+    _message_type: &'static str,
+    _ingress: &'static str,
+    _latency_ms: u64,
+) {
+}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_gossip_propagation_applied_latency(message_type: &'static str, latency_ms: u64) {
+    metrics::histogram!(
+        crate::metrics::GOSSIP_PROPAGATION_APPLIED_LATENCY_MS,
+        "message_type" => message_type
+    )
+    .record(latency_ms as f64);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_gossip_propagation_applied_latency(_message_type: &'static str, _latency_ms: u64) {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_gossip_propagation_sample_skipped(
+    stage: &'static str,
+    message_type: &'static str,
+    reason: &'static str,
+) {
+    metrics::counter!(
+        crate::metrics::GOSSIP_PROPAGATION_SAMPLES_SKIPPED_TOTAL,
+        "stage" => stage,
+        "message_type" => message_type,
+        "reason" => reason
+    )
+    .increment(1);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_gossip_propagation_sample_skipped(
+    _stage: &'static str,
+    _message_type: &'static str,
+    _reason: &'static str,
+) {
+}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_active_sync_completion(latency_ms: u64) {
+    metrics::histogram!(crate::metrics::GOSSIP_ACTIVE_SYNC_COMPLETION_MS).record(latency_ms as f64);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_active_sync_completion(_latency_ms: u64) {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_active_sync_started() {
+    metrics::counter!(crate::metrics::GOSSIP_ACTIVE_SYNC_STARTED_TOTAL).increment(1);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_active_sync_started() {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_active_sync_finished() {
+    metrics::counter!(crate::metrics::GOSSIP_ACTIVE_SYNC_FINISHED_TOTAL).increment(1);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_active_sync_finished() {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_active_sync_timeout() {
+    metrics::counter!(crate::metrics::GOSSIP_ACTIVE_SYNC_TIMEOUT_TOTAL).increment(1);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_active_sync_timeout() {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_missing_dependency_message(message_type: &'static str) {
+    metrics::counter!(
+        crate::metrics::GOSSIP_MISSING_DEPENDENCY_MESSAGES_TOTAL,
+        "message_type" => message_type
+    )
+    .increment(1);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_missing_dependency_message(_message_type: &'static str) {}
+
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+fn observe_dependency_query_request(items: usize) {
+    metrics::counter!(crate::metrics::GOSSIP_DEPENDENCY_QUERY_REQUESTS_TOTAL).increment(1);
+    metrics::counter!(crate::metrics::GOSSIP_DEPENDENCY_QUERY_ITEMS_TOTAL).increment(items as u64);
+}
+
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+fn observe_dependency_query_request(_items: usize) {}
+
+fn observe_received_propagation_latencies(messages: &[BroadcastMessage], ingress: &'static str) {
+    let now = now_timestamp_as_millis_u64();
+    for message in messages {
+        let message_type = broadcast_message_type(message);
+        match message.timestamp() {
+            Some(message_timestamp) if message_timestamp <= now => {
+                observe_gossip_propagation_received_latency(
+                    message_type,
+                    ingress,
+                    now.saturating_sub(message_timestamp),
+                );
+            }
+            Some(_) => {
+                observe_gossip_propagation_sample_skipped(
+                    "received",
+                    message_type,
+                    "future_timestamp",
+                );
+            }
+            None => {
+                observe_gossip_propagation_sample_skipped("received", message_type, "no_timestamp");
+            }
+        }
+    }
+}
+
+fn observe_applied_propagation_latency(message: &BroadcastMessageWithTimestamp) {
+    let message_type = broadcast_message_with_timestamp_type(message);
+    let message_timestamp = match message {
+        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => channel_update.timestamp,
+        BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
+            node_announcement.timestamp
+        }
+        BroadcastMessageWithTimestamp::ChannelAnnouncement(_, _) => {
+            observe_gossip_propagation_sample_skipped(
+                "applied",
+                message_type,
+                "unsupported_message_type",
+            );
+            return;
+        }
+    };
+
+    let now = now_timestamp_as_millis_u64();
+    if message_timestamp > now {
+        observe_gossip_propagation_sample_skipped("applied", message_type, "future_timestamp");
+        return;
+    }
+    observe_gossip_propagation_applied_latency(message_type, now.saturating_sub(message_timestamp));
 }
 
 pub trait GossipMessageStore {
@@ -747,6 +980,7 @@ where
                 state.inflight_requests.remove(&request_id);
                 // TODO: When the peer failed for too many times, we should consider disconnecting from the peer.
                 state.peer_state.failed_times += 1;
+                observe_active_sync_timeout();
                 myself
                     .send_message(GossipSyncingActorMessage::NewGetRequest())
                     .expect("gossip syncing actor alive");
@@ -1253,6 +1487,51 @@ pub enum GossipMessageProcessingError {
     NewerMessageSaved(BroadcastMessageWithTimestamp),
 }
 
+impl GossipMessageProcessingError {
+    fn rejected_broadcast_metrics_reason(&self) -> &'static str {
+        match self {
+            GossipMessageProcessingError::MessageTooNew(_, _) => "message_too_new",
+            GossipMessageProcessingError::ProcessingError(_) => "processing_error",
+            GossipMessageProcessingError::NewerMessageSaved(_) => "newer_message_saved",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum VerifyBroadcastMessageError {
+    #[error("InvalidParameter: {0}")]
+    InvalidParameter(String),
+    #[error("Internal error: {0}")]
+    InternalError(anyhow::Error),
+}
+
+impl VerifyBroadcastMessageError {
+    fn rejected_broadcast_metrics_reason(&self) -> &'static str {
+        match self {
+            VerifyBroadcastMessageError::InvalidParameter(_) => "verify_invalid",
+            VerifyBroadcastMessageError::InternalError(_) => "verify_internal_error",
+        }
+    }
+}
+
+impl From<VerifyBroadcastMessageError> for Error {
+    fn from(error: VerifyBroadcastMessageError) -> Self {
+        match error {
+            VerifyBroadcastMessageError::InvalidParameter(message) => {
+                Error::InvalidParameter(message)
+            }
+            VerifyBroadcastMessageError::InternalError(error) => Error::InternalError(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum InsertMessageStatus {
+    Inserted,
+    InsertedDuplicate,
+    Duplicate,
+}
+
 pub struct ExtendedGossipMessageStoreState<S, C> {
     announce_private_addr: bool,
     store: S,
@@ -1327,14 +1606,19 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             )
             .await
             {
-                Ok((message, saved_to_store)) => {
-                    if saved_to_store {
+                Ok((message, is_newly_applied)) => {
+                    if is_newly_applied {
                         self.latest_remote_broadcast_timestamp
                             .fetch_max(message.cursor().timestamp, Ordering::AcqRel);
+                        observe_applied_broadcast_message();
+                        observe_applied_propagation_latency(&message);
+                    } else {
+                        observe_duplicate_broadcast_message();
                     }
                     verified_sorted_messages.push(message);
                 }
                 Err(error) => {
+                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
                     trace!(
                         "Failed to verify and save message {:?}: {:?}",
                         message,
@@ -1440,6 +1724,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                     if queries.is_empty() {
                         continue;
                     }
+                    observe_dependency_query_request(queries.len());
                     match call!(
                         gossip_actor,
                         GossipActorMessage::QueryBroadcastMessages,
@@ -1508,12 +1793,17 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         &mut self,
         pubkey: &Pubkey,
         message: &BroadcastMessage,
-    ) -> Result<(), GossipMessageProcessingError> {
+    ) -> Result<InsertMessageStatus, GossipMessageProcessingError> {
         if let Some(existing_messages) = self.messages_to_be_saved.get(pubkey) {
             if existing_messages.contains(message) {
-                return Ok(());
+                return Ok(InsertMessageStatus::Duplicate);
             }
         }
+
+        let duplicate_from_other_peer = self
+            .messages_to_be_saved
+            .iter()
+            .any(|(peer, messages)| peer != pubkey && messages.contains(message));
 
         if let Some(existing_message) = get_existing_newer_broadcast_message(message, &self.store) {
             if &BroadcastMessage::from(existing_message.clone()) != message {
@@ -1521,7 +1811,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                     existing_message,
                 ));
             } else {
-                return Ok(());
+                return Ok(InsertMessageStatus::Duplicate);
             }
         }
 
@@ -1558,7 +1848,11 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             .entry(*pubkey)
             .or_default()
             .insert(message.clone());
-        Ok(())
+        Ok(if duplicate_from_other_peer {
+            InsertMessageStatus::InsertedDuplicate
+        } else {
+            InsertMessageStatus::Inserted
+        })
     }
 
     fn has_dependencies_available(&self, message: &BroadcastMessage) -> bool {
@@ -1742,9 +2036,26 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
 
             ExtendedGossipMessageStoreMessage::SaveMessages(peer, messages) => {
                 for message in messages {
-                    if let Err(error) = state.insert_message_to_be_saved_list(&peer, &message).await
-                    {
-                        trace!("Failed to save message: {:?}, error: {:?}", message, error);
+                    match state.insert_message_to_be_saved_list(&peer, &message).await {
+                        Ok(InsertMessageStatus::Inserted) => {
+                            if !state.has_dependencies_available(&message) {
+                                observe_missing_dependency_message(broadcast_message_type(
+                                    &message,
+                                ));
+                            }
+                        }
+                        Ok(InsertMessageStatus::InsertedDuplicate) => {
+                            observe_duplicate_broadcast_message();
+                        }
+                        Ok(InsertMessageStatus::Duplicate) => {
+                            observe_duplicate_broadcast_message();
+                        }
+                        Err(error) => {
+                            observe_rejected_broadcast_message(
+                                error.rejected_broadcast_metrics_reason(),
+                            );
+                            trace!("Failed to save message: {:?}, error: {:?}", message, error);
+                        }
                     }
                 }
             }
@@ -1845,6 +2156,7 @@ pub(crate) struct GossipActorState<S, C> {
         HashMap<(Pubkey, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
     peer_states: HashMap<Pubkey, PeerState>,
     latest_remote_broadcast_timestamp: Arc<AtomicU64>,
+    active_sync_started_at: HashMap<Pubkey, u64>,
 }
 
 impl<S, C> GossipActorState<S, C>
@@ -1953,6 +2265,7 @@ where
 
     async fn start_new_active_syncer(&mut self, pubkey: &Pubkey) {
         let safe_cursor = self.get_safe_cursor_to_start_syncing();
+        let started_at = now_timestamp_as_millis_u64();
         let sync_actor = Actor::spawn_linked(
             Some(format!(
                 "gossip syncing actor to peer {:?} supervised by {:?}",
@@ -1977,6 +2290,8 @@ where
             .get_mut(pubkey)
             .expect("get peer state")
             .change_sync_status(PeerSyncStatus::ActiveGet(sync_actor.0));
+        self.active_sync_started_at.insert(*pubkey, started_at);
+        observe_active_sync_started();
     }
 
     async fn start_passive_syncer(&mut self, pubkey: &Pubkey) {
@@ -2089,9 +2404,12 @@ async fn send_message_to_session(
     session_id: SessionId,
     message: GossipMessage,
 ) -> crate::Result<()> {
+    let payload = message.to_molecule_bytes();
+    let payload_len = payload.len();
     control
-        .send_message_to(session_id, GOSSIP_PROTOCOL_ID, message.to_molecule_bytes())
+        .send_message_to(session_id, GOSSIP_PROTOCOL_ID, payload)
         .await?;
+    observe_gossip_sent_bytes(payload_len);
     Ok(())
 }
 
@@ -2177,8 +2495,8 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
-) -> Result<(BroadcastMessageWithTimestamp, bool), Error> {
-    let (timestamp, already_saved) = match message {
+) -> Result<(BroadcastMessageWithTimestamp, bool), VerifyBroadcastMessageError> {
+    let (timestamp, is_newly_applied) = match message {
         BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
             let on_chain_info =
                 get_channel_on_chain_info(channel_announcement.out_point(), chain, client).await?;
@@ -2190,33 +2508,31 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
                     channel_announcement.clone(),
                 );
             }
-            (on_chain_info.timestamp, already_saved)
+            (on_chain_info.timestamp, !already_saved)
         }
         BroadcastMessage::ChannelUpdate(channel_update) => {
             let already_saved = verify_channel_update(channel_update, store)?;
             if !already_saved {
                 store.save_channel_update(channel_update.clone());
             }
-            (channel_update.timestamp, already_saved)
+            (channel_update.timestamp, !already_saved)
         }
         BroadcastMessage::NodeAnnouncement(node_announcement) => {
             let already_saved = verify_node_announcement(node_announcement, store)?;
             if !already_saved {
                 store.save_node_announcement(node_announcement.clone());
             }
-            (node_announcement.timestamp, already_saved)
+            (node_announcement.timestamp, !already_saved)
         }
     };
-    let message_with_timestamp: BroadcastMessageWithTimestamp = (message.clone(), timestamp).into();
-    let saved_to_store = !already_saved;
-    Ok((message_with_timestamp, saved_to_store))
+    Ok(((message.clone(), timestamp).into(), is_newly_applied))
 }
 
 async fn get_channel_tx(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
-) -> Result<(TransactionView, Hash256), Error> {
+) -> Result<(TransactionView, Hash256), VerifyBroadcastMessageError> {
     // Wait for the tx to be available in test.
     //
     // In the payment test, channels are created first, then the funding
@@ -2242,12 +2558,12 @@ async fn get_channel_tx(
             transaction: Some(tx),
             tx_status: TxStatus::Committed(_, block_hash, _)
         }) => Ok((tx, block_hash.into())),
-        Err(err) => Err(Error::InvalidParameter(format!(
+        Err(err) => Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
             &outpoint.tx_hash(),
             err
         ))),
-        _ => Err(Error::InvalidParameter(format!(
+        _ => Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement transaction {:?} not found or not confirmed, the reason is unknown",
             &outpoint.tx_hash(),
         ))),
@@ -2264,7 +2580,9 @@ async fn get_channel_timestamp<S: GossipMessageStore>(
         return Ok(timestamp);
     }
 
-    let on_chain_info = get_channel_on_chain_info(outpoint, chain, client).await?;
+    let on_chain_info = get_channel_on_chain_info(outpoint, chain, client)
+        .await
+        .map_err(Error::from)?;
 
     Ok(on_chain_info.timestamp)
 }
@@ -2273,11 +2591,11 @@ async fn get_channel_on_chain_info(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
-) -> Result<ChannelOnchainInfo, Error> {
+) -> Result<ChannelOnchainInfo, VerifyBroadcastMessageError> {
     let (tx, block_hash) = get_channel_tx(outpoint, chain, client).await?;
     let first_output = match tx.outputs().get(0) {
         None => {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "On-chain transaction found but no output: {:?}",
                 &outpoint
             )));
@@ -2288,17 +2606,19 @@ async fn get_channel_on_chain_info(
     let timestamp: u64 = match client.get_block_timestamp(block_hash).await {
         Ok(Some(timestamp)) => timestamp,
         Ok(None) => {
-            return Err(Error::InternalError(anyhow::anyhow!(
+            return Err(VerifyBroadcastMessageError::InternalError(anyhow::anyhow!(
                 "Unable to find block {:?} for channel outpoint {:?}",
                 &block_hash,
                 &outpoint
             )));
         }
         Err(err) => {
-            return Err(Error::InternalError(err.context(format!(
-                "Error while trying to obtain block {:?} for channel outpoint {:?}",
-                block_hash, &outpoint
-            ))));
+            return Err(VerifyBroadcastMessageError::InternalError(err.context(
+                format!(
+                    "Error while trying to obtain block {:?} for channel outpoint {:?}",
+                    block_hash, &outpoint
+                ),
+            )));
         }
     };
 
@@ -2316,14 +2636,14 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     channel_announcement: &ChannelAnnouncement,
     on_chain_info: &ChannelOnchainInfo,
     store: &S,
-) -> Result<bool, Error> {
+) -> Result<bool, VerifyBroadcastMessageError> {
     if let Some((_, announcement)) =
         store.get_latest_channel_announcement(&channel_announcement.channel_outpoint)
     {
         if announcement == *channel_announcement {
             return Ok(true);
         } else {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel announcement message already exists but mismatched: {:?}, existing: {:?}",
                 &channel_announcement, &announcement
             )));
@@ -2331,7 +2651,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     }
     let message = channel_announcement.message_to_sign();
     if channel_announcement.node1_id == channel_announcement.node2_id {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement node had a channel with itself: {:?}",
             &channel_announcement
         )));
@@ -2345,7 +2665,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
             (node1_signature, node2_signature, ckb_signature)
         }
         _ => {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel announcement message signature verification failed, some signatures are missing: {:?}",
                 &channel_announcement
             )));
@@ -2353,7 +2673,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     };
 
     if !node1_signature.verify(&channel_announcement.node1_id, &message) {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement message signature verification failed for node 1: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
             &channel_announcement,
             &message,
@@ -2363,7 +2683,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     }
 
     if !node2_signature.verify(&channel_announcement.node2_id, &message) {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement message signature verification failed for node 2: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
             &channel_announcement,
             &message,
@@ -2377,7 +2697,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
 
     let output = &on_chain_info.first_output;
     if output.lock.args.as_bytes() != pubkey_hash {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                     "On-chain transaction found but pubkey hash mismatched: on chain hash {:?}, pub key ({:?}) hash {:?}",
                     &output.lock.args.as_bytes(),
                     hex::encode(pubkey),
@@ -2391,7 +2711,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
         }
         None => {
             if channel_announcement.capacity > capacity {
-                return Err(Error::InvalidParameter(format!(
+                return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                             "On-chain transaction found but capacity mismatched: on chain capacity {:?} smaller than annoucned channel capacity {:?}",
                             &output.capacity, &channel_announcement.capacity
                         )));
@@ -2402,7 +2722,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     if let Err(err) =
         SECP256K1.verify_schnorr(ckb_signature, &message, &channel_announcement.ckb_key)
     {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement message signature verification failed for ckb: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}, error: {:?}",
             &channel_announcement,
             &message,
@@ -2422,14 +2742,14 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
 fn verify_channel_update<S: GossipMessageStore>(
     channel_update: &ChannelUpdate,
     store: &S,
-) -> Result<bool, Error> {
+) -> Result<bool, VerifyBroadcastMessageError> {
     if let Some(BroadcastMessageWithTimestamp::ChannelUpdate(existing)) =
         store.get_broadcast_message_with_cursor(&channel_update.cursor())
     {
         if existing == *channel_update {
             return Ok(true);
         } else {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel update message already exists but mismatched: {:?}, existing: {:?}",
                 &channel_update, &existing
             )));
@@ -2440,7 +2760,7 @@ fn verify_channel_update<S: GossipMessageStore>(
     let signature = match channel_update.signature {
         Some(ref signature) => signature,
         None => {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel update message signature verification failed (signature not found): {:?}",
                 &channel_update
             )));
@@ -2454,7 +2774,7 @@ fn verify_channel_update<S: GossipMessageStore>(
                 channel_announcement.node2_id
             };
             if !signature.verify(&pubkey, &message) {
-                return Err(Error::InvalidParameter(format!(
+                return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                     "Channel update message signature verification failed (invalid signature): {:?}",
                     &channel_update
                 )));
@@ -2465,7 +2785,7 @@ fn verify_channel_update<S: GossipMessageStore>(
             // It is possible that the channel update message is received before the channel announcement message.
             // In this case, we should temporarily store the channel update message and verify it later
             // when the channel announcement message is received.
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel announcement message not found for channel update message: {:?}",
                 &channel_update.channel_outpoint
             )));
@@ -2480,21 +2800,21 @@ fn verify_channel_update<S: GossipMessageStore>(
 fn verify_node_announcement<S: GossipMessageStore>(
     node_announcement: &NodeAnnouncement,
     store: &S,
-) -> Result<bool, Error> {
+) -> Result<bool, VerifyBroadcastMessageError> {
     if let Some(BroadcastMessageWithTimestamp::NodeAnnouncement(announcement)) =
         store.get_broadcast_message_with_cursor(&node_announcement.cursor())
     {
         if announcement == *node_announcement {
             return Ok(true);
         } else {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Node announcement message already exists but mismatched: {:?}, existing: {:?}",
                 &node_announcement, &announcement
             )));
         }
     }
     if !node_announcement.verify() {
-        Err(Error::InvalidParameter(
+        Err(VerifyBroadcastMessageError::InvalidParameter(
             "Node announcement message signature verification failed".to_string(),
         ))
     } else {
@@ -2636,6 +2956,7 @@ where
             num_finished_active_syncing_peers: Default::default(),
             peer_states: Default::default(),
             latest_remote_broadcast_timestamp,
+            active_sync_started_at: Default::default(),
         };
         Ok(state)
     }
@@ -2683,8 +3004,9 @@ where
                     .peer_states
                     .insert(pubkey, PeerState::new(session.id, session.ty));
             }
-            GossipActorMessage::PeerDisconnected(pubkey, _session) => {
-                state.peer_states.remove(&pubkey);
+            GossipActorMessage::PeerDisconnected(peer_id, _session) => {
+                state.peer_states.remove(&peer_id);
+                state.active_sync_started_at.remove(&peer_id);
             }
             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
                 if let Some(reply) = state.query_reply_ports.remove(&(peer, request_id)) {
@@ -2774,6 +3096,11 @@ where
 
             GossipActorMessage::ActiveSyncingFinished(pubkey, cursor) => {
                 state.num_finished_active_syncing_peers += 1;
+                if let Some(started_at) = state.active_sync_started_at.remove(&pubkey) {
+                    let now = now_timestamp_as_millis_u64();
+                    observe_active_sync_completion(now.saturating_sub(started_at));
+                }
+                observe_active_sync_finished();
                 if let Some(peer_state) = state.peer_states.get_mut(&pubkey) {
                     peer_state.change_sync_status(PeerSyncStatus::FinishedActiveSyncing(
                         now_timestamp_as_millis_u64(),
@@ -2821,6 +3148,8 @@ where
                 GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
                     messages,
                 }) => {
+                    observe_received_broadcast_messages(messages.len());
+                    observe_received_propagation_latencies(&messages, GOSSIP_INGRESS_PASSIVE);
                     state
                         .try_to_verify_and_save_broadcast_messages(pubkey, messages)
                         .await;
@@ -2857,6 +3186,11 @@ where
                     }
                 }
                 GossipMessage::GetBroadcastMessagesResult(result) => {
+                    observe_received_broadcast_messages(result.messages.len());
+                    observe_received_propagation_latencies(
+                        &result.messages,
+                        GOSSIP_INGRESS_ACTIVE_GET,
+                    );
                     let peer_state = state.peer_states.get(&pubkey);
                     if let Some(PeerState {
                         sync_status: PeerSyncStatus::ActiveGet(actor),
@@ -2904,6 +3238,8 @@ where
                     }
                 }
                 GossipMessage::QueryBroadcastMessagesResult(result) => {
+                    observe_received_broadcast_messages(result.messages.len());
+                    observe_received_propagation_latencies(&result.messages, GOSSIP_INGRESS_QUERY);
                     if let Some(reply) = state.query_reply_ports.remove(&(pubkey, result.id)) {
                         let _ = reply.send(Ok(result));
                     }
@@ -2972,6 +3308,7 @@ impl ServiceProtocol for GossipProtocolHandle {
     }
 
     async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
+        observe_gossip_received_bytes(data.len());
         let message = unwrap_or_return!(GossipMessage::from_molecule_slice(&data), "parse message");
         match context.session.remote_pubkey.as_ref() {
             Some(pubkey) => {

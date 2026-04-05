@@ -1,0 +1,133 @@
+name: Gossip Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_secs:
+        description: "Benchmark duration in seconds"
+        required: false
+        default: "60"
+      steady_interval_ms:
+        description: "Steady mode update interval in milliseconds"
+        required: false
+        default: "50"
+      burst_updates_per_window:
+        description: "Burst mode updates per window"
+        required: false
+        default: "200"
+      burst_window_ms:
+        description: "Burst mode window in milliseconds"
+        required: false
+        default: "1000"
+      gossip_network_interval_ms:
+        description: "Fiber gossip network maintenance interval in milliseconds"
+        required: false
+        default: "60000"
+      gossip_store_interval_ms:
+        description: "Fiber gossip store maintenance interval in milliseconds"
+        required: false
+        default: "20000"
+  schedule:
+    - cron: "0 3 * * 0"
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  gossip-benchmark:
+    name: Gossip Benchmark (Production-like Intervals)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gossip-benchmark-${{ runner.os }}
+
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
+        with:
+          ckb-version: "0.202.0"
+          cache-prefix: "gossip-benchmark"
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./tests/deploy/udt-init/target
+            ./tests/perf/target
+          key: gossip-benchmark-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            gossip-benchmark-build-${{ runner.os }}-
+
+      - name: Build rust code
+        run: |
+          cd ./tests/deploy/udt-init && cargo build --locked && cd -
+          cd ./tests/perf/ && cargo build --release --locked && cd -
+
+      - name: Run gossip steady and burst benchmarks
+        env:
+          DURATION_SECS: ${{ github.event.inputs.duration_secs || '60' }}
+          STEADY_INTERVAL_MS: ${{ github.event.inputs.steady_interval_ms || '50' }}
+          BURST_UPDATES_PER_WINDOW: ${{ github.event.inputs.burst_updates_per_window || '200' }}
+          BURST_WINDOW_MS: ${{ github.event.inputs.burst_window_ms || '1000' }}
+          GOSSIP_NETWORK_INTERVAL_MS: ${{ github.event.inputs.gossip_network_interval_ms || '60000' }}
+          GOSSIP_STORE_INTERVAL_MS: ${{ github.event.inputs.gossip_store_interval_ms || '20000' }}
+        run: |
+          set -euo pipefail
+
+          export ON_GITHUB_ACTION=y
+          REMOVE_OLD_STATE=y \
+          ENABLE_FIBER_METRICS=1 \
+          START_BOOTNODE=y \
+          CKB_LOG=warn \
+          TEST_ENV=release \
+          FIBER_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS="${GOSSIP_NETWORK_INTERVAL_MS}" \
+          FIBER_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS="${GOSSIP_STORE_INTERVAL_MS}" \
+          ./tests/nodes/start.sh > gossip-benchmark.log 2>&1 &
+          ./tests/nodes/wait.sh
+
+          cd ./tests/perf/
+
+          cargo run --bin run-test --release integration
+
+          cargo run --bin run-test --release -- gossip-benchmark steady \
+            --duration-secs "${DURATION_SECS}" \
+            --interval-ms "${STEADY_INTERVAL_MS}" \
+            --result-mode base
+          cp gossip_baseline.json gossip_steady_baseline.json
+
+          cargo run --bin run-test --release -- gossip-benchmark burst \
+            --duration-secs "${DURATION_SECS}" \
+            --burst-updates-per-window "${BURST_UPDATES_PER_WINDOW}" \
+            --burst-window-ms "${BURST_WINDOW_MS}" \
+            --result-mode base
+          cp gossip_baseline.json gossip_burst_baseline.json
+
+          {
+            echo "duration_secs=${DURATION_SECS}"
+            echo "steady_interval_ms=${STEADY_INTERVAL_MS}"
+            echo "burst_updates_per_window=${BURST_UPDATES_PER_WINDOW}"
+            echo "burst_window_ms=${BURST_WINDOW_MS}"
+            echo "gossip_network_interval_ms=${GOSSIP_NETWORK_INTERVAL_MS}"
+            echo "gossip_store_interval_ms=${GOSSIP_STORE_INTERVAL_MS}"
+          } > gossip_benchmark_params.txt
+
+      - name: Upload gossip benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gossip-benchmark-results
+          path: |
+            ./gossip-benchmark.log
+            ./tests/perf/gossip_baseline.json
+            ./tests/perf/gossip_steady_baseline.json
+            ./tests/perf/gossip_burst_baseline.json
+            ./tests/perf/gossip_benchmark_params.txt
+
