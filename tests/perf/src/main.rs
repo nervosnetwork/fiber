@@ -4,58 +4,9 @@ use std::time::Duration;
 use fiber_e2e_tests::{
     compare_gossip_with_baseline, compare_with_baseline, load_benchmark_baseline,
     load_gossip_benchmark_baseline, run_benchmark_test, run_gossip_benchmark_test,
-    run_integration_test, save_benchmark_baseline, save_gossip_benchmark_baseline, TestResult,
+    run_integration_test, save_benchmark_baseline, save_gossip_benchmark_baseline,
+    GossipBenchmarkArgs, GossipBenchmarkRunMode, GossipLoadMode, TestResult,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GossipLoadMode {
-    Steady,
-    Burst,
-}
-
-impl GossipLoadMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Steady => "steady",
-            Self::Burst => "burst",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunMode {
-    Base,
-    Compare,
-}
-
-impl RunMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Base => "base",
-            Self::Compare => "compare",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "base" => Ok(Self::Base),
-            "compare" => Ok(Self::Compare),
-            _ => Err(format!(
-                "invalid --result-mode '{value}', expected 'base' or 'compare'"
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct GossipBenchmarkCliArgs {
-    load_mode: GossipLoadMode,
-    duration_secs: u64,
-    run_mode: RunMode,
-    interval_ms: u64,
-    burst_updates_per_window: u64,
-    burst_window_ms: u64,
-}
 
 fn parse_u64_flag(value: &str, flag: &str) -> Result<u64, String> {
     value
@@ -80,7 +31,7 @@ fn print_gossip_benchmark_usage() {
     );
 }
 
-fn parse_gossip_benchmark_args(args: &[String]) -> Result<GossipBenchmarkCliArgs, String> {
+fn parse_gossip_benchmark_args(args: &[String]) -> Result<GossipBenchmarkArgs, String> {
     if args.is_empty() {
         return Err("missing load mode, expected 'steady' or 'burst'".to_string());
     }
@@ -96,7 +47,7 @@ fn parse_gossip_benchmark_args(args: &[String]) -> Result<GossipBenchmarkCliArgs
     };
 
     let mut duration_secs = 60u64;
-    let mut run_mode = RunMode::Base;
+    let mut run_mode = GossipBenchmarkRunMode::Base;
     let mut interval_ms = 1000u64;
     let mut burst_updates_per_window = 0u64;
     let mut burst_window_ms = 1000u64;
@@ -119,7 +70,7 @@ fn parse_gossip_benchmark_args(args: &[String]) -> Result<GossipBenchmarkCliArgs
                 duration_secs = parse_u64_flag(value, flag)?;
             }
             "--result-mode" => {
-                run_mode = RunMode::parse(value)?;
+                run_mode = GossipBenchmarkRunMode::parse(value)?;
             }
             "--interval-ms" => {
                 interval_ms = parse_u64_flag(value, flag)?;
@@ -171,7 +122,7 @@ fn parse_gossip_benchmark_args(args: &[String]) -> Result<GossipBenchmarkCliArgs
         }
     }
 
-    Ok(GossipBenchmarkCliArgs {
+    Ok(GossipBenchmarkArgs {
         load_mode,
         duration_secs,
         run_mode,
@@ -289,19 +240,16 @@ async fn main() -> TestResult<()> {
             );
 
             let benchmark_result = run_gossip_benchmark_test(
-                Duration::from_secs(gossip_args.duration_secs),
-                Duration::from_millis(gossip_args.interval_ms),
-                gossip_args.burst_updates_per_window,
-                Duration::from_millis(gossip_args.burst_window_ms),
+                &gossip_args,
             )
             .await?;
 
             match gossip_args.run_mode {
-                RunMode::Base => {
+                GossipBenchmarkRunMode::Base => {
                     save_gossip_benchmark_baseline(&benchmark_result, "gossip_baseline.json")?;
                     println!("💾 Gossip baseline benchmark results saved to gossip_baseline.json");
                 }
-                RunMode::Compare => {
+                GossipBenchmarkRunMode::Compare => {
                     save_gossip_benchmark_baseline(&benchmark_result, "gossip_current.json")?;
                     match load_gossip_benchmark_baseline("gossip_baseline.json") {
                         Ok(baseline) => {

@@ -16,6 +16,59 @@ const CHANNEL_UPDATE_MESSAGE_TYPE: &str = "channel_update";
 const DEFAULT_NODE1_METRICS_URL: &str = "http://127.0.0.1:29114/metrics";
 const DEFAULT_NODE2_METRICS_URL: &str = "http://127.0.0.1:29115/metrics";
 const DEFAULT_NODE3_METRICS_URL: &str = "http://127.0.0.1:29116/metrics";
+const DEFAULT_GOSSIP_FINAL_METRICS_DRAIN_TIMEOUT_SECS: u64 = 15;
+const DEFAULT_GOSSIP_FINAL_METRICS_DRAIN_POLL_MS: u64 = 250;
+const DEFAULT_GOSSIP_FINAL_METRICS_STABLE_POLLS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GossipLoadMode {
+    Steady,
+    Burst,
+}
+
+impl GossipLoadMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Steady => "steady",
+            Self::Burst => "burst",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GossipBenchmarkRunMode {
+    Base,
+    Compare,
+}
+
+impl GossipBenchmarkRunMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Compare => "compare",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "base" => Ok(Self::Base),
+            "compare" => Ok(Self::Compare),
+            _ => Err(format!(
+                "invalid --result-mode '{value}', expected 'base' or 'compare'"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GossipBenchmarkArgs {
+    pub load_mode: GossipLoadMode,
+    pub duration_secs: u64,
+    pub run_mode: GossipBenchmarkRunMode,
+    pub interval_ms: u64,
+    pub burst_updates_per_window: u64,
+    pub burst_window_ms: u64,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BenchmarkResult {
@@ -1060,6 +1113,10 @@ impl HistogramSnapshot {
         }
         self.cumulative_count_le(upper_bound) as f64 * 100.0 / self.count as f64
     }
+
+    fn is_stable_with(&self, other: &Self) -> bool {
+        self.count == other.count && self.buckets == other.buckets
+    }
 }
 
 fn parse_prometheus_histogram(
@@ -1203,6 +1260,18 @@ impl GossipMetricsSnapshot {
             ),
         }
     }
+
+    fn is_stable_with(&self, other: &Self) -> bool {
+        self.received_broadcast_messages == other.received_broadcast_messages
+            && self.applied_broadcast_messages == other.applied_broadcast_messages
+            && self.duplicate_broadcast_messages == other.duplicate_broadcast_messages
+            && self.rejected_broadcast_messages == other.rejected_broadcast_messages
+            && self.received_gossip_bytes == other.received_gossip_bytes
+            && self.sent_gossip_bytes == other.sent_gossip_bytes
+            && self
+                .applied_channel_update_latency
+                .is_stable_with(&other.applied_channel_update_latency)
+    }
 }
 
 fn parse_prometheus_metric_sum(text: &str, metric_name: &str) -> u64 {
@@ -1242,6 +1311,81 @@ async fn collect_gossip_metrics_per_node(
     Some(snapshots)
 }
 
+fn observer_metrics_reached_expected_updates(
+    baseline: Option<&[GossipMetricsSnapshot]>,
+    current: &[GossipMetricsSnapshot],
+    expected_updates: u64,
+) -> bool {
+    if expected_updates == 0 {
+        return true;
+    }
+
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    if baseline.len() != current.len() {
+        return false;
+    }
+
+    baseline.iter().zip(current.iter()).all(|(baseline, current)| {
+        current
+            .applied_channel_update_latency
+            .count
+            .saturating_sub(baseline.applied_channel_update_latency.count)
+            >= expected_updates
+    })
+}
+
+fn gossip_metrics_snapshots_stable(
+    previous: &[GossipMetricsSnapshot],
+    current: &[GossipMetricsSnapshot],
+) -> bool {
+    previous.len() == current.len()
+        && previous
+            .iter()
+            .zip(current.iter())
+            .all(|(previous, current)| previous.is_stable_with(current))
+}
+
+async fn wait_for_gossip_metrics_drain(
+    ctx: &TestContext,
+    metrics_urls: &[String],
+    baseline: Option<&[GossipMetricsSnapshot]>,
+    expected_updates: u64,
+) -> Option<Vec<GossipMetricsSnapshot>> {
+    let drain_timeout = Duration::from_secs(DEFAULT_GOSSIP_FINAL_METRICS_DRAIN_TIMEOUT_SECS);
+    let poll_interval = Duration::from_millis(DEFAULT_GOSSIP_FINAL_METRICS_DRAIN_POLL_MS);
+    let started = Instant::now();
+    let mut stable_polls = 0usize;
+    let mut latest = collect_gossip_metrics_per_node(ctx, metrics_urls).await?;
+
+    loop {
+        if observer_metrics_reached_expected_updates(baseline, &latest, expected_updates) {
+            return Some(latest);
+        }
+
+        if started.elapsed() >= drain_timeout {
+            eprintln!(
+                "Warning: timed out draining in-flight gossip updates after {:?}; using latest metrics snapshot",
+                drain_timeout
+            );
+            return Some(latest);
+        }
+
+        sleep(poll_interval).await;
+        let current = collect_gossip_metrics_per_node(ctx, metrics_urls).await?;
+        if gossip_metrics_snapshots_stable(&latest, &current) {
+            stable_polls = stable_polls.saturating_add(1);
+            if stable_polls >= DEFAULT_GOSSIP_FINAL_METRICS_STABLE_POLLS {
+                return Some(current);
+            }
+        } else {
+            stable_polls = 0;
+        }
+        latest = current;
+    }
+}
+
 fn sum_gossip_metrics(snapshots: &[GossipMetricsSnapshot]) -> GossipMetricsSnapshot {
     let mut total = GossipMetricsSnapshot::default();
     for snapshot in snapshots {
@@ -1273,7 +1417,6 @@ async fn wait_for_monotonic_channel_update_timestamp(
     while should_wait_for_next_channel_update_millis(last_sent_ms, now_timestamp_millis_u64()) {
         sleep(Duration::from_millis(1)).await;
     }
-    last_update_ms_by_channel.insert(channel_id.to_string(), now_timestamp_millis_u64());
 }
 
 async fn build_gossip_workload_channels(
@@ -1329,6 +1472,10 @@ async fn trigger_next_gossip_update(
 
     ctx.update_channel_fee(&ctx.node2.rpc_url, &channel_id, next_fee)
         .await?;
+    // The node assigns the ChannelUpdate timestamp when it processes the RPC,
+    // not when we enqueue it locally, so record the guard timestamp only after
+    // the update call finishes to better approximate the server-side stamp.
+    last_update_ms_by_channel.insert(channel_id.clone(), now_timestamp_millis_u64());
     workload_channels[channel_index].updates =
         workload_channels[channel_index].updates.saturating_add(1);
     *workload_channel_index = (*workload_channel_index).saturating_add(1);
@@ -1336,22 +1483,19 @@ async fn trigger_next_gossip_update(
 }
 
 pub async fn run_gossip_benchmark_test(
-    duration: Duration,
-    update_interval: Duration,
-    burst_updates_per_window: u64,
-    burst_window: Duration,
+    gossip_args: &GossipBenchmarkArgs,
 ) -> TestResult<GossipBenchmarkResult> {
     let ctx = TestContext::new();
+    let duration = Duration::from_secs(gossip_args.duration_secs);
+    let update_interval = Duration::from_millis(gossip_args.interval_ms);
+    let burst_updates_per_window = gossip_args.burst_updates_per_window;
+    let burst_window = Duration::from_millis(gossip_args.burst_window_ms);
     let burst_window = if burst_window.is_zero() {
         Duration::from_millis(1)
     } else {
         burst_window
     };
-    let load_mode = if burst_updates_per_window > 0 {
-        "burst"
-    } else {
-        "steady"
-    };
+    let load_mode = gossip_args.load_mode.as_str();
 
     let mut workload_channels = build_gossip_workload_channels(&ctx).await?;
     let observer_metrics_urls = vec![ctx.node1.metrics_url.clone(), ctx.node3.metrics_url.clone()];
@@ -1407,11 +1551,44 @@ pub async fn run_gossip_benchmark_test(
     let mut peak_send_updates_per_sec = 0.0f64;
 
     while Instant::now() < end {
-        if burst_updates_per_window > 0 {
-            let burst_window_start = Instant::now();
-            let mut sent_in_window = 0u64;
+        match gossip_args.load_mode {
+            GossipLoadMode::Burst => {
+                let burst_window_start = Instant::now();
+                let mut sent_in_window = 0u64;
 
-            while sent_in_window < burst_updates_per_window && Instant::now() < end {
+                while sent_in_window < burst_updates_per_window && Instant::now() < end {
+                    trigger_next_gossip_update(
+                        &ctx,
+                        &mut workload_channels,
+                        &mut next_fee_by_channel,
+                        &mut last_update_ms_by_channel,
+                        &mut workload_channel_index,
+                    )
+                    .await?;
+                    sent_in_window = sent_in_window.saturating_add(1);
+                    total_updates = total_updates.saturating_add(1);
+                }
+
+                burst_windows = burst_windows.saturating_add(1);
+                burst_updates_sent = burst_updates_sent.saturating_add(sent_in_window);
+                let window_elapsed_secs = burst_window_start.elapsed().as_secs_f64();
+                if window_elapsed_secs > 0.0 {
+                    peak_send_updates_per_sec =
+                        peak_send_updates_per_sec.max(sent_in_window as f64 / window_elapsed_secs);
+                }
+
+                let elapsed_in_window = burst_window_start.elapsed();
+                if elapsed_in_window < burst_window {
+                    let remaining_in_window = burst_window - elapsed_in_window;
+                    let remaining_total = end.saturating_duration_since(Instant::now());
+                    let sleep_duration = remaining_in_window.min(remaining_total);
+                    if !sleep_duration.is_zero() {
+                        sleep(sleep_duration).await;
+                    }
+                }
+            }
+            GossipLoadMode::Steady => {
+                let loop_started = Instant::now();
                 trigger_next_gossip_update(
                     &ctx,
                     &mut workload_channels,
@@ -1420,50 +1597,29 @@ pub async fn run_gossip_benchmark_test(
                     &mut workload_channel_index,
                 )
                 .await?;
-                sent_in_window = sent_in_window.saturating_add(1);
                 total_updates = total_updates.saturating_add(1);
-            }
 
-            burst_windows = burst_windows.saturating_add(1);
-            burst_updates_sent = burst_updates_sent.saturating_add(sent_in_window);
-            let window_elapsed_secs = burst_window_start.elapsed().as_secs_f64();
-            if window_elapsed_secs > 0.0 {
-                peak_send_updates_per_sec =
-                    peak_send_updates_per_sec.max(sent_in_window as f64 / window_elapsed_secs);
-            }
-
-            let elapsed_in_window = burst_window_start.elapsed();
-            if elapsed_in_window < burst_window {
-                let remaining_in_window = burst_window - elapsed_in_window;
+                let elapsed = loop_started.elapsed();
                 let remaining_total = end.saturating_duration_since(Instant::now());
-                let sleep_duration = remaining_in_window.min(remaining_total);
+                let sleep_duration = update_interval.saturating_sub(elapsed).min(remaining_total);
                 if !sleep_duration.is_zero() {
                     sleep(sleep_duration).await;
                 }
-            }
-        } else {
-            trigger_next_gossip_update(
-                &ctx,
-                &mut workload_channels,
-                &mut next_fee_by_channel,
-                &mut last_update_ms_by_channel,
-                &mut workload_channel_index,
-            )
-            .await?;
-            total_updates = total_updates.saturating_add(1);
-
-            let remaining_total = end.saturating_duration_since(Instant::now());
-            let sleep_duration = update_interval.min(remaining_total);
-            if !sleep_duration.is_zero() {
-                sleep(sleep_duration).await;
             }
         }
     }
 
     let elapsed_secs = start.elapsed().as_secs_f64();
 
+    println!("  - draining in-flight gossip updates before final metrics");
+    let final_observer_metrics = wait_for_gossip_metrics_drain(
+        &ctx,
+        &observer_metrics_urls,
+        baseline_observer_metrics.as_deref(),
+        total_updates,
+    )
+    .await;
     let final_network_metrics = collect_gossip_metrics_per_node(&ctx, &network_metrics_urls).await;
-    let final_observer_metrics = collect_gossip_metrics_per_node(&ctx, &observer_metrics_urls).await;
 
     let metrics_delta = match (baseline_network_metrics, final_network_metrics) {
         (Some(baseline), Some(current)) => {
@@ -1536,7 +1692,7 @@ pub async fn run_gossip_benchmark_test(
     } else {
         0.0
     };
-    if burst_updates_per_window == 0 {
+    if matches!(gossip_args.load_mode, GossipLoadMode::Steady) {
         peak_send_updates_per_sec = updates_per_sec;
     }
 
@@ -1547,10 +1703,10 @@ pub async fn run_gossip_benchmark_test(
             .as_secs()
             .to_string(),
         test_duration_secs: elapsed_secs,
-        update_interval_ms: update_interval.as_millis() as u64,
+        update_interval_ms: gossip_args.interval_ms,
         load_mode: load_mode.to_string(),
-        burst_updates_per_window,
-        burst_window_ms: burst_window.as_millis() as u64,
+        burst_updates_per_window: gossip_args.burst_updates_per_window,
+        burst_window_ms: gossip_args.burst_window_ms,
         burst_windows,
         burst_updates_sent,
         peak_send_updates_per_sec,

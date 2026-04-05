@@ -1497,7 +1497,7 @@ pub enum GossipMessageProcessingError {
 }
 
 impl GossipMessageProcessingError {
-    fn metrics_reason(&self) -> &'static str {
+    fn rejected_broadcast_metrics_reason(&self) -> &'static str {
         match self {
             GossipMessageProcessingError::MessageTooNew(_, _) => "message_too_new",
             GossipMessageProcessingError::ProcessingError(_) => "processing_error",
@@ -1506,9 +1506,38 @@ impl GossipMessageProcessingError {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum VerifyBroadcastMessageError {
+    #[error("InvalidParameter: {0}")]
+    InvalidParameter(String),
+    #[error("Internal error: {0}")]
+    InternalError(anyhow::Error),
+}
+
+impl VerifyBroadcastMessageError {
+    fn rejected_broadcast_metrics_reason(&self) -> &'static str {
+        match self {
+            VerifyBroadcastMessageError::InvalidParameter(_) => "verify_invalid",
+            VerifyBroadcastMessageError::InternalError(_) => "verify_internal_error",
+        }
+    }
+}
+
+impl From<VerifyBroadcastMessageError> for Error {
+    fn from(error: VerifyBroadcastMessageError) -> Self {
+        match error {
+            VerifyBroadcastMessageError::InvalidParameter(message) => {
+                Error::InvalidParameter(message)
+            }
+            VerifyBroadcastMessageError::InternalError(error) => Error::InternalError(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum InsertMessageStatus {
     Inserted,
+    InsertedDuplicate,
     Duplicate,
 }
 
@@ -1598,6 +1627,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                     verified_sorted_messages.push(message);
                 }
                 Err(error) => {
+                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
                     trace!(
                         "Failed to verify and save message {:?}: {:?}",
                         message,
@@ -1779,6 +1809,11 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             }
         }
 
+        let duplicate_from_other_peer = self
+            .messages_to_be_saved
+            .iter()
+            .any(|(peer, messages)| peer != pubkey && messages.contains(message));
+
         if let Some(existing_message) = get_existing_newer_broadcast_message(message, &self.store) {
             if &BroadcastMessage::from(existing_message.clone()) != message {
                 return Err(GossipMessageProcessingError::NewerMessageSaved(
@@ -1822,7 +1857,11 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             .entry(*pubkey)
             .or_default()
             .insert(message.clone());
-        Ok(InsertMessageStatus::Inserted)
+        Ok(if duplicate_from_other_peer {
+            InsertMessageStatus::InsertedDuplicate
+        } else {
+            InsertMessageStatus::Inserted
+        })
     }
 
     fn has_dependencies_available(&self, message: &BroadcastMessage) -> bool {
@@ -2015,11 +2054,16 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
                                 ));
                             }
                         }
+                        Ok(InsertMessageStatus::InsertedDuplicate) => {
+                            observe_duplicate_broadcast_message();
+                        }
                         Ok(InsertMessageStatus::Duplicate) => {
                             observe_duplicate_broadcast_message();
                         }
                         Err(error) => {
-                            observe_rejected_broadcast_message(error.metrics_reason());
+                            observe_rejected_broadcast_message(
+                                error.rejected_broadcast_metrics_reason(),
+                            );
                             trace!("Failed to save message: {:?}, error: {:?}", message, error);
                         }
                     }
@@ -2461,7 +2505,7 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
-) -> Result<(BroadcastMessageWithTimestamp, bool), Error> {
+) -> Result<(BroadcastMessageWithTimestamp, bool), VerifyBroadcastMessageError> {
     let (timestamp, is_newly_applied) = match message {
         BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
             let on_chain_info =
@@ -2498,7 +2542,7 @@ async fn get_channel_tx(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
-) -> Result<(TransactionView, Hash256), Error> {
+) -> Result<(TransactionView, Hash256), VerifyBroadcastMessageError> {
     // Wait for the tx to be available in test.
     //
     // In the payment test, channels are created first, then the funding
@@ -2524,12 +2568,12 @@ async fn get_channel_tx(
             transaction: Some(tx),
             tx_status: TxStatus::Committed(_, block_hash, _)
         }) => Ok((tx, block_hash.into())),
-        Err(err) => Err(Error::InvalidParameter(format!(
+        Err(err) => Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
             &outpoint.tx_hash(),
             err
         ))),
-        _ => Err(Error::InvalidParameter(format!(
+        _ => Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement transaction {:?} not found or not confirmed, the reason is unknown",
             &outpoint.tx_hash(),
         ))),
@@ -2546,7 +2590,9 @@ async fn get_channel_timestamp<S: GossipMessageStore>(
         return Ok(timestamp);
     }
 
-    let on_chain_info = get_channel_on_chain_info(outpoint, chain, client).await?;
+    let on_chain_info = get_channel_on_chain_info(outpoint, chain, client)
+        .await
+        .map_err(Error::from)?;
 
     Ok(on_chain_info.timestamp)
 }
@@ -2555,11 +2601,11 @@ async fn get_channel_on_chain_info(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
-) -> Result<ChannelOnchainInfo, Error> {
+) -> Result<ChannelOnchainInfo, VerifyBroadcastMessageError> {
     let (tx, block_hash) = get_channel_tx(outpoint, chain, client).await?;
     let first_output = match tx.outputs().get(0) {
         None => {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "On-chain transaction found but no output: {:?}",
                 &outpoint
             )));
@@ -2570,17 +2616,19 @@ async fn get_channel_on_chain_info(
     let timestamp: u64 = match client.get_block_timestamp(block_hash).await {
         Ok(Some(timestamp)) => timestamp,
         Ok(None) => {
-            return Err(Error::InternalError(anyhow::anyhow!(
+            return Err(VerifyBroadcastMessageError::InternalError(anyhow::anyhow!(
                 "Unable to find block {:?} for channel outpoint {:?}",
                 &block_hash,
                 &outpoint
             )));
         }
         Err(err) => {
-            return Err(Error::InternalError(err.context(format!(
-                "Error while trying to obtain block {:?} for channel outpoint {:?}",
-                block_hash, &outpoint
-            ))));
+            return Err(VerifyBroadcastMessageError::InternalError(err.context(
+                format!(
+                    "Error while trying to obtain block {:?} for channel outpoint {:?}",
+                    block_hash, &outpoint
+                ),
+            )));
         }
     };
 
@@ -2598,14 +2646,14 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     channel_announcement: &ChannelAnnouncement,
     on_chain_info: &ChannelOnchainInfo,
     store: &S,
-) -> Result<bool, Error> {
+) -> Result<bool, VerifyBroadcastMessageError> {
     if let Some((_, announcement)) =
         store.get_latest_channel_announcement(&channel_announcement.channel_outpoint)
     {
         if announcement == *channel_announcement {
             return Ok(true);
         } else {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel announcement message already exists but mismatched: {:?}, existing: {:?}",
                 &channel_announcement, &announcement
             )));
@@ -2613,7 +2661,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     }
     let message = channel_announcement.message_to_sign();
     if channel_announcement.node1_id == channel_announcement.node2_id {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement node had a channel with itself: {:?}",
             &channel_announcement
         )));
@@ -2627,7 +2675,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
             (node1_signature, node2_signature, ckb_signature)
         }
         _ => {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel announcement message signature verification failed, some signatures are missing: {:?}",
                 &channel_announcement
             )));
@@ -2635,7 +2683,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     };
 
     if !node1_signature.verify(&channel_announcement.node1_id, &message) {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement message signature verification failed for node 1: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
             &channel_announcement,
             &message,
@@ -2645,7 +2693,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     }
 
     if !node2_signature.verify(&channel_announcement.node2_id, &message) {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement message signature verification failed for node 2: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
             &channel_announcement,
             &message,
@@ -2659,7 +2707,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
 
     let output = &on_chain_info.first_output;
     if output.lock.args.as_bytes() != pubkey_hash {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                     "On-chain transaction found but pubkey hash mismatched: on chain hash {:?}, pub key ({:?}) hash {:?}",
                     &output.lock.args.as_bytes(),
                     hex::encode(pubkey),
@@ -2673,7 +2721,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
         }
         None => {
             if channel_announcement.capacity > capacity {
-                return Err(Error::InvalidParameter(format!(
+                return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                             "On-chain transaction found but capacity mismatched: on chain capacity {:?} smaller than annoucned channel capacity {:?}",
                             &output.capacity, &channel_announcement.capacity
                         )));
@@ -2684,7 +2732,7 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
     if let Err(err) =
         SECP256K1.verify_schnorr(ckb_signature, &message, &channel_announcement.ckb_key)
     {
-        return Err(Error::InvalidParameter(format!(
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement message signature verification failed for ckb: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}, error: {:?}",
             &channel_announcement,
             &message,
@@ -2704,14 +2752,14 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
 fn verify_channel_update<S: GossipMessageStore>(
     channel_update: &ChannelUpdate,
     store: &S,
-) -> Result<bool, Error> {
+) -> Result<bool, VerifyBroadcastMessageError> {
     if let Some(BroadcastMessageWithTimestamp::ChannelUpdate(existing)) =
         store.get_broadcast_message_with_cursor(&channel_update.cursor())
     {
         if existing == *channel_update {
             return Ok(true);
         } else {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel update message already exists but mismatched: {:?}, existing: {:?}",
                 &channel_update, &existing
             )));
@@ -2722,7 +2770,7 @@ fn verify_channel_update<S: GossipMessageStore>(
     let signature = match channel_update.signature {
         Some(ref signature) => signature,
         None => {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel update message signature verification failed (signature not found): {:?}",
                 &channel_update
             )));
@@ -2736,7 +2784,7 @@ fn verify_channel_update<S: GossipMessageStore>(
                 channel_announcement.node2_id
             };
             if !signature.verify(&pubkey, &message) {
-                return Err(Error::InvalidParameter(format!(
+                return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                     "Channel update message signature verification failed (invalid signature): {:?}",
                     &channel_update
                 )));
@@ -2747,7 +2795,7 @@ fn verify_channel_update<S: GossipMessageStore>(
             // It is possible that the channel update message is received before the channel announcement message.
             // In this case, we should temporarily store the channel update message and verify it later
             // when the channel announcement message is received.
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Channel announcement message not found for channel update message: {:?}",
                 &channel_update.channel_outpoint
             )));
@@ -2762,21 +2810,21 @@ fn verify_channel_update<S: GossipMessageStore>(
 fn verify_node_announcement<S: GossipMessageStore>(
     node_announcement: &NodeAnnouncement,
     store: &S,
-) -> Result<bool, Error> {
+) -> Result<bool, VerifyBroadcastMessageError> {
     if let Some(BroadcastMessageWithTimestamp::NodeAnnouncement(announcement)) =
         store.get_broadcast_message_with_cursor(&node_announcement.cursor())
     {
         if announcement == *node_announcement {
             return Ok(true);
         } else {
-            return Err(Error::InvalidParameter(format!(
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
                 "Node announcement message already exists but mismatched: {:?}, existing: {:?}",
                 &node_announcement, &announcement
             )));
         }
     }
     if !node_announcement.verify() {
-        Err(Error::InvalidParameter(
+        Err(VerifyBroadcastMessageError::InvalidParameter(
             "Node announcement message signature verification failed".to_string(),
         ))
     } else {
