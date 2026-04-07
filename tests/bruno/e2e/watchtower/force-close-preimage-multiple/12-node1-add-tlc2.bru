@@ -37,8 +37,8 @@ assert {
 }
 
 script:pre-request {
-  // 17 seconds expiry
-  let expiry = "0x" + (Date.now() + 1000 * 17).toString(16);
+  // Keep tlc2 comfortably valid so only tlc1 expires during the offline window.
+  let expiry = "0x" + (Date.now() + 1000 * 30).toString(16);
   bru.setVar("expiry", expiry);
 }
 

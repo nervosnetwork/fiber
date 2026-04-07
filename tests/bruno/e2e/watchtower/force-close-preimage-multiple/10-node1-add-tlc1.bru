@@ -37,8 +37,9 @@ assert {
 }
 
 script:pre-request {
-  // 10 seconds expiry
-  let expiry = "0x" + (Date.now() + 1000 * 10).toString(16);
+  // Keep tlc1 alive through force-close + disconnect, then let it expire while
+  // the peer is offline before node2 sends the delayed remove_tlc.
+  let expiry = "0x" + (Date.now() + 1000 * 15).toString(16);
   bru.setVar("expiry", expiry);
 }
 

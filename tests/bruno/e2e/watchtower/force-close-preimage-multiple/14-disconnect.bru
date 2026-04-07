@@ -32,6 +32,7 @@ assert {
 }
 
 script:post-response {
-  // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 1000));
+  // Give the channel enough time to transition offline, then keep the peer
+  // disconnected long enough for tlc1 to expire in the offline window.
+  await new Promise(r => setTimeout(r, 5000));
 }

@@ -1795,11 +1795,20 @@ impl NetworkNode {
             other.listening_addrs, &self.listening_addrs
         );
 
-        self.network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ConnectPeer(peer_addr.clone(), false, None),
+        let result = call!(self.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+                peer_addr.clone(),
+                false,
+                crate::fiber::network::PeerConnectSource::Manual,
+                Some(rpc_reply),
             ))
-            .expect("self alive");
+        })
+        .expect("self alive");
+        assert!(
+            result.is_ok(),
+            "connect peer should be accepted: {:?}",
+            result
+        );
     }
 
     pub async fn connect_to(&mut self, other: &mut Self) {

@@ -11,7 +11,8 @@ use crate::fiber::config::{
 
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{
-    DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerDisconnectReason,
+    DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerConnectSource,
+    PeerDisconnectReason, CHECK_CHANNELS_INTERVAL,
 };
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
@@ -79,6 +80,17 @@ fn notify_check_active_channel(node: &NetworkNode, channel_id: Hash256) {
             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::NotifyEvent(ChannelEvent::CheckActiveChannel),
+            }),
+        ))
+        .expect("channel actor alive");
+}
+
+fn notify_maintain_channel_tlcs(node: &NetworkNode, channel_id: Hash256) {
+    node.network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
         ))
         .expect("channel actor alive");
@@ -5283,6 +5295,89 @@ async fn test_peer_disconnect_with_active_channel_disabled_backoff_skips_reconne
 }
 
 #[tokio::test]
+async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let disconnect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+            node_b.pubkey,
+            PeerDisconnectReason::Requested,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        disconnect_result.is_ok(),
+        "manual disconnect should succeed: {:?}",
+        disconnect_result
+    );
+
+    let saw_disconnect = std::cell::Cell::new(false);
+    let saw_skipped = std::cell::Cell::new(false);
+    node_a
+        .expect_to_process_event(|event| {
+            match event {
+                NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey => {
+                    saw_disconnect.set(true);
+                }
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffSkippedRequested" =>
+                {
+                    saw_skipped.set(true);
+                }
+                _ => {}
+            }
+            (saw_disconnect.get() && saw_skipped.get()).then_some(())
+        })
+        .await;
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::MaintainConnections,
+        ))
+        .expect("node_a alive");
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            node_a.expect_event(
+                |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
+            ),
+        )
+        .await
+        .is_err(),
+        "manual disconnect should suppress automatic reconnect attempts"
+    );
+
+    node_b.stop().await;
+
+    let connect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
+            node_b.pubkey,
+            PeerConnectSource::Manual,
+            rpc_reply,
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        connect_result.is_ok(),
+        "manual connect should enqueue a dial attempt: {:?}",
+        connect_result
+    );
+
+    node_a
+        .expect_debug_event("PeerReconnectBackoffSeededByDialError")
+        .await;
+    node_a
+        .expect_debug_event("PeerReconnectBackoffScheduled")
+        .await;
+}
+
+#[tokio::test]
 async fn test_startup_dial_error_with_active_channel_enters_backoff_reconnect() {
     init_tracing();
 
@@ -5528,6 +5623,217 @@ async fn test_remove_tlc_fulfill_persists_preimage_while_reestablishing() {
             )
         })
         .await;
+}
+
+#[tokio::test]
+async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_before_delayed_fulfill()
+{
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 11800000000, true).await;
+
+    let preimage_0 = [1; 32];
+    let payment_hash_0: Hash256 = HashAlgorithm::CkbHash.hash(preimage_0).into();
+    let preimage_1 = [2; 32];
+    let payment_hash_1: Hash256 = HashAlgorithm::CkbHash.hash(preimage_1).into();
+
+    let add_tlc_0 = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 3_000_000,
+                        hash_algorithm: HashAlgorithm::CkbHash,
+                        payment_hash: payment_hash_0,
+                        attempt_id: None,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added first tlc");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let add_tlc_1 = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 6_000_000,
+                        hash_algorithm: HashAlgorithm::CkbHash,
+                        payment_hash: payment_hash_1,
+                        attempt_id: None,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added second tlc");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Mirror the E2E shape: tlc0 should cross the auto-expiry window only
+    // after the peer is disconnected and the channel is already offline.
+    let epoch_delay_milliseconds =
+        (DEFAULT_COMMITMENT_DELAY_EPOCHS as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0)
+            as u64;
+    let disconnect_expiry_grace = Duration::from_secs(4);
+    let short_expiry = now_timestamp_as_millis_u64()
+        + epoch_delay_milliseconds
+        + CHECK_CHANNELS_INTERVAL.as_millis() as u64
+        + disconnect_expiry_grace.as_millis() as u64;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_id);
+    node_b_state
+        .tlc_state
+        .get_mut(&TLCId::Received(add_tlc_0.tlc_id))
+        .expect("first received tlc exists")
+        .expiry = short_expiry;
+    node_b_state
+        .tlc_state
+        .get_mut(&TLCId::Received(add_tlc_1.tlc_id))
+        .expect("second received tlc exists")
+        .expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    node_b
+        .update_channel_actor_state(
+            node_b_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    eprintln!(
+        "offline expiry setup: short_expiry={} epoch_delay_ms={} check_interval_ms={} grace_ms={}",
+        short_expiry,
+        epoch_delay_milliseconds,
+        CHECK_CHANNELS_INTERVAL.as_millis(),
+        disconnect_expiry_grace.as_millis()
+    );
+
+    node_a
+        .send_shutdown(channel_id, true)
+        .await
+        .expect("force close locally");
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("node_a alive");
+
+    node_a
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey),
+        )
+        .await;
+    node_b
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_a.pubkey),
+        )
+        .await;
+
+    let mut offline_state = node_b.get_channel_actor_state(channel_id);
+    for _ in 0..20 {
+        if offline_state.connectivity_state == ChannelConnectivityState::Offline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        offline_state = node_b.get_channel_actor_state(channel_id);
+    }
+    assert_eq!(
+        offline_state.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "channel should be offline before the short-expiry tlc crosses its auto-expiry window"
+    );
+
+    let first_tlc_before_expiry = offline_state
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_0.tlc_id))
+        .expect("first received tlc exists before expiry");
+    let second_tlc_before_expiry = offline_state
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_1.tlc_id))
+        .expect("second received tlc exists before expiry");
+
+    eprintln!(
+        "offline pre-expiry snapshot: channel_state={:?} connectivity={:?} reestablishing={} first_removed_reason={:?} second_removed_reason={:?} retryable_ops={:?}",
+        offline_state.state,
+        offline_state.connectivity_state,
+        offline_state.reestablishing,
+        first_tlc_before_expiry.removed_reason,
+        second_tlc_before_expiry.removed_reason,
+        offline_state.retryable_tlc_operations
+    );
+
+    assert!(
+        first_tlc_before_expiry.removed_reason.is_none(),
+        "short-expiry tlc should still be pending immediately after disconnect, got {:?}",
+        first_tlc_before_expiry.removed_reason
+    );
+    assert!(
+        second_tlc_before_expiry.removed_reason.is_none(),
+        "longer-expiry tlc should still be pending immediately after disconnect, got {:?}",
+        second_tlc_before_expiry.removed_reason
+    );
+
+    tokio::time::sleep(disconnect_expiry_grace + Duration::from_secs(1)).await;
+
+    notify_maintain_channel_tlcs(&node_b, channel_id);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state_after = node_b.get_channel_actor_state(channel_id);
+    let first_tlc = state_after
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_0.tlc_id))
+        .expect("first received tlc still exists");
+    let second_tlc = state_after
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_1.tlc_id))
+        .expect("second received tlc still exists");
+
+    eprintln!(
+        "offline post-expiry snapshot: channel_state={:?} connectivity={:?} reestablishing={} first_removed_reason={:?} second_removed_reason={:?} retryable_ops={:?}",
+        state_after.state,
+        state_after.connectivity_state,
+        state_after.reestablishing,
+        first_tlc.removed_reason,
+        second_tlc.removed_reason,
+        state_after.retryable_tlc_operations
+    );
+
+    assert!(
+        first_tlc.removed_reason.is_none(),
+        "short-expiry tlc should stay pending until the delayed fulfill is replayed, got {:?}",
+        first_tlc.removed_reason
+    );
+    assert!(
+        second_tlc.removed_reason.is_none(),
+        "longer-expiry tlc should remain pending before the delayed fulfill arrives, got {:?}",
+        second_tlc.removed_reason
+    );
 }
 
 #[tokio::test]

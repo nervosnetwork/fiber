@@ -169,7 +169,12 @@ async fn exercise_peer_reconnects(
 
         node_b_network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ConnectPeer(node_c_addr.clone(), false, None),
+                NetworkActorCommand::ConnectPeer(
+                    node_c_addr.clone(),
+                    false,
+                    PeerConnectSource::Manual,
+                    None,
+                ),
             ))
             .expect("node_b alive");
 

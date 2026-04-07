@@ -375,6 +375,12 @@ pub enum PeerReconnectTrigger {
     DialError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerConnectSource {
+    Manual,
+    Automatic,
+}
+
 #[derive(Debug)]
 pub struct OpenChannelResponse {
     pub channel_id: Hash256,
@@ -470,9 +476,14 @@ pub struct SendOnionPacketCommand {
 pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
-    ConnectPeer(Multiaddr, bool, Option<RpcReplyPort<Result<(), String>>>),
+    ConnectPeer(
+        Multiaddr,
+        bool,
+        PeerConnectSource,
+        Option<RpcReplyPort<Result<(), String>>>,
+    ),
     // Connect to a peer via pubkey, resolving address from local graph/saved state.
-    ConnectPeerWithPubkey(Pubkey, RpcReplyPort<Result<(), String>>),
+    ConnectPeerWithPubkey(Pubkey, PeerConnectSource, RpcReplyPort<Result<(), String>>),
     DisconnectPeer(
         Pubkey,
         PeerDisconnectReason,
@@ -1546,9 +1557,12 @@ where
             NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget { target, message }) => {
                 state.send_fiber_message_to_pubkey(&target, message).await?;
             }
-            NetworkActorCommand::ConnectPeer(addr, save, rpc_reply) => {
+            NetworkActorCommand::ConnectPeer(addr, save, source, rpc_reply) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
+                if matches!(source, PeerConnectSource::Manual) {
+                    state.resume_peer_auto_reconnect_by_address(&addr);
+                }
                 if save {
                     state.enqueue_peer_address_to_save(addr.clone());
                 }
@@ -1570,7 +1584,7 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-            NetworkActorCommand::ConnectPeerWithPubkey(pubkey, reply) => {
+            NetworkActorCommand::ConnectPeerWithPubkey(pubkey, source, reply) => {
                 let address = state
                     .get_peer_addresses_by_pubkey(&pubkey)
                     .into_iter()
@@ -1579,6 +1593,9 @@ where
                     let _ = reply.send(Err(Error::PeerNotFound(pubkey).to_string()));
                     return Ok(());
                 };
+                if matches!(source, PeerConnectSource::Manual) {
+                    state.resume_peer_auto_reconnect(pubkey);
+                }
                 match state.control.dial(addr, TargetProtocol::All).await {
                     Ok(()) => {
                         let _ = reply.send(Ok(()));
@@ -1649,7 +1666,12 @@ where
                 if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
                     myself
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
+                            NetworkActorCommand::ConnectPeer(
+                                addr.clone(),
+                                false,
+                                PeerConnectSource::Automatic,
+                                None,
+                            ),
                         ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 } else {
@@ -1678,6 +1700,13 @@ where
                     if state.peer_session_map.contains_key(&pubkey) {
                         continue;
                     }
+                    if state.requested_disconnect_peers.contains(&pubkey) {
+                        debug!(
+                            "Skipping auto reconnect to manually disconnected peer {:?}",
+                            pubkey
+                        );
+                        continue;
+                    }
                     let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
 
                     debug!(
@@ -1688,7 +1717,12 @@ where
                     if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
                         myself
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.to_owned(), false, None),
+                                NetworkActorCommand::ConnectPeer(
+                                    addr.to_owned(),
+                                    false,
+                                    PeerConnectSource::Automatic,
+                                    None,
+                                ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1750,13 +1784,25 @@ where
                                 );
                         continue;
                     }
+                    if state.requested_disconnect_peers.contains(&pubkey) {
+                        debug!(
+                            "Skipping saved peer {:?} because it was manually disconnected",
+                            pubkey
+                        );
+                        continue;
+                    }
 
                     // Randomly pick one address to connect
                     if let Some(addr) = addresses.choose(&mut rng) {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
+                                NetworkActorCommand::ConnectPeer(
+                                    addr.clone(),
+                                    false,
+                                    PeerConnectSource::Automatic,
+                                    None,
+                                ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1771,13 +1817,25 @@ where
                         );
                         continue;
                     }
+                    if state.requested_disconnect_peers.contains(&pubkey) {
+                        debug!(
+                            "Skipping graph peer {:?} because it was manually disconnected",
+                            pubkey
+                        );
+                        continue;
+                    }
 
                     // Randomly pick one address to connect
                     if let Some(addr) = addresses.choose(&mut rng) {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
+                                NetworkActorCommand::ConnectPeer(
+                                    addr.clone(),
+                                    false,
+                                    PeerConnectSource::Automatic,
+                                    None,
+                                ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -3402,6 +3460,8 @@ pub struct NetworkActorState<S, C> {
     min_outbound_peers: usize,
     enable_peer_reconnect_backoff: bool,
     peer_reconnect_backoff_attempts: HashMap<Pubkey, u32>,
+    // Peers manually disconnected by the user. Automatic reconnect stays disabled until the user
+    // explicitly issues another connect request for that peer.
     requested_disconnect_peers: HashSet<Pubkey>,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
@@ -4228,6 +4288,26 @@ where
         })
     }
 
+    fn get_known_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
+        self.peer_channel_index
+            .get_pubkey(peer_id)
+            .or_else(|| self.get_connected_peer_pubkey(peer_id))
+    }
+
+    fn resume_peer_auto_reconnect(&mut self, pubkey: Pubkey) {
+        self.requested_disconnect_peers.remove(&pubkey);
+        self.peer_reconnect_backoff_attempts.remove(&pubkey);
+    }
+
+    fn resume_peer_auto_reconnect_by_address(&mut self, address: &Multiaddr) {
+        let Some(peer_id) = extract_peer_id(address) else {
+            return;
+        };
+        if let Some(pubkey) = self.get_known_peer_pubkey(&peer_id) {
+            self.resume_peer_auto_reconnect(pubkey);
+        }
+    }
+
     fn enqueue_peer_address_to_save(&mut self, address: Multiaddr) {
         let Some(peer_id) = extract_peer_id(&address) else {
             error!(
@@ -4568,7 +4648,6 @@ where
             },
         );
         self.peer_reconnect_backoff_attempts.remove(&remote_pubkey);
-        self.requested_disconnect_peers.remove(&remote_pubkey);
         let remote_peer_id =
             PeerId::from_public_key(&super::types::pubkey_to_tentacle(remote_pubkey));
         if let Some(addresses) = self.pending_save_peer_addresses.remove(&remote_peer_id) {
@@ -4680,7 +4759,7 @@ where
         }
 
         let peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(pubkey));
-        if self.requested_disconnect_peers.remove(&pubkey) {
+        if self.requested_disconnect_peers.contains(&pubkey) {
             debug_event!(self.network, "PeerReconnectBackoffSkippedRequested");
             return;
         }
@@ -5495,7 +5574,12 @@ where
                 Ok(addr) => {
                     myself
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ConnectPeer(addr, false, None),
+                            NetworkActorCommand::ConnectPeer(
+                                addr,
+                                false,
+                                PeerConnectSource::Automatic,
+                                None,
+                            ),
                         ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
