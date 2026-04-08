@@ -457,9 +457,9 @@ fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) ->
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
 
-    // Use DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS (108,000 s) converted to
+    // Use DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS (216,000 s) converted to
     // milliseconds, matching production invoice construction in actor.rs.
-    let default_expiry_delta_ms = 108_000 * 1000;
+    let default_expiry_delta_ms = 216_000 * 1000;
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
         amount: Some(amount),
@@ -561,12 +561,12 @@ async fn test_receive_btc_happy_path() {
     // Step 1: Create order directly in the database (bypassing LND hold invoice creation)
     // In production, ReceiveBTC creates a hold invoice via LND, but we skip that for testing.
     // Use a small final TLC expiry delta (10,000 ms = 10 seconds) so it fits
-    // within the default incoming budget (180 blocks * 600 / 2 = 54,000 seconds).
+    // within the default incoming budget (360 blocks * 600 / 2 = 108,000 seconds).
     let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
     // The incoming Lightning invoice must carry min_final_cltv_expiry_delta matching
-    // the default btc_final_tlc_expiry_delta_blocks (180) so the stored invoice
+    // the default btc_final_tlc_expiry_delta_blocks (360) so the stored invoice
     // reflects a realistic inbound HTLC budget.
-    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 180);
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 360);
     let order = CchOrder {
         created_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1292,17 +1292,17 @@ async fn test_receive_btc_fails_insufficient_expiry_delta() {
     let (_, payment_hash) = create_valid_preimage_pair(251);
     let store = MockCchOrderStore::new();
 
-    // Create a CKB invoice with a very large final TLC expiry delta (100,000 seconds = 100M ms)
-    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 100_000_000);
+    // Create a CKB invoice with a very large final TLC expiry delta (108,001 seconds; ms below).
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 108_001_000);
 
-    // Use a config with btc_final_tlc_expiry_delta_blocks = 180 blocks (= 108,000 seconds).
+    // Use a config with btc_final_tlc_expiry_delta_blocks = 360 blocks (= 216,000 seconds).
     // The incoming Lightning invoice must carry the same CLTV value because
     // compute_max_outgoing_expiry_seconds now reads from the stored invoice.
     // If order was just created:
-    //   remaining = 108,000 seconds
-    //   max_outgoing = 54,000 seconds
-    //   outgoing needs 100,000 seconds
-    //   54,000 < 100,000 → fails!
+    //   remaining = 216,000 seconds
+    //   max_outgoing = 108,000 seconds
+    //   outgoing needs 108,001 seconds
+    //   108,000 < 108,001 → fails!
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
         wrapped_btc_type_script_args: "0x".to_string(),
@@ -1311,8 +1311,8 @@ async fn test_receive_btc_fails_insufficient_expiry_delta() {
     };
 
     // Create a Lightning invoice whose min_final_cltv_expiry_delta matches the
-    // default btc_final_tlc_expiry_delta_blocks (180 blocks).
-    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 180);
+    // default btc_final_tlc_expiry_delta_blocks (360 blocks).
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(payment_hash, 360);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
