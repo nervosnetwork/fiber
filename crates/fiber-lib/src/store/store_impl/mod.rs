@@ -162,7 +162,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         }
     }
 
-    for (key, value) in store.prefix_iterator(&[]) {
+    for (key, value) in store.prefix_iterator([]) {
         if key.is_empty() {
             errors.insert("Encountered empty key".to_string());
             continue;
@@ -851,42 +851,21 @@ impl NetworkGraphStateStore for Store {
         status: Option<PaymentStatus>,
     ) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
-        match after {
-            Some(after_hash) => {
-                let start_key = [&[PAYMENT_SESSION_PREFIX], after_hash.as_ref()].concat();
-                // Start from the `after` key and skip it (exclusive cursor)
-                self.collect_by_prefix_with(
-                    &prefix,
-                    PrefixIterOptions::new()
-                        .start_key(&start_key)
-                        .start_key_exclusive(),
-                )
-                .into_iter()
-                .filter_map(|kv| {
-                    let session: PaymentSession =
-                        deserialize_from(kv.value.as_ref(), "PaymentSession");
-                    match status {
-                        Some(ref s) if session.status != *s => None,
-                        _ => Some(session.init_attempts(self)),
-                    }
-                })
-                .take(limit)
-                .collect()
+        let start_key = after.map(|h| [&[PAYMENT_SESSION_PREFIX], h.as_ref()].concat());
+        let iter = match start_key {
+            Some(key) => self.prefix_iterator_from(prefix, key),
+            None => self.prefix_iterator(prefix),
+        };
+
+        iter.filter_map(|(_key, value)| {
+            let session: PaymentSession = deserialize_from(&value, "PaymentSession");
+            match status {
+                Some(ref s) if session.status != *s => None,
+                _ => Some(session.init_attempts(self)),
             }
-            None => self
-                .collect_by_prefix(&prefix)
-                .into_iter()
-                .filter_map(|kv| {
-                    let session: PaymentSession =
-                        deserialize_from(kv.value.as_ref(), "PaymentSession");
-                    match status {
-                        Some(ref s) if session.status != *s => None,
-                        _ => Some(session.init_attempts(self)),
-                    }
-                })
-                .take(limit)
-                .collect(),
-        }
+        })
+        .take(limit)
+        .collect()
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
