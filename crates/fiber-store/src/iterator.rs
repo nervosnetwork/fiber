@@ -53,8 +53,7 @@ impl<'a, S: crate::backend::StorageBackend + ?Sized> PrefixIterator<'a, S> {
         iter
     }
 
-    /// Create a `PrefixIterator` that starts **after** `start_key` (exclusive
-    /// cursor).
+    /// Create a `PrefixIterator` that starts **after** `start_key` (exclusive cursor).
     pub fn new_from(store: &'a S, prefix: Vec<u8>, start_key: Vec<u8>) -> Self {
         let mut iter = Self {
             store,
