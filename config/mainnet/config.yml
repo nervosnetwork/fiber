@@ -52,11 +52,26 @@ rpc:
   # By default RPC only binds to localhost, thus it only allows accessing from the same machine.
   # Allowing arbitrary machines to access the JSON-RPC port is dangerous and strongly discouraged.
   # Please strictly limit the access to only trusted machines.
+  # If you bind RPC to a public address, set biscuit_public_key to enable authentication.
+  # See https://github.com/nervosnetwork/fiber/blob/main/docs/biscuit-auth.md for how to generate and configure the biscuit key pair.
+  # biscuit_public_key: "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79"
+  # enabled_modules:
+  #   - cch
+  #   - channel
+  #   - graph
+  #   - payment
+  #   - info
+  #   - invoice
+  #   - peer
+  #   - watchtower
+  #   - pubsub
+  #   - dev         # debug builds only
+  #   - prof        # requires the pprof feature
   listening_addr: "127.0.0.1:8227"
 
 ckb:
   # Please use a trusted CKB RPC node, the node should be able to provide the correct data and should be stable.
-  rpc_url: "http://127.0.0.1:8114/"
+  rpc_url: "https://mainnet.ckb.dev/"
   udt_whitelist:
     ## https://github.com/CKBFansDAO/xudtlogos/blob/f2557839ecde0409ba674516a62ae6752bc0daa9/public/tokens/token_list.json#L548
     - name: USDI

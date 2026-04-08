@@ -4,31 +4,28 @@
 
 ```bash
 # Install to default location (~/.fiber)
-curl -sSfL https://get.fiber.world | sh
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | bash
 
 # Install to custom location
-curl -sSfL https://get.fiber.world | INSTALL_DIR=/opt/fiber sh
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | INSTALL_DIR=/opt/fiber bash
 
 # Install specific version
-curl -sSfL https://get.fiber.world | FNN_VERSION=0.7.1 sh
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | FNN_VERSION=0.8.0 bash
 
 # Install for mainnet
-curl -sSfL https://get.fiber.world | NETWORK=mainnet sh
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | NETWORK=mainnet bash
 ```
+
+If you need to test an unpublished public branch or fork, replace `main` in the GitHub Raw URL, or set `INSTALL_REPO` and `INSTALL_REF` before `bash`.
+The examples below assume these installer files have already been published on the upstream `main` branch.
 
 ## Setup Instructions
 
-### 1. Prerequisites
-
-- Linux or macOS (x86_64 or ARM64)
-- `curl` or `wget`
-- `ckb-cli` (will be installed if not present)
-
-### 2. Quick Start
+### Quick Start
 
 ```bash
 # 1. Install FNN
-curl -sSfL https://get.fiber.world | sh
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | bash
 
 # 2. Create CKB account (if you don't have one)
 ckb-cli account new
@@ -36,6 +33,7 @@ ckb-cli account new
 # 3. Export your private key
 ckb-cli account export --lock-arg <your-lock-arg> --extended-privkey-path ~/.fiber/ckb/exported-key
 head -1 ~/.fiber/ckb/exported-key > ~/.fiber/ckb/key
+rm ~/.fiber/ckb/exported-key
 
 # 4. Set password (required)
 export FIBER_SECRET_KEY_PASSWORD="your-secure-password"
@@ -44,87 +42,35 @@ export FIBER_SECRET_KEY_PASSWORD="your-secure-password"
 ~/.fiber/fnn -c ~/.fiber/config.yml -d ~/.fiber
 ```
 
-### 3. Environment Variables
+The installed release bundle also includes:
+
+- `~/.fiber/fnn-cli`
+- `~/.fiber/fnn-migrate`
+- `~/.fiber/config/`
+- `~/.fiber/tools/install/quick-start.sh`
+
+### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `INSTALL_DIR` | Installation directory | `~/.fiber` |
-| `FNN_VERSION` | Version to install | `0.7.1` |
+| `FNN_VERSION` | Version to install | `0.8.0` |
 | `NETWORK` | Network (testnet/mainnet) | `testnet` |
 | `FIBER_SECRET_KEY_PASSWORD` | Password for key encryption | (required) |
 
-### 4. Post-Installation
+For `NETWORK=mainnet`, the installer config defaults `ckb.rpc_url` to `https://mainnet.ckb.dev/`. You can still edit `config.yml` later to use your own trusted endpoint.
+Do not reuse the same install directory across `testnet` and `mainnet`; keep separate data directories for each network.
 
-After installation, you'll need to:
+### Guided quick-start
 
-1. **Fund your account** (for testnet):
-   - Get testnet CKB from https://faucet.nervos.org/
-   - Check your address: `ckb-cli account list`
-
-2. **Set up auto-start** (optional):
-   ```bash
-   # Create systemd service (Linux)
-   sudo tee /etc/systemd/system/fnn.service > /dev/null <<EOF
-   [Unit]
-   Description=Fiber Network Node
-   After=network.target
-
-   [Service]
-   Type=simple
-   User=$USER
-   Environment=FIBER_SECRET_KEY_PASSWORD=your-password
-   Environment=RUST_LOG=info
-   ExecStart=$HOME/.fiber/fnn -c $HOME/.fiber/config.yml -d $HOME/.fiber
-   Restart=on-failure
-
-   [Install]
-   WantedBy=multi-user.target
-   EOF
-
-   sudo systemctl enable fnn
-   sudo systemctl start fnn
-   ```
-
-3. **Configure your node**:
-   Edit `~/.fiber/config.yml` to customize:
-   - Listening address and port
-   - RPC settings
-   - UDT whitelist
-
-## Troubleshooting
-
-### Permission Denied
+If you are working from a local checkout and want a guided install flow:
 
 ```bash
-chmod +x ~/.fiber/fnn
-```
+# Linux/macOS
+./tools/install/quick-start.sh
 
-### Missing ckb-cli
-
-```bash
-# macOS
-brew install ckb-cli
-
-# Linux
-# Download from https://github.com/nervosnetwork/ckb-cli/releases
-```
-
-### Port Already in Use
-
-Edit `~/.fiber/config.yml` and change the listening port:
-```yaml
-fiber:
-  listening_addr: "/ip4/0.0.0.0/tcp/8234"  # Change 8234 to another port
-```
-
-## Upgrading
-
-```bash
-# Backup your data first
-cp -r ~/.fiber/fiber ~/.fiber/fiber.backup
-
-# Reinstall with new version
-curl -sSfL https://get.fiber.world | FNN_VERSION=0.8.0 sh
+# Already have a local fnn binary
+./tools/install/quick-start.sh --local-binary ./fnn
 ```
 
 ## Uninstalling
@@ -146,4 +92,4 @@ rm -rf ~/.fiber
 
 - [Fiber Docs](https://docs.fiber.world/)
 - [GitHub](https://github.com/nervosnetwork/fiber)
-- [RPC API](https://github.com/nervosnetwork/fiber/blob/main/src/rpc/README.md)
+- [RPC API](https://github.com/nervosnetwork/fiber/blob/main/crates/fiber-lib/src/rpc/README.md)
