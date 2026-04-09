@@ -1,4 +1,5 @@
 use ckb_sdk::RpcError;
+use ckb_types::packed::OutPoint;
 use fiber_store::StoreError;
 use ractor::{MessagingErr, SpawnErr};
 use tentacle::error::SendErrorKind;
@@ -48,6 +49,8 @@ pub enum Error {
     FirstHopError(String, bool),
     #[error("InvalidParameter: {0}")]
     InvalidParameter(String),
+    #[error("Channel announcement verification deferred for {0:?}: {1}")]
+    DeferredChannelAnnouncementVerification(OutPoint, String),
     #[error("Network Graph error: {0}")]
     NetworkGraphError(#[from] PathFindError),
     #[error("Invalid peer message: {0}")]

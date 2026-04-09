@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
@@ -255,7 +255,13 @@ fn compute_peer_reconnect_delay(attempt: u32) -> Duration {
 
 /// The index of active channels for each peer.
 /// Note we maintain peer to channel index no matter the peer is connected or not.
+#[derive(Clone, Default)]
 pub struct PeerChannelIndex {
+    inner: Arc<StdRwLock<PeerChannelIndexState>>,
+}
+
+#[derive(Default)]
+struct PeerChannelIndexState {
     // Map from peer pubkey to the set of active channel ids
     peer_channels_map: HashMap<Pubkey, HashSet<Hash256>>,
     // Map from peer id to pubkey, used for dialing with peer id and maintaining peer reconnect backoff.
@@ -264,7 +270,7 @@ pub struct PeerChannelIndex {
     channel_id_to_peer_map: HashMap<Hash256, Pubkey>,
 }
 
-impl PeerChannelIndex {
+impl PeerChannelIndexState {
     fn build<S>(store: &S) -> Self
     where
         S: ChannelActorStateStore,
@@ -297,65 +303,103 @@ impl PeerChannelIndex {
             channel_id_to_peer_map,
         }
     }
+}
 
-    fn add_channel(&mut self, pubkey: Pubkey, channel_id: Hash256) {
-        self.peer_channels_map
+impl PeerChannelIndex {
+    pub(crate) fn build<S>(store: &S) -> Self
+    where
+        S: ChannelActorStateStore,
+    {
+        Self {
+            inner: Arc::new(StdRwLock::new(PeerChannelIndexState::build(store))),
+        }
+    }
+
+    pub(crate) fn add_channel(&self, pubkey: Pubkey, channel_id: Hash256) {
+        let mut state = self.inner.write().expect("peer channel index write lock");
+        state
+            .peer_channels_map
             .entry(pubkey)
             .or_default()
             .insert(channel_id);
         let peer_id = pubkey_to_tentacle(pubkey).peer_id();
-        self.peer_id_to_pubkey_map.entry(peer_id).or_insert(pubkey);
-        self.channel_id_to_peer_map
+        state.peer_id_to_pubkey_map.entry(peer_id).or_insert(pubkey);
+        state
+            .channel_id_to_peer_map
             .entry(channel_id)
             .or_insert(pubkey);
     }
 
-    fn remove_channel(&mut self, pubkey: &Pubkey, channel_id: &Hash256) {
+    pub(crate) fn remove_channel(&self, pubkey: &Pubkey, channel_id: &Hash256) {
+        let mut state = self.inner.write().expect("peer channel index write lock");
         let mut is_empty = false;
-        if let Some(channels) = self.peer_channels_map.get_mut(pubkey) {
+        if let Some(channels) = state.peer_channels_map.get_mut(pubkey) {
             channels.remove(channel_id);
             if channels.is_empty() {
                 is_empty = true;
             }
         }
-        self.channel_id_to_peer_map.remove(channel_id);
+        state.channel_id_to_peer_map.remove(channel_id);
         if is_empty {
             let peer_id = pubkey_to_tentacle(*pubkey).peer_id();
-            self.peer_channels_map.remove(pubkey);
-            self.peer_id_to_pubkey_map.remove(&peer_id);
+            state.peer_channels_map.remove(pubkey);
+            state.peer_id_to_pubkey_map.remove(&peer_id);
         }
     }
 
-    fn has_channels(&self, pubkey: &Pubkey) -> bool {
-        self.peer_channels_map.contains_key(pubkey)
+    pub(crate) fn has_channels(&self, pubkey: &Pubkey) -> bool {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .peer_channels_map
+            .contains_key(pubkey)
     }
 
-    fn has_channel(&self, pubkey: &Pubkey, channel_id: &Hash256) -> bool {
-        self.peer_channels_map
+    pub(crate) fn has_channel(&self, pubkey: &Pubkey, channel_id: &Hash256) -> bool {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .peer_channels_map
             .get(pubkey)
             .map(|channels| channels.contains(channel_id))
             .unwrap_or(false)
     }
 
-    fn get_channels(&self, pubkey: &Pubkey) -> Option<&HashSet<Hash256>> {
-        self.peer_channels_map.get(pubkey)
+    pub(crate) fn get_channels(&self, pubkey: &Pubkey) -> Option<HashSet<Hash256>> {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .peer_channels_map
+            .get(pubkey)
+            .cloned()
     }
 
-    fn replace_channel(&mut self, pubkey: Pubkey, old: Hash256, new: Hash256) {
-        if let Some(channels) = self.peer_channels_map.get_mut(&pubkey) {
+    pub(crate) fn replace_channel(&self, pubkey: Pubkey, old: Hash256, new: Hash256) {
+        let mut state = self.inner.write().expect("peer channel index write lock");
+        if let Some(channels) = state.peer_channels_map.get_mut(&pubkey) {
             channels.remove(&old);
             channels.insert(new);
-            self.channel_id_to_peer_map.remove(&old);
-            self.channel_id_to_peer_map.insert(new, pubkey);
+            state.channel_id_to_peer_map.remove(&old);
+            state.channel_id_to_peer_map.insert(new, pubkey);
         }
     }
 
-    fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
-        self.peer_id_to_pubkey_map.get(peer_id).cloned()
+    pub(crate) fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .peer_id_to_pubkey_map
+            .get(peer_id)
+            .cloned()
     }
 
-    fn get_peer_by_channel_id(&self, channel_id: &Hash256) -> Option<Pubkey> {
-        self.channel_id_to_peer_map.get(channel_id).cloned()
+    pub(crate) fn get_peer_by_channel_id(&self, channel_id: &Hash256) -> Option<Pubkey> {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .channel_id_to_peer_map
+            .get(channel_id)
+            .cloned()
     }
 }
 
@@ -367,6 +411,8 @@ pub enum PeerDisconnectReason {
     InitMessageTimeout,
     /// Chain hash mismatch.
     ChainHashMismatch,
+    /// Gossip peer temporarily banned.
+    Banned,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4731,7 +4777,7 @@ where
         self.peer_session_map.remove(&pubkey);
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
             for channel_id in channel_ids {
-                if let Some(channel) = self.channels.get(channel_id) {
+                if let Some(channel) = self.channels.get(&channel_id) {
                     if let Err(err) = channel
                         .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected))
                     {
@@ -5013,7 +5059,7 @@ where
             )));
         }
         debug_event!(_myself, "PeerInit");
-        if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey).cloned() {
+        if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey) {
             for channel_id in channels {
                 if let Err(e) = self.reestablish_channel(channel_id).await {
                     error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
@@ -5337,6 +5383,7 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
+        let peer_channel_index = PeerChannelIndex::build(&self.store);
 
         // Conditionally start GossipService based on sync_network_graph config
         let (gossip_actor, gossip_handle_opt) = if config.sync_network_graph() {
@@ -5347,6 +5394,8 @@ where
                 self.store.clone(),
                 self.chain_actor.clone(),
                 self.chain_client.clone(),
+                Some(myself.clone()),
+                peer_channel_index.clone(),
                 myself.get_cell(),
             )
             .await;
@@ -5506,7 +5555,6 @@ where
 
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
-        let peer_channel_index = PeerChannelIndex::build(&self.store);
 
         let mut state = NetworkActorState {
             store: self.store.clone(),

@@ -10,6 +10,7 @@ pub mod profiling;
 pub mod types;
 
 mod fee;
+pub(crate) mod gossip_policy;
 mod in_flight_ckb_tx_actor;
 mod key;
 mod path;
