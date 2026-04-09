@@ -1,11 +1,5 @@
 use crate::backend::StorageBackend;
 use crate::StoreError;
-#[cfg(not(target_arch = "wasm32"))]
-use console::Term;
-use indicatif::MultiProgress;
-use indicatif::ProgressBar;
-#[cfg(not(target_arch = "wasm32"))]
-use indicatif::ProgressDrawTarget;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -14,12 +8,114 @@ use tracing::{error, info};
 use crate::Store;
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
-pub const INIT_DB_VERSION: &str = "20241116135521";
+pub const INIT_DB_VERSION: &str = "20260302100001";
 include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
 
 fn internal_error(reason: String) -> StoreError {
     StoreError::DBInternalError(reason)
 }
+
+// --- Callback types for platform-specific UI ---
+
+/// Describes a pending migration plan for user confirmation.
+pub struct MigrationPlan {
+    pub current_version: String,
+    pub target_version: String,
+    pub pending_count: usize,
+    pub has_break_change: bool,
+    pub message: String,
+}
+
+/// Reports progress of an in-flight migration step.
+pub struct MigrationProgress {
+    pub current_step: usize,
+    pub total_steps: usize,
+    pub current_version: String,
+    pub message: String,
+}
+
+/// Migration-specific errors.
+pub enum MigrateError {
+    UserCancelled,
+    DatabaseTooOld {
+        db_version: String,
+        min_version: String,
+    },
+    DatabaseTooNew {
+        db_version: String,
+        latest_version: String,
+    },
+    MigrationFailed {
+        version: String,
+        error: String,
+    },
+}
+
+impl std::fmt::Display for MigrateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MigrateError::UserCancelled => write!(f, "Migration cancelled by user"),
+            MigrateError::DatabaseTooOld {
+                db_version,
+                min_version,
+            } => {
+                write!(
+                    f,
+                    "Database version {} is too old. Minimum supported version is {}. \
+                     Please use fnn-migrate v0.7.x to upgrade first.",
+                    db_version, min_version
+                )
+            }
+            MigrateError::DatabaseTooNew {
+                db_version,
+                latest_version,
+            } => {
+                write!(
+                    f,
+                    "Database version {} is newer than the latest supported version {}. \
+                     Please upgrade the fiber binary.",
+                    db_version, latest_version
+                )
+            }
+            MigrateError::MigrationFailed { version, error } => {
+                write!(f, "Migration {} failed: {}", version, error)
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for MigrateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for MigrateError {}
+
+/// Platform-specific confirmation callback.
+/// Receives a MigrationPlan, returns true if user confirms.
+pub type MigrateConfirmFn = Box<dyn FnOnce(MigrationPlan) -> bool>;
+
+/// Platform-specific progress callback.
+/// Called before each migration step executes.
+pub type MigrateProgressFn = Box<dyn Fn(MigrationProgress)>;
+
+// --- Migration trait ---
+
+pub trait Migration: Send + Sync {
+    /// Timestamp-based version string: "YYYYMMDDHHMMSS"
+    fn version(&self) -> &str;
+
+    /// Execute migration using the store backend.
+    fn migrate(&self, store: &Store) -> Result<(), String>;
+
+    /// Whether this migration is a breaking change requiring user action.
+    fn is_break_change(&self) -> bool {
+        false
+    }
+}
+
+// --- Migrations registry ---
 
 #[derive(Default)]
 pub struct Migrations {
@@ -32,24 +128,18 @@ impl Migrations {
             .insert(migration.version().to_string(), migration);
     }
 
-    /// Check if database's version is matched with the executable binary version.
-    ///
-    /// Returns
-    /// - Less: The database version is less than the matched version of the executable binary.
-    ///   Requires migration.
-    /// - Equal: The database version is matched with the executable binary version.
-    /// - Greater: The database version is greater than the matched version of the executable binary.
-    ///   Requires upgrade the executable binary.
-    pub fn check(&self, db: &Store) -> Ordering {
-        let db_version = match db.get(MIGRATION_VERSION_KEY) {
-            Some(version_bytes) => {
-                String::from_utf8(version_bytes.to_vec()).expect("version bytes to utf8")
-            }
-            None => {
-                return Ordering::Less;
-            }
-        };
+    pub fn get_db_version(&self, store: &Store) -> Option<String> {
+        store
+            .get(MIGRATION_VERSION_KEY)
+            .map(|v| String::from_utf8(v).expect("version bytes to utf8"))
+    }
 
+    /// Check database version against binary version.
+    pub fn check(&self, store: &Store) -> Ordering {
+        let db_version = match self.get_db_version(store) {
+            Some(v) => v,
+            None => return Ordering::Less,
+        };
         eprintln!(
             "Current database version: [{}], latest db version: [{}]",
             db_version, LATEST_DB_VERSION
@@ -57,180 +147,126 @@ impl Migrations {
         db_version.as_str().cmp(LATEST_DB_VERSION)
     }
 
-    fn latest_migration(&self) -> Option<&Arc<dyn Migration>> {
-        self.migrations.values().last()
+    /// Initialize a new database with LATEST_DB_VERSION.
+    pub fn init_db_version(&self, store: &Store) {
+        info!("Init database version {}", LATEST_DB_VERSION);
+        store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
     }
 
-    // will only invoked in fnn-migrate binary
-    fn run_migrate<'a>(
-        &self,
-        mut db: &'a Store,
-        current_version: &str,
-    ) -> Result<&'a Store, StoreError> {
-        let mpb = Arc::new(MultiProgress::new());
-
-        // make sure the latest migration is the last one
-        // this may only happened the fnn-migrate binary is not compiled with
-        // the correct fiber code base
-        {
-            let Some(latest_migration) = self.latest_migration() else {
-                return Err(internal_error("No migrations found".to_string()));
-            };
-            let latest_migration_version = latest_migration.version();
-            if latest_migration_version != LATEST_DB_VERSION {
-                error!(
-                    "The latest migration version is not equal to the latest db version, \
-                please check the migration version: {}",
-                    latest_migration_version
-                );
-                return Err(internal_error(
-                    "The latest migration version is not equal to the latest db version"
-                        .to_string(),
-                ));
-            }
-        }
-
-        let migrations: BTreeMap<_, _> = self
-            .migrations
+    /// Collect pending migrations (version > current).
+    fn pending_migrations(&self, current_version: &str) -> Vec<&Arc<dyn Migration>> {
+        self.migrations
             .iter()
-            .filter(|(mv, _)| mv.as_str() > current_version)
-            .collect();
-        let migrations_count = migrations.len();
-
-        for (idx, (_, m)) in migrations.iter().enumerate() {
-            let mpbc = Arc::clone(&mpb);
-            let pb = move |count: u64| -> ProgressBar {
-                let pb = mpbc.add(ProgressBar::new(count));
-                #[cfg(not(target_arch = "wasm32"))]
-                pb.set_draw_target(ProgressDrawTarget::term(Term::stdout(), 1));
-                pb.set_prefix(format!("[{}/{}]", idx + 1, migrations_count));
-                pb
-            };
-            db = m.migrate(db, Arc::new(pb))?;
-            db.put(MIGRATION_VERSION_KEY, m.version());
-        }
-        mpb.clear().expect("MultiProgress join");
-        Ok(db)
+            .filter(|(v, _)| v.as_str() > current_version)
+            .map(|(_, m)| m)
+            .collect()
     }
 
-    fn get_migration_version(&self, db: &Store) -> Result<Option<String>, StoreError> {
-        let raw = db.get(MIGRATION_VERSION_KEY);
-
-        Ok(raw.map(|version_bytes| {
-            String::from_utf8(version_bytes.to_vec()).expect("version bytes to utf8")
-        }))
+    /// Check if any pending migration is a breaking change.
+    fn has_break_change(&self, current_version: &str) -> bool {
+        self.pending_migrations(current_version)
+            .iter()
+            .any(|m| m.is_break_change())
     }
 
-    /// Initial db version
-    pub fn init_db_version(&self, db: &Store) -> Result<(), StoreError> {
-        if self.need_init(db) {
-            info!("Init database version {}", LATEST_DB_VERSION);
-            db.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
-        }
-        Ok(())
-    }
-
-    pub fn need_init(&self, db: &Store) -> bool {
-        self.get_migration_version(db)
-            .expect("get migration failed")
-            .is_none()
-    }
-
-    pub fn is_any_break_change(&self, db: &Store) -> bool {
-        let Some(current_version) = self
-            .get_migration_version(db)
-            .expect("get migration failed")
-        else {
-            return false;
+    /// Run the full auto-migration flow.
+    pub fn auto_migrate(
+        &self,
+        store: &Store,
+        confirm_fn: MigrateConfirmFn,
+        progress_fn: MigrateProgressFn,
+    ) -> Result<(), MigrateError> {
+        let db_version = match self.get_db_version(store) {
+            None => {
+                // New database -- stamp with latest version
+                self.init_db_version(store);
+                return Ok(());
+            }
+            Some(v) => v,
         };
 
-        let migrations: BTreeMap<_, _> = self
-            .migrations
-            .iter()
-            .filter(|(mv, _)| mv.as_str() > current_version.as_str())
-            .collect();
-        migrations.values().any(|m| m.is_break_change())
-    }
+        // Already up to date
+        if db_version.as_str() == LATEST_DB_VERSION {
+            info!(
+                "Database version {} is current, no migration needed",
+                db_version
+            );
+            return Ok(());
+        }
 
-    pub fn migrate<'a>(&self, db: &'a Store) -> Result<&'a Store, StoreError> {
-        let db_version = self.get_migration_version(db)?;
-        match db_version {
-            Some(ref v) => {
-                info!("Current database version {}", v);
-                self.check_valid_to_migrate(v, db)?;
-                let db = self.run_migrate(db, v.as_str())?;
-                Ok(db)
-            }
-            None => Ok(db),
+        // Database too new
+        if db_version.as_str() > LATEST_DB_VERSION {
+            return Err(MigrateError::DatabaseTooNew {
+                db_version,
+                latest_version: LATEST_DB_VERSION.to_string(),
+            });
         }
-    }
 
-    fn check_valid_to_migrate(&self, cur_version: &str, db: &Store) -> Result<(), StoreError> {
-        if let Some(m) = self.migrations.values().last() {
-            if m.version() < cur_version {
-                error!(
-                    "Database downgrade detected. \
-                    The database schema version is newer than `fiber` schema version,\
-                    please upgrade `fiber` to the latest version"
-                );
-                return Err(internal_error(
-                    "Database downgrade is not supported".to_string(),
-                ));
-            }
+        // Database too old (before new epoch)
+        if db_version.as_str() < INIT_DB_VERSION {
+            return Err(MigrateError::DatabaseTooOld {
+                db_version,
+                min_version: INIT_DB_VERSION.to_string(),
+            });
         }
-        if self.is_any_break_change(db) {
-            return Err(internal_error(
-                "There is a breaking change migration".to_string(),
-            ));
+
+        // Collect pending migrations
+        let pending = self.pending_migrations(&db_version);
+        if pending.is_empty() {
+            // Between INIT and LATEST but no migrations to run
+            self.init_db_version(store);
+            return Ok(());
         }
+
+        let has_break = self.has_break_change(&db_version);
+
+        // Build plan and request confirmation
+        let plan = MigrationPlan {
+            current_version: db_version.clone(),
+            target_version: LATEST_DB_VERSION.to_string(),
+            pending_count: pending.len(),
+            has_break_change: has_break,
+            message: format!(
+                "Database migration required ({} -> {}), {} pending migration(s).{}",
+                db_version,
+                LATEST_DB_VERSION,
+                pending.len(),
+                if has_break {
+                    " WARNING: Contains breaking changes -- backup strongly recommended."
+                } else {
+                    " Backup recommended."
+                }
+            ),
+        };
+
+        if !confirm_fn(plan) {
+            return Err(MigrateError::UserCancelled);
+        }
+
+        // Execute migrations
+        let total = pending.len();
+        for (idx, m) in pending.iter().enumerate() {
+            progress_fn(MigrationProgress {
+                current_step: idx + 1,
+                total_steps: total,
+                current_version: m.version().to_string(),
+                message: format!("Migrating v{}", m.version()),
+            });
+
+            m.migrate(store)
+                .map_err(|e| MigrateError::MigrationFailed {
+                    version: m.version().to_string(),
+                    error: e,
+                })?;
+
+            // Update db-version after each successful migration
+            store.put(MIGRATION_VERSION_KEY, m.version());
+        }
+
+        info!(
+            "Migration complete: {} -> {}",
+            db_version, LATEST_DB_VERSION
+        );
         Ok(())
-    }
-}
-
-pub trait Migration: Send + Sync {
-    fn migrate<'a>(
-        &self,
-        _db: &'a Store,
-        _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, StoreError>;
-
-    /// returns migration version, use `date +'%Y%m%d%H%M%S'` timestamp format
-    fn version(&self) -> &str;
-
-    /// break change
-    fn is_break_change(&self) -> bool {
-        false
-    }
-}
-
-pub struct DefaultMigration {
-    version: String,
-}
-
-impl Default for DefaultMigration {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DefaultMigration {
-    pub fn new() -> Self {
-        Self {
-            version: INIT_DB_VERSION.to_string(),
-        }
-    }
-}
-
-impl Migration for DefaultMigration {
-    fn migrate<'a>(
-        &self,
-        db: &'a Store,
-        _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, StoreError> {
-        Ok(db)
-    }
-
-    fn version(&self) -> &str {
-        &self.version
     }
 }
