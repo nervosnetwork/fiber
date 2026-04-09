@@ -976,7 +976,15 @@ where
                         if msg.is_none() {
                             break;
                         }
-                        info!("Tor reconnected, triggering MaintainConnections");
+                        info!("Tor reconnected, delaying before MaintainConnections to let DisconnectPeer events drain");
+                        // Delay to ensure that PeerDisconnected events (triggered
+                        // by the old Tor connection dropping) are processed by the
+                        // actor before we send MaintainConnections. Without this,
+                        // MaintainConnections may see stale peer_session_map entries
+                        // and skip reconnection, leaving peers disconnected until
+                        // the next periodic cycle (1200 s).
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        info!("Triggering MaintainConnections after Tor reconnect");
                         let _ = myself.send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::MaintainConnections,
                         ));
