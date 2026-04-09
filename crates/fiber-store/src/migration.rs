@@ -1,19 +1,13 @@
-use crate::backend::StorageBackend;
-use crate::StoreError;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::Store;
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
 pub const INIT_DB_VERSION: &str = "20260302100001";
 include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
-
-fn internal_error(reason: String) -> StoreError {
-    StoreError::DBInternalError(reason)
-}
 
 // --- Callback types for platform-specific UI ---
 

@@ -9,7 +9,9 @@
 //! 3. Implement `pub struct MigrationObj` with `Migration` trait
 //! 4. Run `cargo build` -- build.rs will auto-register it
 
+#[allow(unused_imports)]
 use crate::db_migrate::DbMigrate;
+#[allow(unused_imports)]
 use std::sync::Arc;
 
 include!(concat!(env!("OUT_DIR"), "/register_migrations.rs"));
