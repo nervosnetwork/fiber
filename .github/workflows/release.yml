@@ -61,10 +61,10 @@ jobs:
             pkg_suffix: aarch64-linux-portable
           - os: macos-15
             bin_suffix:
-            pkg_suffix: aarch64-apple-darwin-portable
+            pkg_suffix: aarch64-darwin-portable
           - os: macos-15-intel
             bin_suffix:
-            pkg_suffix: x86_64-apple-darwin-portable
+            pkg_suffix: x86_64-darwin-portable
           - os: windows-2022
             bin_suffix: .exe
             pkg_suffix: x86_64-windows
