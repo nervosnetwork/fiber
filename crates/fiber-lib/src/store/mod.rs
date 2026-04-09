@@ -7,5 +7,8 @@ pub use store_impl::Store;
 pub use store_impl::{check_validate, open_store};
 pub use store_trait::FiberStore;
 
+// Re-export migration types for callers of open_store
+pub use fiber_store::migration::{MigrationPlan, MigrationProgress};
+
 #[cfg(test)]
 mod tests;

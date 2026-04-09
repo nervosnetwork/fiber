@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::backend::StorageBackend;
 use crate::Store;
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
@@ -163,6 +164,18 @@ impl Migrations {
             .any(|m| m.is_break_change())
     }
 
+    /// Effective latest version: the maximum of `LATEST_DB_VERSION` and the
+    /// highest version among registered migrations. This allows dynamically
+    /// added migrations (e.g. in tests) to extend beyond the compile-time constant.
+    fn effective_latest_version(&self) -> &str {
+        match self.migrations.keys().last() {
+            Some(max_registered) if max_registered.as_str() > LATEST_DB_VERSION => {
+                max_registered.as_str()
+            }
+            _ => LATEST_DB_VERSION,
+        }
+    }
+
     /// Run the full auto-migration flow.
     pub fn auto_migrate(
         &self,
@@ -170,6 +183,8 @@ impl Migrations {
         confirm_fn: MigrateConfirmFn,
         progress_fn: MigrateProgressFn,
     ) -> Result<(), MigrateError> {
+        let latest_version = self.effective_latest_version();
+
         let db_version = match self.get_db_version(store) {
             None => {
                 // New database -- stamp with latest version
@@ -180,7 +195,7 @@ impl Migrations {
         };
 
         // Already up to date
-        if db_version.as_str() == LATEST_DB_VERSION {
+        if db_version.as_str() == latest_version {
             info!(
                 "Database version {} is current, no migration needed",
                 db_version
@@ -189,10 +204,10 @@ impl Migrations {
         }
 
         // Database too new
-        if db_version.as_str() > LATEST_DB_VERSION {
+        if db_version.as_str() > latest_version {
             return Err(MigrateError::DatabaseTooNew {
                 db_version,
-                latest_version: LATEST_DB_VERSION.to_string(),
+                latest_version: latest_version.to_string(),
             });
         }
 
@@ -217,13 +232,13 @@ impl Migrations {
         // Build plan and request confirmation
         let plan = MigrationPlan {
             current_version: db_version.clone(),
-            target_version: LATEST_DB_VERSION.to_string(),
+            target_version: latest_version.to_string(),
             pending_count: pending.len(),
             has_break_change: has_break,
             message: format!(
                 "Database migration required ({} -> {}), {} pending migration(s).{}",
                 db_version,
-                LATEST_DB_VERSION,
+                latest_version,
                 pending.len(),
                 if has_break {
                     " WARNING: Contains breaking changes -- backup strongly recommended."
@@ -257,10 +272,7 @@ impl Migrations {
             store.put(MIGRATION_VERSION_KEY, m.version());
         }
 
-        info!(
-            "Migration complete: {} -> {}",
-            db_version, LATEST_DB_VERSION
-        );
+        info!("Migration complete: {} -> {}", db_version, latest_version);
         Ok(())
     }
 }

@@ -7,8 +7,8 @@ use std::{
 use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
-use fiber_store::migration::{MigrationPlan, MigrationProgress};
 use fnn::fiber::network::init_chain_hash;
+use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::{
     Config,
     actors::RootActor,

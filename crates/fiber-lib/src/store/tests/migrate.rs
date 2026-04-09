@@ -16,7 +16,7 @@ fn gen_path() -> std::path::PathBuf {
 
 fn gen_store() -> fiber_store::Store {
     let path = gen_path();
-    fiber_store::Store::open_db(path).unwrap()
+    fiber_store::Store::open_db(&path).unwrap()
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn test_break_change_migration() {
 fn test_db_migrate_check() {
     let store = gen_store();
 
-    let mut migrate = DbMigrate::new();
+    let migrate = DbMigrate::new();
     // No version set yet
     assert_eq!(migrate.check(&store), Ordering::Less);
 

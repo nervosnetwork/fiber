@@ -1,7 +1,6 @@
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use core::default::Default;
-use fiber_store::migration::{MigrationPlan, MigrationProgress};
 use fnn::actors::RootActor;
 use fnn::cch::CchArgs;
 use fnn::ckb::client::CkbRpcClient;
@@ -13,6 +12,7 @@ use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
 use fnn::rpc::server::start_rpc;
 use fnn::store::open_store;
+use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
