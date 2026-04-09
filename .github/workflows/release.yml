@@ -48,7 +48,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-22.04, ubuntu-24.04, ubuntu-22.04-arm, macos-15-intel, windows-2022 ]
+        os: [ ubuntu-22.04, ubuntu-24.04, ubuntu-22.04-arm, macos-15, macos-15-intel, windows-2022 ]
         include:
           - os: ubuntu-22.04
             bin_suffix:
@@ -59,6 +59,9 @@ jobs:
           - os: ubuntu-22.04-arm
             bin_suffix:
             pkg_suffix: aarch64-linux-portable
+          - os: macos-15
+            bin_suffix:
+            pkg_suffix: aarch64-darwin-portable
           - os: macos-15-intel
             bin_suffix:
             pkg_suffix: x86_64-darwin-portable
@@ -115,13 +118,9 @@ jobs:
     - if: matrix.os == 'ubuntu-24.04'
       name: Build linux
       run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
-    - if: matrix.os == 'macos-15-intel'
+    - if: startsWith(matrix.os, 'macos-15')
       name: Build macos portable
-      run: |
-        export OPENSSL_LIB_DIR=/usr/local/opt/openssl@1.1/lib
-        export OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@1.1/include
-        export OPENSSL_STATIC=1
-        cargo build --release --locked --features portable && cd migrate && cargo build --release --locked && cd ..
+      run: cargo build --release --locked --features portable && cd migrate && cargo build --release --locked && cd ..
     - if: matrix.os == 'windows-2022'
       name: Build windows
       run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
