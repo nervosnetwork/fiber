@@ -2,7 +2,6 @@
 use crate::fiber::KeyPair;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::{onion_service::OnionConfig, proxy::ProxyConfig};
-use crate::Error;
 use crate::{ckb::contracts::Contract, invoice::Currency, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
@@ -425,13 +424,13 @@ pub struct FiberConfig {
     #[arg(skip)]
     #[serde(default)]
     pub onion: OnionConfig,
-    #[cfg(not(target_arch = "wasm32"))]
+
     /// Path to a RocksDB checkpoint to restore from
     #[arg(
         name = "FIBER_RESTORE_PATH",
         long = "fiber-restore-path",
         env,
-        help = "Path to a RocksDB checkpoint to restore from. This is a one-time operation that will replace the current database."
+        help = "Path to a database directory to restore from. This is a one-time operation that will replace the current database."
     )]
     pub(crate) restore_path: Option<PathBuf>,
 }
@@ -498,19 +497,20 @@ impl FiberConfig {
         path
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn check_restore_path(&self) -> Result<Option<&PathBuf>> {
         match &self.restore_path {
             None => Ok(None),
             Some(path) => {
+                #[cfg(not(target_arch = "wasm32"))]
                 if !path.exists() {
-                    return Err(Error::InvalidParameter(format!(
+                    return Err(crate::Error::InvalidParameter(format!(
                         "Restore path {:?} does not exist",
                         path
                     )));
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 if !path.is_dir() {
-                    return Err(Error::InvalidParameter(format!(
+                    return Err(crate::Error::InvalidParameter(format!(
                         "Restore path {:?} is not a directory",
                         path
                     )));

@@ -25,6 +25,7 @@ use web_sys::js_sys::Uint8Array;
 
 use crate::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use crate::iterator::{IteratorDirection, KVPair};
+use crate::StoreError;
 
 type TakeWhileCallback = Box<dyn Fn(&[u8]) -> bool + 'static>;
 
@@ -166,6 +167,18 @@ impl StorageBackend for Store {
                 value: kv.value,
             })
             .collect()
+    }
+
+    fn backup_now(&self, _path: &Path) -> Result<(), StoreError> {
+        Err(StoreError::BackupError(
+            "Not supported on browser yet".into(),
+        ))
+    }
+
+    fn restore(&self, _restore_path: &Path, _db_path: &Path) -> Result<(), StoreError> {
+        Err(StoreError::RestoreError(
+            "Not supported on browser yet".into(),
+        ))
     }
 }
 

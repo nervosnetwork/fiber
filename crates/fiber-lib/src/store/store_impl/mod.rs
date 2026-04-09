@@ -4,6 +4,7 @@ use ckb_types::packed::Script;
 use crate::store::store_trait::{FiberStore, PrefixIterOptions};
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
+use fiber_store::StoreError;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -76,13 +77,6 @@ impl Store {
             watcher(change);
         }
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn create_checkpoint(&self, path: &Path) -> Result<(), String> {
-        self.inner
-            .create_checkpoint(path)
-            .map_err(|e| e.to_string())
-    }
 }
 
 impl StorageBackend for Store {
@@ -114,16 +108,13 @@ impl StorageBackend for Store {
         self.inner
             .collect_iterator(start, direction, take_while_fn, limit)
     }
-}
-#[cfg(not(target_arch = "wasm32"))]
-pub trait KVStore {
-    fn get_inner(&self) -> &fiber_store::Store;
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl KVStore for Store {
-    fn get_inner(&self) -> &fiber_store::Store {
-        &self.inner
+    fn backup_now(&self, path: &Path) -> Result<(), StoreError> {
+        self.inner.backup_now(path)
+    }
+
+    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+        self.inner.restore(restore_path, db_path)
     }
 }
 
@@ -331,7 +322,6 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
-    #[cfg(not(target_arch = "wasm32"))]
     RestoreAuditMap(&'static str, RestoreAuditMap),
 }
 
@@ -456,7 +446,6 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
-            #[cfg(not(target_arch = "wasm32"))]
             KeyValue::RestoreAuditMap(key, _map) => {
                 [&[RESTORE_AUDIT_PREFIX], key.as_bytes()].concat()
             }
@@ -502,7 +491,6 @@ impl StoreKeyValue for KeyValue {
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
-            #[cfg(not(target_arch = "wasm32"))]
             KeyValue::RestoreAuditMap(_key, audit_map) => {
                 serialize_to_vec(audit_map, "RestoreAuditMap")
             }
@@ -1644,7 +1632,6 @@ impl CchOrderStore for Store {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl RestoreAuditStore for Store {
     fn get_restore_audit_map(&self) -> Option<RestoreAuditMap> {
         let kv = KeyValue::RestoreAuditMap("audit_map", RestoreAuditMap::default());
@@ -1679,16 +1666,6 @@ impl RestoreAuditStore for Store {
             }
         }
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl RestoreAuditStore for Store {
-    fn get_restore_audit_map(&self) -> Option<RestoreAuditMap> {
-        None
-    }
-    fn insert_restore_audit_map(&self, _map: RestoreAuditMap) {}
-    fn delete_restore_audit_map(&self) {}
-    fn resolve_channel_audit(&self, _channel_id: &Hash256) {}
 }
 
 // All timestamps are saved in a 24-byte array, with BroadcastMessageID::ChannelAnnouncement(outpoint) as the key.

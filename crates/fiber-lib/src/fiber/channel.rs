@@ -457,16 +457,17 @@ where
                     // Restore Audit Interception
                     if let Some(audit_map) = self.store.get_restore_audit_map() {
                         if let Some(audit_info) = audit_map.channels.get(&state.get_id()) {
+                            // A normal reestablish considers +1 to be safe
                             if reestablish_channel.remote_commitment_number
-                                > audit_info.local_commitment_number
+                                > audit_info.local_commitment_number + 1
                             {
                                 error!(
-                                "CRITICAL: Recovery rollback detected for channel {}! Backup CN: {}, Peer expects: {}. Blocking channel to prevent penalty.",
-                                state.get_id(), audit_info.local_commitment_number, reestablish_channel.remote_commitment_number
-                            );
+                                    "CRITICAL: Recovery rollback detected for channel {}! local_commitment_number: {}, remote_commitment_number: {}. Blocking channel to prevent penalty.",
+                                    state.get_id(), audit_info.local_commitment_number, reestablish_channel.remote_commitment_number
+                                );
                                 return Err(ProcessingChannelError::InvalidParameter(
-                                "Channel state rollback detected during restore audit. Manual intervention required.".into()
-                            ));
+                                    "Channel state rollback detected during restore audit. Manual intervention required.".into()
+                                ));
                             } else {
                                 self.store.resolve_channel_audit(&state.get_id());
                                 info!("Recovery audit passed for channel {}.", state.get_id());

@@ -2099,6 +2099,7 @@ dependencies = [
  "console_error_panic_hook",
  "fiber-wasm-db-common 0.1.0",
  "indicatif",
+ "serde",
  "thiserror 1.0.69",
  "tracing",
  "wasm-bindgen",

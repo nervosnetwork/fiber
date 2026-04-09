@@ -645,16 +645,14 @@ Get the node information.
 <a id="info-backup_now"></a>
 #### Method `backup_now`
 
-Backup the node database and key files to a specified path.
+Backup the node information.
 
 ##### Params
-
-* `String` - <em>String</em>, 
+* None
 
 ##### Returns
 
-* `path` - <em>`String`</em>, The path of backup file
-* `timestamp` - <em>`u64`</em>, The timestamp of backup
+* None
 
 ---
 

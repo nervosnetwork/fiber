@@ -86,6 +86,7 @@ impl From<StoreError> for Error {
             StoreError::DBInternalError(msg) => Error::DBInternalError(msg),
             StoreError::IOError(err) => Error::IO(err),
             StoreError::RestoreError(msg) => Error::DBInternalError(msg),
+            StoreError::BackupError(msg) => Error::DBInternalError(msg),
         }
     }
 }

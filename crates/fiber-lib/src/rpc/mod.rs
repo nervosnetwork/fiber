@@ -40,7 +40,6 @@ pub mod server {
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
     #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
     use crate::rpc::prof::{ProfRpcServer, ProfRpcServerImpl};
-    use crate::store::store_impl::KVStore;
     use crate::{
         cch::CchMessage,
         fiber::{
@@ -79,6 +78,7 @@ pub mod server {
 
     use super::biscuit::BiscuitAuth;
     use crate::store::store_impl::StoreChange;
+    use fiber_store::StorageBackend;
     use ractor::{ActorCell, OutputPort};
 
     #[cfg(feature = "watchtower")]
@@ -90,7 +90,6 @@ pub mod server {
         + GossipMessageStore
         + WatchtowerStore
         + PreimageStore
-        + KVStore
     {
     }
     #[cfg(feature = "watchtower")]
@@ -102,7 +101,6 @@ pub mod server {
             + GossipMessageStore
             + WatchtowerStore
             + PreimageStore
-            + KVStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -269,7 +267,7 @@ pub mod server {
 
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
-    pub async fn start_rpc<S: RpcServerStore + KVStore + Clone + Send + Sync + 'static>(
+    pub async fn start_rpc<S: RpcServerStore + StorageBackend + Clone + Send + Sync + 'static>(
         config: RpcConfig,
         ckb_config: Option<CkbConfig>,
         fiber_config: Option<FiberConfig>,
@@ -320,14 +318,13 @@ pub mod server {
         }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {
-                #[cfg(not(target_arch = "wasm32"))]
                 modules
                     .merge(
                         InfoRpcServerImpl::new(
                             network_actor.clone(),
                             store.clone(),
                             ckb_config.clone().expect("ckb config should be set"),
-                            fiber_config.clone(),
+                            fiber_config,
                         )
                         .into_rpc(),
                     )

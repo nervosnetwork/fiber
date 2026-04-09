@@ -53,7 +53,6 @@ use fiber_types::{
     RetryableTlcOperation, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket,
     TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{ChannelAuditInfo, RestoreAuditMap, RestoreAuditStore};
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
@@ -9229,7 +9228,6 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
     );
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_channel_restore_audit_failure_closes_channel() {
     init_tracing();
@@ -9241,14 +9239,14 @@ async fn test_channel_restore_audit_failure_closes_channel() {
     let original_cn = state.commitment_numbers.local;
 
     // The backup simulating the loss of the last update
-    state.commitment_numbers.local = original_cn - 1;
+    state.commitment_numbers.local = original_cn - 2;
     node_a.store.insert_channel_actor_state(state);
 
     let mut audit_map = RestoreAuditMap::new();
     audit_map.add_channel(
         channel_id,
         ChannelAuditInfo {
-            local_commitment_number: original_cn - 1,
+            local_commitment_number: original_cn - 2,
         },
     );
     node_a.store.insert_restore_audit_map(audit_map);
@@ -9285,7 +9283,6 @@ async fn test_channel_restore_audit_failure_closes_channel() {
     );
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_channel_restore_audit_success_resolves() {
     init_tracing();
@@ -9333,7 +9330,6 @@ async fn test_channel_restore_audit_success_resolves() {
     );
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_channel_restore_audit_peer_lagging_is_safe() {
     init_tracing();
@@ -9375,7 +9371,6 @@ async fn test_channel_restore_audit_peer_lagging_is_safe() {
     assert!(node_a.store.get_restore_audit_map().is_none());
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_channel_restore_audit_multi_channel_isolation() {
     init_tracing();

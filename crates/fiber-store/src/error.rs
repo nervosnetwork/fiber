@@ -8,6 +8,9 @@ pub enum StoreError {
     #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),
 
+    #[error("Backup error: {0}")]
+    BackupError(String),
+
     #[error("Restore error: {0}")]
     RestoreError(String),
 }
