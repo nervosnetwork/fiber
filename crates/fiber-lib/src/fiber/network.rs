@@ -828,7 +828,12 @@ where
         tracker: &tokio_util::task::TaskTracker,
         myself: ActorRef<NetworkActorMessage>,
     ) -> Result<Option<(MultiAddr, tokio_util::sync::CancellationToken)>, String> {
-        use std::net::{Ipv4Addr, SocketAddr};
+        use std::{
+            net::{Ipv4Addr, SocketAddr},
+            time::Duration,
+        };
+
+        use tokio::time::timeout;
 
         // Resolve p2p listen address for onion service forwarding
         let p2p_listen_address: SocketAddr = match &config.onion.p2p_listen_address {
@@ -941,13 +946,22 @@ where
 
         // Wait for the onion service to successfully register with Tor before
         // returning the address, so callers don't advertise an unreachable address.
-        match ready_rx.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
+        match timeout(
+            Duration::from_secs(config.onion.onion_service_start_timeout as u64),
+            ready_rx,
+        )
+        .await
+        {
+            Err(_) => {
+                cancel_token.cancel();
+                return Err(String::from("Timed out waiting for onion service"));
+            }
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(err))) => {
                 cancel_token.cancel();
                 return Err(err);
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 cancel_token.cancel();
                 return Err("Onion service task exited before signaling readiness".to_string());
             }

@@ -472,6 +472,14 @@ pub struct OnionConfig {
     /// The external port that the onion service will expose [default: 8115]
     #[serde(default = "default_onion_external_port")]
     pub onion_external_port: u16,
+
+    /// Maximum time to wait for the start of onion service
+    #[serde(default = "default_onion_service_start_timeout")]
+    pub onion_service_start_timeout: usize,
+}
+
+fn default_onion_service_start_timeout() -> usize {
+    5
 }
 
 fn default_tor_controller() -> String {

@@ -39,6 +39,8 @@ fiber:
   #   tor_password: ""
   #   ## The external port exposed by the onion service. [default: 8228]
   #   onion_external_port: 8228
+  #   ## Maximum time in seconds to wait for the onion service to register with Tor. [default: 5]
+  #   onion_service_start_timeout: 5
   # lock script configurations related to fiber network
   # https://github.com/nervosnetwork/fiber-scripts/blob/main/deployment/testnet/migrations/2025-02-28-111246.json
   scripts:

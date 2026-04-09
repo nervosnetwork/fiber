@@ -79,8 +79,11 @@ impl OnionService {
         reconnect_notify: tokio::sync::mpsc::UnboundedSender<()>,
         ready_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) -> Result<(), String> {
+        const MAX_INITIAL_RETRIES: u32 = 3;
+
         let mut first_start = true;
         let mut ready_tx = Some(ready_tx);
+        let mut initial_retries = 0u32;
         loop {
             let (tor_alive_tx, mut tor_alive_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
             match self
@@ -98,16 +101,33 @@ impl OnionService {
                         info!("Tor reconnected, notifying network to reconnect peers");
                         let _ = reconnect_notify.send(());
                     }
+                    first_start = false;
                 }
                 Err(err) => {
                     error!("Failed to start onion service: {}", err);
-                    if let Some(tx) = ready_tx.take() {
-                        let _ = tx.send(Err(err));
-                        return Ok(());
+                    if ready_tx.is_some() {
+                        initial_retries += 1;
+                        if initial_retries >= MAX_INITIAL_RETRIES {
+                            error!(
+                                "Onion service failed to start after {} retries, giving up",
+                                MAX_INITIAL_RETRIES
+                            );
+                            if let Some(tx) = ready_tx.take() {
+                                let _ = tx.send(Err(err));
+                            }
+                            return Ok(());
+                        }
+                        warn!(
+                            "Onion service initial start failed (attempt {}/{}), retrying...",
+                            initial_retries, MAX_INITIAL_RETRIES
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
                     }
+                    first_start = false;
                 }
             }
-            first_start = false;
+
             // Wait until tor connection drops or cancellation
             tokio::select! {
                 _ = tor_alive_rx.recv() => {}
