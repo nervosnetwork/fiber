@@ -114,15 +114,8 @@ download_unix_installer_scripts() {
 }
 
 ensure_ckb_cli_available() {
-    if check_command ckb-cli; then
-        CKB_CLI_HINT_PATH="$(command -v ckb-cli)"
+    if CKB_CLI_HINT_PATH="$(resolve_existing_ckb_cli_path "$INSTALL_DIR")"; then
         print_success "ckb-cli found at $CKB_CLI_HINT_PATH"
-        return
-    fi
-
-    if [ -f "$INSTALL_DIR/ckb-cli" ]; then
-        CKB_CLI_HINT_PATH="$INSTALL_DIR/ckb-cli"
-        print_success "Found existing ckb-cli at $CKB_CLI_HINT_PATH"
         return
     fi
 
@@ -134,7 +127,7 @@ ensure_ckb_cli_available() {
 
 install_fn() {
     print_header
-    
+
     # Non-interactive mode uses defaults
     if ! is_interactive_stdin; then
         print_info "Running in non-interactive mode with defaults"
@@ -147,7 +140,7 @@ install_fn() {
     validate_network "$NETWORK"
     ensure_install_dir_matches_network "$INSTALL_DIR" "$NETWORK"
     ensure_download_tool
-    
+
     # Create install directory
     mkdir -p "$INSTALL_DIR"
 
@@ -156,10 +149,12 @@ install_fn() {
     install_fnn_binary "$INSTALL_DIR"
     download_config_file "$INSTALL_DIR" "$NETWORK"
     download_unix_installer_scripts
-    
+
     # Create data directory
     mkdir -p "$INSTALL_DIR/fiber"
-    
+
+    cd "$INSTALL_DIR"
+
     print_success "Installation complete!"
     echo ""
     echo "Release bundle installed to: $INSTALL_DIR"
@@ -171,15 +166,13 @@ install_fn() {
     echo "ckb-cli is available at: $CKB_CLI_HINT_PATH"
     echo ""
     echo "Next steps:"
-    echo "  1. Set up your CKB account and export the key"
-    echo "     $CKB_CLI_HINT_PATH account new"
-    echo "  2. Set FIBER_SECRET_KEY_PASSWORD environment variable"
-    echo "  3. Run: $INSTALL_DIR/fnn -c $INSTALL_DIR/config.yml -d $INSTALL_DIR"
-    echo "  4. If you want the guided Unix installer later:"
-    echo "     $INSTALL_DIR/tools/install/quick-start.sh $INSTALL_DIR $NETWORK"
     echo ""
     echo "For detailed setup instructions:"
-    echo "  https://docs.fiber.world/"
+    echo "  https://www.fiber.world/docs/quick-start/run-a-node"
+    echo ""
+    echo "  If you want the guided Unix installer later:"
+    echo "     $INSTALL_DIR/tools/install/quick-start.sh $INSTALL_DIR"
+
 }
 
 # Show help

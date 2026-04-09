@@ -69,8 +69,9 @@ If you are working from a local checkout and want a guided install flow:
 # Linux/macOS
 ./tools/install/quick-start.sh
 
-# Already have a local fnn binary
-./tools/install/quick-start.sh --local-binary ./fnn
+# Override the default mainnet selection
+./tools/install/quick-start.sh ./my-fnn testnet
+
 ```
 
 ## Uninstalling
@@ -90,6 +91,6 @@ rm -rf ~/.fiber
 
 ## Documentation
 
-- [Fiber Docs](https://docs.fiber.world/)
+- [Fiber Docs](https://www.fiber.world/docs)
 - [GitHub](https://github.com/nervosnetwork/fiber)
 - [RPC API](https://github.com/nervosnetwork/fiber/blob/main/crates/fiber-lib/src/rpc/README.md)

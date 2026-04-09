@@ -1,17 +1,17 @@
 # Fiber Network Node (FNN) Installer Script for Windows
 # Usage: .\tools\install\install-fnn.ps1 [-InstallDir <path>] [-Network <testnet|mainnet>]
-# Example: .\tools\install\install-fnn.ps1 -InstallDir "C:\my-fnn" -Network testnet
+# Example: .\tools\install\install-fnn.ps1 -InstallDir "C:\my-fnn" -Network mainnet
 
 param(
     [string]$InstallDir = ".\my-fnn",
-    [string]$Network = "testnet"
+    [string]$Network = "mainnet"
 )
 
 # Allow the same env overrides as the shell installers when params are omitted.
 if ($InstallDir -eq ".\my-fnn" -and $env:INSTALL_DIR) {
     $InstallDir = $env:INSTALL_DIR
 }
-if ($Network -eq "testnet" -and $env:NETWORK) {
+if ($Network -eq "mainnet" -and $env:NETWORK) {
     $Network = $env:NETWORK
 }
 
@@ -68,6 +68,19 @@ $CKB_CLI_BINARY = "ckb-cli_v${CKB_CLI_VERSION}_x86_64-pc-windows-msvc.zip"
 function Test-Command($command) {
     $null = Get-Command $command -ErrorAction SilentlyContinue
     return $?
+}
+
+function Get-ExistingCkbCliPath {
+    if (Test-Command "ckb-cli") {
+        return (Get-Command "ckb-cli").Source
+    }
+
+    $localCkbCli = Join-Path $InstallDir "ckb-cli.exe"
+    if (Test-Path $localCkbCli) {
+        return $localCkbCli
+    }
+
+    return $null
 }
 
 function Get-ConfigValueInSection {
@@ -278,6 +291,101 @@ function Escape-YamlDoubleQuotedValue {
     return $Value.Replace('\', '\\').Replace('"', '\"')
 }
 
+function Normalize-InstallDir {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $Path
+    }
+
+    if ($Path -eq "~") {
+        return $HOME
+    }
+
+    if ($Path.StartsWith("~/") -or $Path.StartsWith("~\")) {
+        $relativePath = $Path.Substring(2).TrimStart('\', '/')
+        return Join-Path $HOME $relativePath
+    }
+
+    return $Path
+}
+
+function Test-InteractiveStdin {
+    try {
+        return -not [Console]::IsInputRedirected
+    }
+    catch {
+        return $true
+    }
+}
+
+function Test-InstallPathHasExistingContents {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return $false
+    }
+
+    if (-not (Test-Path $Path -PathType Container)) {
+        return $true
+    }
+
+    return [bool](Get-ChildItem -Path $Path -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+function Get-InstallBackupDir {
+    param([string]$Path)
+
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $candidate = "${Path}.backup-$timestamp"
+    $suffix = 1
+
+    while (Test-Path $candidate) {
+        $candidate = "${Path}.backup-$timestamp-$suffix"
+        $suffix += 1
+    }
+
+    return $candidate
+}
+
+function Backup-ExistingInstallPath {
+    param(
+        [string]$ExistingPath,
+        [string]$BackupPath
+    )
+
+    Move-Item -LiteralPath $ExistingPath -Destination $BackupPath
+    Write-Success "Backed up existing install path to $BackupPath"
+}
+
+function Prepare-InstallDir {
+    $script:InstallDir = Normalize-InstallDir $script:InstallDir
+
+    while (Test-InstallPathHasExistingContents -Path $script:InstallDir) {
+        $backupDir = Get-InstallBackupDir -Path $script:InstallDir
+
+        Write-Warning "Install directory already exists and is not empty: $script:InstallDir"
+
+        if (-not (Test-InteractiveStdin)) {
+            Backup-ExistingInstallPath -ExistingPath $script:InstallDir -BackupPath $backupDir
+            break
+        }
+
+        Write-Host "  Press Enter to back it up to:"
+        Write-Host "    $backupDir"
+        Write-Host "  Or type a different install directory path."
+        $userInput = Read-Host "Install directory choice (default: back up current directory)"
+
+        if ([string]::IsNullOrWhiteSpace($userInput)) {
+            Backup-ExistingInstallPath -ExistingPath $script:InstallDir -BackupPath $backupDir
+            break
+        }
+
+        $script:InstallDir = Normalize-InstallDir $userInput
+        Write-Info "Using installation directory: $script:InstallDir"
+    }
+}
+
 function Get-ExistingInstallNetwork {
     $markerPath = Join-Path $InstallDir $NETWORK_MARKER_FILE_NAME
     $configPath = Join-Path $InstallDir "config.yml"
@@ -393,12 +501,8 @@ function Configure-MainnetPublicNode {
         Write-Host ""
         Write-Info "Configure the node name announced to the Fiber network."
         Write-Host "  Placeholder: $PUBLIC_NODE_NAME_PLACEHOLDER"
-        do {
-            $announcedNodeName = Read-Host "Enter announced_node_name"
-            if ([string]::IsNullOrWhiteSpace($announcedNodeName)) {
-                Write-Warning "announced_node_name cannot be empty for a public mainnet node."
-            }
-        } while ([string]::IsNullOrWhiteSpace($announcedNodeName))
+        Write-Host "  Press Enter to skip announced_node_name."
+        $announcedNodeName = Read-Host "Enter announced_node_name (optional)"
 
         if (-not (Set-RawConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "auto_announce_node" -KeyValue "true")) {
             Write-Error "Failed to update fiber.auto_announce_node in $configPath"
@@ -408,7 +512,12 @@ function Configure-MainnetPublicNode {
             Write-Error "Failed to update fiber.announce_listening_addr in $configPath"
             exit 1
         }
-        if (-not (Set-RawConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "announced_node_name" -KeyValue "`"$(Escape-YamlDoubleQuotedValue $announcedNodeName)`"")) {
+        if ([string]::IsNullOrWhiteSpace($announcedNodeName)) {
+            if (-not (Remove-ConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "announced_node_name")) {
+                Write-Error "Failed to update fiber.announced_node_name in $configPath"
+                exit 1
+            }
+        } elseif (-not (Set-RawConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "announced_node_name" -KeyValue "`"$(Escape-YamlDoubleQuotedValue $announcedNodeName)`"")) {
             Write-Error "Failed to update fiber.announced_node_name in $configPath"
             exit 1
         }
@@ -483,21 +592,21 @@ function Install-CkbCli {
     Write-Warning "ckb-cli is required but not found."
     Write-Host ""
     $installCkb = Read-Host "Would you like to automatically download and install ckb-cli? (y/n)"
-    
+
     if ($installCkb -ne "y" -and $installCkb -ne "Y") {
         Write-Info "Please install ckb-cli manually:"
         Write-Host "  https://github.com/nervosnetwork/ckb-cli"
         exit 1
     }
-    
+
     Write-Info "Downloading ckb-cli v$CKB_CLI_VERSION..."
-    
+
     $downloadUrl = "$CKB_CLI_RELEASE_URL/$CKB_CLI_BINARY"
     $tempDir = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid().ToString()
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-    
+
     Write-Host "  Downloading from: $downloadUrl"
-    
+
     try {
         Invoke-WebRequest -Uri $downloadUrl -OutFile "$tempDir\$CKB_CLI_BINARY" -UseBasicParsing
     }
@@ -506,56 +615,49 @@ function Install-CkbCli {
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
     }
-    
+
     Write-Info "Extracting ckb-cli..."
     Expand-Archive -Path "$tempDir\$CKB_CLI_BINARY" -DestinationPath $tempDir -Force
-    
+
     $ckbCliPath = Get-ChildItem -Path $tempDir -Name "ckb-cli.exe" -Recurse | Select-Object -First 1
     if (-not $ckbCliPath) {
         Write-Error "Could not find ckb-cli.exe in the downloaded archive"
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
     }
-    
+
     $fullCkbCliPath = Join-Path $tempDir $ckbCliPath
-    
+
     # Install to install directory
     Copy-Item $fullCkbCliPath "$InstallDir\ckb-cli.exe"
     $script:CKB_CLI_CMD = "$InstallDir\ckb-cli.exe"
     Write-Success "ckb-cli installed to $InstallDir\ckb-cli.exe"
-    
+
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
 }
 
 function Check-Prerequisites {
     Write-Info "Checking prerequisites..."
-    
-    # Check for ckb-cli
-    if (-not (Test-Command "ckb-cli")) {
-        # Check if ckb-cli exists in install directory
-        if (Test-Path "$InstallDir\ckb-cli.exe") {
-            Write-Info "Found ckb-cli in install directory"
-            $script:CKB_CLI_CMD = "$InstallDir\ckb-cli.exe"
-        }
-        else {
-            Install-CkbCli
-        }
+
+    $existingCkbCli = Get-ExistingCkbCliPath
+    if ($existingCkbCli) {
+        $script:CKB_CLI_CMD = $existingCkbCli
+        Write-Success "ckb-cli found at $script:CKB_CLI_CMD"
+        return
     }
-    else {
-        Write-Success "ckb-cli found"
-        $script:CKB_CLI_CMD = (Get-Command "ckb-cli").Source
-    }
+
+    Install-CkbCli
 }
 
 function Download-Binary {
     Write-Info "Downloading Fiber release bundle v$FNN_VERSION for windows-$ARCH..."
-    
+
     $downloadUrl = "$GITHUB_RELEASE_URL/$FNN_BINARY"
     $tempDir = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid().ToString()
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-    
+
     Write-Host "  Downloading from: $downloadUrl"
-    
+
     try {
         Invoke-WebRequest -Uri $downloadUrl -OutFile "$tempDir\$FNN_BINARY" -UseBasicParsing
     }
@@ -564,9 +666,9 @@ function Download-Binary {
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
     }
-    
+
     Write-Success "Download completed"
-    
+
     Write-Info "Extracting release bundle..."
     # Extract .tar.gz file (Windows 10/11 has tar built-in)
     try {
@@ -577,7 +679,7 @@ function Download-Binary {
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
     }
-    
+
     $fnnExe = Get-ChildItem -Path $tempDir -Name "fnn.exe" -Recurse | Select-Object -First 1
     $fnnCliExe = Get-ChildItem -Path $tempDir -Name "fnn-cli.exe" -Recurse | Select-Object -First 1
     $fnnMigrateExe = Get-ChildItem -Path $tempDir -Name "fnn-migrate.exe" -Recurse | Select-Object -First 1
@@ -631,7 +733,7 @@ function Download-Config {
     }
 
     Copy-Item $bundledConfig "$InstallDir\config.yml" -Force
-    
+
     Apply-NetworkConfigDefaults
     Write-InstallNetworkMarker
     if ($missingTemplates) {
@@ -644,10 +746,10 @@ function Download-Config {
 
 function Setup-Keys {
     Write-Info "Setting up node keys..."
-    
+
     $ckbDir = "$InstallDir\ckb"
     New-Item -ItemType Directory -Path $ckbDir -Force | Out-Null
-    
+
     Write-Warning "You need a CKB account to run the Fiber node."
     Write-Host ""
     Write-Host "Please choose an option:"
@@ -655,7 +757,7 @@ function Setup-Keys {
     Write-Host "  2) Use an existing account (you'll need the lock_arg)"
     Write-Host ""
     $choice = Read-Host "Enter your choice (1 or 2)"
-    
+
     switch ($choice) {
         "1" {
             Write-Info "Creating new CKB account..."
@@ -720,20 +822,20 @@ function Setup-Keys {
             exit 1
         }
     }
-    
+
     Write-Info "Exporting private key..."
-    
+
     try {
         # Export the key
         & $CKB_CLI_CMD account export --lock-arg $LOCK_ARG --extended-privkey-path "$ckbDir\exported-key" 2>&1 | Out-Null
-        
+
         # Extract only the private key and remove the exported extended key material.
         $keyContent = Get-Content "$ckbDir\exported-key" -TotalCount 1
         $keyContent | Set-Content "$ckbDir\key"
         Remove-Item "$ckbDir\exported-key" -Force
-        
+
         Write-Success "Private key saved to $ckbDir\key"
-        
+
         # Set permissions (Windows doesn't have chmod, but we can set ACLs)
         $path = "$ckbDir\key"
         $acl = Get-Acl $path
@@ -743,7 +845,7 @@ function Setup-Keys {
         )
         $acl.SetAccessRule($rule)
         Set-Acl $path $acl
-        
+
         # Show funding information
         Show-FundingInfo $LOCK_ARG
     }
@@ -759,7 +861,7 @@ function Show-FundingInfo($lockArg) {
     Write-Host "    IMPORTANT: Fund Your Account" -ForegroundColor Yellow
     Write-Host "==========================================" -ForegroundColor Yellow
     Write-Host ""
-    
+
     Write-Info "Getting your CKB address..."
     try {
         $accountInfo = & $CKB_CLI_CMD account list 2>&1 | Select-String -Context 0,5 $lockArg
@@ -773,10 +875,10 @@ function Show-FundingInfo($lockArg) {
     catch {
         # Ignore errors, just show general info
     }
-    
+
     Write-Host "To open payment channels and make transactions, you need CKB tokens."
     Write-Host ""
-    
+
     if ($Network -eq "testnet") {
         Write-Host "For Testnet:"
         Write-Host "  1. Get free testnet CKB from the faucet:"
@@ -794,7 +896,7 @@ function Show-FundingInfo($lockArg) {
         Write-Host ""
         Write-Host "  3. Recommended minimum amount: 1000+ CKB for channel funding"
     }
-    
+
     Write-Host ""
     Write-Host "How to check your balance:"
     Write-Host "  $CKB_CLI_CMD wallet get-capacity --lock-arg $lockArg"
@@ -805,7 +907,7 @@ function Show-FundingInfo($lockArg) {
 
 function Create-StartupScript {
     Write-Info "Creating startup script..."
-    
+
     $scriptContent = @"
 # Fiber Network Node Startup Script
 # Generated by install-fnn.ps1
@@ -857,10 +959,10 @@ Set-Location `$installDir
 `$env:RUST_LOG = "info"
 .\fnn.exe -c config.yml -d .
 "@
-    
+
     $scriptContent | Set-Content "$InstallDir\start-node.ps1" -Encoding UTF8
     Write-Success "Startup script created: $InstallDir\start-node.ps1"
-    
+
     # Also create a batch file for easy double-click execution
     $batchContent = @"
 @echo off
@@ -869,7 +971,7 @@ pause
 "@
     $batchContent | Set-Content "$InstallDir\start-node.bat" -Encoding ASCII
     Write-Success "Batch script created: $InstallDir\start-node.bat"
-    
+
     # Show password reminder
     Write-Host ""
     Write-Host "==========================================" -ForegroundColor Yellow
@@ -901,76 +1003,6 @@ pause
     Write-Host ""
 }
 
-function Create-Readme {
-    $readmeContent = @"
-# Fiber Network Node
-
-This directory contains your Fiber Network Node installation.
-
-## Files and Directories
-
-- ``fnn.exe`` - The Fiber Network Node binary
-- ``fnn-cli.exe`` - Fiber command-line utility
-- ``fnn-migrate.exe`` - Database migration utility
-- ``config\`` - Bundled network configuration templates for both testnet and mainnet
-- ``config.yml`` - Active node configuration file for the selected network
-- ``ckb\key`` - Your private key file (keep this secure!)
-- ``start-node.ps1`` - PowerShell script to start the node
-- ``start-node.bat`` - Batch script to start the node (double-click to run)
-- ``fiber\`` - Node data directory (created on first run)
-
-## Quick Start
-
-### Option 1: Double-click (Easiest)
-Double-click ``start-node.bat`` to start the node.
-
-### Option 2: PowerShell
-```powershell
-.\start-node.ps1
-```
-
-### Option 3: Manual
-```powershell
-`$env:FIBER_SECRET_KEY_PASSWORD = 'your-password'
-`$env:RUST_LOG = 'info'
-.\fnn.exe -c config.yml -d .
-```
-
-The node will start syncing with the $Network.
-
-## Configuration
-
-Edit ``config.yml`` to customize:
-- Listening address and port
-- RPC settings
-- CKB node URL
-- UDT whitelist
-
-## Security Notes
-
-- Never share your ``ckb\key`` file
-- Keep your FIBER_SECRET_KEY_PASSWORD secure
-- The ``ckb\`` directory contains sensitive data - back it up safely
-
-## Upgrading
-
-To upgrade to a new version:
-1. Stop the node
-2. Backup your data: ``Copy-Item -Recurse fiber\store fiber\store.backup``
-3. Download the new release bundle and replace ``fnn.exe``, ``fnn-cli.exe``, ``fnn-migrate.exe``, and ``config\``
-4. Start the node again
-
-## Documentation
-
-- Fiber Docs: https://docs.fiber.world/
-- GitHub: https://github.com/nervosnetwork/fiber
-- RPC API: https://github.com/nervosnetwork/fiber/blob/main/crates/fiber-lib/src/rpc/README.md
-"@
-    
-    $readmeContent | Set-Content "$InstallDir\README.md" -Encoding UTF8
-    Write-Success "README created"
-}
-
 function Show-Summary {
     $canStartNow = $true
 
@@ -999,8 +1031,7 @@ function Show-Summary {
     Write-Host "  - start-node.bat   : Batch startup script"
     Write-Host ""
     Write-Host "Documentation:"
-    Write-Host "  - https://docs.fiber.world/"
-    Write-Host "  - https://github.com/nervosnetwork/fiber"
+    Write-Host "  - https://www.fiber.world/docs/quick-start/run-a-node"
     Write-Host ""
     Write-Warning "Remember to:"
     Write-Host "  1. Keep your private key file (ckb\key) secure"
@@ -1057,6 +1088,7 @@ if ($Network -ne "testnet" -and $Network -ne "mainnet") {
     exit 1
 }
 
+Prepare-InstallDir
 Assert-InstallDirMatchesNetwork
 
 Write-Info "Installation directory: $InstallDir"
@@ -1083,9 +1115,6 @@ Setup-Keys
 
 # Create startup script
 Create-StartupScript
-
-# Create README
-Create-Readme
 
 # Print summary
 Show-Summary

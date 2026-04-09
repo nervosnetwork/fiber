@@ -275,6 +275,165 @@ set_config_value_in_section() {
     mv "$temp_file" "$config_file"
 }
 
+set_rendered_config_value_in_section() {
+    local config_file="$1"
+    local section_name="$2"
+    local key_name="$3"
+    local rendered_value="$4"
+    local temp_file
+
+    [ -f "$config_file" ] || return 1
+
+    temp_file=$(mktemp)
+    if ! awk -v section_name="$section_name" -v key_name="$key_name" -v rendered_value="$rendered_value" '
+        /^[^[:space:]#][^:]*:[[:space:]]*$/ {
+            if (in_section && !updated) {
+                printf "  %s: %s\n", key_name, rendered_value
+                updated = 1
+            }
+            in_section = ($0 == section_name ":")
+            print
+            next
+        }
+
+        in_section && $0 ~ "^[[:space:]]*" key_name ":[[:space:]]*" {
+            printf "  %s: %s\n", key_name, rendered_value
+            updated = 1
+            next
+        }
+
+        {
+            print
+        }
+
+        END {
+            if (in_section && !updated) {
+                printf "  %s: %s\n", key_name, rendered_value
+            }
+        }
+    ' "$config_file" > "$temp_file"; then
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    mv "$temp_file" "$config_file"
+}
+
+remove_config_value_in_section() {
+    local config_file="$1"
+    local section_name="$2"
+    local key_name="$3"
+    local temp_file
+
+    [ -f "$config_file" ] || return 1
+
+    temp_file=$(mktemp)
+    if ! awk -v section_name="$section_name" -v key_name="$key_name" '
+        /^[^[:space:]#][^:]*:[[:space:]]*$/ {
+            in_section = ($0 == section_name ":")
+            print
+            next
+        }
+
+        in_section && $0 ~ "^[[:space:]]*" key_name ":[[:space:]]*" {
+            next
+        }
+
+        {
+            print
+        }
+    ' "$config_file" > "$temp_file"; then
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    mv "$temp_file" "$config_file"
+}
+
+set_list_value_in_section() {
+    local config_file="$1"
+    local section_name="$2"
+    local key_name="$3"
+    shift 3
+
+    [ -f "$config_file" ] || return 1
+
+    local temp_file
+    local list_delimiter
+    local list_items=""
+    local item
+
+    list_delimiter=$'\034'
+    for item in "$@"; do
+        if [ -n "$list_items" ]; then
+            list_items="${list_items}${list_delimiter}"
+        fi
+        list_items="${list_items}${item}"
+    done
+
+    temp_file=$(mktemp)
+    if ! awk -v section_name="$section_name" -v key_name="$key_name" -v list_items="$list_items" -v list_delimiter="$list_delimiter" '
+        BEGIN {
+            item_count = split(list_items, items, list_delimiter)
+            if (item_count > 0 && items[item_count] == "") {
+                item_count--
+            }
+        }
+
+        function print_list_block() {
+            if (item_count == 0) {
+                printf "  %s: []\n", key_name
+                return
+            }
+
+            printf "  %s:\n", key_name
+            for (i = 1; i <= item_count; i++) {
+                printf "    - \"%s\"\n", items[i]
+            }
+        }
+
+        /^[^[:space:]#][^:]*:[[:space:]]*$/ {
+            in_section = ($0 == section_name ":")
+            print
+            next
+        }
+
+        in_section && $0 ~ "^[[:space:]]*" key_name ":[[:space:]]*" {
+            print_list_block()
+            found = 1
+            replacing = 1
+            next
+        }
+
+        replacing {
+            if ($0 ~ /^  [^[:space:]#][^:]*:[[:space:]]*/) {
+                replacing = 0
+                print
+            }
+            next
+        }
+
+        {
+            print
+        }
+
+        END {
+            if (!found) {
+                exit 1
+            }
+        }
+    ' "$config_file" > "$temp_file"; then
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    mv "$temp_file" "$config_file"
+}
+
+escape_yaml_double_quoted_value() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 get_existing_install_network() {
     local install_dir="$1"
     local marker_file="$install_dir/$NETWORK_MARKER_FILE_NAME"
@@ -295,6 +454,22 @@ install_data_dir_has_contents() {
     [ -d "$data_dir" ] || return 1
 
     find "$data_dir" -mindepth 1 -maxdepth 1 -print -quit 2> /dev/null | grep -q .
+}
+
+resolve_existing_ckb_cli_path() {
+    local install_dir="$1"
+
+    if check_command ckb-cli; then
+        command -v ckb-cli
+        return 0
+    fi
+
+    if [ -f "$install_dir/ckb-cli" ]; then
+        printf '%s\n' "$install_dir/ckb-cli"
+        return 0
+    fi
+
+    return 1
 }
 
 ensure_install_dir_matches_network() {

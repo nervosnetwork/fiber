@@ -2,7 +2,7 @@
 
 # Fiber Network Node (FNN) Quick Start Script
 # Usage: ./tools/install/quick-start.sh [install-directory] [network]
-# Example: ./tools/install/quick-start.sh ~/my-fiber-node testnet
+# Example: ./tools/install/quick-start.sh ~/my-fiber-node mainnet
 
 set -e
 
@@ -36,6 +36,7 @@ Behavior:
   - If quick-start runs from an existing installed bundle, it reuses that install directory and bundle by default.
   - If the install directory already has contents, quick-start backs it up by default.
   - You can also enter a different install directory path when prompted.
+  - If no network is provided, quick-start defaults to mainnet.
   - Mainnet guided installs ask whether this should be a public Fiber node.
 EOF
 }
@@ -177,22 +178,22 @@ prompt_for_network_if_needed() {
     fi
 
     if ! is_interactive_stdin; then
-        NETWORK="testnet"
+        NETWORK="mainnet"
         return
     fi
 
     echo "Choose network:"
-    echo "  1) testnet (default)"
-    echo "  2) mainnet"
-    read -p "Enter your choice (1 or 2, default: testnet): " network_choice
+    echo "  1) mainnet (default)"
+    echo "  2) testnet"
+    read -p "Enter your choice (1 or 2, default: mainnet): " network_choice
     network_choice=${network_choice:-1}
 
     case "$network_choice" in
         1)
-            NETWORK="testnet"
+            NETWORK="mainnet"
             ;;
         2)
-            NETWORK="mainnet"
+            NETWORK="testnet"
             ;;
         *)
             print_error "Invalid choice: $network_choice"
@@ -203,141 +204,6 @@ prompt_for_network_if_needed() {
 
 get_ckb_rpc_url_from_config() {
     get_config_value_in_section "$INSTALL_DIR/config.yml" "ckb" "rpc_url"
-}
-
-escape_yaml_double_quoted_value() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}
-
-upsert_raw_config_value_in_section() {
-    local config_file="$1"
-    local section_name="$2"
-    local key_name="$3"
-    local rendered_value="$4"
-    local temp_file
-
-    [ -f "$config_file" ] || return 1
-
-    temp_file=$(mktemp)
-    if ! awk -v section_name="$section_name" -v key_name="$key_name" -v rendered_value="$rendered_value" '
-        /^[^[:space:]#][^:]*:[[:space:]]*$/ {
-            if (in_section && !updated) {
-                printf "  %s: %s\n", key_name, rendered_value
-                updated = 1
-            }
-            in_section = ($0 == section_name ":")
-            print
-            next
-        }
-
-        in_section && $0 ~ "^[[:space:]]*" key_name ":[[:space:]]*" {
-            printf "  %s: %s\n", key_name, rendered_value
-            updated = 1
-            next
-        }
-
-        {
-            print
-        }
-
-        END {
-            if (in_section && !updated) {
-                printf "  %s: %s\n", key_name, rendered_value
-            }
-        }
-    ' "$config_file" > "$temp_file"; then
-        rm -f "$temp_file"
-        return 1
-    fi
-
-    mv "$temp_file" "$config_file"
-}
-
-remove_config_value_in_section() {
-    local config_file="$1"
-    local section_name="$2"
-    local key_name="$3"
-    local temp_file
-
-    [ -f "$config_file" ] || return 1
-
-    temp_file=$(mktemp)
-    if ! awk -v section_name="$section_name" -v key_name="$key_name" '
-        /^[^[:space:]#][^:]*:[[:space:]]*$/ {
-            in_section = ($0 == section_name ":")
-            print
-            next
-        }
-
-        in_section && $0 ~ "^[[:space:]]*" key_name ":[[:space:]]*" {
-            next
-        }
-
-        {
-            print
-        }
-    ' "$config_file" > "$temp_file"; then
-        rm -f "$temp_file"
-        return 1
-    fi
-
-    mv "$temp_file" "$config_file"
-}
-
-set_announced_addrs_config() {
-    local config_file="$1"
-    local announced_addr="$2"
-    local temp_file
-
-    [ -f "$config_file" ] || return 1
-
-    temp_file=$(mktemp)
-    if ! awk -v announced_addr="$announced_addr" '
-        function print_announced_addrs_block() {
-            if (announced_addr != "") {
-                print "  announced_addrs:"
-                printf "    - \"%s\"\n", announced_addr
-            } else {
-                print "  announced_addrs: []"
-            }
-        }
-
-        /^[^[:space:]#][^:]*:[[:space:]]*$/ {
-            in_fiber = ($0 == "fiber:")
-            print
-            next
-        }
-
-        in_fiber && $0 ~ /^[[:space:]]*announced_addrs:/ {
-            print_announced_addrs_block()
-            found = 1
-            replacing = 1
-            next
-        }
-
-        replacing {
-            if ($0 ~ /^  [^[:space:]#][^:]*:[[:space:]]*/) {
-                replacing = 0
-                print
-            }
-            next
-        }
-
-        {
-            print
-        }
-
-        END {
-            if (!found) {
-                exit 1
-            }
-        }
-    ' "$config_file" > "$temp_file"; then
-        rm -f "$temp_file"
-        return 1
-    fi
-
-    mv "$temp_file" "$config_file"
 }
 
 configure_ckb_rpc_url() {
@@ -417,27 +283,31 @@ configure_mainnet_public_node() {
         echo ""
         print_info "Configure the node name announced to the Fiber network."
         echo "  Placeholder: $PUBLIC_NODE_NAME_PLACEHOLDER"
-        while [ -z "$announced_node_name" ]; do
-            read -p "Enter announced_node_name: " announced_node_name
-            if [ -z "$announced_node_name" ]; then
-                print_warning "announced_node_name cannot be empty for a public mainnet node."
-            fi
-        done
+        echo "  Press Enter to skip announced_node_name."
+        read -p "Enter announced_node_name (optional): " announced_node_name
+        announced_node_name="$(printf '%s' "$announced_node_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
-        escaped_node_name="$(escape_yaml_double_quoted_value "$announced_node_name")"
-        upsert_raw_config_value_in_section "$config_file" "fiber" "auto_announce_node" "true" || {
+        set_rendered_config_value_in_section "$config_file" "fiber" "auto_announce_node" "true" || {
             print_error "Failed to update fiber.auto_announce_node in $config_file"
             exit 1
         }
-        upsert_raw_config_value_in_section "$config_file" "fiber" "announce_listening_addr" "true" || {
+        set_rendered_config_value_in_section "$config_file" "fiber" "announce_listening_addr" "true" || {
             print_error "Failed to update fiber.announce_listening_addr in $config_file"
             exit 1
         }
-        upsert_raw_config_value_in_section "$config_file" "fiber" "announced_node_name" "\"$escaped_node_name\"" || {
-            print_error "Failed to update fiber.announced_node_name in $config_file"
-            exit 1
-        }
-        set_announced_addrs_config "$config_file" "$announced_addr" || {
+        if [ -n "$announced_node_name" ]; then
+            escaped_node_name="$(escape_yaml_double_quoted_value "$announced_node_name")"
+            set_rendered_config_value_in_section "$config_file" "fiber" "announced_node_name" "\"$escaped_node_name\"" || {
+                print_error "Failed to update fiber.announced_node_name in $config_file"
+                exit 1
+            }
+        else
+            remove_config_value_in_section "$config_file" "fiber" "announced_node_name" || {
+                print_error "Failed to update fiber.announced_node_name in $config_file"
+                exit 1
+            }
+        fi
+        set_list_value_in_section "$config_file" "fiber" "announced_addrs" "$announced_addr" || {
             print_error "Failed to update fiber.announced_addrs in $config_file"
             exit 1
         }
@@ -445,11 +315,11 @@ configure_mainnet_public_node() {
         return
     fi
 
-    upsert_raw_config_value_in_section "$config_file" "fiber" "auto_announce_node" "false" || {
+    set_rendered_config_value_in_section "$config_file" "fiber" "auto_announce_node" "false" || {
         print_error "Failed to update fiber.auto_announce_node in $config_file"
         exit 1
     }
-    upsert_raw_config_value_in_section "$config_file" "fiber" "announce_listening_addr" "false" || {
+    set_rendered_config_value_in_section "$config_file" "fiber" "announce_listening_addr" "false" || {
         print_error "Failed to update fiber.announce_listening_addr in $config_file"
         exit 1
     }
@@ -457,7 +327,7 @@ configure_mainnet_public_node() {
         print_error "Failed to update fiber.announced_node_name in $config_file"
         exit 1
     }
-    set_announced_addrs_config "$config_file" "" || {
+    set_list_value_in_section "$config_file" "fiber" "announced_addrs" || {
         print_error "Failed to update fiber.announced_addrs in $config_file"
         exit 1
     }
@@ -568,46 +438,39 @@ install_ckb_cli() {
     print_warning "ckb-cli is required but not installed."
     echo ""
     read -p "Would you like to automatically download and install ckb-cli? (y/n): " install_ckb
-    
+
     if [ "$install_ckb" != "y" ] && [ "$install_ckb" != "Y" ]; then
         print_info "Please install ckb-cli manually:"
         echo "  https://github.com/nervosnetwork/ckb-cli"
         exit 1
     fi
-    
+
     install_ckb_cli_binary "$INSTALL_DIR"
     CKB_CLI_CMD="$CKB_CLI_INSTALLED_PATH"
 }
 
 check_prerequisites() {
     print_info "Checking prerequisites..."
-    
+
     ensure_download_tool
     print_success "Download tool found"
 
     require_unzip_if_needed
-    
-    # Check for ckb-cli
-    if ! check_command ckb-cli; then
-        # Check if ckb-cli exists in install directory
-        if [ -f "$INSTALL_DIR/ckb-cli" ]; then
-            print_info "Found ckb-cli in install directory"
-            CKB_CLI_CMD="$INSTALL_DIR/ckb-cli"
-        else
-            install_ckb_cli
-        fi
-    else
-        print_success "ckb-cli found"
-        CKB_CLI_CMD="$(command -v ckb-cli)"
+
+    if CKB_CLI_CMD="$(resolve_existing_ckb_cli_path "$INSTALL_DIR")"; then
+        print_success "ckb-cli found at $CKB_CLI_CMD"
+        return
     fi
+
+    install_ckb_cli
 }
 
 setup_keys() {
     print_info "Setting up node keys..."
-    
+
     local ckb_dir="$INSTALL_DIR/ckb"
     mkdir -p "$ckb_dir"
-    
+
     print_warning "You need a CKB account to run the Fiber node."
     echo ""
     echo "Please choose an option:"
@@ -615,7 +478,7 @@ setup_keys() {
     echo "  2) Use an existing account (you'll need the lock_arg)"
     echo ""
     read -p "Enter your choice (1 or 2): " choice
-    
+
     case "$choice" in
         1)
             print_info "Creating new CKB account..."
@@ -623,45 +486,45 @@ setup_keys() {
             echo ""
             # Run ckb-cli account new directly (not capturing output) so it can interact with user
             $CKB_CLI_CMD account new
-            
+
             if [ $? -ne 0 ]; then
                 print_error "Failed to create account"
                 exit 1
             fi
-            
+
             echo ""
             print_info "Account created successfully!"
-            
+
             # Automatically get the lock_arg from the account list
             print_info "Getting account information..."
             sleep 1
-            
+
             # Get account list and extract the last created account's lock_arg
             local account_list
             account_list=$($CKB_CLI_CMD account list 2>&1)
-            
+
             if [ $? -ne 0 ]; then
                 print_error "Failed to get account list"
                 echo "$account_list"
                 exit 1
             fi
-            
+
             # Extract the most recently added account's lock_arg (the last one in the list)
             LOCK_ARG=$(echo "$account_list" | grep "lock_arg:" | tail -1 | awk '{print $2}')
-            
+
             if [ -z "$LOCK_ARG" ]; then
                 print_error "Could not automatically detect lock_arg"
                 print_info "Please check the account list manually:"
                 echo "$account_list"
                 echo ""
                 read -p "Enter the lock_arg manually: " LOCK_ARG
-                
+
                 if [ -z "$LOCK_ARG" ]; then
                     print_error "lock_arg is required"
                     exit 1
                 fi
             fi
-            
+
             print_success "Detected lock_arg: $LOCK_ARG"
             # Save to global variable for summary
             export GLOBAL_LOCK_ARG="$LOCK_ARG"
@@ -677,48 +540,48 @@ setup_keys() {
             exit 1
             ;;
     esac
-    
+
     print_info "Exporting private key..."
-    
+
     # Export the key
     $CKB_CLI_CMD account export --lock-arg "$LOCK_ARG" --extended-privkey-path "$ckb_dir/exported-key"
-    
+
     # Extract only the private key and remove the exported extended key material.
     head -n 1 "$ckb_dir/exported-key" > "$ckb_dir/key"
     rm -f "$ckb_dir/exported-key"
-    
+
     print_success "Private key saved to $ckb_dir/key"
-    
+
     # Set permissions
     chmod 600 "$ckb_dir/key"
-    
+
     # Show funding information
     show_funding_info "$LOCK_ARG"
 }
 
 show_funding_info() {
     local lock_arg="$1"
-    
+
     echo ""
     echo -e "${YELLOW}=========================================="
     echo "    IMPORTANT: Fund Your Account"
     echo "==========================================${NC}"
     echo ""
-    
+
     # Get the address from ckb-cli
     print_info "Getting your CKB address..."
     local account_info=$($CKB_CLI_CMD account list 2>&1 | grep -A 5 "$lock_arg" || echo "")
-    
+
     if [ -n "$account_info" ]; then
         echo ""
         echo "Your account addresses:"
         echo "$account_info" | grep -E "mainnet:|testnet:" | head -4
         echo ""
     fi
-    
+
     echo "To open payment channels and make transactions, you need CKB tokens."
     echo ""
-    
+
     if [ "$NETWORK" = "testnet" ]; then
         echo "For Testnet:"
     echo "  1. Get free testnet CKB from the faucet:"
@@ -735,7 +598,7 @@ show_funding_info() {
         echo ""
         echo "  3. Recommended minimum amount: 1000+ CKB for channel funding"
     fi
-    
+
     echo ""
     echo "How to check your balance:"
     echo "  ckb-cli wallet get-capacity --lock-arg $lock_arg"
@@ -746,7 +609,7 @@ show_funding_info() {
 
 create_startup_script() {
     print_info "Creating startup script..."
-    
+
     cat > "$INSTALL_DIR/start-node.sh" << EOF
 #!/bin/bash
 
@@ -805,7 +668,7 @@ EOF
 
     chmod +x "$INSTALL_DIR/start-node.sh"
     print_success "Startup script created: $INSTALL_DIR/start-node.sh"
-    
+
     # Show password reminder
     echo ""
     echo -e "${YELLOW}=========================================="
@@ -838,104 +701,18 @@ EOF
     echo ""
 }
 
-create_readme() {
-    cat > "$INSTALL_DIR/README.md" << EOF
-# Fiber Network Node
+prepare_release_bundle() {
+    if [ -n "$LOCAL_FNN_BINARY" ]; then
+        install_local_fnn_binary "$LOCAL_FNN_BINARY" "$INSTALL_DIR"
+    elif [ "$REUSE_EXISTING_INSTALL" -eq 1 ] && has_release_bundle "$INSTALL_DIR"; then
+        print_success "Reusing existing release bundle in $INSTALL_DIR"
+    else
+        install_fnn_binary "$INSTALL_DIR"
+    fi
 
-This directory contains your Fiber Network Node installation.
-
-## Files and Directories
-
-- \`fnn\` - The Fiber Network Node binary
-- \`fnn-cli\` - Fiber command-line utility
-- \`fnn-migrate\` - Database migration utility
-- \`config/\` - Bundled network configuration templates for both testnet and mainnet
-- \`config.yml\` - Active node configuration file for the selected network
-- \`ckb/key\` - Your private key file (keep this secure!)
-- \`start-node.sh\` - Script to start the node
-- \`fiber/\` - Node data directory (created on first run)
-
-## Quick Start
-
-1. Start the node:
-   \`\`\`bash
-   ./start-node.sh
-   \`\`\`
-
-   Or manually:
-   \`\`\`bash
-   FIBER_SECRET_KEY_PASSWORD='your-password' RUST_LOG=info ./fnn -c config.yml -d .
-   \`\`\`
-
-2. The node will start syncing with the ${NETWORK}.
-
-3. Check the logs for connection status.
-
-## Password Setup (Important!)
-
-The \`FIBER_SECRET_KEY_PASSWORD\` is required every time you start the node.
-
-### Option 1: Set environment variable (Recommended)
-
-Add to your shell profile (\`~/.bashrc\`, \`~/.zshrc\`, etc.):
-\`\`\`bash
-export FIBER_SECRET_KEY_PASSWORD="your-password"
-\`\`\`
-
-Then reload: \`source ~/.bashrc\` or \`source ~/.zshrc\`
-
-### Option 2: Edit the startup script
-
-Edit \`start-node.sh\` and set the password directly:
-\`\`\`bash
-# Replace the read prompt with:
-export FIBER_SECRET_KEY_PASSWORD="your-password"
-\`\`\`
-
-### Option 3: Create a wrapper script
-
-Create \`start-with-password.sh\`:
-\`\`\`bash
-#!/bin/bash
-export FIBER_SECRET_KEY_PASSWORD="your-password"
-./start-node.sh
-\`\`\`
-
-**⚠️ Security Warning:**
-- Never commit passwords to version control
-- Use a secure password manager
-- The password cannot be recovered if lost!
-
-## Configuration
-
-Edit \`config.yml\` to customize:
-- Listening address and port
-- RPC settings
-- CKB node URL
-- UDT whitelist
-
-## Security Notes
-
-- Never share your \`ckb/key\` file
-- Keep your FIBER_SECRET_KEY_PASSWORD secure
-- The \`ckb/\` directory contains sensitive data - back it up safely
-
-## Upgrading
-
-To upgrade to a new version:
-1. Stop the node
-2. Backup your data: \`cp -r fiber/store fiber/store.backup\`
-3. Download the new release bundle and replace \`fnn\`, \`fnn-cli\`, \`fnn-migrate\`, and \`config/\`
-4. Start the node again
-
-## Documentation
-
-- Fiber Docs: https://docs.fiber.world/
-- GitHub: https://github.com/nervosnetwork/fiber
-- RPC API: https://github.com/nervosnetwork/fiber/blob/main/crates/fiber-lib/src/rpc/README.md
-EOF
-
-    print_success "README created"
+    download_config_file "$INSTALL_DIR" "$NETWORK"
+    configure_ckb_rpc_url
+    configure_mainnet_public_node
 }
 
 print_summary() {
@@ -966,8 +743,7 @@ print_summary() {
     echo "  - start-node.sh    : Easy startup script"
     echo ""
     echo "Documentation:"
-    echo "  - https://docs.fiber.world/"
-    echo "  - https://github.com/nervosnetwork/fiber"
+    echo "  - https://www.fiber.world/docs"
     echo ""
     print_warning "Remember to:"
     echo "  1. Keep your private key file (ckb/key) secure"
@@ -1019,17 +795,17 @@ print_summary() {
 
 main() {
     print_header
-    
+
     # Validate network
     validate_network "$NETWORK"
     prepare_install_dir
     ensure_install_dir_matches_network "$INSTALL_DIR" "$NETWORK"
-    
+
     print_info "Installation directory: $INSTALL_DIR"
     print_info "Network: $NETWORK"
     print_info "Platform: $PLATFORM-$ARCH"
     echo ""
-    
+
     # Create installation directory
     mkdir -p "$INSTALL_DIR"
     if [ "$REUSE_EXISTING_INSTALL" -eq 1 ]; then
@@ -1040,36 +816,18 @@ main() {
 
     # Check prerequisites
     check_prerequisites
-    
-    # Install binary
+
+    # Install release bundle and prepare config
     echo ""
-    if [ -n "$LOCAL_FNN_BINARY" ]; then
-        install_local_fnn_binary "$LOCAL_FNN_BINARY" "$INSTALL_DIR"
-        download_config_file "$INSTALL_DIR" "$NETWORK"
-        configure_ckb_rpc_url
-        configure_mainnet_public_node
-    elif [ "$REUSE_EXISTING_INSTALL" -eq 1 ] && has_release_bundle "$INSTALL_DIR"; then
-        print_success "Reusing existing release bundle in $INSTALL_DIR"
-        download_config_file "$INSTALL_DIR" "$NETWORK"
-        configure_ckb_rpc_url
-        configure_mainnet_public_node
-    else
-        install_fnn_binary "$INSTALL_DIR"
-        download_config_file "$INSTALL_DIR" "$NETWORK"
-        configure_ckb_rpc_url
-        configure_mainnet_public_node
-    fi
-    
+    prepare_release_bundle
+
     # Setup keys
     echo ""
     setup_keys
-    
+
     # Create startup script
     create_startup_script
-    
-    # Create README
-    create_readme
-    
+
     # Print summary
     print_summary
 }

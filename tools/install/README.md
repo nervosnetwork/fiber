@@ -24,6 +24,8 @@ curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/inst
 ./tools/install/quick-start.sh
 ```
 
+If you omit the network argument, `quick-start.sh` defaults to `mainnet`.
+
 ### Unix guided installer with an existing local binary
 
 ```bash
@@ -44,4 +46,3 @@ irm https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/ins
 
 If you need to test an unpublished public branch or fork, replace `main` in the GitHub Raw URL, or set `INSTALL_REPO` and `INSTALL_REF` for the Unix one-liner.
 The examples below assume these installer files have already been published on the upstream `main` branch.
-
