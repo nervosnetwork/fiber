@@ -59,7 +59,17 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// The default implementation batches calls to [`Self::collect_iterator`]
     /// so that only a bounded number of entries are held in memory at any time.
-    fn prefix_iterator(&self, prefix: &[u8]) -> PrefixIterator<'_, Self> {
-        PrefixIterator::new(self, prefix.to_vec())
+    fn prefix_iterator(&self, prefix: impl Into<Vec<u8>>) -> PrefixIterator<'_, Self> {
+        PrefixIterator::new(self, prefix.into())
+    }
+
+    /// Like [`prefix_iterator`](Self::prefix_iterator), but starts iteration
+    /// **after** `start_key` (exclusive cursor).
+    fn prefix_iterator_from(
+        &self,
+        prefix: impl Into<Vec<u8>>,
+        start_key: impl Into<Vec<u8>>,
+    ) -> PrefixIterator<'_, Self> {
+        PrefixIterator::new_from(self, prefix.into(), start_key.into())
     }
 }
