@@ -403,11 +403,13 @@ pub struct FiberConfig {
     pub metrics_addr: Option<String>,
 
     /// SOCKS5 proxy configuration
+    #[cfg(not(target_arch = "wasm32"))]
     #[arg(skip)]
     #[serde(default)]
     pub proxy: ProxyConfig,
 
     /// Tor onion hidden service configuration
+    #[cfg(not(target_arch = "wasm32"))]
     #[arg(skip)]
     #[serde(default)]
     pub onion: OnionConfig,
