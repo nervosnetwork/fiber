@@ -228,13 +228,13 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
-    let store = open_store(temp_dir.as_ref());
+    let store = open_store(temp_dir.as_ref(), Box::new(|_| true), Box::new(|_| {}));
     (store.expect("create store"), temp_dir)
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn generate_store() -> (Store, ()) {
-    let store = open_store(&PathBuf::default());
+    let store = open_store(&PathBuf::default(), Box::new(|_| true), Box::new(|_| {}));
     (store.expect("create store"), ())
 }
 
@@ -359,7 +359,8 @@ impl NetworkNodeConfigBuilder {
             .map(char::from)
             .collect();
         let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
-        let store = open_store(rand_db_dir).expect("create store");
+        let store =
+            open_store(rand_db_dir, Box::new(|_| true), Box::new(|_| {})).expect("create store");
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let ckb_config = if self.rpc_config.is_some() {
             let ckb_dir = Path::new(base_dir.to_str()).join("ckb");

@@ -1,13 +1,9 @@
 use fiber_store::backend::StorageBackend;
 use fiber_store::db_migrate::DbMigrate;
 use fiber_store::migration::{
-    DefaultMigration, Migration, Migrations, LATEST_DB_VERSION, MIGRATION_VERSION_KEY,
+    MigrateError, Migration, Migrations, INIT_DB_VERSION, LATEST_DB_VERSION, MIGRATION_VERSION_KEY,
 };
-use fiber_store::StoreError;
-use indicatif::ProgressBar;
-use ouroboros::self_referencing;
 use std::cmp::Ordering;
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 fn gen_path() -> std::path::PathBuf {
@@ -17,37 +13,55 @@ fn gen_path() -> std::path::PathBuf {
         .unwrap();
     tmp_dir.as_ref().to_path_buf()
 }
-#[self_referencing]
-struct StoreAndMigrate {
-    store: fiber_store::Store,
-    #[borrows(store)]
-    #[covariant]
-    migrate: DbMigrate<'this>,
-}
 
-impl StoreAndMigrate {
-    fn new_with_path(path: impl AsRef<Path>) -> Self {
-        StoreAndMigrateBuilder {
-            store: fiber_store::Store::open_db(path.as_ref()).unwrap(),
-            migrate_builder: |store: &fiber_store::Store| DbMigrate::new(store),
-        }
-        .build()
-    }
-}
-
-fn gen_migrate() -> StoreAndMigrate {
+fn gen_store() -> fiber_store::Store {
     let path = gen_path();
-    StoreAndMigrate::new_with_path(path)
+    fiber_store::Store::open_db(path).unwrap()
 }
 
 #[test]
-fn test_default_migration() {
-    let migrate = gen_migrate();
-    assert!(migrate.borrow_migrate().need_init());
-    assert_eq!(migrate.borrow_migrate().check(), Ordering::Less);
-    migrate.borrow_migrate().init_db_version().unwrap();
-    assert!(!migrate.borrow_migrate().need_init());
-    assert_eq!(migrate.borrow_migrate().check(), Ordering::Equal);
+fn test_new_db_gets_latest_version() {
+    let store = gen_store();
+    let migrations = Migrations::default();
+
+    let result = migrations.auto_migrate(&store, Box::new(|_| true), Box::new(|_| {}));
+    assert!(result.is_ok());
+
+    let version = store.get(MIGRATION_VERSION_KEY).unwrap();
+    let version_str = String::from_utf8(version).unwrap();
+    assert_eq!(version_str, LATEST_DB_VERSION);
+}
+
+#[test]
+fn test_current_db_no_migration_needed() {
+    let store = gen_store();
+    store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
+
+    let migrations = Migrations::default();
+    let result = migrations.auto_migrate(&store, Box::new(|_| true), Box::new(|_| {}));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_old_db_returns_error() {
+    let store = gen_store();
+    store.put(MIGRATION_VERSION_KEY, "20240101000000");
+
+    let migrations = Migrations::default();
+    let result = migrations.auto_migrate(&store, Box::new(|_| true), Box::new(|_| {}));
+
+    assert!(matches!(result, Err(MigrateError::DatabaseTooOld { .. })));
+}
+
+#[test]
+fn test_newer_db_returns_error() {
+    let store = gen_store();
+    store.put(MIGRATION_VERSION_KEY, "99991231235959");
+
+    let migrations = Migrations::default();
+    let result = migrations.auto_migrate(&store, Box::new(|_| true), Box::new(|_| {}));
+
+    assert!(matches!(result, Err(MigrateError::DatabaseTooNew { .. })));
 }
 
 pub struct DummyMigration {
@@ -65,15 +79,11 @@ impl DummyMigration {
 }
 
 impl Migration for DummyMigration {
-    fn migrate<'a>(
-        &self,
-        db: &'a fiber_store::Store,
-        _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a fiber_store::Store, StoreError> {
+    fn migrate(&self, _store: &fiber_store::Store) -> Result<(), String> {
         eprintln!("DummyMigration::migrate {} ... ", self.version);
         let mut count = self.run_count.write().unwrap();
         *count += 1;
-        Ok(db)
+        Ok(())
     }
 
     fn version(&self) -> &str {
@@ -94,13 +104,9 @@ impl BreakChangeMigration {
 }
 
 impl Migration for BreakChangeMigration {
-    fn migrate<'a>(
-        &self,
-        db: &'a fiber_store::Store,
-        _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a fiber_store::Store, StoreError> {
+    fn migrate(&self, _store: &fiber_store::Store) -> Result<(), String> {
         eprintln!("BreakChangeMigration::migrate {} ... ", self.version);
-        Ok(db)
+        Ok(())
     }
 
     fn version(&self) -> &str {
@@ -115,85 +121,80 @@ impl Migration for BreakChangeMigration {
 #[test]
 fn test_run_migration() {
     let run_count = Arc::new(RwLock::new(0));
+    let store = gen_store();
 
-    let migrate = gen_migrate();
-    migrate.borrow_migrate().init_db_version().unwrap();
-    let db = migrate.borrow_store();
-
-    let mut migrations = Migrations::default();
-    // a smaller version
-    migrations.add_migration(Arc::new(DummyMigration::new(
-        "20221116135521",
-        run_count.clone(),
-    )));
-
-    migrations.add_migration(Arc::new(DummyMigration::new(
-        "20241216135521",
-        run_count.clone(),
-    )));
-    migrations.add_migration(Arc::new(DummyMigration::new(
-        "20241216135522",
-        run_count.clone(),
-    )));
-    migrations.add_migration(Arc::new(DummyMigration::new(
-        LATEST_DB_VERSION,
-        run_count.clone(),
-    )));
-    assert_eq!(migrations.check(db), Ordering::Equal);
-
-    // now manually set db version to a lower one
-    db.put(MIGRATION_VERSION_KEY, "20221116135521");
-    assert_eq!(migrations.check(db), Ordering::Less);
-
-    migrations.migrate(db).unwrap();
-    assert_eq!(*run_count.read().unwrap(), 3);
-    assert_eq!(migrations.check(db), Ordering::Equal);
+    // Initialize with INIT_DB_VERSION
+    store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
 
     let mut migrations = Migrations::default();
-    migrations.add_migration(Arc::new(DefaultMigration::new()));
-    // checked by the LATEST_DB_VERSION
-    assert_eq!(migrations.check(db), Ordering::Equal);
+    // Add migrations after INIT_DB_VERSION
+    let v1 = "20260302200001";
+    let v2 = "20260302200002";
+    migrations.add_migration(Arc::new(DummyMigration::new(v1, run_count.clone())));
+    migrations.add_migration(Arc::new(DummyMigration::new(v2, run_count.clone())));
+
+    let result = migrations.auto_migrate(&store, Box::new(|_| true), Box::new(|_| {}));
+    assert!(result.is_ok());
+    assert_eq!(*run_count.read().unwrap(), 2);
+
+    // Verify version was updated to the last migration
+    let version = store.get(MIGRATION_VERSION_KEY).unwrap();
+    let version_str = String::from_utf8(version).unwrap();
+    assert_eq!(version_str, v2);
+}
+
+#[test]
+fn test_user_cancel_returns_error() {
+    let run_count = Arc::new(RwLock::new(0));
+    let store = gen_store();
+
+    store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
+
+    let mut migrations = Migrations::default();
+    migrations.add_migration(Arc::new(DummyMigration::new(
+        "20260302200001",
+        run_count.clone(),
+    )));
+
+    // User declines
+    let result = migrations.auto_migrate(&store, Box::new(|_| false), Box::new(|_| {}));
+
+    assert!(matches!(result, Err(MigrateError::UserCancelled)));
+    // Migration should NOT have run
+    assert_eq!(*run_count.read().unwrap(), 0);
 }
 
 #[test]
 fn test_break_change_migration() {
-    let run_count = Arc::new(RwLock::new(0));
-
-    let migrate = gen_migrate();
-    migrate.borrow_migrate().init_db_version().unwrap();
-    let db = migrate.borrow_store();
+    let store = gen_store();
+    store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
 
     let mut migrations = Migrations::default();
-    migrations.add_migration(Arc::new(DummyMigration::new(
-        "20221116135521",
-        run_count.clone(),
-    )));
+    migrations.add_migration(Arc::new(BreakChangeMigration::new("20260302200001")));
 
-    migrations.add_migration(Arc::new(BreakChangeMigration::new(LATEST_DB_VERSION)));
+    // auto_migrate should present a plan with has_break_change=true
+    let result = migrations.auto_migrate(
+        &store,
+        Box::new(|plan| {
+            assert!(plan.has_break_change);
+            true // confirm anyway
+        }),
+        Box::new(|_| {}),
+    );
+    assert!(result.is_ok());
+}
 
-    assert_eq!(migrations.check(db), Ordering::Equal);
-    assert!(!migrations.is_any_break_change(db));
+#[test]
+fn test_db_migrate_check() {
+    let store = gen_store();
 
-    // now manually set db version to a lower one
-    db.put(MIGRATION_VERSION_KEY, "20221116135521");
-    assert_eq!(migrations.check(db), Ordering::Less);
-    assert!(migrations.is_any_break_change(db));
+    let mut migrate = DbMigrate::new();
+    // No version set yet
+    assert_eq!(migrate.check(&store), Ordering::Less);
 
-    let result = migrations.migrate(db);
-    assert!(result.is_err());
-    let error = result.unwrap_err().to_string();
-    eprintln!("Error: {}", error);
-    assert!(error.contains("breaking change migration"));
+    store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
+    assert_eq!(migrate.check(&store), Ordering::Equal);
 
-    let mut db_migrate = DbMigrate::new(db);
-    let result = db_migrate.init_or_check("dummy_path");
-    assert!(result.is_err());
-    let error = result.unwrap_err();
-    assert!(error.contains("Fiber need to run some database migrations"));
-
-    db_migrate.add_migration(Arc::new(BreakChangeMigration::new(LATEST_DB_VERSION)));
-    let result = db_migrate.init_or_check("dummy_path");
-    assert!(result.is_err());
-    let error = result.unwrap_err();
-    assert!(error.contains("need to shutdown all old channels"));
+    store.put(MIGRATION_VERSION_KEY, "99991231235959");
+    assert_eq!(migrate.check(&store), Ordering::Greater);
 }

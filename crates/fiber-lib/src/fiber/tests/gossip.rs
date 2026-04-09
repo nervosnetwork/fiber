@@ -43,7 +43,8 @@ struct GossipTestingContext {
 impl GossipTestingContext {
     async fn new() -> Self {
         let dir = TempDir::new("test-gossip-store");
-        let store = open_store(dir).expect("created store failed");
+        let store =
+            open_store(dir, Box::new(|_| true), Box::new(|_| {})).expect("created store failed");
         let shared_state = Arc::new(std::sync::RwLock::new(MockChainState::new()));
         let chain_actor = Actor::spawn(None, MockChainActor::new(), (None, shared_state.clone()))
             .await
