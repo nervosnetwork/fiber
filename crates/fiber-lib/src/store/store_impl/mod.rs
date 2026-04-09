@@ -26,6 +26,7 @@ use crate::{
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
 use fiber_store::db_migrate::DbMigrate;
+use fiber_store::migration::{MigrateConfirmFn, MigrateProgressFn};
 use fiber_types::schema::*;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::CchOrder;
@@ -128,20 +129,30 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
-/// Open a store at `path`, with migration check.
-pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
+/// Open a store at `path`, running auto-migration if needed.
+pub fn open_store<P: AsRef<Path>>(
+    path: P,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<Store, String> {
     let db = fiber_store::Store::open_db(path.as_ref())?;
-    check_migrate(path, &db)?;
+    run_auto_migrate(&db, confirm_fn, progress_fn)?;
     Ok(Store {
         inner: db,
         watcher: None,
     })
 }
 
-fn check_migrate<P: AsRef<Path>>(path: P, db: &fiber_store::Store) -> Result<(), String> {
-    let migrate = DbMigrate::new(db);
-    migrate.init_or_check(path)?;
-    Ok(())
+fn run_auto_migrate(
+    db: &fiber_store::Store,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<(), String> {
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    migrate
+        .auto_migrate(db, confirm_fn, progress_fn)
+        .map_err(|e| e.to_string())
 }
 
 pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
@@ -250,8 +261,23 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     }
 
     let mut errors: Vec<String> = errors.into_iter().collect();
-    if let Err(version_err) = check_migrate(path, &store.inner) {
-        errors.push(version_err);
+    {
+        let mut migrate = DbMigrate::new();
+        fiber_store::migrations::register_all_migrations(&mut migrate);
+        let ordering = migrate.check(&store.inner);
+        match ordering {
+            std::cmp::Ordering::Greater => {
+                errors.push(
+                    "Database version is newer than the binary. Please upgrade fiber.".to_string(),
+                );
+            }
+            std::cmp::Ordering::Less => {
+                errors.push(
+                    "Database version is older than the binary. Migration needed.".to_string(),
+                );
+            }
+            std::cmp::Ordering::Equal => {}
+        }
     }
     if errors.is_empty() {
         info!("All keys and values in the store are valid.");
