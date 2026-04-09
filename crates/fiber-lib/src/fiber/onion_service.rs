@@ -1,4 +1,5 @@
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -19,6 +20,57 @@ use torut::onion::TorSecretKeyV3;
 use tracing::{debug, error, info, warn};
 
 use futures::future::BoxFuture;
+
+/// Default tor controller address
+pub const DEFAULT_TOR_CONTROLLER: &str = "127.0.0.1:9051";
+
+/// Default onion external port
+pub const DEFAULT_ONION_EXTERNAL_PORT: u16 = 8228;
+
+/// Tor onion hidden service configuration
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct OnionConfig {
+    /// Automatically create Tor onion service [default: false]
+    #[serde(default)]
+    pub listen_on_onion: bool,
+
+    /// Tor socks5 server url, e.g. 127.0.0.1:9050
+    pub onion_server: Option<String>,
+
+    /// The onion service will proxy incoming traffic to this p2p listen address.
+    /// If not set, uses the default 127.0.0.1 with the port from listening_addr.
+    pub p2p_listen_address: Option<String>,
+
+    /// Path to store onion private key [default: $BASE_DIR/fiber/onion_private_key]
+    pub onion_private_key_path: Option<String>,
+
+    /// Tor controller url [default: 127.0.0.1:9051]
+    #[serde(default = "default_tor_controller")]
+    pub tor_controller: String,
+
+    /// Tor controller plaintext password (for Tor's `HashedControlPassword`; Tor stores the hash in `torrc`)
+    pub tor_password: Option<String>,
+
+    /// The external port that the onion service will expose [default: 8115]
+    #[serde(default = "default_onion_external_port")]
+    pub onion_external_port: u16,
+
+    /// Maximum time to wait for the start of onion service
+    #[serde(default = "default_onion_service_start_timeout")]
+    pub onion_service_start_timeout: usize,
+}
+
+fn default_onion_service_start_timeout() -> usize {
+    5
+}
+
+fn default_tor_controller() -> String {
+    DEFAULT_TOR_CONTROLLER.to_string()
+}
+
+fn default_onion_external_port() -> u16 {
+    DEFAULT_ONION_EXTERNAL_PORT
+}
 
 /// Configuration for the onion service, constructed from FiberConfig fields.
 pub struct OnionServiceConfig {

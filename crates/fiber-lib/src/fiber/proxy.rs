@@ -1,4 +1,29 @@
+use serde::{Deserialize, Serialize};
 use url::Url;
+
+/// SOCKS5 proxy configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    /// Socks5 proxy URL for fiber. e.g. socks5://username:password@127.0.0.1:1080
+    pub proxy_url: Option<String>,
+
+    /// Use random auth for each proxy connection [default: true]
+    #[serde(default = "default_proxy_random_auth")]
+    pub proxy_random_auth: bool,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            proxy_url: None,
+            proxy_random_auth: true,
+        }
+    }
+}
+
+fn default_proxy_random_auth() -> bool {
+    true
+}
 
 pub(crate) fn check_proxy_url(proxy_url: &str) -> Result<(), String> {
     let parsed_url = Url::parse(proxy_url).map_err(|e| e.to_string())?;
