@@ -12,7 +12,11 @@ pub mod types;
 mod fee;
 mod in_flight_ckb_tx_actor;
 mod key;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod onion_service;
 mod path;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod proxy;
 mod settle_tlc_set_command;
 
 pub use config::FiberConfig;

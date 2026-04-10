@@ -55,6 +55,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+base64 = "0.22"
 biscuit-auth = "6.0.0-beta.3"
 ckb-hash = "1"
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
@@ -83,8 +84,10 @@ tokio = { version = "1", features = [
   "signal",
   "process",
 ] }
+torut = "0.2"
 tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["cors"] }
+url = "2"
 tokio-metrics = { version = "0.4.5", optional = true, features = ["metrics-rs-integration"] }
 metrics = { version = "0.24.2", optional = true }
 metrics-exporter-prometheus = { version = "0.17.2", optional = true }

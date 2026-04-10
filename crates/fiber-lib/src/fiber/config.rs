@@ -1,5 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 use crate::fiber::KeyPair;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fiber::{onion_service::OnionConfig, proxy::ProxyConfig};
 use crate::{ckb::contracts::Contract, invoice::Currency, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
@@ -401,6 +403,18 @@ pub struct FiberConfig {
         help = "Address for metrics endpoint (e.g., 127.0.0.1:9090). Requires binary to be compiled with RUSTFLAGS=\"--cfg tokio_unstable\" and metrics feature enabled"
     )]
     pub metrics_addr: Option<String>,
+
+    /// SOCKS5 proxy configuration
+    #[cfg(not(target_arch = "wasm32"))]
+    #[arg(skip)]
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+
+    /// Tor onion hidden service configuration
+    #[cfg(not(target_arch = "wasm32"))]
+    #[arg(skip)]
+    #[serde(default)]
+    pub onion: OnionConfig,
 }
 
 #[cfg(not(any(test, feature = "bench")))]
