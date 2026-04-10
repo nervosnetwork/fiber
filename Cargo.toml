@@ -10,7 +10,6 @@ members = [
     "crates/fiber-json-types",
     "crates/fiber-cli",
 ]
-exclude = ["rpc-doc-gen"]
 resolver = "2"
 default-members = ["crates/fiber-bin", "crates/fiber-lib", "crates/fiber-cli"]
 [profile.release]
