@@ -508,7 +508,11 @@ Funds changes:
 
 Mainnet public nodes do not hold any USDI yet, so UDT channels cannot be created at this time. This section only covers the testnet.
 
-On testnet, node2 exposes a public RPC endpoint (including `new_invoice`), so for simplicity this demo uses the path nodeA → node1 → node2. Only nodeA is needed.
+On testnet, node2 exposes a public RPC endpoint (including `new_invoice`), so for simplicity this demo uses the path nodeA → node1 → node2. Only nodeA is needed. Set the node2 RPC URL before running the commands below (check [dashboard](https://dashboard.fiber.channel/nodes) for the current endpoint):
+
+```bash
+NODE2_RPC="<node2_rpc_endpoint>"
+```
 
 
 ### Establishing a UDT Channel: nodeA ⟺ node1
@@ -592,7 +596,7 @@ On testnet, node2 exposes a public RPC endpoint (including `new_invoice`), so fo
    Here, a unique payment_preimage is still required. You can generate one using: `payment_preimage="0x$(openssl rand -hex 32)"`
 
    ```bash
-   curl -s --location 'http://18.163.221.211:8227' --header 'Content-Type: application/json' --data '{
+   curl -s --location "$NODE2_RPC" --header 'Content-Type: application/json' --data '{
        "id": 1,
        "jsonrpc": "2.0",
        "method": "new_invoice",
