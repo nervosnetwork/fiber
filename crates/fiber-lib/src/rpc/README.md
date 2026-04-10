@@ -83,8 +83,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `HopHint`](#type-hophint)
     * [Type `HopRequire`](#type-hoprequire)
     * [Type `Htlc`](#type-htlc)
+    * [Type `InboundTlcStatus`](#type-inboundtlcstatus)
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentStatus`](#type-paymentstatus)
     * [Type `PeerInfo`](#type-peerinfo)
@@ -1492,6 +1494,22 @@ The htlc data structure.
 * `status` - <em>[TlcStatus](#type-tlcstatus)</em>, The status of the htlc
 ---
 
+<a id="#type-inboundtlcstatus"></a>
+### Type `InboundTlcStatus`
+
+The status of an inbound tlc.
+
+
+#### Enum with values of
+
+* `RemoteAnnounced` - Received tlc from remote party, but not committed yet
+* `AnnounceWaitPrevAck` - We received another AddTlc peer message when we are waiting for the ack of the last one.
+* `AnnounceWaitAck` - We have sent commitment signed to peer and waiting ACK for confirming this AddTlc
+* `Committed` - We have received ACK from peer and Committed this tlc
+* `LocalRemoved` - We have removed this tlc, but haven't received ACK from peer
+* `RemoveAckConfirmed` - We have received the ACK for the RemoveTlc, it's safe to remove this tlc
+---
+
 <a id="#type-invoicedata"></a>
 ### Type `InvoiceData`
 
@@ -1523,6 +1541,22 @@ The Node information.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - <em>`u64`</em>, The minimum CKB funding amount for automatically accepting open channel requests.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, The UDT configuration infos of the node.
+---
+
+<a id="#type-outboundtlcstatus"></a>
+### Type `OutboundTlcStatus`
+
+The status of an outbound tlc.
+
+
+#### Enum with values of
+
+* `LocalAnnounced` - Offered tlc created and sent to remote party
+* `Committed` - Received ACK from remote party for this offered tlc
+* `RemoteRemoved` - Remote party removed this tlc
+* `RemoveWaitPrevAck` - We received another RemoveTlc message from peer when we are waiting for the ack of the last one.
+* `RemoveWaitAck` - We have sent commitment signed to peer and waiting ACK for confirming this RemoveTlc
+* `RemoveAckConfirmed` - We have received the ACK for the RemoveTlc, it's safe to remove this tlc
 ---
 
 <a id="#type-paymentcustomrecords"></a>
