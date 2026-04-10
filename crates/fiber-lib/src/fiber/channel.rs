@@ -3124,6 +3124,13 @@ where
                     .update_close_transaction_confirmed(tx_hash, force, close_by_us)
                     .await?;
                 debug_event!(self.network, "ChannelClosed");
+                if matches!(
+                    state.state,
+                    ChannelState::Closed(flags)
+                        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                ) {
+                    myself.stop(Some(format!("ChannelStopped: {:?}", StopReason::Closed)));
+                }
             }
             ChannelEvent::CheckActiveChannel => {
                 if state.peer_does_not_reply_ack_in_time() && !state.is_closed() {

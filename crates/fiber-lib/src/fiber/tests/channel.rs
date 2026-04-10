@@ -7579,6 +7579,80 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
     );
 }
 
+#[tokio::test]
+async fn test_cooperative_close_stops_channel_actor_immediately() {
+    init_tracing();
+
+    let (node_a, _node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    node_a
+        .send_shutdown(channel_id, false)
+        .await
+        .expect("cooperatively shutdown channel");
+
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::Closed(CloseFlags::COOPERATIVE)
+        )
+    })
+    .await;
+
+    wait_until_async_timeout(|| async {
+        let control_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Update(
+                        UpdateCommand {
+                            enabled: None,
+                            tlc_expiry_delta: None,
+                            tlc_minimum_value: None,
+                            tlc_fee_proportional_millionths: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_a alive");
+
+        control_result.is_err()
+            && matches!(
+                node_a
+                    .get_channel_actor_state_unchecked(channel_id)
+                    .map(|state| state.state),
+                Some(ChannelState::Closed(CloseFlags::COOPERATIVE))
+            )
+    })
+    .await;
+
+    let control_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    let err = control_result.expect_err("cooperative close should stop the channel actor");
+    assert!(
+        err.contains("Channel not found error"),
+        "expected cooperative close to remove the live actor, got: {err}"
+    );
+}
+
 /// Test for issue #938: Channel funding is aborted after restart when stuck in NegotiatingFunding
 ///
 /// This test verifies that the fix works correctly:
