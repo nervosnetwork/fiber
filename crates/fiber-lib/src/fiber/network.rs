@@ -1612,11 +1612,7 @@ where
                     .map(|peer| peer.session_id);
                 if matches!(reason, PeerDisconnectReason::Requested) {
                     state.peer_reconnect_backoff_attempts.remove(&pubkey);
-                    if session.is_some() {
-                        state.requested_disconnect_peers.insert(pubkey);
-                    } else {
-                        state.requested_disconnect_peers.remove(&pubkey);
-                    }
+                    state.requested_disconnect_peers.insert(pubkey);
                 }
                 if let Some(session) = session {
                     debug!(

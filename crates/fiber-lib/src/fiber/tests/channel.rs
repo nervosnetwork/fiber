@@ -5378,6 +5378,70 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
 }
 
 #[tokio::test]
+async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let first_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+            node_b.pubkey,
+            PeerDisconnectReason::Requested,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        first_disconnect_result.is_ok(),
+        "first manual disconnect should succeed: {:?}",
+        first_disconnect_result
+    );
+
+    node_a
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey),
+        )
+        .await;
+
+    let second_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+            node_b.pubkey,
+            PeerDisconnectReason::Requested,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node_a alive");
+    let err = second_disconnect_result
+        .expect_err("second manual disconnect should report the already-disconnected peer");
+    assert!(
+        err.contains("is not connected"),
+        "expected already-disconnected error, got: {err}"
+    );
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::MaintainConnections,
+        ))
+        .expect("node_a alive");
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            node_a.expect_event(
+                |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
+            ),
+        )
+        .await
+        .is_err(),
+        "repeated manual disconnect should keep automatic reconnect suppressed"
+    );
+
+    node_b.stop().await;
+}
+
+#[tokio::test]
 async fn test_startup_dial_error_with_active_channel_enters_backoff_reconnect() {
     init_tracing();
 
