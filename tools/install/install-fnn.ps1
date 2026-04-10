@@ -31,21 +31,22 @@ $script:StartupBlockerMessage = $null
 # Global variable for ckb-cli command
 $CKB_CLI_CMD = "ckb-cli"
 
-# Colors for output
+# Keep console output ASCII-only so Windows PowerShell 5.1 can read this file
+# reliably even when the checkout is UTF-8 without BOM.
 function Write-Success($message) {
-    Write-Host "✓ $message" -ForegroundColor Green
+    Write-Host "[OK] $message" -ForegroundColor Green
 }
 
-function Write-Warning($message) {
-    Write-Host "⚠ $message" -ForegroundColor Yellow
+function Write-FnnWarning($message) {
+    Write-Host "[WARN] $message" -ForegroundColor Yellow
 }
 
-function Write-Error($message) {
-    Write-Host "✗ $message" -ForegroundColor Red
+function Write-FnnError($message) {
+    Write-Host "[ERROR] $message" -ForegroundColor Red
 }
 
 function Write-Info($message) {
-    Write-Host "ℹ $message" -ForegroundColor Cyan
+    Write-Host "[INFO] $message" -ForegroundColor Cyan
 }
 
 function Show-Header {
@@ -60,14 +61,93 @@ function Show-Header {
 $PLATFORM = "windows"
 $ARCH = if ([System.Environment]::Is64BitOperatingSystem) { "x86_64" } else { "x86" }
 
+function Enable-Tls12ForDownloads {
+    try {
+        $currentProtocols = [System.Net.ServicePointManager]::SecurityProtocol
+        $tls12 = [System.Net.SecurityProtocolType]::Tls12
+        $tls13 = 0
+        if ([enum]::GetNames([System.Net.SecurityProtocolType]) -contains "Tls13") {
+            $tls13 = [System.Net.SecurityProtocolType]::Tls13
+        }
+
+        [System.Net.ServicePointManager]::SecurityProtocol = $currentProtocols -bor $tls12 -bor $tls13
+    }
+    catch {
+        Write-FnnWarning "Failed to explicitly enable TLS 1.2+. Downloads may fail on older Windows builds."
+    }
+}
+
+function New-TemporaryDirectory {
+    $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    return $tempDir
+}
+
+function Find-FirstFileInDirectory {
+    param(
+        [string]$SearchPath,
+        [string]$FileName
+    )
+
+    return Get-ChildItem -Path $SearchPath -Filter $FileName -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+
+function Find-FirstDirectoryInDirectory {
+    param(
+        [string]$SearchPath,
+        [string]$DirectoryName
+    )
+
+    return Get-ChildItem -Path $SearchPath -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $DirectoryName } | Select-Object -First 1
+}
+
+function Expand-TarGzArchive {
+    param(
+        [string]$ArchivePath,
+        [string]$DestinationPath
+    )
+
+    $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
+    if (-not $tarCmd) {
+        Write-FnnError "Failed to extract archive. Make sure 'tar' is available (included in Windows 10/11)."
+        exit 1
+    }
+
+    & $tarCmd.Source -xzf $ArchivePath -C $DestinationPath 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-FnnError "Failed to extract archive: $ArchivePath"
+        exit 1
+    }
+}
+
+function Set-KeyFilePermissions {
+    param([string]$Path)
+
+    try {
+        $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $acl = Get-Acl $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $currentIdentity.Name,
+            [System.Security.AccessControl.FileSystemRights]::Read -bor [System.Security.AccessControl.FileSystemRights]::Write,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        $acl.SetAccessRule($rule)
+        Set-Acl $Path $acl
+    }
+    catch {
+        Write-FnnWarning "Saved the private key, but could not tighten file permissions automatically."
+        Write-Host "  Review the ACL for $Path manually if this machine is shared."
+    }
+}
+
 # Determine binary names
 # Note: FNN Windows release uses .tar.gz format, not .zip
 $FNN_BINARY = "fnn_v${FNN_VERSION}-x86_64-windows.tar.gz"
 $CKB_CLI_BINARY = "ckb-cli_v${CKB_CLI_VERSION}_x86_64-pc-windows-msvc.zip"
 
 function Test-Command($command) {
-    $null = Get-Command $command -ErrorAction SilentlyContinue
-    return $?
+    return $null -ne (Get-Command $command -ErrorAction SilentlyContinue)
 }
 
 function Get-ExistingCkbCliPath {
@@ -98,11 +178,11 @@ function Get-ConfigValueInSection {
     $keyPattern = [regex]::Escape($KeyName)
     foreach ($line in [System.IO.File]::ReadAllLines($ConfigPath)) {
         if ($line -match '^[^\s#][^:]*:\s*$') {
-            $inSection = ($line -eq "$SectionName:")
+            $inSection = ($line -eq "${SectionName}:")
             continue
         }
 
-        if ($inSection -and $line -match "^\s*$keyPattern:\s*(.*)$") {
+        if ($inSection -and $line -match "^\s*${keyPattern}:\s*(.*)$") {
             $value = $Matches[1] -replace '\s+#.*$', ''
             $value = $value.Trim()
             return $value.Trim('"')
@@ -131,13 +211,13 @@ function Set-ConfigValueInSection {
 
     foreach ($line in [System.IO.File]::ReadAllLines($ConfigPath)) {
         if ($line -match '^[^\s#][^:]*:\s*$') {
-            $inSection = ($line -eq "$SectionName:")
+            $inSection = ($line -eq "${SectionName}:")
             $newLines.Add($line)
             continue
         }
 
-        if ($inSection -and $line -match "^\s*$keyPattern:\s*") {
-            $newLines.Add("  $KeyName: `"$KeyValue`"")
+        if ($inSection -and $line -match "^\s*${keyPattern}:\s*") {
+            $newLines.Add("  ${KeyName}: `"$KeyValue`"")
             $updated = $true
             continue
         }
@@ -173,16 +253,16 @@ function Set-RawConfigValueInSection {
     foreach ($line in [System.IO.File]::ReadAllLines($ConfigPath)) {
         if ($line -match '^[^\s#][^:]*:\s*$') {
             if ($inSection -and -not $updated) {
-                $newLines.Add("  $KeyName: $KeyValue")
+                $newLines.Add("  ${KeyName}: $KeyValue")
                 $updated = $true
             }
-            $inSection = ($line -eq "$SectionName:")
+            $inSection = ($line -eq "${SectionName}:")
             $newLines.Add($line)
             continue
         }
 
-        if ($inSection -and $line -match "^\s*$keyPattern:\s*") {
-            $newLines.Add("  $KeyName: $KeyValue")
+        if ($inSection -and $line -match "^\s*${keyPattern}:\s*") {
+            $newLines.Add("  ${KeyName}: $KeyValue")
             $updated = $true
             continue
         }
@@ -191,7 +271,7 @@ function Set-RawConfigValueInSection {
     }
 
     if ($inSection -and -not $updated) {
-        $newLines.Add("  $KeyName: $KeyValue")
+        $newLines.Add("  ${KeyName}: $KeyValue")
     }
 
     Set-Content -Path $ConfigPath -Value $newLines -Encoding UTF8
@@ -215,12 +295,12 @@ function Remove-ConfigValueInSection {
 
     foreach ($line in [System.IO.File]::ReadAllLines($ConfigPath)) {
         if ($line -match '^[^\s#][^:]*:\s*$') {
-            $inSection = ($line -eq "$SectionName:")
+            $inSection = ($line -eq "${SectionName}:")
             $newLines.Add($line)
             continue
         }
 
-        if ($inSection -and $line -match "^\s*$keyPattern:\s*") {
+        if ($inSection -and $line -match "^\s*${keyPattern}:\s*") {
             continue
         }
 
@@ -302,7 +382,7 @@ function Normalize-InstallDir {
         return $HOME
     }
 
-    if ($Path.StartsWith("~/") -or $Path.StartsWith("~\")) {
+    if ($Path.StartsWith("~/") -or $Path.StartsWith('~\')) {
         $relativePath = $Path.Substring(2).TrimStart('\', '/')
         return Join-Path $HOME $relativePath
     }
@@ -364,7 +444,7 @@ function Prepare-InstallDir {
     while (Test-InstallPathHasExistingContents -Path $script:InstallDir) {
         $backupDir = Get-InstallBackupDir -Path $script:InstallDir
 
-        Write-Warning "Install directory already exists and is not empty: $script:InstallDir"
+        Write-FnnWarning "Install directory already exists and is not empty: $script:InstallDir"
 
         if (-not (Test-InteractiveStdin)) {
             Backup-ExistingInstallPath -ExistingPath $script:InstallDir -BackupPath $backupDir
@@ -407,7 +487,7 @@ function Assert-InstallDirMatchesNetwork {
     }
 
     if ($existingNetwork -and $existingNetwork -ne $Network -and $hasData) {
-        Write-Error "Install directory $InstallDir already contains $existingNetwork data."
+        Write-FnnError "Install directory $InstallDir already contains $existingNetwork data."
         Write-Host "  Reusing it for $Network can mix network graph state and cause chain hash mismatch warnings."
         Write-Host "  Use a different install directory, or remove $InstallDir\fiber before switching networks."
         exit 1
@@ -428,7 +508,7 @@ function Apply-NetworkConfigDefaults {
 
     if ($rpcUrlOverride) {
         if (-not (Set-ConfigValueInSection -ConfigPath $configPath -SectionName "ckb" -KeyName "rpc_url" -KeyValue $rpcUrlOverride)) {
-            Write-Error "Failed to update ckb.rpc_url in $configPath"
+            Write-FnnError "Failed to update ckb.rpc_url in $configPath"
             exit 1
         }
     }
@@ -450,7 +530,7 @@ function Configure-CkbRpcUrl {
 
     $currentRpcUrl = Get-CkbRpcUrlFromConfig
     Write-Host ""
-    Write-Warning "Mainnet requires a reachable CKB RPC endpoint."
+    Write-FnnWarning "Mainnet requires a reachable CKB RPC endpoint."
     Write-Host "  Press Enter to use the default public RPC, or provide your own trusted endpoint."
     Write-Host "  Current ckb.rpc_url: $currentRpcUrl"
     $desiredRpcUrl = Read-Host "Enter the CKB RPC URL to use (press Enter to keep the current value)"
@@ -459,7 +539,7 @@ function Configure-CkbRpcUrl {
     }
 
     if (-not (Set-ConfigValueInSection -ConfigPath (Join-Path $InstallDir "config.yml") -SectionName "ckb" -KeyName "rpc_url" -KeyValue $desiredRpcUrl)) {
-        Write-Error "Failed to update ckb.rpc_url in $InstallDir\config.yml"
+        Write-FnnError "Failed to update ckb.rpc_url in $InstallDir\config.yml"
         exit 1
     }
 
@@ -482,7 +562,7 @@ function Configure-MainnetPublicNode {
         '^(?i:y|yes)$' { $true; break }
         '^(?i:n|no)$' { $false; break }
         default {
-            Write-Error "Invalid choice: $publicChoice"
+            Write-FnnError "Invalid choice: $publicChoice"
             exit 1
         }
     }
@@ -494,7 +574,7 @@ function Configure-MainnetPublicNode {
         do {
             $announcedAddr = Read-Host "Enter announced_addrs"
             if ([string]::IsNullOrWhiteSpace($announcedAddr)) {
-                Write-Warning "announced_addrs cannot be empty for a public mainnet node."
+                Write-FnnWarning "announced_addrs cannot be empty for a public mainnet node."
             }
         } while ([string]::IsNullOrWhiteSpace($announcedAddr))
 
@@ -505,24 +585,24 @@ function Configure-MainnetPublicNode {
         $announcedNodeName = Read-Host "Enter announced_node_name (optional)"
 
         if (-not (Set-RawConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "auto_announce_node" -KeyValue "true")) {
-            Write-Error "Failed to update fiber.auto_announce_node in $configPath"
+            Write-FnnError "Failed to update fiber.auto_announce_node in $configPath"
             exit 1
         }
         if (-not (Set-RawConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "announce_listening_addr" -KeyValue "true")) {
-            Write-Error "Failed to update fiber.announce_listening_addr in $configPath"
+            Write-FnnError "Failed to update fiber.announce_listening_addr in $configPath"
             exit 1
         }
         if ([string]::IsNullOrWhiteSpace($announcedNodeName)) {
             if (-not (Remove-ConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "announced_node_name")) {
-                Write-Error "Failed to update fiber.announced_node_name in $configPath"
+                Write-FnnError "Failed to update fiber.announced_node_name in $configPath"
                 exit 1
             }
         } elseif (-not (Set-RawConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "announced_node_name" -KeyValue "`"$(Escape-YamlDoubleQuotedValue $announcedNodeName)`"")) {
-            Write-Error "Failed to update fiber.announced_node_name in $configPath"
+            Write-FnnError "Failed to update fiber.announced_node_name in $configPath"
             exit 1
         }
         if (-not (Set-AnnouncedAddrsConfig -ConfigPath $configPath -AnnouncedAddr $announcedAddr)) {
-            Write-Error "Failed to update fiber.announced_addrs in $configPath"
+            Write-FnnError "Failed to update fiber.announced_addrs in $configPath"
             exit 1
         }
 
@@ -531,19 +611,19 @@ function Configure-MainnetPublicNode {
     }
 
     if (-not (Set-RawConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "auto_announce_node" -KeyValue "false")) {
-        Write-Error "Failed to update fiber.auto_announce_node in $configPath"
+        Write-FnnError "Failed to update fiber.auto_announce_node in $configPath"
         exit 1
     }
     if (-not (Set-RawConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "announce_listening_addr" -KeyValue "false")) {
-        Write-Error "Failed to update fiber.announce_listening_addr in $configPath"
+        Write-FnnError "Failed to update fiber.announce_listening_addr in $configPath"
         exit 1
     }
     if (-not (Remove-ConfigValueInSection -ConfigPath $configPath -SectionName "fiber" -KeyName "announced_node_name")) {
-        Write-Error "Failed to update fiber.announced_node_name in $configPath"
+        Write-FnnError "Failed to update fiber.announced_node_name in $configPath"
         exit 1
     }
     if (-not (Set-AnnouncedAddrsConfig -ConfigPath $configPath -AnnouncedAddr "")) {
-        Write-Error "Failed to update fiber.announced_addrs in $configPath"
+        Write-FnnError "Failed to update fiber.announced_addrs in $configPath"
         exit 1
     }
 
@@ -567,7 +647,7 @@ function Check-CkbRpcPreflight {
     }
 
     try {
-        $response = Invoke-RestMethod -Uri $rpcUrl -Method Post -ContentType "application/json" -Body '{"id":2,"jsonrpc":"2.0","method":"get_block_hash","params":["0x0"]}'
+        $response = Invoke-RestMethod -Uri $rpcUrl -Method Post -ContentType "application/json" -Body '{"id":2,"jsonrpc":"2.0","method":"get_block_hash","params":["0x0"]}' -ErrorAction Stop
     }
     catch {
         $script:StartupBlockerMessage = "Cannot reach the configured CKB RPC at $rpcUrl."
@@ -589,7 +669,7 @@ function Check-CkbRpcPreflight {
 }
 
 function Install-CkbCli {
-    Write-Warning "ckb-cli is required but not found."
+    Write-FnnWarning "ckb-cli is required but not found."
     Write-Host ""
     $installCkb = Read-Host "Would you like to automatically download and install ckb-cli? (y/n)"
 
@@ -602,34 +682,38 @@ function Install-CkbCli {
     Write-Info "Downloading ckb-cli v$CKB_CLI_VERSION..."
 
     $downloadUrl = "$CKB_CLI_RELEASE_URL/$CKB_CLI_BINARY"
-    $tempDir = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid().ToString()
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    $tempDir = New-TemporaryDirectory
 
     Write-Host "  Downloading from: $downloadUrl"
 
     try {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile "$tempDir\$CKB_CLI_BINARY" -UseBasicParsing
+        Invoke-WebRequest -Uri $downloadUrl -OutFile "$tempDir\$CKB_CLI_BINARY" -UseBasicParsing -ErrorAction Stop
     }
     catch {
-        Write-Error "Failed to download ckb-cli: $_"
+        Write-FnnError "Failed to download ckb-cli: $_"
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
     }
 
     Write-Info "Extracting ckb-cli..."
-    Expand-Archive -Path "$tempDir\$CKB_CLI_BINARY" -DestinationPath $tempDir -Force
-
-    $ckbCliPath = Get-ChildItem -Path $tempDir -Name "ckb-cli.exe" -Recurse | Select-Object -First 1
-    if (-not $ckbCliPath) {
-        Write-Error "Could not find ckb-cli.exe in the downloaded archive"
+    try {
+        Expand-Archive -Path "$tempDir\$CKB_CLI_BINARY" -DestinationPath $tempDir -Force -ErrorAction Stop
+    }
+    catch {
+        Write-FnnError "Failed to extract ckb-cli: $_"
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
     }
 
-    $fullCkbCliPath = Join-Path $tempDir $ckbCliPath
+    $ckbCliPath = Find-FirstFileInDirectory -SearchPath $tempDir -FileName "ckb-cli.exe"
+    if (-not $ckbCliPath) {
+        Write-FnnError "Could not find ckb-cli.exe in the downloaded archive"
+        Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+        exit 1
+    }
 
     # Install to install directory
-    Copy-Item $fullCkbCliPath "$InstallDir\ckb-cli.exe"
+    Copy-Item $ckbCliPath.FullName "$InstallDir\ckb-cli.exe"
     $script:CKB_CLI_CMD = "$InstallDir\ckb-cli.exe"
     Write-Success "ckb-cli installed to $InstallDir\ckb-cli.exe"
 
@@ -653,16 +737,15 @@ function Download-Binary {
     Write-Info "Downloading Fiber release bundle v$FNN_VERSION for windows-$ARCH..."
 
     $downloadUrl = "$GITHUB_RELEASE_URL/$FNN_BINARY"
-    $tempDir = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid().ToString()
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    $tempDir = New-TemporaryDirectory
 
     Write-Host "  Downloading from: $downloadUrl"
 
     try {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile "$tempDir\$FNN_BINARY" -UseBasicParsing
+        Invoke-WebRequest -Uri $downloadUrl -OutFile "$tempDir\$FNN_BINARY" -UseBasicParsing -ErrorAction Stop
     }
     catch {
-        Write-Error "Failed to download FNN binary: $_"
+        Write-FnnError "Failed to download FNN binary: $_"
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
     }
@@ -670,30 +753,22 @@ function Download-Binary {
     Write-Success "Download completed"
 
     Write-Info "Extracting release bundle..."
-    # Extract .tar.gz file (Windows 10/11 has tar built-in)
-    try {
-        & tar -xzf "$tempDir\$FNN_BINARY" -C $tempDir 2>&1 | Out-Null
-    }
-    catch {
-        Write-Error "Failed to extract archive. Make sure 'tar' is available (included in Windows 10/11)"
-        Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-        exit 1
-    }
+    Expand-TarGzArchive -ArchivePath "$tempDir\$FNN_BINARY" -DestinationPath $tempDir
 
-    $fnnExe = Get-ChildItem -Path $tempDir -Name "fnn.exe" -Recurse | Select-Object -First 1
-    $fnnCliExe = Get-ChildItem -Path $tempDir -Name "fnn-cli.exe" -Recurse | Select-Object -First 1
-    $fnnMigrateExe = Get-ChildItem -Path $tempDir -Name "fnn-migrate.exe" -Recurse | Select-Object -First 1
-    $configDir = Get-ChildItem -Path $tempDir -Directory -Recurse | Where-Object { $_.Name -eq "config" } | Select-Object -First 1
+    $fnnExe = Find-FirstFileInDirectory -SearchPath $tempDir -FileName "fnn.exe"
+    $fnnCliExe = Find-FirstFileInDirectory -SearchPath $tempDir -FileName "fnn-cli.exe"
+    $fnnMigrateExe = Find-FirstFileInDirectory -SearchPath $tempDir -FileName "fnn-migrate.exe"
+    $configDir = Find-FirstDirectoryInDirectory -SearchPath $tempDir -DirectoryName "config"
 
     if (-not $fnnExe -or -not $fnnCliExe -or -not $fnnMigrateExe -or -not $configDir) {
-        Write-Error "The downloaded release bundle is missing required files."
+        Write-FnnError "The downloaded release bundle is missing required files."
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
     }
 
-    Copy-Item (Join-Path $tempDir $fnnExe) "$InstallDir\fnn.exe"
-    Copy-Item (Join-Path $tempDir $fnnCliExe) "$InstallDir\fnn-cli.exe"
-    Copy-Item (Join-Path $tempDir $fnnMigrateExe) "$InstallDir\fnn-migrate.exe"
+    Copy-Item $fnnExe.FullName "$InstallDir\fnn.exe"
+    Copy-Item $fnnCliExe.FullName "$InstallDir\fnn-cli.exe"
+    Copy-Item $fnnMigrateExe.FullName "$InstallDir\fnn-migrate.exe"
     Remove-Item -Recurse -Force "$InstallDir\config" -ErrorAction SilentlyContinue
     Copy-Item $configDir.FullName "$InstallDir\config" -Recurse
 
@@ -717,10 +792,10 @@ function Download-Config {
             $missingTemplates = $true
             New-Item -ItemType Directory -Path $templateDir -Force | Out-Null
             try {
-                Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nervosnetwork/fiber/v$FNN_VERSION/config/$templateNetwork/config.yml" -OutFile $templateConfig -UseBasicParsing
+                Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nervosnetwork/fiber/v$FNN_VERSION/config/$templateNetwork/config.yml" -OutFile $templateConfig -UseBasicParsing -ErrorAction Stop
             }
             catch {
-                Write-Error "Failed to download config for ${templateNetwork}: $_"
+                Write-FnnError "Failed to download config for ${templateNetwork}: $_"
                 exit 1
             }
         }
@@ -728,7 +803,7 @@ function Download-Config {
 
     $bundledConfig = "$InstallDir\config\$Network\config.yml"
     if (-not (Test-Path $bundledConfig)) {
-        Write-Error "Could not prepare the selected config template: $bundledConfig"
+        Write-FnnError "Could not prepare the selected config template: $bundledConfig"
         exit 1
     }
 
@@ -750,7 +825,7 @@ function Setup-Keys {
     $ckbDir = "$InstallDir\ckb"
     New-Item -ItemType Directory -Path $ckbDir -Force | Out-Null
 
-    Write-Warning "You need a CKB account to run the Fiber node."
+    Write-FnnWarning "You need a CKB account to run the Fiber node."
     Write-Host ""
     Write-Host "Please choose an option:"
     Write-Host "  1) Create a new CKB account (requires ckb-cli)"
@@ -768,7 +843,7 @@ function Setup-Keys {
             & $CKB_CLI_CMD account new
 
             if ($LASTEXITCODE -ne 0) {
-                Write-Error "Failed to create account"
+                Write-FnnError "Failed to create account"
                 exit 1
             }
 
@@ -783,7 +858,7 @@ function Setup-Keys {
             $accountList = & $CKB_CLI_CMD account list 2>&1
 
             if ($LASTEXITCODE -ne 0) {
-                Write-Error "Failed to get account list"
+                Write-FnnError "Failed to get account list"
                 Write-Host $accountList
                 exit 1
             }
@@ -794,15 +869,15 @@ function Setup-Keys {
                 $LOCK_ARG = $lockArgMatch.ToString().Split(":")[1].Trim()
             }
 
-            if (-not $LOCK_ARG) {
-                Write-Error "Could not automatically detect lock_arg"
+            if ([string]::IsNullOrWhiteSpace($LOCK_ARG)) {
+                Write-FnnError "Could not automatically detect lock_arg"
                 Write-Info "Please check the account list manually:"
                 Write-Host $accountList
                 Write-Host ""
                 $LOCK_ARG = Read-Host "Enter the lock_arg manually"
 
-                if (-not $LOCK_ARG) {
-                    Write-Error "lock_arg is required"
+                if ([string]::IsNullOrWhiteSpace($LOCK_ARG)) {
+                    Write-FnnError "lock_arg is required"
                     exit 1
                 }
             }
@@ -818,16 +893,26 @@ function Setup-Keys {
             $script:GlobalLockArg = $LOCK_ARG
         }
         default {
-            Write-Error "Invalid choice"
+            Write-FnnError "Invalid choice"
             exit 1
         }
     }
 
+    if ([string]::IsNullOrWhiteSpace($LOCK_ARG)) {
+        Write-FnnError "lock_arg is required"
+        exit 1
+    }
+
     Write-Info "Exporting private key..."
+    Write-Info "ckb-cli may prompt you for your wallet password to export the key."
 
     try {
-        # Export the key
-        & $CKB_CLI_CMD account export --lock-arg $LOCK_ARG --extended-privkey-path "$ckbDir\exported-key" 2>&1 | Out-Null
+        # Run ckb-cli account export directly so it can prompt for the wallet password.
+        & $CKB_CLI_CMD account export --lock-arg $LOCK_ARG --extended-privkey-path "$ckbDir\exported-key"
+        if ($LASTEXITCODE -ne 0) {
+            Write-FnnError "Failed to export key"
+            exit 1
+        }
 
         # Extract only the private key and remove the exported extended key material.
         $keyContent = Get-Content "$ckbDir\exported-key" -TotalCount 1
@@ -836,21 +921,13 @@ function Setup-Keys {
 
         Write-Success "Private key saved to $ckbDir\key"
 
-        # Set permissions (Windows doesn't have chmod, but we can set ACLs)
-        $path = "$ckbDir\key"
-        $acl = Get-Acl $path
-        $acl.SetAccessRuleProtection($true, $false)
-        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $env:USERNAME, "Read,Write", "Allow"
-        )
-        $acl.SetAccessRule($rule)
-        Set-Acl $path $acl
+        Set-KeyFilePermissions -Path "$ckbDir\key"
 
         # Show funding information
         Show-FundingInfo $LOCK_ARG
     }
     catch {
-        Write-Error "Failed to export key: $_"
+        Write-FnnError "Failed to export key: $_"
         exit 1
     }
 }
@@ -901,7 +978,7 @@ function Show-FundingInfo($lockArg) {
     Write-Host "How to check your balance:"
     Write-Host "  $CKB_CLI_CMD wallet get-capacity --lock-arg $lockArg"
     Write-Host ""
-    Write-Warning "Remember: You must have CKB tokens before opening channels!"
+    Write-FnnWarning "Remember: You must have CKB tokens before opening channels!"
     Write-Host ""
 }
 
@@ -916,6 +993,11 @@ function Create-StartupScript {
 `$networkMarkerFile = Join-Path `$installDir "$NETWORK_MARKER_FILE_NAME"
 `$configNetwork = `$null
 `$inFiberSection = `$false
+if (-not (Test-Path (Join-Path `$installDir "config.yml"))) {
+    Write-Host "Error: Could not find config.yml in `$installDir." -ForegroundColor Red
+    exit 1
+}
+
 foreach (`$line in [System.IO.File]::ReadAllLines((Join-Path `$installDir "config.yml"))) {
     if (`$line -match '^[^\s#][^:]*:\s*$') {
         `$inFiberSection = (`$line -eq "fiber:")
@@ -944,7 +1026,7 @@ elseif (`$configNetwork) {
 if (-not `$env:FIBER_SECRET_KEY_PASSWORD) {
     `$securePassword = Read-Host "Enter your FIBER_SECRET_KEY_PASSWORD (or set it as environment variable)" -AsSecureString
     `$BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR(`$securePassword)
-    `$env:FIBER_SECRET_KEY_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(`$BSTR)
+    `$env:FIBER_SECRET_KEY_PASSWORD = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR(`$BSTR)
     [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR(`$BSTR)
     Write-Host ""
 }
@@ -996,7 +1078,7 @@ pause
     Write-Host '   set FIBER_SECRET_KEY_PASSWORD=your-password'
     Write-Host '   start-node.bat'
     Write-Host ""
-    Write-Warning "Security Warning:"
+    Write-FnnWarning "Security Warning:"
     Write-Host "   - Never commit passwords to version control"
     Write-Host "   - Keep your password in a secure password manager"
     Write-Host "   - The password cannot be recovered if lost!"
@@ -1033,7 +1115,7 @@ function Show-Summary {
     Write-Host "Documentation:"
     Write-Host "  - https://www.fiber.world/docs/quick-start/run-a-node"
     Write-Host ""
-    Write-Warning "Remember to:"
+    Write-FnnWarning "Remember to:"
     Write-Host "  1. Keep your private key file (ckb\key) secure"
     Write-Host "  2. Use a strong password for FIBER_SECRET_KEY_PASSWORD"
     Write-Host "  3. Backup your ckb\ directory regularly"
@@ -1048,7 +1130,7 @@ function Show-Summary {
 
     if (-not (Check-CkbRpcPreflight)) {
         $canStartNow = $false
-        Write-Warning "Skipping automatic startup because the configured CKB RPC is not ready."
+        Write-FnnWarning "Skipping automatic startup because the configured CKB RPC is not ready."
         Write-Host "  $script:StartupBlockerMessage"
         Write-Host "  Update ckb.rpc_url in $InstallDir\config.yml and try again."
         Write-Host ""
@@ -1081,10 +1163,16 @@ function Show-Summary {
 
 # Main execution
 Show-Header
+Enable-Tls12ForDownloads
+
+if ($ARCH -ne "x86_64") {
+    Write-FnnError "Only 64-bit Windows is supported by the published FNN release bundle."
+    exit 1
+}
 
 # Validate network
 if ($Network -ne "testnet" -and $Network -ne "mainnet") {
-    Write-Error "Invalid network: $Network. Must be 'testnet' or 'mainnet'"
+    Write-FnnError "Invalid network: $Network. Must be 'testnet' or 'mainnet'"
     exit 1
 }
 
@@ -1118,3 +1206,4 @@ Create-StartupScript
 
 # Print summary
 Show-Summary
+
