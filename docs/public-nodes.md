@@ -508,11 +508,7 @@ Funds changes:
 
 Mainnet public nodes do not hold any USDI yet, so UDT channels cannot be created at this time. This section only covers the testnet.
 
-On testnet, node2 exposes a public RPC endpoint (including `new_invoice`), so for simplicity this demo uses the path nodeA → node1 → node2. Only nodeA is needed. Set the node2 RPC URL before running the commands below (check [dashboard](https://dashboard.fiber.channel/nodes) for the current endpoint):
-
-```bash
-NODE2_RPC="<node2_rpc_endpoint>"
-```
+On testnet, node2 exposes a public RPC endpoint (including `new_invoice`), so for simplicity this demo uses the path nodeA → node1 → node2. Only nodeA is needed.
 
 
 ### Establishing a UDT Channel: nodeA ⟺ node1
@@ -589,7 +585,36 @@ NODE2_RPC="<node2_rpc_endpoint>"
 ### Payment: nodeA → node1 → node2
 
 
-1. Generate an invoice on node2
+1. Use `graph_nodes` to discover node2's current IP
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
+       "id": 1,
+       "jsonrpc": "2.0",
+       "method": "graph_nodes",
+       "params": [
+           {}
+       ]
+   }'
+   ```
+
+   Then find the entry whose `pubkey` matches `$NODE2_PUBKEY`.
+
+   Example response excerpt:
+
+   ```json
+   {"node_name":"CkbaNode-2","version":"0.8.0","addresses":["/ip4/18.163.221.211/tcp/8119/p2p/QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89"],"features":["GOSSIP_QUERIES_REQUIRED","BASIC_MPP_REQUIRED","TRAMPOLINE_ROUTING_REQUIRED"],"pubkey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc","timestamp":"0x19d776bd919","chain_hash":"0x10639e0895502b5688a6be8cf69460d76541bfa4821629d86d62ba0aae3f9606","auto_accept_min_ckb_funding_amount":"0x9502f9000","udt_cfg_infos":[{"name":"RUSD","script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"auto_accept_amount":"0x77359400","cell_deps":[{"type_id":{"code_hash":"0x00000000000000000000000000000000000000000000000000545950455f4944","hash_type":"type","args":"0x97d30b723c0b2c66e9cb8d4d0df4ab5d7222cbb00d4a9a2055ce2e5d7f0d8b0f"}}]}]}
+   ```
+
+   Using the IP from the entry above, construct the RPC endpoint with the default port `8227`:
+
+   ```bash
+   NODE2_RPC="http://18.163.221.211:8227"
+   ```
+
+
+
+2. Generate an invoice on node2
 
    Set the amount to 0x5f5e100 (100,000,000), which is equivalent to 1 RUSD.
 
@@ -597,7 +622,7 @@ NODE2_RPC="<node2_rpc_endpoint>"
 
    ```bash
    curl -s --location "$NODE2_RPC" --header 'Content-Type: application/json' --data '{
-       "id": 1,
+       "id": 2,
        "jsonrpc": "2.0",
        "method": "new_invoice",
        "params": [
@@ -623,16 +648,16 @@ NODE2_RPC="<node2_rpc_endpoint>"
 
 
 
-2. Send payment from nodeA
+3. Send payment from nodeA
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 2,
+       "id": 3,
        "jsonrpc": "2.0",
        "method": "send_payment",
        "params": [
            {
-               "invoice": "<invoice_address from step 1>"
+               "invoice": "<invoice_address from step 2>"
            }
        ]
    }'
@@ -640,13 +665,13 @@ NODE2_RPC="<node2_rpc_endpoint>"
 
 
 
-3. Repeat Steps 1 and 2 two more times
+4. Repeat Steps 2 and 3 two more times
 
    Perform two additional `new_invoice` (on node2) and `send_payment` (on nodeA) requests, keeping the amount set to 0x5f5e100.
 
 
 
-4. Query channel balances after payments
+5. Query channel balances after payments
 
    nodeA ⟺ node1
 
@@ -676,13 +701,13 @@ Funds changes:
 
 
 
-5. Close the UDT channel
+6. Close the UDT channel
 
    Replace `<channel_id>` with the `channel_id` from the `list_channels` response.
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 5,
+       "id": 6,
        "jsonrpc": "2.0",
        "method": "shutdown_channel",
        "params": [
