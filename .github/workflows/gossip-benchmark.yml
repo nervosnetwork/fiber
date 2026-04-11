@@ -102,14 +102,14 @@ jobs:
             --duration-secs "${DURATION_SECS}" \
             --interval-ms "${STEADY_INTERVAL_MS}" \
             --result-mode base
-          cp gossip_baseline.json gossip_steady_baseline.json
+          cp artifacts/gossip_baseline.json artifacts/gossip_steady_baseline.json
 
           cargo run --bin run-test --release -- gossip-benchmark burst \
             --duration-secs "${DURATION_SECS}" \
             --burst-updates-per-window "${BURST_UPDATES_PER_WINDOW}" \
             --burst-window-ms "${BURST_WINDOW_MS}" \
             --result-mode base
-          cp gossip_baseline.json gossip_burst_baseline.json
+          cp artifacts/gossip_baseline.json artifacts/gossip_burst_baseline.json
 
           {
             echo "duration_secs=${DURATION_SECS}"
@@ -118,7 +118,7 @@ jobs:
             echo "burst_window_ms=${BURST_WINDOW_MS}"
             echo "gossip_network_interval_ms=${GOSSIP_NETWORK_INTERVAL_MS}"
             echo "gossip_store_interval_ms=${GOSSIP_STORE_INTERVAL_MS}"
-          } > gossip_benchmark_params.txt
+          } > artifacts/gossip_benchmark_params.txt
 
       - name: Upload gossip benchmark artifacts
         uses: actions/upload-artifact@v4
@@ -126,8 +126,7 @@ jobs:
           name: gossip-benchmark-results
           path: |
             ./gossip-benchmark.log
-            ./tests/perf/gossip_baseline.json
-            ./tests/perf/gossip_steady_baseline.json
-            ./tests/perf/gossip_burst_baseline.json
-            ./tests/perf/gossip_benchmark_params.txt
-
+            ./tests/perf/artifacts/gossip_baseline.json
+            ./tests/perf/artifacts/gossip_steady_baseline.json
+            ./tests/perf/artifacts/gossip_burst_baseline.json
+            ./tests/perf/artifacts/gossip_benchmark_params.txt

@@ -1,4 +1,6 @@
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use fiber_e2e_tests::{
@@ -7,6 +9,21 @@ use fiber_e2e_tests::{
     run_integration_test, save_benchmark_baseline, save_gossip_benchmark_baseline,
     GossipBenchmarkArgs, GossipBenchmarkRunMode, GossipLoadMode, TestResult,
 };
+
+const PERF_ARTIFACTS_DIR: &str = "artifacts";
+
+fn perf_artifacts_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PERF_ARTIFACTS_DIR)
+}
+
+fn perf_artifact_path(filename: &str) -> PathBuf {
+    perf_artifacts_dir().join(filename)
+}
+
+fn ensure_perf_artifacts_dir() -> TestResult<()> {
+    fs::create_dir_all(perf_artifacts_dir())?;
+    Ok(())
+}
 
 fn parse_u64_flag(value: &str, flag: &str) -> Result<u64, String> {
     value
@@ -167,6 +184,7 @@ async fn main() -> TestResult<()> {
             }
         }
         "benchmark" => {
+            ensure_perf_artifacts_dir()?;
             let duration = args
                 .get(2)
                 .and_then(|s| s.parse::<u64>().ok())
@@ -181,29 +199,35 @@ async fn main() -> TestResult<()> {
             println!("📊 Parameters: {} seconds, {} threads", duration, workers);
 
             let benchmark_result = run_benchmark_test(Duration::from_secs(duration), workers)?;
+            let baseline_path = perf_artifact_path("baseline.json");
+            let current_path = perf_artifact_path("current.json");
+            let comparison_report_path = perf_artifact_path("comparison_report.txt");
 
             match run_mode.as_str() {
                 "base" => {
                     // Save baseline
-                    save_benchmark_baseline(&benchmark_result, "baseline.json")?;
-                    println!("💾 Baseline benchmark results saved to baseline.json");
+                    save_benchmark_baseline(&benchmark_result, &baseline_path)?;
+                    println!(
+                        "💾 Baseline benchmark results saved to {}",
+                        baseline_path.display()
+                    );
                 }
                 "compare" => {
-                    save_benchmark_baseline(&benchmark_result, "current.json")?;
+                    save_benchmark_baseline(&benchmark_result, &current_path)?;
                     // Load baseline and compare
-                    match load_benchmark_baseline("baseline.json") {
+                    match load_benchmark_baseline(&baseline_path) {
                         Ok(baseline) => {
                             match compare_with_baseline(
                                 &benchmark_result,
                                 &baseline,
-                                "comparison_report.txt",
+                                &comparison_report_path,
                             ) {
                                 Ok(_) => println!("📊 Comparison completed successfully"),
                                 Err(e) => eprintln!("❌ Failed to save comparison report: {}", e),
                             }
                         }
                         Err(e) => {
-                            eprintln!("❌ Failed to load baseline.json: {}", e);
+                            eprintln!("❌ Failed to load {}: {}", baseline_path.display(), e);
                             eprintln!("💡 Run with 'base' mode first to create a baseline");
                             std::process::exit(1);
                         }
@@ -217,6 +241,7 @@ async fn main() -> TestResult<()> {
             }
         }
         "gossip-benchmark" => {
+            ensure_perf_artifacts_dir()?;
             let gossip_args = match parse_gossip_benchmark_args(&args[2..]) {
                 Ok(parsed) => parsed,
                 Err(error) => {
@@ -243,20 +268,26 @@ async fn main() -> TestResult<()> {
                 &gossip_args,
             )
             .await?;
+            let gossip_baseline_path = perf_artifact_path("gossip_baseline.json");
+            let gossip_current_path = perf_artifact_path("gossip_current.json");
+            let gossip_comparison_report_path = perf_artifact_path("gossip_comparison_report.txt");
 
             match gossip_args.run_mode {
                 GossipBenchmarkRunMode::Base => {
-                    save_gossip_benchmark_baseline(&benchmark_result, "gossip_baseline.json")?;
-                    println!("💾 Gossip baseline benchmark results saved to gossip_baseline.json");
+                    save_gossip_benchmark_baseline(&benchmark_result, &gossip_baseline_path)?;
+                    println!(
+                        "💾 Gossip baseline benchmark results saved to {}",
+                        gossip_baseline_path.display()
+                    );
                 }
                 GossipBenchmarkRunMode::Compare => {
-                    save_gossip_benchmark_baseline(&benchmark_result, "gossip_current.json")?;
-                    match load_gossip_benchmark_baseline("gossip_baseline.json") {
+                    save_gossip_benchmark_baseline(&benchmark_result, &gossip_current_path)?;
+                    match load_gossip_benchmark_baseline(&gossip_baseline_path) {
                         Ok(baseline) => {
                             match compare_gossip_with_baseline(
                                 &benchmark_result,
                                 &baseline,
-                                "gossip_comparison_report.txt",
+                                &gossip_comparison_report_path,
                             ) {
                                 Ok(_) => println!("📊 Gossip comparison completed successfully"),
                                 Err(e) => {
@@ -265,7 +296,11 @@ async fn main() -> TestResult<()> {
                             }
                         }
                         Err(e) => {
-                            eprintln!("❌ Failed to load gossip_baseline.json: {}", e);
+                            eprintln!(
+                                "❌ Failed to load {}: {}",
+                                gossip_baseline_path.display(),
+                                e
+                            );
                             eprintln!("💡 Run with 'base' mode first to create a gossip baseline");
                             std::process::exit(1);
                         }

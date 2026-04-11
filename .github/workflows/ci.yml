@@ -196,6 +196,10 @@ jobs:
           cargo run --bin run-test --release integration
           cargo run --bin run-test --release benchmark 90 30 base
           cd -
+          mkdir -p ./tests/perf/artifacts
+          if [ -f "./tests/perf/baseline.json" ] && [ ! -f "./tests/perf/artifacts/baseline.json" ]; then
+            mv ./tests/perf/baseline.json ./tests/perf/artifacts/baseline.json
+          fi
           git stash
 
       - name: Run current benchmark
@@ -221,22 +225,22 @@ jobs:
           path: |
             ./baseline.log
             ./current.log
-            ./tests/perf/comparison_report.txt
-            ./tests/perf/baseline.json
-            ./tests/perf/current.json
+            ./tests/perf/artifacts/comparison_report.txt
+            ./tests/perf/artifacts/baseline.json
+            ./tests/perf/artifacts/current.json
 
       - name: Check benchmark result
         run: |
           echo "Check benchmark result on current PR commit: ${{ github.sha }}"
-          if [ -f "./tests/perf/comparison_report.txt" ]; then
-            if grep -q "Performance regression detected" "./tests/perf/comparison_report.txt"; then
+          if [ -f "./tests/perf/artifacts/comparison_report.txt" ]; then
+            if grep -q "Performance regression detected" "./tests/perf/artifacts/comparison_report.txt"; then
               echo "❌ Performance regression detected! Failing the workflow."
               exit 1
             else
               echo "✅ No performance regression detected."
             fi
           else
-            echo "⚠️ Comparison report not found at ./tests/perf/comparison_report.txt"
+            echo "⚠️ Comparison report not found at ./tests/perf/artifacts/comparison_report.txt"
             echo "This might indicate a benchmark execution failure."
             exit 1
           fi

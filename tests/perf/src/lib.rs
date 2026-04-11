@@ -1812,26 +1812,32 @@ pub async fn run_gossip_benchmark_test(
 }
 
 /// Save benchmark result to a JSON file
-pub fn save_benchmark_baseline(result: &BenchmarkResult, filename: &str) -> TestResult<()> {
+pub fn save_benchmark_baseline<P: AsRef<Path>>(
+    result: &BenchmarkResult,
+    filename: P,
+) -> TestResult<()> {
+    let filename = filename.as_ref();
     let json_data = serde_json::to_string_pretty(result)?;
     fs::write(filename, json_data)?;
-    println!("📊 Baseline saved to: {}", filename);
+    println!("📊 Baseline saved to: {}", filename.display());
     Ok(())
 }
 
 /// Load benchmark baseline from a JSON file
-pub fn load_benchmark_baseline(filename: &str) -> TestResult<BenchmarkResult> {
+pub fn load_benchmark_baseline<P: AsRef<Path>>(filename: P) -> TestResult<BenchmarkResult> {
+    let filename = filename.as_ref();
     let json_data = fs::read_to_string(filename)?;
     let result: BenchmarkResult = serde_json::from_str(&json_data)?;
     Ok(result)
 }
 
 /// Compare current benchmark result with baseline
-pub fn compare_with_baseline(
+pub fn compare_with_baseline<P: AsRef<Path>>(
     current: &BenchmarkResult,
     baseline: &BenchmarkResult,
-    filename: &str,
+    filename: P,
 ) -> TestResult<()> {
+    let filename = filename.as_ref();
     let mut output = String::new();
 
     // Helper macro to write to both console and string buffer
@@ -1907,35 +1913,40 @@ pub fn compare_with_baseline(
     }
     // Write to file
     fs::write(filename, output)?;
-    println!("📁 Comparison results saved to: {}", filename);
+    println!("📁 Comparison results saved to: {}", filename.display());
 
     Ok(())
 }
 
 /// Save gossip benchmark result to a JSON file
-pub fn save_gossip_benchmark_baseline(
+pub fn save_gossip_benchmark_baseline<P: AsRef<Path>>(
     result: &GossipBenchmarkResult,
-    filename: &str,
+    filename: P,
 ) -> TestResult<()> {
+    let filename = filename.as_ref();
     let json_data = serde_json::to_string_pretty(result)?;
     fs::write(filename, json_data)?;
-    println!("📊 Gossip baseline saved to: {}", filename);
+    println!("📊 Gossip baseline saved to: {}", filename.display());
     Ok(())
 }
 
 /// Load gossip benchmark baseline from a JSON file
-pub fn load_gossip_benchmark_baseline(filename: &str) -> TestResult<GossipBenchmarkResult> {
+pub fn load_gossip_benchmark_baseline<P: AsRef<Path>>(
+    filename: P,
+) -> TestResult<GossipBenchmarkResult> {
+    let filename = filename.as_ref();
     let json_data = fs::read_to_string(filename)?;
     let result: GossipBenchmarkResult = serde_json::from_str(&json_data)?;
     Ok(result)
 }
 
 /// Compare current gossip benchmark result with baseline.
-pub fn compare_gossip_with_baseline(
+pub fn compare_gossip_with_baseline<P: AsRef<Path>>(
     current: &GossipBenchmarkResult,
     baseline: &GossipBenchmarkResult,
-    filename: &str,
+    filename: P,
 ) -> TestResult<()> {
+    let filename = filename.as_ref();
     let mut output = String::new();
     let mut failed = false;
 
@@ -2172,7 +2183,7 @@ pub fn compare_gossip_with_baseline(
     }
 
     fs::write(filename, output)?;
-    println!("📁 Gossip comparison results saved to: {}", filename);
+    println!("📁 Gossip comparison results saved to: {}", filename.display());
     Ok(())
 }
 
