@@ -46,6 +46,59 @@ print_info() {
     echo -e "${BLUE}ℹ $1${NC}"
 }
 
+ensure_success() {
+    local error_message="$1"
+    shift
+
+    "$@" || {
+        print_error "$error_message"
+        exit 1
+    }
+}
+
+update_config_value_or_exit() {
+    local config_file="$1"
+    local section_name="$2"
+    local key_name="$3"
+    local key_value="$4"
+
+    ensure_success \
+        "Failed to update ${section_name}.${key_name} in $config_file" \
+        set_config_value_in_section "$config_file" "$section_name" "$key_name" "$key_value"
+}
+
+update_rendered_config_value_or_exit() {
+    local config_file="$1"
+    local section_name="$2"
+    local key_name="$3"
+    local rendered_value="$4"
+
+    ensure_success \
+        "Failed to update ${section_name}.${key_name} in $config_file" \
+        set_rendered_config_value_in_section "$config_file" "$section_name" "$key_name" "$rendered_value"
+}
+
+remove_config_value_or_exit() {
+    local config_file="$1"
+    local section_name="$2"
+    local key_name="$3"
+
+    ensure_success \
+        "Failed to update ${section_name}.${key_name} in $config_file" \
+        remove_config_value_in_section "$config_file" "$section_name" "$key_name"
+}
+
+update_list_config_value_or_exit() {
+    local config_file="$1"
+    local section_name="$2"
+    local key_name="$3"
+    shift 3
+
+    ensure_success \
+        "Failed to update ${section_name}.${key_name} in $config_file" \
+        set_list_value_in_section "$config_file" "$section_name" "$key_name" "$@"
+}
+
 check_command() {
     command -v "$1" &> /dev/null
 }
@@ -123,87 +176,73 @@ extract_archive() {
     esac
 }
 
-find_first_file() {
+find_first_path() {
     local search_dir="$1"
-    local file_name="$2"
+    local artifact_name="$2"
+    local artifact_type="$3"
 
-    find "$search_dir" -name "$file_name" -type f | head -1
+    find "$search_dir" -name "$artifact_name" -type "$artifact_type" | head -1
 }
 
-find_first_dir() {
-    local search_dir="$1"
-    local dir_name="$2"
+install_artifact_into_dir() {
+    local source_path="$1"
+    local install_dir="$2"
+    local target_name="$3"
+    local description="$4"
+    local artifact_kind="$5"
 
-    find "$search_dir" -name "$dir_name" -type d | head -1
+    if [ "$artifact_kind" = "file" ]; then
+        copy_binary_to_install_dir "$source_path" "$install_dir" "$target_name"
+    else
+        rm -rf "$install_dir/$target_name"
+        cp -R "$source_path" "$install_dir/$target_name"
+    fi
+
+    print_success "$description installed to $install_dir/$target_name"
 }
 
-copy_required_binary_from_search_dir() {
+install_required_artifact_from_search_dir() {
     local search_dir="$1"
     local source_name="$2"
     local install_dir="$3"
     local target_name="$4"
     local description="$5"
-    local binary_path
+    local artifact_kind="$6"
+    local artifact_path=""
+    local artifact_type="f"
 
-    binary_path=$(find_first_file "$search_dir" "$source_name")
-    if [ -z "$binary_path" ]; then
-        print_error "Could not find $source_name in the downloaded archive"
+    if [ "$artifact_kind" = "dir" ]; then
+        artifact_type="d"
+    fi
+
+    artifact_path=$(find_first_path "$search_dir" "$source_name" "$artifact_type")
+    if [ -z "$artifact_path" ]; then
+        if [ "$artifact_kind" = "dir" ]; then
+            print_error "Could not find $source_name directory in the downloaded archive"
+        else
+            print_error "Could not find $source_name in the downloaded archive"
+        fi
         exit 1
     fi
 
-    copy_binary_to_install_dir "$binary_path" "$install_dir" "$target_name"
-    print_success "$description installed to $install_dir/$target_name"
+    install_artifact_into_dir "$artifact_path" "$install_dir" "$target_name" "$description" "$artifact_kind"
 }
 
-copy_required_directory_from_search_dir() {
-    local search_dir="$1"
-    local source_name="$2"
-    local install_dir="$3"
-    local target_name="$4"
-    local description="$5"
-    local dir_path
-
-    dir_path=$(find_first_dir "$search_dir" "$source_name")
-    if [ -z "$dir_path" ]; then
-        print_error "Could not find $source_name directory in the downloaded archive"
-        exit 1
-    fi
-
-    rm -rf "$install_dir/$target_name"
-    cp -R "$dir_path" "$install_dir/$target_name"
-    print_success "$description installed to $install_dir/$target_name"
-}
-
-copy_first_existing_file_to_install_dir() {
+install_first_existing_artifact() {
     local install_dir="$1"
     local target_name="$2"
     local description="$3"
-    shift 3
+    local artifact_kind="$4"
+    shift 4
 
     local candidate
     for candidate in "$@"; do
-        if [ -f "$candidate" ]; then
-            copy_binary_to_install_dir "$candidate" "$install_dir" "$target_name"
-            print_success "$description installed to $install_dir/$target_name"
+        if [ "$artifact_kind" = "dir" ] && [ -d "$candidate" ]; then
+            install_artifact_into_dir "$candidate" "$install_dir" "$target_name" "$description" "$artifact_kind"
             return 0
         fi
-    done
-
-    return 1
-}
-
-copy_first_existing_directory_to_install_dir() {
-    local install_dir="$1"
-    local target_name="$2"
-    local description="$3"
-    shift 3
-
-    local candidate
-    for candidate in "$@"; do
-        if [ -d "$candidate" ]; then
-            rm -rf "$install_dir/$target_name"
-            cp -R "$candidate" "$install_dir/$target_name"
-            print_success "$description installed to $install_dir/$target_name"
+        if [ "$artifact_kind" = "file" ] && [ -f "$candidate" ]; then
+            install_artifact_into_dir "$candidate" "$install_dir" "$target_name" "$description" "$artifact_kind"
             return 0
         fi
     done
@@ -236,39 +275,41 @@ get_config_value_in_section() {
     ' "$config_file"
 }
 
-set_config_value_in_section() {
+config_key_exists_in_section() {
     local config_file="$1"
     local section_name="$2"
     local key_name="$3"
-    local key_value="$4"
+
+    [ -f "$config_file" ] || return 1
+
+    awk -v section_name="$section_name" -v key_name="$key_name" '
+        /^[^[:space:]#][^:]*:[[:space:]]*$/ {
+            in_section = ($0 == section_name ":")
+            next
+        }
+
+        in_section && $0 ~ "^[[:space:]]*" key_name ":[[:space:]]*" {
+            found = 1
+            exit
+        }
+
+        END {
+            if (!found) {
+                exit 1
+            }
+        }
+    ' "$config_file" > /dev/null
+}
+
+rewrite_config_file() {
+    local config_file="$1"
+    shift
     local temp_file
 
     [ -f "$config_file" ] || return 1
 
     temp_file=$(mktemp)
-    if ! awk -v section_name="$section_name" -v key_name="$key_name" -v key_value="$key_value" '
-        /^[^[:space:]#][^:]*:[[:space:]]*$/ {
-            in_section = ($0 == section_name ":")
-            print
-            next
-        }
-
-        in_section && $0 ~ "^[[:space:]]*" key_name ":[[:space:]]*" {
-            printf "  %s: \"%s\"\n", key_name, key_value
-            updated = 1
-            next
-        }
-
-        {
-            print
-        }
-
-        END {
-            if (!updated) {
-                exit 1
-            }
-        }
-    ' "$config_file" > "$temp_file"; then
+    if ! awk "$@" "$config_file" > "$temp_file"; then
         rm -f "$temp_file"
         return 1
     fi
@@ -276,17 +317,28 @@ set_config_value_in_section() {
     mv "$temp_file" "$config_file"
 }
 
+set_config_value_in_section() {
+    local config_file="$1"
+    local section_name="$2"
+    local key_name="$3"
+    local key_value="$4"
+    local escaped_key_value
+
+    config_key_exists_in_section "$config_file" "$section_name" "$key_name" || return 1
+    escaped_key_value="$(escape_yaml_double_quoted_value "$key_value")"
+    set_rendered_config_value_in_section "$config_file" "$section_name" "$key_name" "\"$escaped_key_value\""
+}
+
 set_rendered_config_value_in_section() {
     local config_file="$1"
     local section_name="$2"
     local key_name="$3"
     local rendered_value="$4"
-    local temp_file
 
-    [ -f "$config_file" ] || return 1
-
-    temp_file=$(mktemp)
-    if ! awk -v section_name="$section_name" -v key_name="$key_name" -v rendered_value="$rendered_value" '
+    rewrite_config_file "$config_file" \
+        -v section_name="$section_name" \
+        -v key_name="$key_name" \
+        -v rendered_value="$rendered_value" '
         /^[^[:space:]#][^:]*:[[:space:]]*$/ {
             if (in_section && !updated) {
                 printf "  %s: %s\n", key_name, rendered_value
@@ -312,24 +364,17 @@ set_rendered_config_value_in_section() {
                 printf "  %s: %s\n", key_name, rendered_value
             }
         }
-    ' "$config_file" > "$temp_file"; then
-        rm -f "$temp_file"
-        return 1
-    fi
-
-    mv "$temp_file" "$config_file"
+    '
 }
 
 remove_config_value_in_section() {
     local config_file="$1"
     local section_name="$2"
     local key_name="$3"
-    local temp_file
 
-    [ -f "$config_file" ] || return 1
-
-    temp_file=$(mktemp)
-    if ! awk -v section_name="$section_name" -v key_name="$key_name" '
+    rewrite_config_file "$config_file" \
+        -v section_name="$section_name" \
+        -v key_name="$key_name" '
         /^[^[:space:]#][^:]*:[[:space:]]*$/ {
             in_section = ($0 == section_name ":")
             print
@@ -343,12 +388,7 @@ remove_config_value_in_section() {
         {
             print
         }
-    ' "$config_file" > "$temp_file"; then
-        rm -f "$temp_file"
-        return 1
-    fi
-
-    mv "$temp_file" "$config_file"
+    '
 }
 
 set_list_value_in_section() {
@@ -357,9 +397,6 @@ set_list_value_in_section() {
     local key_name="$3"
     shift 3
 
-    [ -f "$config_file" ] || return 1
-
-    local temp_file
     local list_delimiter
     local list_items=""
     local item
@@ -372,8 +409,11 @@ set_list_value_in_section() {
         list_items="${list_items}${item}"
     done
 
-    temp_file=$(mktemp)
-    if ! awk -v section_name="$section_name" -v key_name="$key_name" -v list_items="$list_items" -v list_delimiter="$list_delimiter" '
+    rewrite_config_file "$config_file" \
+        -v section_name="$section_name" \
+        -v key_name="$key_name" \
+        -v list_items="$list_items" \
+        -v list_delimiter="$list_delimiter" '
         BEGIN {
             item_count = split(list_items, items, list_delimiter)
             if (item_count > 0 && items[item_count] == "") {
@@ -423,12 +463,7 @@ set_list_value_in_section() {
                 exit 1
             }
         }
-    ' "$config_file" > "$temp_file"; then
-        rm -f "$temp_file"
-        return 1
-    fi
-
-    mv "$temp_file" "$config_file"
+    '
 }
 
 escape_yaml_double_quoted_value() {
@@ -505,10 +540,7 @@ apply_network_config_defaults() {
     fi
 
     if [ -n "$rpc_url_override" ]; then
-        if ! set_config_value_in_section "$config_file" "ckb" "rpc_url" "$rpc_url_override"; then
-            print_error "Failed to update ckb.rpc_url in $config_file"
-            exit 1
-        fi
+        update_config_value_or_exit "$config_file" "ckb" "rpc_url" "$rpc_url_override"
     fi
 }
 
@@ -609,10 +641,10 @@ install_fnn_binary() {
     print_info "Extracting release bundle..."
     extract_archive "${temp_dir}/${FNN_BINARY_NAME}" "$extract_dir"
 
-    copy_required_binary_from_search_dir "$extract_dir" "fnn" "$install_dir" "fnn" "Node binary"
-    copy_required_binary_from_search_dir "$extract_dir" "fnn-cli" "$install_dir" "fnn-cli" "CLI binary"
-    copy_required_binary_from_search_dir "$extract_dir" "fnn-migrate" "$install_dir" "fnn-migrate" "Migration binary"
-    copy_required_directory_from_search_dir "$extract_dir" "config" "$install_dir" "config" "Configuration templates"
+    install_required_artifact_from_search_dir "$extract_dir" "fnn" "$install_dir" "fnn" "Node binary" file
+    install_required_artifact_from_search_dir "$extract_dir" "fnn-cli" "$install_dir" "fnn-cli" "CLI binary" file
+    install_required_artifact_from_search_dir "$extract_dir" "fnn-migrate" "$install_dir" "fnn-migrate" "Migration binary" file
+    install_required_artifact_from_search_dir "$extract_dir" "config" "$install_dir" "config" "Configuration templates" dir
     rm -rf "$temp_dir"
 }
 
@@ -634,10 +666,11 @@ install_local_fnn_binary() {
     copy_binary_to_install_dir "$source_abs" "$install_dir" "fnn"
     print_success "Node binary installed to $install_dir/fnn"
 
-    if ! copy_first_existing_file_to_install_dir \
+    if ! install_first_existing_artifact \
         "$install_dir" \
         "fnn-cli" \
         "CLI binary" \
+        file \
         "$source_dir/fnn-cli"
     then
         print_warning "Local fnn-cli binary not found next to $source_abs."
@@ -659,10 +692,11 @@ install_local_fnn_binary() {
         echo "  Copy fnn-migrate into $install_dir manually if you need to run database migrations."
     fi
 
-    if ! copy_first_existing_directory_to_install_dir \
+    if ! install_first_existing_artifact \
         "$install_dir" \
         "config" \
         "Configuration templates" \
+        dir \
         "$source_dir/config" \
         "$source_dir/../../config"
     then
@@ -731,7 +765,7 @@ install_ckb_cli_binary() {
     print_info "Extracting ckb-cli..."
     extract_archive "${temp_dir}/${ckb_cli_binary}" "$temp_dir"
 
-    ckb_cli_path=$(find_first_file "$temp_dir" "ckb-cli")
+    ckb_cli_path=$(find_first_path "$temp_dir" "ckb-cli" f)
     if [ -z "$ckb_cli_path" ]; then
         print_error "Could not find ckb-cli binary in the downloaded archive"
         rm -rf "$temp_dir"
@@ -977,10 +1011,7 @@ configure_ckb_rpc_url() {
     desired_rpc_url="${CKB_RPC_URL:-$current_rpc_url}"
 
     if [ -n "${CKB_RPC_URL:-}" ]; then
-        if ! set_config_value_in_section "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$CKB_RPC_URL"; then
-            print_error "Failed to update ckb.rpc_url in $INSTALL_DIR/config.yml"
-            exit 1
-        fi
+        update_config_value_or_exit "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$CKB_RPC_URL"
         print_success "Configured CKB RPC URL: $CKB_RPC_URL"
         return
     fi
@@ -996,10 +1027,7 @@ configure_ckb_rpc_url() {
     read -p "Enter the CKB RPC URL to use (press Enter to keep the current value): " desired_rpc_url
     desired_rpc_url="${desired_rpc_url:-$current_rpc_url}"
 
-    if ! set_config_value_in_section "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$desired_rpc_url"; then
-        print_error "Failed to update ckb.rpc_url in $INSTALL_DIR/config.yml"
-        exit 1
-    fi
+    update_config_value_or_exit "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$desired_rpc_url"
     print_success "Configured CKB RPC URL: $desired_rpc_url"
 }
 
@@ -1050,50 +1078,27 @@ configure_mainnet_public_node() {
         read -p "Enter announced_node_name (optional): " announced_node_name
         announced_node_name="$(printf '%s' "$announced_node_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
-        set_rendered_config_value_in_section "$config_file" "fiber" "auto_announce_node" "true" || {
-            print_error "Failed to update fiber.auto_announce_node in $config_file"
-            exit 1
-        }
-        set_rendered_config_value_in_section "$config_file" "fiber" "announce_listening_addr" "true" || {
-            print_error "Failed to update fiber.announce_listening_addr in $config_file"
-            exit 1
-        }
+        update_rendered_config_value_or_exit "$config_file" "fiber" "auto_announce_node" "true"
+        update_rendered_config_value_or_exit "$config_file" "fiber" "announce_listening_addr" "true"
         if [ -n "$announced_node_name" ]; then
             escaped_node_name="$(escape_yaml_double_quoted_value "$announced_node_name")"
-            set_rendered_config_value_in_section "$config_file" "fiber" "announced_node_name" "\"$escaped_node_name\"" || {
-                print_error "Failed to update fiber.announced_node_name in $config_file"
-                exit 1
-            }
+            update_rendered_config_value_or_exit \
+                "$config_file" \
+                "fiber" \
+                "announced_node_name" \
+                "\"$escaped_node_name\""
         else
-            remove_config_value_in_section "$config_file" "fiber" "announced_node_name" || {
-                print_error "Failed to update fiber.announced_node_name in $config_file"
-                exit 1
-            }
+            remove_config_value_or_exit "$config_file" "fiber" "announced_node_name"
         fi
-        set_list_value_in_section "$config_file" "fiber" "announced_addrs" "$announced_addr" || {
-            print_error "Failed to update fiber.announced_addrs in $config_file"
-            exit 1
-        }
+        update_list_config_value_or_exit "$config_file" "fiber" "announced_addrs" "$announced_addr"
         print_success "Configured this mainnet node as a public Fiber node"
         return
     fi
 
-    set_rendered_config_value_in_section "$config_file" "fiber" "auto_announce_node" "false" || {
-        print_error "Failed to update fiber.auto_announce_node in $config_file"
-        exit 1
-    }
-    set_rendered_config_value_in_section "$config_file" "fiber" "announce_listening_addr" "false" || {
-        print_error "Failed to update fiber.announce_listening_addr in $config_file"
-        exit 1
-    }
-    remove_config_value_in_section "$config_file" "fiber" "announced_node_name" || {
-        print_error "Failed to update fiber.announced_node_name in $config_file"
-        exit 1
-    }
-    set_list_value_in_section "$config_file" "fiber" "announced_addrs" || {
-        print_error "Failed to update fiber.announced_addrs in $config_file"
-        exit 1
-    }
+    update_rendered_config_value_or_exit "$config_file" "fiber" "auto_announce_node" "false"
+    update_rendered_config_value_or_exit "$config_file" "fiber" "announce_listening_addr" "false"
+    remove_config_value_or_exit "$config_file" "fiber" "announced_node_name"
+    update_list_config_value_or_exit "$config_file" "fiber" "announced_addrs"
     print_success "Configured this mainnet node as a non-public Fiber node"
 }
 
@@ -1158,48 +1163,21 @@ check_ckb_rpc_preflight() {
     return 0
 }
 
-get_local_install_script_dir() {
-    if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-        cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
-    fi
-}
-
-resolve_install_script_url() {
-    local script_name="${1:-install.sh}"
-    local override_url="${2:-}"
-    local install_url="${INSTALL_URL:-$INSTALL_URL_DEFAULT}"
-
-    if [ -n "$override_url" ]; then
-        printf '%s\n' "$override_url"
-        return
-    fi
-
-    case "$install_url" in
-        */install.sh)
-            if [ "$script_name" = "install.sh" ]; then
-                printf '%s\n' "$install_url"
-            else
-                printf '%s/%s\n' "${install_url%/*}" "$script_name"
-            fi
-            ;;
-        *)
-            printf '%s/%s\n' "${install_url%/}" "$script_name"
-            ;;
-    esac
-}
-
 install_unix_installer_script() {
     local helper_dir="$INSTALL_DIR/tools/install"
-    local local_script_dir
+    local local_script_path=""
     local script_url
 
     mkdir -p "$helper_dir"
-    local_script_dir="$(get_local_install_script_dir)"
 
-    if [ -n "$local_script_dir" ] && [ -f "$local_script_dir/install.sh" ]; then
-        cp "$local_script_dir/install.sh" "$helper_dir/install.sh"
+    if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+        local_script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    fi
+
+    if [ -n "$local_script_path" ] && [ -f "$local_script_path" ]; then
+        cp "$local_script_path" "$helper_dir/install.sh"
     else
-        script_url="$(resolve_install_script_url "install.sh" "${INSTALL_URL:-}")"
+        script_url="${INSTALL_URL:-$INSTALL_URL_DEFAULT}"
         print_info "Downloading Unix installer script..."
         download_file "$script_url" "$helper_dir/install.sh" quiet
     fi
@@ -1208,31 +1186,34 @@ install_unix_installer_script() {
     print_success "Unix installer script installed to $helper_dir/install.sh"
 }
 
-ensure_ckb_cli_available_for_bootstrap() {
-    if CKB_CLI_HINT_PATH="$(resolve_existing_ckb_cli_path "$INSTALL_DIR")"; then
-        print_success "ckb-cli found at $CKB_CLI_HINT_PATH"
+ensure_ckb_cli_available() {
+    local install_mode="$1"
+
+    if CKB_CLI_CMD="$(resolve_existing_ckb_cli_path "$INSTALL_DIR")"; then
+        CKB_CLI_HINT_PATH="$CKB_CLI_CMD"
+        print_success "ckb-cli found at $CKB_CLI_CMD"
         return
     fi
 
     require_unzip_if_needed
-    print_warning "ckb-cli not found. Downloading it automatically..."
-    install_ckb_cli_binary "$INSTALL_DIR"
-    CKB_CLI_HINT_PATH="$CKB_CLI_INSTALLED_PATH"
-}
 
-install_ckb_cli() {
-    print_warning "ckb-cli is required but not installed."
-    echo ""
-    read -p "Would you like to automatically download and install ckb-cli? (y/n): " install_ckb
+    if [ "$install_mode" = "bootstrap" ]; then
+        print_warning "ckb-cli not found. Downloading it automatically..."
+    else
+        print_warning "ckb-cli is required but not installed."
+        echo ""
+        read -p "Would you like to automatically download and install ckb-cli? (y/n): " install_ckb
 
-    if [ "$install_ckb" != "y" ] && [ "$install_ckb" != "Y" ]; then
-        print_info "Please install ckb-cli manually:"
-        echo "  https://github.com/nervosnetwork/ckb-cli"
-        exit 1
+        if [ "$install_ckb" != "y" ] && [ "$install_ckb" != "Y" ]; then
+            print_info "Please install ckb-cli manually:"
+            echo "  https://github.com/nervosnetwork/ckb-cli"
+            exit 1
+        fi
     fi
 
     install_ckb_cli_binary "$INSTALL_DIR"
     CKB_CLI_CMD="$CKB_CLI_INSTALLED_PATH"
+    CKB_CLI_HINT_PATH="$CKB_CLI_INSTALLED_PATH"
 }
 
 check_prerequisites() {
@@ -1240,15 +1221,7 @@ check_prerequisites() {
 
     ensure_download_tool
     print_success "Download tool found"
-
-    require_unzip_if_needed
-
-    if CKB_CLI_CMD="$(resolve_existing_ckb_cli_path "$INSTALL_DIR")"; then
-        print_success "ckb-cli found at $CKB_CLI_CMD"
-        return
-    fi
-
-    install_ckb_cli
+    ensure_ckb_cli_available guided
 }
 
 setup_keys() {
@@ -1682,7 +1655,7 @@ run_bootstrap_install() {
 
     mkdir -p "$INSTALL_DIR"
 
-    ensure_ckb_cli_available_for_bootstrap
+    ensure_ckb_cli_available bootstrap
 
     install_fnn_binary "$INSTALL_DIR"
     download_config_file "$INSTALL_DIR" "$NETWORK"
