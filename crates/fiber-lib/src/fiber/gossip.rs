@@ -102,6 +102,22 @@ const GOSSIP_INGRESS_PASSIVE: &str = "passive";
 const GOSSIP_INGRESS_ACTIVE_GET: &str = "active_get";
 const GOSSIP_INGRESS_QUERY: &str = "query";
 
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+#[path = "gossip_metrics.rs"]
+mod metrics_impl;
+#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
+#[path = "gossip_metrics_noop.rs"]
+mod metrics_impl;
+
+use self::metrics_impl::{
+    observe_active_sync_completion, observe_active_sync_finished, observe_active_sync_started,
+    observe_active_sync_timeout, observe_applied_broadcast_message,
+    observe_applied_propagation_latency, observe_dependency_query_request,
+    observe_duplicate_broadcast_message, observe_gossip_received_bytes, observe_gossip_sent_bytes,
+    observe_missing_dependency_message, observe_received_broadcast_messages,
+    observe_received_propagation_latencies, observe_rejected_broadcast_message,
+};
+
 fn max_acceptable_gossip_message_timestamp() -> u64 {
     now_timestamp_as_millis_u64() + MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS
 }
@@ -112,228 +128,6 @@ fn broadcast_message_type(message: &BroadcastMessage) -> &'static str {
         BroadcastMessage::ChannelUpdate(_) => "channel_update",
         BroadcastMessage::NodeAnnouncement(_) => "node_announcement",
     }
-}
-
-fn broadcast_message_with_timestamp_type(message: &BroadcastMessageWithTimestamp) -> &'static str {
-    match message {
-        BroadcastMessageWithTimestamp::ChannelAnnouncement(_, _) => "channel_announcement",
-        BroadcastMessageWithTimestamp::ChannelUpdate(_) => "channel_update",
-        BroadcastMessageWithTimestamp::NodeAnnouncement(_) => "node_announcement",
-    }
-}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_gossip_received_bytes(bytes: usize) {
-    metrics::counter!(crate::metrics::GOSSIP_RECEIVED_BYTES_TOTAL).increment(bytes as u64);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_gossip_received_bytes(_bytes: usize) {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_gossip_sent_bytes(bytes: usize) {
-    metrics::counter!(crate::metrics::GOSSIP_SENT_BYTES_TOTAL).increment(bytes as u64);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_gossip_sent_bytes(_bytes: usize) {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_received_broadcast_messages(count: usize) {
-    metrics::counter!(crate::metrics::GOSSIP_RECEIVED_BROADCAST_MESSAGES_TOTAL)
-        .increment(count as u64);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_received_broadcast_messages(_count: usize) {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_applied_broadcast_message() {
-    metrics::counter!(crate::metrics::GOSSIP_APPLIED_BROADCAST_MESSAGES_TOTAL).increment(1);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_applied_broadcast_message() {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_duplicate_broadcast_message() {
-    metrics::counter!(crate::metrics::GOSSIP_DUPLICATE_BROADCAST_MESSAGES_TOTAL).increment(1);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_duplicate_broadcast_message() {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_rejected_broadcast_message(reason: &'static str) {
-    metrics::counter!(
-        crate::metrics::GOSSIP_REJECTED_BROADCAST_MESSAGES_TOTAL,
-        "reason" => reason
-    )
-    .increment(1);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_rejected_broadcast_message(_reason: &'static str) {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_gossip_propagation_received_latency(
-    message_type: &'static str,
-    ingress: &'static str,
-    latency_ms: u64,
-) {
-    metrics::histogram!(
-        crate::metrics::GOSSIP_PROPAGATION_RECEIVED_LATENCY_MS,
-        "message_type" => message_type,
-        "ingress" => ingress
-    )
-    .record(latency_ms as f64);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_gossip_propagation_received_latency(
-    _message_type: &'static str,
-    _ingress: &'static str,
-    _latency_ms: u64,
-) {
-}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_gossip_propagation_applied_latency(message_type: &'static str, latency_ms: u64) {
-    metrics::histogram!(
-        crate::metrics::GOSSIP_PROPAGATION_APPLIED_LATENCY_MS,
-        "message_type" => message_type
-    )
-    .record(latency_ms as f64);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_gossip_propagation_applied_latency(_message_type: &'static str, _latency_ms: u64) {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_gossip_propagation_sample_skipped(
-    stage: &'static str,
-    message_type: &'static str,
-    reason: &'static str,
-) {
-    metrics::counter!(
-        crate::metrics::GOSSIP_PROPAGATION_SAMPLES_SKIPPED_TOTAL,
-        "stage" => stage,
-        "message_type" => message_type,
-        "reason" => reason
-    )
-    .increment(1);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_gossip_propagation_sample_skipped(
-    _stage: &'static str,
-    _message_type: &'static str,
-    _reason: &'static str,
-) {
-}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_active_sync_completion(latency_ms: u64) {
-    metrics::histogram!(crate::metrics::GOSSIP_ACTIVE_SYNC_COMPLETION_MS).record(latency_ms as f64);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_active_sync_completion(_latency_ms: u64) {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_active_sync_started() {
-    metrics::counter!(crate::metrics::GOSSIP_ACTIVE_SYNC_STARTED_TOTAL).increment(1);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_active_sync_started() {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_active_sync_finished() {
-    metrics::counter!(crate::metrics::GOSSIP_ACTIVE_SYNC_FINISHED_TOTAL).increment(1);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_active_sync_finished() {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_active_sync_timeout() {
-    metrics::counter!(crate::metrics::GOSSIP_ACTIVE_SYNC_TIMEOUT_TOTAL).increment(1);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_active_sync_timeout() {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_missing_dependency_message(message_type: &'static str) {
-    metrics::counter!(
-        crate::metrics::GOSSIP_MISSING_DEPENDENCY_MESSAGES_TOTAL,
-        "message_type" => message_type
-    )
-    .increment(1);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_missing_dependency_message(_message_type: &'static str) {}
-
-#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-fn observe_dependency_query_request(items: usize) {
-    metrics::counter!(crate::metrics::GOSSIP_DEPENDENCY_QUERY_REQUESTS_TOTAL).increment(1);
-    metrics::counter!(crate::metrics::GOSSIP_DEPENDENCY_QUERY_ITEMS_TOTAL).increment(items as u64);
-}
-
-#[cfg(not(all(feature = "metrics", not(target_arch = "wasm32"))))]
-fn observe_dependency_query_request(_items: usize) {}
-
-fn observe_received_propagation_latencies(messages: &[BroadcastMessage], ingress: &'static str) {
-    let now = now_timestamp_as_millis_u64();
-    for message in messages {
-        let message_type = broadcast_message_type(message);
-        match message.timestamp() {
-            Some(message_timestamp) if message_timestamp <= now => {
-                observe_gossip_propagation_received_latency(
-                    message_type,
-                    ingress,
-                    now.saturating_sub(message_timestamp),
-                );
-            }
-            Some(_) => {
-                observe_gossip_propagation_sample_skipped(
-                    "received",
-                    message_type,
-                    "future_timestamp",
-                );
-            }
-            None => {
-                observe_gossip_propagation_sample_skipped("received", message_type, "no_timestamp");
-            }
-        }
-    }
-}
-
-fn observe_applied_propagation_latency(message: &BroadcastMessageWithTimestamp) {
-    let message_type = broadcast_message_with_timestamp_type(message);
-    let message_timestamp = match message {
-        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => channel_update.timestamp,
-        BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
-            node_announcement.timestamp
-        }
-        BroadcastMessageWithTimestamp::ChannelAnnouncement(_, _) => {
-            observe_gossip_propagation_sample_skipped(
-                "applied",
-                message_type,
-                "unsupported_message_type",
-            );
-            return;
-        }
-    };
-
-    let now = now_timestamp_as_millis_u64();
-    if message_timestamp > now {
-        observe_gossip_propagation_sample_skipped("applied", message_type, "future_timestamp");
-        return;
-    }
-    observe_gossip_propagation_applied_latency(message_type, now.saturating_sub(message_timestamp));
 }
 
 pub trait GossipMessageStore {
