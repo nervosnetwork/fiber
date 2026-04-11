@@ -384,10 +384,15 @@ function Normalize-InstallDir {
 
     if ($Path.StartsWith("~/") -or $Path.StartsWith('~\')) {
         $relativePath = $Path.Substring(2).TrimStart('\', '/')
-        return Join-Path $HOME $relativePath
+        $Path = Join-Path $HOME $relativePath
     }
 
-    return $Path
+    try {
+        return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    }
+    catch {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
 }
 
 function Test-InteractiveStdin {
