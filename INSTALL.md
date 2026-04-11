@@ -4,16 +4,16 @@
 
 ```bash
 # Install to default location (~/.fiber)
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | bash
 
 # Install to custom location
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | INSTALL_DIR=/opt/fiber bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | INSTALL_DIR=/opt/fiber bash
 
 # Install specific version
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | FNN_VERSION=0.8.0 bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | FNN_VERSION=0.8.0 bash
 
 # Install for mainnet
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | NETWORK=mainnet bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | NETWORK=mainnet bash
 ```
 
 If you need to test an unpublished public branch or fork, replace `main` in the GitHub Raw URL, or set `INSTALL_REPO` and `INSTALL_REF` before `bash`.
@@ -25,7 +25,7 @@ The examples below assume these installer files have already been published on t
 
 ```bash
 # 1. Install FNN
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | bash
 
 # 2. Create CKB account (if you don't have one)
 ckb-cli account new
@@ -47,7 +47,7 @@ The installed release bundle also includes:
 - `~/.fiber/fnn-cli`
 - `~/.fiber/fnn-migrate`
 - `~/.fiber/config/`
-- `~/.fiber/tools/install/quick-start.sh`
+- `~/.fiber/tools/install/install.sh`
 
 ### Environment Variables
 
@@ -61,16 +61,16 @@ The installed release bundle also includes:
 For `NETWORK=mainnet`, the installer config defaults `ckb.rpc_url` to `https://mainnet.ckb.dev/`. You can still edit `config.yml` later to use your own trusted endpoint.
 Do not reuse the same install directory across `testnet` and `mainnet`; keep separate data directories for each network.
 
-### Guided quick-start
+### Guided install
 
 If you are working from a local checkout and want a guided install flow:
 
 ```bash
 # Linux/macOS
-./tools/install/quick-start.sh
+./tools/install/install.sh
 
 # Override the default mainnet selection
-./tools/install/quick-start.sh ./my-fnn testnet
+./tools/install/install.sh ./my-fnn testnet
 
 ```
 

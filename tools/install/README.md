@@ -7,21 +7,21 @@ All installer-related scripts live in `tools/install/`.
 ### Linux/MacOS
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-curl.sh | bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | bash
 ```
 
 ### Unix guided installer
 
 ```bash
-./tools/install/quick-start.sh
+./tools/install/install.sh
 ```
 
-If you omit the network argument, `quick-start.sh` defaults to `mainnet`.
+If you omit the network argument in guided mode, `install.sh` defaults to `mainnet`.
+When it runs via `curl | bash`, the same script uses bootstrap mode and defaults to `testnet`.
 
 ### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install-fnn.ps1 | iex
+irm https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.ps1 | iex
 ```
-
 
