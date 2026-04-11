@@ -49,6 +49,48 @@ function Write-Info($message) {
     Write-Host "[INFO] $message" -ForegroundColor Cyan
 }
 
+function Restart-InstallerFromTempFileIfNeeded {
+    $invocationPath = $null
+    if ($MyInvocation -and $MyInvocation.MyCommand) {
+        $invocationPath = $MyInvocation.MyCommand.Path
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -or -not [string]::IsNullOrWhiteSpace($invocationPath)) {
+        return $false
+    }
+
+    $scriptBlock = $null
+    if ($MyInvocation -and $MyInvocation.MyCommand) {
+        $scriptBlock = $MyInvocation.MyCommand.ScriptBlock
+    }
+    if (-not $scriptBlock) {
+        Write-FnnWarning "Could not re-launch the installer from a temporary file. Interactive password prompts may look degraded in 'irm | iex' mode."
+        return $false
+    }
+
+    $tempScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("fnn-install-{0}.ps1" -f [System.Guid]::NewGuid().ToString())
+    $powershellExe = Join-Path $PSHOME "powershell.exe"
+    if (-not (Test-Path $powershellExe)) {
+        $powershellExe = "powershell"
+    }
+
+    try {
+        [System.IO.File]::WriteAllText($tempScriptPath, $scriptBlock.ToString(), [System.Text.UTF8Encoding]::new($false))
+        Write-Info "Re-launching the installer from a temporary .ps1 file so ckb-cli can use normal password prompts."
+        & $powershellExe -NoProfile -ExecutionPolicy Bypass -File $tempScriptPath -InstallDir $InstallDir -Network $Network
+        $global:LASTEXITCODE = $LASTEXITCODE
+    }
+    finally {
+        Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
+    }
+
+    return $true
+}
+
+if (Restart-InstallerFromTempFileIfNeeded) {
+    return
+}
+
 function Show-Header {
     Write-Host ""
     Write-Host "==========================================" -ForegroundColor Cyan
@@ -444,15 +486,15 @@ function Backup-ExistingInstallPath {
 }
 
 function Prepare-InstallDir {
-    $script:InstallDir = Normalize-InstallDir $script:InstallDir
+    $resolvedInstallDir = Normalize-InstallDir $InstallDir
 
-    while (Test-InstallPathHasExistingContents -Path $script:InstallDir) {
-        $backupDir = Get-InstallBackupDir -Path $script:InstallDir
+    while (Test-InstallPathHasExistingContents -Path $resolvedInstallDir) {
+        $backupDir = Get-InstallBackupDir -Path $resolvedInstallDir
 
-        Write-FnnWarning "Install directory already exists and is not empty: $script:InstallDir"
+        Write-FnnWarning "Install directory already exists and is not empty: $resolvedInstallDir"
 
         if (-not (Test-InteractiveStdin)) {
-            Backup-ExistingInstallPath -ExistingPath $script:InstallDir -BackupPath $backupDir
+            Backup-ExistingInstallPath -ExistingPath $resolvedInstallDir -BackupPath $backupDir
             break
         }
 
@@ -462,13 +504,15 @@ function Prepare-InstallDir {
         $userInput = Read-Host "Install directory choice (default: back up current directory)"
 
         if ([string]::IsNullOrWhiteSpace($userInput)) {
-            Backup-ExistingInstallPath -ExistingPath $script:InstallDir -BackupPath $backupDir
+            Backup-ExistingInstallPath -ExistingPath $resolvedInstallDir -BackupPath $backupDir
             break
         }
 
-        $script:InstallDir = Normalize-InstallDir $userInput
-        Write-Info "Using installation directory: $script:InstallDir"
+        $resolvedInstallDir = Normalize-InstallDir $userInput
+        Write-Info "Using installation directory: $resolvedInstallDir"
     }
+
+    return $resolvedInstallDir
 }
 
 function Get-ExistingInstallNetwork {
@@ -638,16 +682,20 @@ function Configure-MainnetPublicNode {
 function Check-CkbRpcPreflight {
     $rpcUrl = Get-CkbRpcUrlFromConfig
     if (-not $rpcUrl) {
-        $script:StartupBlockerMessage = "Could not read ckb.rpc_url from $InstallDir\config.yml."
-        return $false
+        return [pscustomobject]@{
+            Ok = $false
+            Message = "Could not read ckb.rpc_url from $InstallDir\config.yml."
+        }
     }
 
     $expectedGenesisHash = switch ($Network) {
         "mainnet" { $MAINNET_GENESIS_HASH }
         "testnet" { $TESTNET_GENESIS_HASH }
         default {
-            $script:StartupBlockerMessage = "Unsupported network: $Network"
-            return $false
+            return [pscustomobject]@{
+                Ok = $false
+                Message = "Unsupported network: $Network"
+            }
         }
     }
 
@@ -655,22 +703,31 @@ function Check-CkbRpcPreflight {
         $response = Invoke-RestMethod -Uri $rpcUrl -Method Post -ContentType "application/json" -Body '{"id":2,"jsonrpc":"2.0","method":"get_block_hash","params":["0x0"]}' -ErrorAction Stop
     }
     catch {
-        $script:StartupBlockerMessage = "Cannot reach the configured CKB RPC at $rpcUrl."
-        return $false
+        return [pscustomobject]@{
+            Ok = $false
+            Message = "Cannot reach the configured CKB RPC at $rpcUrl."
+        }
     }
 
     $actualGenesisHash = $response.result
     if (-not $actualGenesisHash) {
-        $script:StartupBlockerMessage = "The CKB RPC at $rpcUrl did not return a usable genesis hash."
-        return $false
+        return [pscustomobject]@{
+            Ok = $false
+            Message = "The CKB RPC at $rpcUrl did not return a usable genesis hash."
+        }
     }
 
     if ($actualGenesisHash -ne $expectedGenesisHash) {
-        $script:StartupBlockerMessage = "The configured CKB RPC at $rpcUrl does not appear to be a $Network node."
-        return $false
+        return [pscustomobject]@{
+            Ok = $false
+            Message = "The configured CKB RPC at $rpcUrl does not appear to be a $Network node."
+        }
     }
 
-    return $true
+    return [pscustomobject]@{
+        Ok = $true
+        Message = $null
+    }
 }
 
 function Install-CkbCli {
@@ -719,10 +776,11 @@ function Install-CkbCli {
 
     # Install to install directory
     Copy-Item $ckbCliPath.FullName "$InstallDir\ckb-cli.exe"
-    $script:CKB_CLI_CMD = "$InstallDir\ckb-cli.exe"
-    Write-Success "ckb-cli installed to $InstallDir\ckb-cli.exe"
+    $installedCkbCliPath = "$InstallDir\ckb-cli.exe"
+    Write-Success "ckb-cli installed to $installedCkbCliPath"
 
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+    return $installedCkbCliPath
 }
 
 function Check-Prerequisites {
@@ -730,12 +788,11 @@ function Check-Prerequisites {
 
     $existingCkbCli = Get-ExistingCkbCliPath
     if ($existingCkbCli) {
-        $script:CKB_CLI_CMD = $existingCkbCli
-        Write-Success "ckb-cli found at $script:CKB_CLI_CMD"
-        return
+        Write-Success "ckb-cli found at $existingCkbCli"
+        return $existingCkbCli
     }
 
-    Install-CkbCli
+    return Install-CkbCli
 }
 
 function Download-Binary {
@@ -829,6 +886,7 @@ function Setup-Keys {
 
     $ckbDir = "$InstallDir\ckb"
     New-Item -ItemType Directory -Path $ckbDir -Force | Out-Null
+    $createdNewAccount = $false
 
     Write-FnnWarning "You need a CKB account to run the Fiber node."
     Write-Host ""
@@ -841,7 +899,10 @@ function Setup-Keys {
     switch ($choice) {
         "1" {
             Write-Info "Creating new CKB account..."
-            Write-Info "You will be prompted to set a password for your CKB wallet"
+            Write-Info "ckb-cli will ask for your CKB wallet password three times during setup:"
+            Write-Host "  1) Enter a new wallet password"
+            Write-Host "  2) Enter the same wallet password again to confirm it"
+            Write-Host "  3) Enter the same wallet password once more to export the key for FNN"
             Write-Host ""
 
             # Run ckb-cli account new directly (not capturing output) so it can interact with user
@@ -851,6 +912,8 @@ function Setup-Keys {
                 Write-FnnError "Failed to create account"
                 exit 1
             }
+
+            $createdNewAccount = $true
 
             Write-Host ""
             Write-Info "Account created successfully!"
@@ -888,14 +951,10 @@ function Setup-Keys {
             }
 
             Write-Success "Detected lock_arg: $LOCK_ARG"
-            # Save to script scope variable for summary
-            $script:GlobalLockArg = $LOCK_ARG
         }
         "2" {
             Write-Host ""
             $LOCK_ARG = Read-Host "Enter your lock_arg"
-            # Save to script scope variable for summary
-            $script:GlobalLockArg = $LOCK_ARG
         }
         default {
             Write-FnnError "Invalid choice"
@@ -909,7 +968,12 @@ function Setup-Keys {
     }
 
     Write-Info "Exporting private key..."
-    Write-Info "ckb-cli may prompt you for your wallet password to export the key."
+    if ($createdNewAccount) {
+        Write-Info "When ckb-cli prompts next, enter the same CKB wallet password you just created."
+    }
+    else {
+        Write-Info "When ckb-cli prompts next, enter the password for the selected CKB wallet."
+    }
 
     try {
         # Run ckb-cli account export directly so it can prompt for the wallet password.
@@ -935,6 +999,8 @@ function Setup-Keys {
         Write-FnnError "Failed to export key: $_"
         exit 1
     }
+
+    return $LOCK_ARG
 }
 
 function Show-FundingInfo($lockArg) {
@@ -1124,19 +1190,20 @@ function Show-Summary {
     Write-Host "  1. Keep your private key file (ckb\key) secure"
     Write-Host "  2. Use a strong password for FIBER_SECRET_KEY_PASSWORD"
     Write-Host "  3. Backup your ckb\ directory regularly"
-    if ($script:GlobalLockArg) {
+    if ($GlobalLockArg) {
         Write-Host "  4. Fund your CKB address:"
-        Write-Host "     - Get your address: $CKB_CLI_CMD account list | Select-String '$script:GlobalLockArg' -Context 0,5"
+        Write-Host "     - Get your address: $CKB_CLI_CMD account list | Select-String '$GlobalLockArg' -Context 0,5"
         if ($Network -eq "testnet") {
             Write-Host "     - Testnet faucet: https://faucet.nervos.org/"
         }
     }
     Write-Host ""
 
-    if (-not (Check-CkbRpcPreflight)) {
+    $rpcPreflight = Check-CkbRpcPreflight
+    if (-not $rpcPreflight.Ok) {
         $canStartNow = $false
         Write-FnnWarning "Skipping automatic startup because the configured CKB RPC is not ready."
-        Write-Host "  $script:StartupBlockerMessage"
+        Write-Host "  $($rpcPreflight.Message)"
         Write-Host "  Update ckb.rpc_url in $InstallDir\config.yml and try again."
         Write-Host ""
     }
@@ -1181,7 +1248,7 @@ if ($Network -ne "testnet" -and $Network -ne "mainnet") {
     exit 1
 }
 
-Prepare-InstallDir
+$InstallDir = Prepare-InstallDir
 Assert-InstallDirMatchesNetwork
 
 Write-Info "Installation directory: $InstallDir"
@@ -1194,7 +1261,7 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Write-Success "Created directory: $InstallDir"
 
 # Check prerequisites
-Check-Prerequisites
+$CKB_CLI_CMD = Check-Prerequisites
 
 # Download binary and config
 Download-Binary
@@ -1204,7 +1271,7 @@ Configure-MainnetPublicNode
 
 # Setup keys
 Write-Host ""
-Setup-Keys
+$GlobalLockArg = Setup-Keys
 
 # Create startup script
 Create-StartupScript
