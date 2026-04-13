@@ -15,6 +15,16 @@ if ($Network -eq "mainnet" -and $env:NETWORK) {
     $Network = $env:NETWORK
 }
 
+$script:InstallerScriptPath = $PSCommandPath
+if ([string]::IsNullOrWhiteSpace($script:InstallerScriptPath) -and $MyInvocation -and $MyInvocation.MyCommand) {
+    $script:InstallerScriptPath = $MyInvocation.MyCommand.Path
+}
+
+$script:InstallerScriptText = $null
+if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.ScriptBlock) {
+    $script:InstallerScriptText = $MyInvocation.MyCommand.ScriptBlock.ToString()
+}
+
 # Configuration
 $FNN_VERSION = if ($env:FNN_VERSION) { $env:FNN_VERSION } else { "0.8.0" }
 $CKB_CLI_VERSION = if ($env:CKB_CLI_VERSION) { $env:CKB_CLI_VERSION } else { "1.12.0" }
@@ -50,32 +60,39 @@ function Write-Info($message) {
 }
 
 function Restart-InstallerFromTempFileIfNeeded {
-    $invocationPath = $null
-    if ($MyInvocation -and $MyInvocation.MyCommand) {
-        $invocationPath = $MyInvocation.MyCommand.Path
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -or -not [string]::IsNullOrWhiteSpace($invocationPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($script:InstallerScriptPath)) {
         return $false
     }
 
-    $scriptBlock = $null
-    if ($MyInvocation -and $MyInvocation.MyCommand) {
-        $scriptBlock = $MyInvocation.MyCommand.ScriptBlock
-    }
-    if (-not $scriptBlock) {
+    if ([string]::IsNullOrWhiteSpace($script:InstallerScriptText)) {
         Write-FnnWarning "Could not re-launch the installer from a temporary file. Interactive password prompts may look degraded in 'irm | iex' mode."
         return $false
     }
 
     $tempScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("fnn-install-{0}.ps1" -f [System.Guid]::NewGuid().ToString())
-    $powershellExe = Join-Path $PSHOME "powershell.exe"
-    if (-not (Test-Path $powershellExe)) {
-        $powershellExe = "powershell"
+    $powershellExe = $null
+    try {
+        $powershellExe = (Get-Process -Id $PID -ErrorAction Stop).Path
+    }
+    catch {
+    }
+
+    if ([string]::IsNullOrWhiteSpace($powershellExe)) {
+        foreach ($candidate in @(
+            (Join-Path $PSHOME "pwsh.exe"),
+            (Join-Path $PSHOME "powershell.exe"),
+            "pwsh",
+            "powershell"
+        )) {
+            if ((Test-Path $candidate) -or ($candidate -in @("pwsh", "powershell"))) {
+                $powershellExe = $candidate
+                break
+            }
+        }
     }
 
     try {
-        [System.IO.File]::WriteAllText($tempScriptPath, $scriptBlock.ToString(), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($tempScriptPath, $script:InstallerScriptText, [System.Text.UTF8Encoding]::new($false))
         Write-Info "Re-launching the installer from a temporary .ps1 file so ckb-cli can use normal password prompts."
         & $powershellExe -NoProfile -ExecutionPolicy Bypass -File $tempScriptPath -InstallDir $InstallDir -Network $Network
         $global:LASTEXITCODE = $LASTEXITCODE
