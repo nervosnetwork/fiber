@@ -82,9 +82,10 @@ impl PeerRpcServerImpl {
 
         if let Some(pubkey_str) = params.pubkey {
             let pubkey = Pubkey::try_from(pubkey_str).rpc_err(&params)?;
+            let addr_type = params.addr_type;
             let message = |rpc_reply| {
                 NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
-                    pubkey, rpc_reply,
+                    pubkey, addr_type, rpc_reply,
                 ))
             };
             return crate::handle_actor_call!(self.actor, message, params);

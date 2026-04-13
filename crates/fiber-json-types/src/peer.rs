@@ -5,6 +5,18 @@ use crate::serde_utils::Pubkey;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// The type of multiaddr transport to filter by when resolving peer addresses.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiAddrType {
+    /// TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
+    Tcp,
+    /// WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
+    Ws,
+    /// WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
+    Wss,
+}
+
 /// Parameters for connecting to a peer.
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct ConnectPeerParams {
@@ -17,6 +29,10 @@ pub struct ConnectPeerParams {
     pub pubkey: Option<Pubkey>,
     /// Whether to save the peer address to the peer store.
     pub save: Option<bool>,
+    /// Filter addresses by transport type when connecting by pubkey.
+    /// If not specified, a random address is chosen from all available addresses.
+    /// This is useful for WASM environments where only `wss` addresses are supported.
+    pub addr_type: Option<MultiAddrType>,
 }
 
 /// Parameters for disconnecting from a peer.

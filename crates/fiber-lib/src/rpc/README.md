@@ -84,6 +84,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `HopRequire`](#type-hoprequire)
     * [Type `Htlc`](#type-htlc)
     * [Type `InvoiceData`](#type-invoicedata)
+    * [Type `MultiAddrType`](#type-multiaddrtype)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentStatus`](#type-paymentstatus)
@@ -992,6 +993,9 @@ Connect to a peer.
 * `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key of the peer to connect to.
  The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
+* `addr_type` - <em>Option<[MultiAddrType](#type-multiaddrtype)></em>, Filter addresses by transport type when connecting by pubkey.
+ If not specified, a random address is chosen from all available addresses.
+ This is useful for WASM environments where only `wss` addresses are supported.
 
 ##### Returns
 
@@ -1503,6 +1507,19 @@ The metadata of the invoice.
 * `timestamp` - <em>`u128`</em>, The timestamp of the invoice
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice
 * `attrs` - <em>Vec<[Attribute](#type-attribute)></em>, The attributes of the invoice, e.g. description, expiry time, etc.
+---
+
+<a id="#type-multiaddrtype"></a>
+### Type `MultiAddrType`
+
+The type of multiaddr transport to filter by when resolving peer addresses.
+
+
+#### Enum with values of
+
+* `tcp` - TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
+* `ws` - WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
+* `wss` - WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
 ---
 
 <a id="#type-nodeinfo"></a>
