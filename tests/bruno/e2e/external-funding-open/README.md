@@ -113,7 +113,7 @@ This script does not start the environment by itself. It assumes the above `star
 If the script fails while waiting for node1 RPC after restart, check:
 
 - whether `./tests/nodes/start.sh e2e/external-funding-open` is still running in the other terminal;
-- [`tests/bruno/e2e/external-funding-open/logs/external-funding-open-node1-restart.log`](tests/bruno/e2e/external-funding-open/logs/external-funding-open-node1-restart.log) for restart output.
+- [`tests/bruno/e2e/external-funding-open/logs/external-funding-open-node1-restart.log`](./logs/external-funding-open-node1-restart.log) for restart output.
 
 ### Prerequisites
 

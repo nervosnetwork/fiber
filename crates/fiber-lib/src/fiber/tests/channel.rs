@@ -1,9 +1,9 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore,
-    ReloadParams, ReplayOrderHint, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS,
-    XUDT_COMPATIBLE_WITNESS,
+    merge_external_funding_witnesses, AddTlcResponse, ChannelActorState, ChannelActorStateStore,
+    ChannelOpenRecordStore, ReloadParams, ReplayOrderHint, UpdateCommand,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
+    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -43,7 +43,7 @@ use crate::{
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
-    packed::{CellDep, CellInput, Script, Transaction},
+    packed::{Bytes, CellDep, CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use fiber_types::{
@@ -8563,6 +8563,32 @@ fn mock_sign_external_funding_tx(unsigned_tx: &Transaction) -> Transaction {
         .data()
 }
 
+#[test]
+fn test_external_funding_witness_merge_preserves_existing_signatures() {
+    let external_signature: Bytes = [1u8; 65].pack();
+    let local_placeholder = Bytes::default();
+    let remote_placeholder = Bytes::default();
+    let remote_signature: Bytes = [2u8; 65].pack();
+    let remote_extra_signature: Bytes = [3u8; 65].pack();
+    let local_tx = Transaction::default()
+        .as_advanced_builder()
+        .set_witnesses(vec![external_signature.clone(), local_placeholder])
+        .build();
+
+    let merged = merge_external_funding_witnesses(
+        local_tx.witnesses(),
+        vec![
+            remote_placeholder,
+            remote_signature.clone(),
+            remote_extra_signature.clone(),
+        ],
+    );
+
+    assert_eq!(merged[0], external_signature);
+    assert_eq!(merged[1], remote_signature);
+    assert_eq!(merged[2], remote_extra_signature);
+}
+
 async fn wait_for_external_funding_post_submit_progress(
     node: &NetworkNode,
     channel_id: Hash256,
@@ -8665,20 +8691,17 @@ async fn test_open_channel_with_external_funding() {
         "channel should wait for external funding submit, got {:?}",
         persisted_state.state
     );
-    let external_funding_recovery_state = node_a
-        .store
-        .get_external_funding_recovery_state(&channel_id)
+    let external_funding_state = persisted_state
+        .external_funding
+        .as_ref()
         .expect("persisted external funding state should exist");
     assert_eq!(
-        external_funding_recovery_state
-            .unsigned_funding_tx
-            .raw()
-            .as_slice(),
+        external_funding_state.unsigned_funding_tx.raw().as_slice(),
         unsigned_tx.raw().as_slice(),
         "persisted unsigned tx should match returned unsigned tx"
     );
     assert!(
-        !external_funding_recovery_state.signed_submitted,
+        !external_funding_state.signed_submitted,
         "persisted state should still wait for signed submit"
     );
 }
@@ -9438,12 +9461,12 @@ async fn test_external_funding_hydrate_restores_early_peer_commitment_signed_sta
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
 
     let mut persisted_state = node_a.get_channel_actor_state(channel_id);
-    let mut recovery_state = node_a
-        .store
-        .get_external_funding_recovery_state(&channel_id)
-        .expect("external funding recovery state should exist");
-    recovery_state.peer_commitment_signed_received = true;
-    persisted_state.hydrate_external_funding_runtime(Some(recovery_state));
+    persisted_state
+        .external_funding
+        .as_mut()
+        .expect("external funding state should exist")
+        .peer_commitment_signed_received = true;
+    persisted_state.hydrate_external_funding_runtime();
 
     assert!(
         matches!(
@@ -9668,10 +9691,7 @@ async fn test_external_funding_state_cleared_after_terminal_path() {
     let state = node_a.get_channel_actor_state(channel_id);
     assert!(matches!(state.state, ChannelState::ChannelReady));
     assert!(
-        node_a
-            .store
-            .get_external_funding_recovery_state(&channel_id)
-            .is_none(),
+        state.external_funding.is_none(),
         "persisted external funding state should be cleared after channel ready"
     );
 }

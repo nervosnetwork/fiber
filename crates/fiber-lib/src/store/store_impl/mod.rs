@@ -34,8 +34,8 @@ use fiber_types::schema::*;
 use fiber_types::CchOrder;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, ExternalFundingRecoveryState, Hash256, PaymentCustomRecords, PaymentSession,
-    PaymentStatus, PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
+    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
 };
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
@@ -253,13 +253,6 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
-            EXTERNAL_FUNDING_STATE_PREFIX => {
-                check_deserialization::<ExternalFundingRecoveryState>(
-                    &value,
-                    "EXTERNAL_FUNDING_STATE_PREFIX",
-                    &mut errors,
-                );
-            }
             #[cfg(not(target_arch = "wasm32"))]
             CCH_ORDER_PREFIX => {
                 check_deserialization::<CchOrder>(&value, "CCH_ORDER_PREFIX", &mut errors);
@@ -377,7 +370,6 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
-    ExternalFundingState(Hash256, ExternalFundingRecoveryState),
 }
 
 /// Recorded store changes.
@@ -501,9 +493,6 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
-            KeyValue::ExternalFundingState(channel_id, _) => {
-                [&[EXTERNAL_FUNDING_STATE_PREFIX], channel_id.as_ref()].concat()
-            }
         }
     }
 
@@ -546,9 +535,6 @@ impl StoreKeyValue for KeyValue {
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
-            KeyValue::ExternalFundingState(_, state) => {
-                serialize_to_vec(state, "ExternalFundingRecoveryState")
-            }
         }
     }
 }
@@ -633,7 +619,6 @@ impl ChannelActorStateStore for Store {
         if let Some(state) = self.get_channel_actor_state(id) {
             let mut batch = self.batch();
             batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat());
-            batch.delete([&[EXTERNAL_FUNDING_STATE_PREFIX], id.as_ref()].concat());
             let remote_pubkey_bytes = state.get_remote_pubkey().serialize();
             batch.delete(
                 [
@@ -783,31 +768,6 @@ impl ChannelActorStateStore for Store {
     fn delete_pending_commit_diff(&self, channel_id: &Hash256) {
         let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
         self.delete(&key);
-    }
-
-    fn get_external_funding_recovery_state(
-        &self,
-        channel_id: &Hash256,
-    ) -> Option<ExternalFundingRecoveryState> {
-        let key = [&[EXTERNAL_FUNDING_STATE_PREFIX], channel_id.as_ref()].concat();
-        self.get(key)
-            .map(|v| deserialize_from(v.as_ref(), "ExternalFundingRecoveryState"))
-    }
-
-    fn insert_external_funding_recovery_state(
-        &self,
-        channel_id: Hash256,
-        external_funding_recovery_state: ExternalFundingRecoveryState,
-    ) {
-        let mut batch = self.batch();
-        let kv = KeyValue::ExternalFundingState(channel_id, external_funding_recovery_state);
-        batch.put(kv.key(), kv.value());
-        batch.commit();
-    }
-
-    fn delete_external_funding_recovery_state(&self, channel_id: &Hash256) {
-        let key = [&[EXTERNAL_FUNDING_STATE_PREFIX], channel_id.as_ref()].concat();
-        self.delete(key);
     }
 }
 

@@ -676,6 +676,7 @@ fn test_channel_actor_state_store() {
                 onion_packet: None,
             })],
             last_was_revoke: true,
+            external_funding: None,
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
@@ -813,6 +814,7 @@ fn sample_channel_actor_state(
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
+            external_funding: None,
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
@@ -1279,59 +1281,6 @@ fn test_store_channel_open_record() {
     record.fail("test failure".to_string());
     assert_eq!(record.status, ChannelOpeningStatus::Failed);
     assert_eq!(record.failure_detail.as_deref(), Some("test failure"));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn test_store_external_funding_recovery_state() {
-    let path = TempDir::new("external_funding_recovery_state_store");
-    let store = open_store(path).expect("create store failed");
-    let channel_id = deterministic_hash256(42, 123);
-    let state = fiber_types::ExternalFundingRecoveryState {
-        unsigned_funding_tx: Transaction::default(),
-        funding_lock_script: Some(Script::default()),
-        funding_lock_script_cell_deps: vec![CellDep::default()],
-        started_at_ms: 123_456,
-        signed_submitted: false,
-        peer_commitment_signed_received: false,
-    };
-
-    assert!(store
-        .get_external_funding_recovery_state(&channel_id)
-        .is_none());
-
-    store.insert_external_funding_recovery_state(channel_id, state.clone());
-    let loaded_state = store
-        .get_external_funding_recovery_state(&channel_id)
-        .expect("persisted external funding state");
-    assert_eq!(loaded_state.started_at_ms, state.started_at_ms);
-    assert_eq!(loaded_state.signed_submitted, state.signed_submitted);
-    assert_eq!(
-        loaded_state.peer_commitment_signed_received,
-        state.peer_commitment_signed_received
-    );
-    assert_eq!(
-        loaded_state.unsigned_funding_tx.as_slice(),
-        state.unsigned_funding_tx.as_slice()
-    );
-
-    let updated_state = fiber_types::ExternalFundingRecoveryState {
-        signed_submitted: true,
-        peer_commitment_signed_received: true,
-        ..state
-    };
-    store.insert_external_funding_recovery_state(channel_id, updated_state.clone());
-    let reloaded_state = store
-        .get_external_funding_recovery_state(&channel_id)
-        .expect("updated external funding state");
-    assert!(reloaded_state.signed_submitted);
-    assert!(reloaded_state.peer_commitment_signed_received);
-    assert_eq!(reloaded_state.started_at_ms, updated_state.started_at_ms);
-
-    store.delete_external_funding_recovery_state(&channel_id);
-    assert!(store
-        .get_external_funding_recovery_state(&channel_id)
-        .is_none());
 }
 
 #[cfg(not(target_arch = "wasm32"))]
