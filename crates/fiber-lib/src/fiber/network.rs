@@ -3344,14 +3344,12 @@ where
         let old_tx = transaction.into_view();
         let mut tx = FundingTx::new();
         tx.update_for_self(old_tx);
-        let tx = match self.fund(tx, request).await {
-            Ok(tx) => match tx.into_inner() {
-                Some(tx) => tx,
-                _ => {
-                    error!("Obtained empty funding tx (attempt {})", retry_count + 1);
-                    return Ok(());
-                }
-            },
+        let tx = match self
+            .fund(tx, request)
+            .await
+            .and_then(|tx| tx.into_inner().ok_or(FundingError::AbsentTx))
+        {
+            Ok(tx) => tx,
             Err(err) => {
                 let should_abort = schedule_funding_retry(
                     myself,
