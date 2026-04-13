@@ -4,7 +4,8 @@
 
 param(
     [string]$InstallDir = ".\my-fnn",
-    [string]$Network = "mainnet"
+    [string]$Network = "mainnet",
+    [switch]$RelaunchedFromIex
 )
 
 # Allow the same env overrides as the shell installers when params are omitted.
@@ -19,6 +20,11 @@ $script:InstallerScriptPath = $PSCommandPath
 if ([string]::IsNullOrWhiteSpace($script:InstallerScriptPath) -and $MyInvocation -and $MyInvocation.MyCommand) {
     $script:InstallerScriptPath = $MyInvocation.MyCommand.Path
 }
+
+$INSTALL_REPO = if ($env:INSTALL_REPO) { $env:INSTALL_REPO } else { "nervosnetwork/fiber" }
+$INSTALL_REF = if ($env:INSTALL_REF) { $env:INSTALL_REF } else { "main" }
+$INSTALL_SCRIPT_PATH = if ($env:INSTALL_SCRIPT_PATH) { $env:INSTALL_SCRIPT_PATH } else { "tools/install/install.ps1" }
+$INSTALL_SCRIPT_URL = if ($env:INSTALL_SCRIPT_URL) { $env:INSTALL_SCRIPT_URL } else { "https://raw.githubusercontent.com/$INSTALL_REPO/$INSTALL_REF/$INSTALL_SCRIPT_PATH" }
 
 # Configuration
 $FNN_VERSION = if ($env:FNN_VERSION) { $env:FNN_VERSION } else { "0.8.0" }
@@ -38,6 +44,61 @@ $CKB_CLI_CMD = "ckb-cli"
 
 # Keep console output ASCII-only so Windows PowerShell 5.1 can read this file
 # reliably even when the checkout is UTF-8 without BOM.
+function Write-Host {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+        [object[]]$Object,
+        [ConsoleColor]$ForegroundColor,
+        [ConsoleColor]$BackgroundColor,
+        [switch]$NoNewline,
+        [object]$Separator = " "
+    )
+
+    if (-not $RelaunchedFromIex) {
+        Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+        return
+    }
+
+    $text = if ($null -eq $Object) { "" } else { ($Object | ForEach-Object { "$_" }) -join $Separator }
+    $originalForeground = $null
+    $originalBackground = $null
+    $restoreForeground = $false
+    $restoreBackground = $false
+
+    try {
+        $originalForeground = [Console]::ForegroundColor
+        $restoreForeground = $true
+        $originalBackground = [Console]::BackgroundColor
+        $restoreBackground = $true
+
+        if ($PSBoundParameters.ContainsKey("ForegroundColor")) {
+            [Console]::ForegroundColor = $ForegroundColor
+        }
+        if ($PSBoundParameters.ContainsKey("BackgroundColor")) {
+            [Console]::BackgroundColor = $BackgroundColor
+        }
+
+        if ($NoNewline) {
+            [Console]::Write($text)
+        }
+        else {
+            [Console]::WriteLine($text)
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+    }
+    finally {
+        if ($restoreForeground) {
+            [Console]::ForegroundColor = $originalForeground
+        }
+        if ($restoreBackground) {
+            [Console]::BackgroundColor = $originalBackground
+        }
+    }
+}
+
 function Write-Success($message) {
     Write-Host "[OK] $message" -ForegroundColor Green
 }
@@ -52,6 +113,21 @@ function Write-FnnError($message) {
 
 function Write-Info($message) {
     Write-Host "[INFO] $message" -ForegroundColor Cyan
+}
+
+function Enable-BasicTls12ForRelaunch {
+    try {
+        $currentProtocols = [System.Net.ServicePointManager]::SecurityProtocol
+        $tls12 = [System.Net.SecurityProtocolType]::Tls12
+        $tls13 = 0
+        if ([enum]::GetNames([System.Net.SecurityProtocolType]) -contains "Tls13") {
+            $tls13 = [System.Net.SecurityProtocolType]::Tls13
+        }
+
+        [System.Net.ServicePointManager]::SecurityProtocol = $currentProtocols -bor $tls12 -bor $tls13
+    }
+    catch {
+    }
 }
 
 function Get-PowerShellExecutablePath {
@@ -85,13 +161,77 @@ function Convert-ToPowerShellLiteral {
     return "'" + ($Value -replace "'", "''") + "'"
 }
 
+function Restart-InstallerFromRemoteFileIfNeeded {
+    return $false
+}
+
 function Invoke-InteractiveConsoleCommand {
     param(
         [string]$FilePath,
-        [string[]]$ArgumentList = @()
+        [string[]]$ArgumentList = @(),
+        [string[]]$WindowIntroLines = @()
     )
 
+    if ([string]::IsNullOrWhiteSpace($script:InstallerScriptPath)) {
+        $workingDirectory = (Get-Location).Path
+        $powershellExe = Get-PowerShellExecutablePath
+        if ([string]::IsNullOrWhiteSpace($powershellExe)) {
+            Write-FnnWarning "Could not locate PowerShell for the interactive helper window. Falling back to direct execution."
+            & $FilePath @ArgumentList
+            return
+        }
+
+        $tempScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("fnn-ckb-cli-window-{0}.ps1" -f [System.Guid]::NewGuid().ToString())
+        $fileLiteral = Convert-ToPowerShellLiteral -Value $FilePath
+        $argumentListLiteral = "@(" + (($ArgumentList | ForEach-Object { Convert-ToPowerShellLiteral -Value $_ }) -join ", ") + ")"
+        $introLinesLiteral = "@(" + (($WindowIntroLines | ForEach-Object { Convert-ToPowerShellLiteral -Value $_ }) -join ", ") + ")"
+        $tempScriptContent = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    `$host.UI.RawUI.WindowTitle = 'FNN Installer - ckb-cli prompt'
+}
+catch {
+}
+`$introLines = $introLinesLiteral
+if (`$introLines.Count -gt 0) {
+    Write-Host ''
+    foreach (`$line in `$introLines) {
+        Write-Host `$line -ForegroundColor Cyan
+    }
+    Write-Host ''
+}
+`$exePath = $fileLiteral
+`$arguments = $argumentListLiteral
+& `$exePath @arguments
+`$exitCode = `$LASTEXITCODE
+if (`$exitCode -ne 0) {
+    Write-Host ''
+    Write-Host ('ckb-cli exited with code {0}.' -f `$exitCode) -ForegroundColor Red
+    Read-Host 'Press Enter to close this window' | Out-Null
+}
+exit `$exitCode
+"@
+
+        Write-Info "Opening a separate console window for secure ckb-cli password entry..."
+        try {
+            [System.IO.File]::WriteAllText($tempScriptPath, $tempScriptContent, [System.Text.UTF8Encoding]::new($false))
+            $process = Start-Process -FilePath $powershellExe -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $tempScriptPath) -WorkingDirectory $workingDirectory -PassThru -Wait
+        }
+        finally {
+            Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
+        }
+        $global:LASTEXITCODE = $process.ExitCode
+        return
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($script:InstallerScriptPath)) {
+        if ($WindowIntroLines.Count -gt 0) {
+            Write-Host ""
+            foreach ($line in $WindowIntroLines) {
+                Write-Info $line
+            }
+            Write-Host ""
+        }
         & $FilePath @ArgumentList
         return
     }
@@ -932,9 +1072,16 @@ function Setup-Keys {
         "1" {
             Write-Info "Creating new CKB account..."
             Write-Info "ckb-cli will ask for your CKB wallet password two times during setup:"
+            if ([string]::IsNullOrWhiteSpace($script:InstallerScriptPath)) {
+                Write-Info "A separate console window will open for the password prompts. Finish there, then return to this installer window."
+            }
             Write-Host ""
 
-            Invoke-InteractiveConsoleCommand -FilePath $CKB_CLI_CMD -ArgumentList @("account", "new")
+            Invoke-InteractiveConsoleCommand -FilePath $CKB_CLI_CMD -ArgumentList @("account", "new") -WindowIntroLines @(
+                "Fiber opened this window for ckb-cli account creation.",
+                "Please enter your new CKB wallet password when ckb-cli shows 'Password:'.",
+                "Then enter the same password again when ckb-cli shows 'Repeat the password:'."
+            )
 
             if ($LASTEXITCODE -ne 0) {
                 Write-FnnError "Failed to create account"
@@ -997,10 +1144,13 @@ function Setup-Keys {
 
     Write-Info "Exporting private key..."
     if ($createdNewAccount) {
-        Write-Info "When ckb-cli prompts next, enter the same CKB wallet password you just created."
+        Write-Info "The next ckb-cli step will ask for the same CKB wallet password again to export the key for FNN."
     }
     else {
-        Write-Info "When ckb-cli prompts next, enter the password for the selected CKB wallet."
+        Write-Info "The next ckb-cli step will ask for the password of the selected CKB wallet."
+    }
+    if ([string]::IsNullOrWhiteSpace($script:InstallerScriptPath)) {
+        Write-Info "A separate console window will open for the password prompt. Finish there, then return to this installer window."
     }
 
     try {
@@ -1011,6 +1161,9 @@ function Setup-Keys {
             $LOCK_ARG,
             "--extended-privkey-path",
             "$ckbDir\exported-key"
+        ) -WindowIntroLines @(
+            "Fiber opened this window to export your CKB private key for FNN.",
+            "Please enter the same CKB wallet password again when ckb-cli prompts for it."
         )
 
         if ($LASTEXITCODE -ne 0) {
