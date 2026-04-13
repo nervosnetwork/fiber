@@ -931,10 +931,7 @@ function Setup-Keys {
     switch ($choice) {
         "1" {
             Write-Info "Creating new CKB account..."
-            Write-Info "ckb-cli will ask for your CKB wallet password three times during setup:"
-            Write-Host "  1) Enter a new wallet password"
-            Write-Host "  2) Enter the same wallet password again to confirm it"
-            Write-Host "  3) Enter the same wallet password once more to export the key for FNN"
+            Write-Info "ckb-cli will ask for your CKB wallet password two times during setup:"
             Write-Host ""
 
             Invoke-InteractiveConsoleCommand -FilePath $CKB_CLI_CMD -ArgumentList @("account", "new")
