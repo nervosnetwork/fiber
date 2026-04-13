@@ -20,11 +20,6 @@ if ([string]::IsNullOrWhiteSpace($script:InstallerScriptPath) -and $MyInvocation
     $script:InstallerScriptPath = $MyInvocation.MyCommand.Path
 }
 
-$script:InstallerScriptText = $null
-if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.ScriptBlock) {
-    $script:InstallerScriptText = $MyInvocation.MyCommand.ScriptBlock.ToString()
-}
-
 # Configuration
 $FNN_VERSION = if ($env:FNN_VERSION) { $env:FNN_VERSION } else { "0.8.0" }
 $CKB_CLI_VERSION = if ($env:CKB_CLI_VERSION) { $env:CKB_CLI_VERSION } else { "1.12.0" }
@@ -59,17 +54,7 @@ function Write-Info($message) {
     Write-Host "[INFO] $message" -ForegroundColor Cyan
 }
 
-function Restart-InstallerFromTempFileIfNeeded {
-    if (-not [string]::IsNullOrWhiteSpace($script:InstallerScriptPath)) {
-        return $false
-    }
-
-    if ([string]::IsNullOrWhiteSpace($script:InstallerScriptText)) {
-        Write-FnnWarning "Could not re-launch the installer from a temporary file. Interactive password prompts may look degraded in 'irm | iex' mode."
-        return $false
-    }
-
-    $tempScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("fnn-install-{0}.ps1" -f [System.Guid]::NewGuid().ToString())
+function Get-PowerShellExecutablePath {
     $powershellExe = $null
     try {
         $powershellExe = (Get-Process -Id $PID -ErrorAction Stop).Path
@@ -91,21 +76,51 @@ function Restart-InstallerFromTempFileIfNeeded {
         }
     }
 
+    return $powershellExe
+}
+
+function Convert-ToPowerShellLiteral {
+    param([string]$Value)
+
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Invoke-InteractiveConsoleCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList = @()
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($script:InstallerScriptPath)) {
+        & $FilePath @ArgumentList
+        return
+    }
+
+    $powershellExe = Get-PowerShellExecutablePath
+    if ([string]::IsNullOrWhiteSpace($powershellExe)) {
+        Write-FnnWarning "Could not launch a child PowerShell process. Falling back to the current console for interactive prompts."
+        & $FilePath @ArgumentList
+        return
+    }
+
+    $tempScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("fnn-interactive-{0}.ps1" -f [System.Guid]::NewGuid().ToString())
+    $fileLiteral = Convert-ToPowerShellLiteral -Value $FilePath
+    $argumentListLiteral = "@(" + (($ArgumentList | ForEach-Object { Convert-ToPowerShellLiteral -Value $_ }) -join ", ") + ")"
+    $tempScriptContent = @"
+`$ErrorActionPreference = 'Stop'
+`$exePath = $fileLiteral
+`$arguments = $argumentListLiteral
+& `$exePath @arguments
+exit `$LASTEXITCODE
+"@
+
     try {
-        [System.IO.File]::WriteAllText($tempScriptPath, $script:InstallerScriptText, [System.Text.UTF8Encoding]::new($false))
-        Write-Info "Re-launching the installer from a temporary .ps1 file so ckb-cli can use normal password prompts."
-        & $powershellExe -NoProfile -ExecutionPolicy Bypass -File $tempScriptPath -InstallDir $InstallDir -Network $Network
-        $global:LASTEXITCODE = $LASTEXITCODE
+        [System.IO.File]::WriteAllText($tempScriptPath, $tempScriptContent, [System.Text.UTF8Encoding]::new($false))
+        & $powershellExe -NoProfile -ExecutionPolicy Bypass -File $tempScriptPath
     }
     finally {
         Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
     }
-
-    return $true
-}
-
-if (Restart-InstallerFromTempFileIfNeeded) {
-    return
 }
 
 function Show-Header {
@@ -922,8 +937,7 @@ function Setup-Keys {
             Write-Host "  3) Enter the same wallet password once more to export the key for FNN"
             Write-Host ""
 
-            # Run ckb-cli account new directly (not capturing output) so it can interact with user
-            & $CKB_CLI_CMD account new
+            Invoke-InteractiveConsoleCommand -FilePath $CKB_CLI_CMD -ArgumentList @("account", "new")
 
             if ($LASTEXITCODE -ne 0) {
                 Write-FnnError "Failed to create account"
@@ -993,8 +1007,15 @@ function Setup-Keys {
     }
 
     try {
-        # Run ckb-cli account export directly so it can prompt for the wallet password.
-        & $CKB_CLI_CMD account export --lock-arg $LOCK_ARG --extended-privkey-path "$ckbDir\exported-key"
+        Invoke-InteractiveConsoleCommand -FilePath $CKB_CLI_CMD -ArgumentList @(
+            "account",
+            "export",
+            "--lock-arg",
+            $LOCK_ARG,
+            "--extended-privkey-path",
+            "$ckbDir\exported-key"
+        )
+
         if ($LASTEXITCODE -ne 0) {
             Write-FnnError "Failed to export key"
             exit 1
