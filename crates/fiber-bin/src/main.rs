@@ -94,21 +94,30 @@ pub async fn main() -> Result<(), ExitMessage> {
         }
     }
 
+    if let Some(source_path) = &config.restore {
+        info!("Starting manual restore process from: {:?}", source_path);
+
+        let parsed_fiber_config = config
+            .parsed_fiber()
+            .ok_or(ExitMessage("fiber config must be set".to_string()))?;
+
+        let store_path = parsed_fiber_config.store_path();
+
+        restore(source_path, &store_path)
+            .map_err(|err| ExitMessage(format!("Failed to restore database: {}", err)))?;
+
+        info!("Successfully restored database to {:?}.", store_path);
+        info!("All channels have been marked as 'Stale' for safety audit.");
+
+        std::process::exit(0);
+    }
+
     let parsed_fiber_config = config
         .parsed_fiber()
         .ok_or(ExitMessage("fiber config must be set".to_string()))?;
 
     // Derive store_path: prefer fiber config, fall back to base_dir/fiber/store
     let store_path = parsed_fiber_config.store_path();
-
-    let restore_path = parsed_fiber_config
-        .check_restore_path()
-        .map_err(|err| ExitMessage(format!("Restore path error: {}", err)))?;
-
-    if let Some(path) = restore_path {
-        restore(path, &store_path)
-            .map_err(|err| ExitMessage(format!("Restore process error: {}", err)))?;
-    }
 
     let raw_store = open_store(store_path).map_err(|err| ExitMessage(err.to_string()))?;
 

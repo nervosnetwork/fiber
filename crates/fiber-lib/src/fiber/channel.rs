@@ -62,9 +62,9 @@ use fiber_types::{
     CommitmentNumbers, EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
     NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
     PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RestoreAuditStore, RetryableTlcOperation, RevocationData, RevokeAndAck,
-    SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
-    TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
+    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr,
+    TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -421,7 +421,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: ChannelActorStateStore + InvoiceStore + PreimageStore + RestoreAuditStore,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -454,27 +454,6 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                    // Restore Audit Interception
-                    if let Some(audit_map) = self.store.get_restore_audit_map() {
-                        if let Some(audit_info) = audit_map.channels.get(&state.get_id()) {
-                            // A normal reestablish considers +1 to be safe
-                            if reestablish_channel.remote_commitment_number
-                                > audit_info.local_commitment_number + 1
-                            {
-                                error!(
-                                    "CRITICAL: Recovery rollback detected for channel {}! local_commitment_number: {}, remote_commitment_number: {}. Blocking channel to prevent penalty.",
-                                    state.get_id(), audit_info.local_commitment_number, reestablish_channel.remote_commitment_number
-                                );
-                                return Err(ProcessingChannelError::InvalidParameter(
-                                    "Channel state rollback detected during restore audit. Manual intervention required.".into()
-                                ));
-                            } else {
-                                self.store.resolve_channel_audit(&state.get_id());
-                                info!("Recovery audit passed for channel {}.", state.get_id());
-                            }
-                        }
-                    }
-
                     let pending_commit_diff = self.store.get_pending_commit_diff(&state.get_id());
                     state
                         .handle_reestablish_channel_message(
@@ -3327,13 +3306,7 @@ where
 #[async_trait::async_trait]
 impl<S> Actor for ChannelActor<S>
 where
-    S: ChannelActorStateStore
-        + InvoiceStore
-        + PreimageStore
-        + RestoreAuditStore
-        + Send
-        + Sync
-        + 'static,
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;
@@ -3660,6 +3633,23 @@ where
                 channel.network = Some(self.network.clone());
                 channel.private_key = Some(args.private_key.clone());
                 self.store.insert_channel_actor_state(channel.clone());
+
+                let reestablish_channel = ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: channel.get_local_commitment_number(),
+                    remote_commitment_number: channel.get_remote_commitment_number(),
+                };
+
+                if channel.state != ChannelState::Stale {
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
+                                FiberMessage::reestablish_channel(reestablish_channel),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
 
                 channel
             }
@@ -4553,6 +4543,13 @@ impl ChannelActorState {
 
     pub fn is_tlc_forwarding_enabled(&self) -> bool {
         self.local_tlc_info.enabled
+    }
+
+    pub fn is_risk_of_penalty(&self) -> bool {
+        matches!(
+            self.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+        )
     }
 
     pub fn set_waiting_peer_response(&mut self) {
@@ -7587,6 +7584,36 @@ impl ChannelActorState {
                     self.on_reestablished_channel_ready(myself);
                     debug_event!(network, "Reestablished channel in ChannelReady");
                 }
+            }
+            ChannelState::Stale => {
+                let my_local = self.get_local_commitment_number();
+                let my_remote = self.get_remote_commitment_number();
+                let peer_local = reestablish_channel.local_commitment_number;
+                let peer_remote = reestablish_channel.remote_commitment_number;
+
+                if peer_local.abs_diff(my_remote) > 1 || peer_remote.abs_diff(my_local) > 1 {
+                    error!(
+                        "Audit Failed for Stale channel: Local(L:{}, R:{}), Peer(L:{}, R:{})",
+                        my_local, my_remote, peer_local, peer_remote
+                    );
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "reestablish channel message with invalid commitment numbers during audit"
+                            .to_string(),
+                    ));
+                }
+
+                info!(
+                    "Passive audit passed for channel {}. Resuming to Ready.",
+                    self.get_id()
+                );
+                self.update_state(ChannelState::ChannelReady);
+
+                return Box::pin(self.handle_reestablish_channel_message(
+                    myself,
+                    reestablish_channel,
+                    pending_commit_diff,
+                ))
+                .await;
             }
             ChannelState::ShuttingDown(flags) => {
                 // Resend the shutdown message to the peer if we have not received the peer's shutdown message.

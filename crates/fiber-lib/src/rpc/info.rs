@@ -134,7 +134,7 @@ impl<S: StoreInfo> InfoRpcServerImpl<S> {
             .or_else(|e| log_and_error!(target_path, format!("Failed to backup keys: {e}")))?;
 
         self.store
-            .backup_now(target_path)
+            .backup(target_path)
             .or_else(|e| log_and_error!(target_path, format!("Failed to backup: {e}")))
     }
 }

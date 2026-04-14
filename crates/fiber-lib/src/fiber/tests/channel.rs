@@ -53,7 +53,7 @@ use fiber_types::{
     RetryableTlcOperation, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket,
     TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
-use fiber_types::{ChannelAuditInfo, RestoreAuditMap, RestoreAuditStore};
+
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
 use musig2::KeyAggContext;
@@ -163,13 +163,14 @@ fn test_channel_state_bincode_compatibility() {
         &[4, 0, 0, 0, 0, 0, 0, 0],
     );
     assert_channel_state_encoding(ChannelState::ChannelReady, &[5, 0, 0, 0]);
+    assert_channel_state_encoding(ChannelState::Stale, &[6, 0, 0, 0]);
     assert_channel_state_encoding(
         ChannelState::ShuttingDown(ShuttingDownFlags::empty()),
-        &[6, 0, 0, 0, 0, 0, 0, 0],
+        &[7, 0, 0, 0, 0, 0, 0, 0],
     );
     assert_channel_state_encoding(
         ChannelState::Closed(CloseFlags::empty()),
-        &[7, 0, 0, 0, 0, 0, 0, 0],
+        &[8, 0, 0, 0, 0, 0, 0, 0],
     );
     assert_channel_state_encoding(
         ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING),
@@ -9229,78 +9230,49 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
 }
 
 #[tokio::test]
-async fn test_channel_restore_audit_failure_closes_channel() {
+async fn test_channel_stale_passive_wait_no_proactive_send() {
     init_tracing();
 
-    let (mut node_a, mut node_b, channel_id) =
+    let (node_a, node_b, channel_id) =
         create_nodes_with_established_channel(9900000000, 9900000000, true).await;
 
-    let mut state = node_a.get_channel_actor_state(channel_id);
-    let original_cn = state.commitment_numbers.local;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    state_a.state = ChannelState::Stale;
+    state_a.reestablishing = true;
+    node_a.store.insert_channel_actor_state(state_a);
+    let state_b = node_a.get_channel_actor_state(channel_id);
+    let peer_commitment_number = state_b.get_local_commitment_number();
 
-    // The backup simulating the loss of the last update
-    state.commitment_numbers.local = original_cn - 2;
-    node_a.store.insert_channel_actor_state(state);
-
-    let mut audit_map = RestoreAuditMap::new();
-    audit_map.add_channel(
-        channel_id,
-        ChannelAuditInfo {
-            local_commitment_number: original_cn - 2,
-        },
-    );
-    node_a.store.insert_restore_audit_map(audit_map);
-
-    // Reestablish
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_b.pubkey,
-                PeerDisconnectReason::Requested,
-                None,
-            ),
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: peer_commitment_number,
+                    remote_commitment_number: peer_commitment_number,
+                }),
+            )),
         ))
-        .expect("disconnect sent");
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    node_a.connect_to(&mut node_b).await;
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        .expect("send reestablish message");
 
     let current_state = node_a.get_channel_actor_state(channel_id);
-
-    assert_eq!(current_state.get_id(), channel_id);
-
-    assert!(
-        current_state.reestablishing,
-        "Channel should still be in reestablishing state due to audit failure"
-    );
-
-    // Audit marker is not resolved
-    assert!(
-        node_a.store.get_restore_audit_map().is_some(),
-        "Audit map must persist in DB when rollback is detected"
-    );
+    assert_eq!(current_state.state, ChannelState::Stale);
 }
 
 #[tokio::test]
-async fn test_channel_restore_audit_success_resolves() {
+async fn test_channel_stale_audit_success_resumes_ready() {
     init_tracing();
 
-    let (mut node_a, mut node_b, channel_id) =
+    let (node_a, node_b, channel_id) =
         create_nodes_with_established_channel(9900000000, 9900000000, true).await;
 
-    let state = node_a.get_channel_actor_state(channel_id);
-    let current_cn = state.commitment_numbers.local;
-
-    let mut audit_map = RestoreAuditMap::new();
-    audit_map.add_channel(
-        channel_id,
-        ChannelAuditInfo {
-            local_commitment_number: current_cn,
-        },
-    );
-    node_a.store.insert_restore_audit_map(audit_map);
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    let original_cn = state_a.commitment_numbers.local;
+    state_a.state = ChannelState::Stale;
+    state_a.reestablishing = true;
+    node_a.store.insert_channel_actor_state(state_a);
 
     node_a
         .network_actor
@@ -9312,125 +9284,78 @@ async fn test_channel_restore_audit_success_resolves() {
             ),
         ))
         .expect("disconnect sent");
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    node_a.connect_to(&mut node_b).await;
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: original_cn,
+                    remote_commitment_number: original_cn,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     let current_state = node_a.get_channel_actor_state(channel_id);
-
+    assert_eq!(
+        current_state.state,
+        ChannelState::ChannelReady,
+        "Should resume to ChannelReady"
+    );
     assert!(
         !current_state.reestablishing,
-        "Channel should finish reestablishing"
-    );
-
-    assert!(
-        node_a.store.get_restore_audit_map().is_none(),
-        "Audit map should be cleared after successful reestablishment"
+        "Reestablishing should be finished"
     );
 }
 
 #[tokio::test]
-async fn test_channel_restore_audit_peer_lagging_is_safe() {
+async fn test_channel_stale_audit_failure_blocks_channel() {
     init_tracing();
 
-    let (mut node_a, mut node_b, channel_id) =
+    let (mut node_a, node_b, channel_id) =
         create_nodes_with_established_channel(9900000000, 9900000000, true).await;
 
-    let mut state = node_a.get_channel_actor_state(channel_id);
-
-    state.commitment_numbers.local = 10;
-    node_a.store.insert_channel_actor_state(state);
-
-    let mut audit_map = RestoreAuditMap::new();
-    audit_map.add_channel(
-        channel_id,
-        ChannelAuditInfo {
-            local_commitment_number: 10,
-        },
-    );
-    node_a.store.insert_restore_audit_map(audit_map);
-
+    let state_a = node_a.get_channel_actor_state(channel_id);
     let mut state_b = node_b.get_channel_actor_state(channel_id);
-    state_b.commitment_numbers.remote = 5;
+    let original_cn = state_a.commitment_numbers.local;
+
+    let mut state_a_stale = state_a.clone();
+    state_a_stale.state = ChannelState::Stale;
+    state_a_stale.reestablishing = true;
+    state_b.commitment_numbers.remote = original_cn + 5;
+
+    node_a.store.insert_channel_actor_state(state_a_stale);
     node_b.store.insert_channel_actor_state(state_b);
 
-    node_a
+    node_a.restart().await;
+
+    node_b
         .network_actor
-        .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
-                node_b.pubkey,
-                PeerDisconnectReason::Requested,
-                None,
-            ),
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: original_cn + 5,
+                    remote_commitment_number: original_cn,
+                }),
+            )),
         ))
-        .expect("disconnect sent");
-    node_a.connect_to(&mut node_b).await;
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        .expect("send reestablish message");
 
-    assert!(node_a.store.get_restore_audit_map().is_none());
-}
+    let current_state = node_a.get_channel_actor_state(channel_id);
 
-#[tokio::test]
-async fn test_channel_restore_audit_multi_channel_isolation() {
-    init_tracing();
-
-    let (nodes, channels) = create_n_nodes_network(
-        &[
-            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-            ((0, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
-        ],
-        3,
-    )
-    .await;
-    let [mut node_a, mut node_b, mut node_c] = nodes.try_into().expect("expected nodes");
-
-    let mut audit_map = RestoreAuditMap::new();
-    audit_map.add_channel(
-        channels[0],
-        ChannelAuditInfo {
-            local_commitment_number: 0,
-        },
+    assert_eq!(
+        current_state.state,
+        ChannelState::Stale,
+        "Audit should fail and stay in Stale"
     );
-
-    let state_ac = node_a.get_channel_actor_state(channels[1]);
-    audit_map.add_channel(
-        channels[1],
-        ChannelAuditInfo {
-            local_commitment_number: state_ac.commitment_numbers.local,
-        },
-    );
-
-    node_a.store.insert_restore_audit_map(audit_map);
-
-    for peer in &[node_b.pubkey, node_c.pubkey] {
-        node_a
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::DisconnectPeer(*peer, PeerDisconnectReason::Requested, None),
-            ))
-            .expect("disconnect sent");
-    }
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    node_a.connect_to(&mut node_b).await;
-    node_a.connect_to(&mut node_c).await;
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-    let map = node_a
-        .store
-        .get_restore_audit_map()
-        .expect("Map should still exist because one channel failed");
-
     assert!(
-        map.channels.contains_key(&channels[0]),
-        "Channel A-B should be blocked and remain in audit map"
-    );
-
-    assert!(
-        !map.channels.contains_key(&channels[1]),
-        "Channel A-C should have passed audit and been resolved"
+        current_state.reestablishing,
+        "Should still be in reestablishing phase"
     );
 }

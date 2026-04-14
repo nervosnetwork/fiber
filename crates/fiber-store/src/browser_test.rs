@@ -114,7 +114,7 @@ impl StorageBackend for Store {
         self.collect_from_btree(start, direction, &take_while_fn, limit)
     }
 
-    fn backup_now(&self, _path: &Path) -> Result<(), StoreError> {
+    fn backup(&self, _path: &Path) -> Result<(), StoreError> {
         Err(StoreError::BackupError(
             "Not supported on browser yet".into(),
         ))

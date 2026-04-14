@@ -26,9 +26,7 @@ mod testrocksdb_tests {
 
         // Perform Backup
         // RocksDB stores actual data in backup_dir/db
-        store
-            .backup_now(&backup_dir)
-            .expect("RocksDB backup failed");
+        store.backup(&backup_dir).expect("RocksDB backup failed");
         assert!(backup_dir.join("db").exists());
 
         // Simulate data change
@@ -133,7 +131,7 @@ mod sqlite_tests {
 
         // Perform Backup
         // SQLite stores actual data in backup_dir/data.sqlite
-        store.backup_now(&backup_dir).expect("SQLite backup failed");
+        store.backup(&backup_dir).expect("SQLite backup failed");
         assert!(backup_dir.join("data.sqlite").exists());
 
         // Modify data
@@ -166,7 +164,7 @@ mod sqlite_tests {
         fs::create_dir_all(&backup_dir).unwrap();
         let store = SqliteStore::open_db(&db_path).unwrap();
 
-        let result = store.backup_now(&backup_dir);
+        let result = store.backup(&backup_dir);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }

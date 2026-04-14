@@ -87,7 +87,7 @@ impl StorageBackend for Store {
         results
     }
 
-    fn backup_now(&self, path: &Path) -> Result<(), StoreError> {
+    fn backup(&self, path: &Path) -> Result<(), StoreError> {
         let target_dir = PathBuf::from(&path);
 
         // Prevent overwriting existing data

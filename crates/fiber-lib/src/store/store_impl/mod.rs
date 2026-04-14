@@ -33,8 +33,7 @@ use fiber_types::CchOrder;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
     Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, RestoreAuditMap, RestoreAuditStore, TimedResult,
-    CURSOR_SIZE,
+    PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
 };
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
@@ -109,8 +108,8 @@ impl StorageBackend for Store {
             .collect_iterator(start, direction, take_while_fn, limit)
     }
 
-    fn backup_now(&self, path: &Path) -> Result<(), StoreError> {
-        self.inner.backup_now(path)
+    fn backup(&self, path: &Path) -> Result<(), StoreError> {
+        self.inner.backup(path)
     }
 
     fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
@@ -322,7 +321,6 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
-    RestoreAuditMap(&'static str, RestoreAuditMap),
 }
 
 /// Recorded store changes.
@@ -446,9 +444,6 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
-            KeyValue::RestoreAuditMap(key, _map) => {
-                [&[RESTORE_AUDIT_PREFIX], key.as_bytes()].concat()
-            }
         }
     }
 
@@ -491,9 +486,6 @@ impl StoreKeyValue for KeyValue {
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
-            KeyValue::RestoreAuditMap(_key, audit_map) => {
-                serialize_to_vec(audit_map, "RestoreAuditMap")
-            }
         }
     }
 }
@@ -1629,42 +1621,6 @@ impl CchOrderStore for Store {
         let mut batch = self.batch();
         batch.delete(key);
         batch.commit();
-    }
-}
-
-impl RestoreAuditStore for Store {
-    fn get_restore_audit_map(&self) -> Option<RestoreAuditMap> {
-        let kv = KeyValue::RestoreAuditMap("audit_map", RestoreAuditMap::default());
-        self.get(kv.key())
-            .map(|v| deserialize_from(v.as_ref(), "RestoreAuditMap"))
-    }
-
-    fn insert_restore_audit_map(&self, map: RestoreAuditMap) {
-        let mut batch = self.batch();
-        let kv = KeyValue::RestoreAuditMap("audit_map", map);
-        batch.put(kv.key(), kv.value());
-        batch.commit();
-    }
-
-    fn delete_restore_audit_map(&self) {
-        let kv = KeyValue::RestoreAuditMap("audit_map", RestoreAuditMap::default());
-        let key = kv.key();
-
-        let mut batch = self.batch();
-        batch.delete(key);
-        batch.commit();
-    }
-
-    fn resolve_channel_audit(&self, channel_id: &Hash256) {
-        if let Some(mut map) = self.get_restore_audit_map() {
-            if map.channels.remove(channel_id).is_some() {
-                if map.channels.is_empty() {
-                    self.delete_restore_audit_map();
-                } else {
-                    self.insert_restore_audit_map(map);
-                }
-            }
-        }
     }
 }
 

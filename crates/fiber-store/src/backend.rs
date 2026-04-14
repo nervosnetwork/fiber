@@ -77,7 +77,7 @@ pub trait StorageBackend: Send + Sync {
     }
 
     /// Backup the node database to a specified path.
-    fn backup_now(&self, path: &Path) -> Result<(), StoreError>;
+    fn backup(&self, path: &Path) -> Result<(), StoreError>;
 
     /// Restore the node database with a specified path.
     fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError>;

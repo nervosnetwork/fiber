@@ -18,7 +18,6 @@
 //! | 224          | Hash256              | ChannelData                 |
 //! | 201          | Hash256              | ChannelOpenRecord           |
 //! | 232          | Payment_hash         | CchOrder                    |
-//! | 250          | b"audit_map"         | RestoreAuditMap             |
 //! +--------------+----------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -52,6 +51,3 @@ mod watchtower {
 pub use watchtower::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CCH_ORDER_PREFIX: u8 = 232;
-
-/// Prefix for storage related to database restoration and consistency audits.
-pub const RESTORE_AUDIT_PREFIX: u8 = 250;

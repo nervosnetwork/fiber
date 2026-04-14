@@ -169,7 +169,7 @@ impl StorageBackend for Store {
             .collect()
     }
 
-    fn backup_now(&self, _path: &Path) -> Result<(), StoreError> {
+    fn backup(&self, _path: &Path) -> Result<(), StoreError> {
         Err(StoreError::BackupError(
             "Not supported on browser yet".into(),
         ))

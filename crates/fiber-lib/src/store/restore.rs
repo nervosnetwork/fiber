@@ -1,8 +1,8 @@
 use crate::errors::{Error, Result};
-use crate::store::audit::create_restore_audit_map;
+use crate::fiber::channel::ChannelActorStateStore;
 use crate::store::open_store;
 use fiber_store::StorageBackend;
-use fiber_types::RestoreAuditStore;
+use fiber_types::ChannelState;
 use std::path::Path;
 use tracing::info;
 
@@ -12,17 +12,12 @@ pub fn restore(restore_path: &Path, base_path: &Path) -> Result<()> {
     restore_node_keys(restore_path, base_path)?;
     store.restore(restore_path, base_path)?;
 
-    info!("Scanning for active channels to build audit map...");
-    let audit_map = create_restore_audit_map(&store);
-    let channel_count = audit_map.channels.len();
-
-    store.insert_restore_audit_map(audit_map);
-
-    info!(
-        "Restore completed successfully. {} channels marked for consistency check on next startup.",
-        channel_count
-    );
-
+    info!("Scanning stale channels.");
+    for mut channel in store.get_all_channel_states() {
+        if channel.is_risk_of_penalty() {
+            channel.update_state(ChannelState::Stale);
+        }
+    }
     Ok(())
 }
 

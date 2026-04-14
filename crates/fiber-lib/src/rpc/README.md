@@ -1356,6 +1356,8 @@ The state of a channel.
  funding transaction to confirm.
 * `ChannelReady` - Both we and our counterparty consider the funding transaction confirmed and the channel is
  now operational.
+* `Stale` - The channel state is potentially outdated (e.g., after a database restore).
+ We must perform a passive audit with the peer before resuming operations.
 * `ShuttingDown` - <em>`ShuttingDownFlags`</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
 * `Closed` - <em>`CloseFlags`</em>, This channel is closed.
 ---

@@ -252,6 +252,9 @@ pub enum ChannelState {
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
     ChannelReady,
+    /// The channel state is potentially outdated (e.g., after a database restore).
+    /// We must perform a passive audit with the peer before resuming operations.
+    Stale,
     /// We've successfully negotiated a `closing_signed` dance.
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
