@@ -2682,6 +2682,13 @@ where
                 state
                     .peer_states
                     .insert(pubkey, PeerState::new(session.id, session.ty));
+                // Immediately trigger network maintenance to start syncing with
+                // the new peer, rather than waiting for the next periodic
+                // TickNetworkMaintenance (up to 60s in production).
+                // This eliminates the initial gossip sync delay after connecting
+                // to a bootnode, which is critical for WASM nodes that need
+                // peer addresses from gossip data quickly.
+                myself.send_message(GossipActorMessage::TickNetworkMaintenance)?;
             }
             GossipActorMessage::PeerDisconnected(pubkey, _session) => {
                 state.peer_states.remove(&pubkey);
