@@ -24,7 +24,6 @@ use std::sync::Arc;
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-#[cfg(not(target_arch = "wasm32"))]
 use tentacle::utils::TransportType;
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
@@ -343,10 +342,10 @@ pub enum NetworkActorCommand {
     // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr, bool, Option<RpcReplyPort<Result<(), String>>>),
     // Connect to a peer via pubkey, resolving address from local graph/saved state.
-    // The optional MultiAddrTransport filters addresses by transport type (e.g. Wss for WASM).
+    // The optional TransportType filters addresses by transport type (e.g. Wss for WASM).
     ConnectPeerWithPubkey(
         Pubkey,
-        Option<fiber_types::MultiAddrTransport>,
+        Option<TransportType>,
         RpcReplyPort<Result<(), String>>,
     ),
     DisconnectPeer(
@@ -1457,7 +1456,7 @@ where
                 let address = if let Some(transport) = addr_type {
                     addresses
                         .into_iter()
-                        .filter(|addr| matches_addr_transport(addr, transport))
+                        .filter(|addr| find_type(addr) == transport)
                         .choose(&mut rand::thread_rng())
                 } else {
                     addresses.into_iter().choose(&mut rand::thread_rng())
@@ -5686,7 +5685,6 @@ pub async fn start_network<
     actor
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     let mut iter = addr.iter();
 
@@ -5696,18 +5694,6 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
         _ => None,
     })
     .unwrap_or(TransportType::Tcp)
-}
-
-/// Check whether a multiaddr matches the given transport type filter.
-fn matches_addr_transport(addr: &Multiaddr, transport: fiber_types::MultiAddrTransport) -> bool {
-    let has_ws = addr.iter().any(|proto| matches!(proto, Protocol::Ws));
-    let has_wss = addr.iter().any(|proto| matches!(proto, Protocol::Wss));
-
-    match transport {
-        fiber_types::MultiAddrTransport::Tcp => !has_ws && !has_wss,
-        fiber_types::MultiAddrTransport::Ws => has_ws,
-        fiber_types::MultiAddrTransport::Wss => has_wss,
-    }
 }
 
 struct ToBeAcceptedChannels {

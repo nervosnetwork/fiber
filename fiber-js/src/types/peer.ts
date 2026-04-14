@@ -1,12 +1,12 @@
 import { Pubkey } from "./general"
 
-type MultiAddrType = "tcp" | "ws" | "wss";
+type TransportType = "tcp" | "ws" | "wss";
 
 interface ConnectPeerParams {
     address?: string;
     pubkey?: Pubkey;
     save?: boolean;
-    addr_type?: MultiAddrType;
+    addr_type?: TransportType;
 }
 
 interface DisconnectPeerParams {
@@ -27,6 +27,6 @@ export type {
     ConnectPeerParams,
     DisconnectPeerParams,
     ListPeerResult,
-    MultiAddrType,
+    TransportType,
     PeerInfo
  }

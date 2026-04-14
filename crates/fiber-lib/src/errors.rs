@@ -12,7 +12,8 @@ use crate::{
         InFlightCkbTxActorMessage, NetworkActorMessage,
     },
 };
-use fiber_types::{Hash256, MultiAddrTransport, Pubkey};
+use fiber_types::{Hash256, Pubkey};
+use tentacle::utils::TransportType;
 
 use crate::invoice::InvoiceError;
 
@@ -22,8 +23,8 @@ pub enum Error {
     IO(#[from] std::io::Error),
     #[error("Peer not found error: {0:?}")]
     PeerNotFound(Pubkey),
-    #[error("No matching address for peer {0:?} with transport type {1}")]
-    NoMatchingAddress(Pubkey, MultiAddrTransport),
+    #[error("No matching address for peer {0:?} with transport type {1:?}")]
+    NoMatchingAddress(Pubkey, TransportType),
     #[error("Channel not found error: {0:?}")]
     ChannelNotFound(Hash256),
     #[error("Failed to send tentacle message: {0}")]

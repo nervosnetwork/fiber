@@ -657,13 +657,3 @@ mod watchtower_convert {
         }
     }
 }
-
-impl From<crate::peer::MultiAddrType> for fiber_types::MultiAddrTransport {
-    fn from(t: crate::peer::MultiAddrType) -> Self {
-        match t {
-            crate::peer::MultiAddrType::Tcp => fiber_types::MultiAddrTransport::Tcp,
-            crate::peer::MultiAddrType::Ws => fiber_types::MultiAddrTransport::Ws,
-            crate::peer::MultiAddrType::Wss => fiber_types::MultiAddrTransport::Wss,
-        }
-    }
-}

@@ -9,27 +9,6 @@ use serde_with::serde_as;
 use std::collections::{hash_map::Entry, HashMap};
 use tentacle_multiaddr::Multiaddr;
 
-/// The transport type of a multiaddr, used to filter peer addresses when connecting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MultiAddrTransport {
-    /// TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
-    Tcp,
-    /// WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
-    Ws,
-    /// WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
-    Wss,
-}
-
-impl std::fmt::Display for MultiAddrTransport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MultiAddrTransport::Tcp => write!(f, "Tcp"),
-            MultiAddrTransport::Ws => write!(f, "Ws"),
-            MultiAddrTransport::Wss => write!(f, "Wss"),
-        }
-    }
-}
-
 /// A hop requirement to meet when building a router. Does not include the source node;
 /// the last hop is the target node.
 #[serde_as]
