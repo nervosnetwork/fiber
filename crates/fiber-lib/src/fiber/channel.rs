@@ -4500,6 +4500,7 @@ impl ChannelActorState {
             ChannelState::ChannelReady
             | ChannelState::NegotiatingFunding(..)
             | ChannelState::SigningCommitment(..)
+            | ChannelState::AwaitingTxSignatures(..)
             | ChannelState::AwaitingChannelReady(..)
             | ChannelState::CollaboratingFundingTx(..) => {
                 Some(OfflineChannelRestoreMode::ReestablishPeer)
