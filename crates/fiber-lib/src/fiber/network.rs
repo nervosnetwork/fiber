@@ -343,10 +343,10 @@ pub enum NetworkActorCommand {
     // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr, bool, Option<RpcReplyPort<Result<(), String>>>),
     // Connect to a peer via pubkey, resolving address from local graph/saved state.
-    // The optional MultiAddrType filters addresses by transport type (e.g. Wss for WASM).
+    // The optional MultiAddrTransport filters addresses by transport type (e.g. Wss for WASM).
     ConnectPeerWithPubkey(
         Pubkey,
-        Option<fiber_json_types::MultiAddrType>,
+        Option<fiber_types::MultiAddrTransport>,
         RpcReplyPort<Result<(), String>>,
     ),
     DisconnectPeer(
@@ -1454,16 +1454,21 @@ where
             }
             NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, reply) => {
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
-                let address = if let Some(addr_type) = addr_type {
+                let address = if let Some(transport) = addr_type {
                     addresses
                         .into_iter()
-                        .filter(|addr| matches_addr_type(addr, addr_type))
+                        .filter(|addr| matches_addr_transport(addr, transport))
                         .choose(&mut rand::thread_rng())
                 } else {
                     addresses.into_iter().choose(&mut rand::thread_rng())
                 };
                 let Some(addr) = address else {
-                    let _ = reply.send(Err(Error::PeerNotFound(pubkey).to_string()));
+                    let err = if let Some(transport) = addr_type {
+                        Error::NoMatchingAddress(pubkey, transport)
+                    } else {
+                        Error::PeerNotFound(pubkey)
+                    };
+                    let _ = reply.send(Err(err.to_string()));
                     return Ok(());
                 };
                 match state.control.dial(addr, TargetProtocol::All).await {
@@ -5694,14 +5699,14 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
 }
 
 /// Check whether a multiaddr matches the given transport type filter.
-fn matches_addr_type(addr: &Multiaddr, addr_type: fiber_json_types::MultiAddrType) -> bool {
+fn matches_addr_transport(addr: &Multiaddr, transport: fiber_types::MultiAddrTransport) -> bool {
     let has_ws = addr.iter().any(|proto| matches!(proto, Protocol::Ws));
     let has_wss = addr.iter().any(|proto| matches!(proto, Protocol::Wss));
 
-    match addr_type {
-        fiber_json_types::MultiAddrType::Tcp => !has_ws && !has_wss,
-        fiber_json_types::MultiAddrType::Ws => has_ws,
-        fiber_json_types::MultiAddrType::Wss => has_wss,
+    match transport {
+        fiber_types::MultiAddrTransport::Tcp => !has_ws && !has_wss,
+        fiber_types::MultiAddrTransport::Ws => has_ws,
+        fiber_types::MultiAddrTransport::Wss => has_wss,
     }
 }
 
