@@ -24,8 +24,8 @@ use std::sync::Arc;
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
+use tentacle::utils::extract_peer_id;
 use tentacle::utils::TransportType;
-use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -5266,11 +5266,7 @@ where
         }
 
         if !config.announce_private_addr.unwrap_or_default() {
-            announced_addrs.retain(|addr| {
-                multiaddr_to_socketaddr(addr)
-                    .map(|socket_addr| is_reachable(socket_addr.ip()))
-                    .unwrap_or_default()
-            });
+            announced_addrs.retain(crate::utils::is_addr_reachable);
         }
         #[cfg(not(target_arch = "wasm32"))]
         info!(
