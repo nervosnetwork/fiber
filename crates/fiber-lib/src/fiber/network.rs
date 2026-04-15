@@ -24,9 +24,8 @@ use std::sync::Arc;
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-#[cfg(not(target_arch = "wasm32"))]
+use tentacle::utils::extract_peer_id;
 use tentacle::utils::TransportType;
-use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -343,7 +342,12 @@ pub enum NetworkActorCommand {
     // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr, bool, Option<RpcReplyPort<Result<(), String>>>),
     // Connect to a peer via pubkey, resolving address from local graph/saved state.
-    ConnectPeerWithPubkey(Pubkey, RpcReplyPort<Result<(), String>>),
+    // The optional TransportType filters addresses by transport type (e.g. Wss for WASM).
+    ConnectPeerWithPubkey(
+        Pubkey,
+        Option<TransportType>,
+        RpcReplyPort<Result<(), String>>,
+    ),
     DisconnectPeer(
         Pubkey,
         PeerDisconnectReason,
@@ -814,6 +818,189 @@ where
             network_graph,
             chain_client,
         }
+    }
+
+    /// Start Tor onion hidden service if properly configured.
+    /// Returns the onion multiaddr and a CancellationToken to stop the service,
+    /// or None if the required configuration (onion_server or proxy_url) is missing.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn start_onion_service(
+        &self,
+        config: &FiberConfig,
+        listening_addrs: &[MultiAddr],
+        my_peer_id: &tentacle::secio::PeerId,
+        tracker: &tokio_util::task::TaskTracker,
+        myself: ActorRef<NetworkActorMessage>,
+    ) -> Result<Option<(MultiAddr, tokio_util::sync::CancellationToken)>, String> {
+        use std::{
+            net::{Ipv4Addr, SocketAddr},
+            time::Duration,
+        };
+
+        use tokio::time::timeout;
+
+        // Resolve p2p listen address for onion service forwarding
+        let p2p_listen_address: SocketAddr = match &config.onion.p2p_listen_address {
+            Some(addr) => {
+                let addr: SocketAddr = addr
+                    .parse()
+                    .map_err(|err| format!("Failed to parse onion_p2p_listen_address: {}", err))?;
+                if addr.port() == 0 {
+                    return Err("onion_p2p_listen_address port must not be 0".to_string());
+                }
+                addr
+            }
+            None => {
+                // Try to derive from listening addresses
+                let port = listening_addrs.iter().find_map(|addr| {
+                    let mut iter = addr.iter();
+                    if let (
+                        Some(tentacle::multiaddr::Protocol::Ip4(ip)),
+                        Some(tentacle::multiaddr::Protocol::Tcp(port)),
+                    ) = (iter.next(), iter.next())
+                    {
+                        if ip == Ipv4Addr::new(0, 0, 0, 0) || ip == Ipv4Addr::new(127, 0, 0, 1) {
+                            return Some(port);
+                        }
+                    }
+                    None
+                });
+                match port {
+                    Some(port) => {
+                        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+                    }
+                    None => {
+                        error!(
+                            "No suitable IPv4 listen address found for onion service; \
+                            please configure `onion.p2p_listen_address` or ensure an IPv4 \
+                            listener on 0.0.0.0 or 127.0.0.1 is present"
+                        );
+                        return Err(
+                            "No suitable IPv4 listen address found for onion service".to_string()
+                        );
+                    }
+                }
+            }
+        };
+
+        // Check tor controller is reachable
+        let tor_controller_str = config.onion.tor_controller.as_str();
+        let tor_controller_addr: SocketAddr = tor_controller_str
+            .parse()
+            .map_err(|err| format!("Failed to parse tor_controller address: {}", err))?;
+        let tor_connect_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect(tor_controller_addr),
+        )
+        .await;
+        match tor_connect_result {
+            Ok(Ok(_)) => {
+                info!(
+                    "Confirmed tor_controller is listening on {}",
+                    tor_controller_str
+                );
+            }
+            Ok(Err(_)) | Err(_) => {
+                error!(
+                    "tor_controller is not listening on {}, skipping onion service",
+                    tor_controller_addr
+                );
+                return Ok(None);
+            }
+        }
+
+        let onion_private_key_path =
+            config
+                .onion
+                .onion_private_key_path
+                .clone()
+                .unwrap_or_else(|| {
+                    config
+                        .base_dir()
+                        .join("onion_private_key")
+                        .display()
+                        .to_string()
+                });
+
+        let onion_config = super::onion_service::OnionServiceConfig {
+            onion_private_key_path,
+            tor_controller: tor_controller_str.to_string(),
+            tor_password: config.onion.tor_password.clone(),
+            p2p_listen_address,
+            onion_external_port: config.onion.onion_external_port,
+        };
+
+        let peer_id_str = my_peer_id.to_base58();
+        let (onion_service, onion_addr) =
+            super::onion_service::OnionService::new(onion_config, &peer_id_str)?;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let token_clone = cancel_token.clone();
+        let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+        tracker.spawn(async move {
+            if let Err(err) = onion_service
+                .start(token_clone, reconnect_tx, ready_tx)
+                .await
+            {
+                error!("Onion service stopped with error: {}", err);
+            }
+        });
+
+        // Wait for the onion service to successfully register with Tor before
+        // returning the address, so callers don't advertise an unreachable address.
+        match timeout(
+            Duration::from_secs(config.onion.onion_service_start_timeout as u64),
+            ready_rx,
+        )
+        .await
+        {
+            Err(_) => {
+                cancel_token.cancel();
+                return Err(String::from("Timed out waiting for onion service"));
+            }
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(err))) => {
+                cancel_token.cancel();
+                return Err(err);
+            }
+            Ok(Err(_)) => {
+                cancel_token.cancel();
+                return Err("Onion service task exited before signaling readiness".to_string());
+            }
+        }
+
+        // Listen for Tor reconnection events and trigger peer reconnection
+        let cancel_for_listener = cancel_token.clone();
+        tracker.spawn(async move {
+            loop {
+                tokio::select! {
+                    msg = reconnect_rx.recv() => {
+                        if msg.is_none() {
+                            break;
+                        }
+                        info!("Tor reconnected, delaying before MaintainConnections to let DisconnectPeer events drain");
+                        // Delay to ensure that PeerDisconnected events (triggered
+                        // by the old Tor connection dropping) are processed by the
+                        // actor before we send MaintainConnections. Without this,
+                        // MaintainConnections may see stale peer_session_map entries
+                        // and skip reconnection, leaving peers disconnected until
+                        // the next periodic cycle (1200 s).
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        info!("Triggering MaintainConnections after Tor reconnect");
+                        let _ = myself.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::MaintainConnections,
+                        ));
+                    }
+                    _ = cancel_for_listener.cancelled() => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Some((onion_addr, cancel_token)))
     }
 
     pub async fn handle_peer_message(
@@ -1447,13 +1634,23 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-            NetworkActorCommand::ConnectPeerWithPubkey(pubkey, reply) => {
-                let address = state
-                    .get_peer_addresses_by_pubkey(&pubkey)
-                    .into_iter()
-                    .choose(&mut rand::thread_rng());
+            NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, reply) => {
+                let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
+                let address = if let Some(transport) = addr_type {
+                    addresses
+                        .into_iter()
+                        .filter(|addr| find_type(addr) == transport)
+                        .choose(&mut rand::thread_rng())
+                } else {
+                    addresses.into_iter().choose(&mut rand::thread_rng())
+                };
                 let Some(addr) = address else {
-                    let _ = reply.send(Err(Error::PeerNotFound(pubkey).to_string()));
+                    let err = if let Some(transport) = addr_type {
+                        Error::NoMatchingAddress(pubkey, transport)
+                    } else {
+                        Error::PeerNotFound(pubkey)
+                    };
+                    let _ = reply.send(Err(err.to_string()));
                     return Ok(());
                 };
                 match state.control.dial(addr, TargetProtocol::All).await {
@@ -3161,14 +3358,12 @@ where
         let old_tx = transaction.into_view();
         let mut tx = FundingTx::new();
         tx.update_for_self(old_tx);
-        let tx = match self.fund(tx, request).await {
-            Ok(tx) => match tx.into_inner() {
-                Some(tx) => tx,
-                _ => {
-                    error!("Obtained empty funding tx (attempt {})", retry_count + 1);
-                    return Ok(());
-                }
-            },
+        let tx = match self
+            .fund(tx, request)
+            .await
+            .and_then(|tx| tx.into_inner().ok_or(FundingError::AbsentTx))
+        {
+            Ok(tx) => tx,
             Err(err) => {
                 let should_abort = schedule_funding_retry(
                     myself,
@@ -3386,6 +3581,9 @@ pub struct NetworkActorState<S, C> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
+    // Cancellation token for the onion service background task.
+    #[cfg(not(target_arch = "wasm32"))]
+    onion_service_token: Option<tokio_util::sync::CancellationToken>,
     peer_session_map: HashMap<Pubkey, ConnectedPeer>,
     pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
@@ -5175,6 +5373,46 @@ where
             if let Some(gossip_handle) = gossip_handle_opt {
                 builder = builder.insert_protocol(gossip_handle.create_meta());
             }
+
+            // Set SOCKS5 proxy config
+            if let Some(proxy_url) = &config.proxy.proxy_url {
+                match super::proxy::check_proxy_url(proxy_url) {
+                    Ok(()) => {
+                        builder = builder
+                            .tcp_proxy_config(proxy_url)
+                            .tcp_proxy_random_auth(config.proxy.proxy_random_auth);
+                        info!(
+                            "Set tcp_proxy_config: {:?}, proxy_random_auth: {}",
+                            proxy_url, config.proxy.proxy_random_auth
+                        );
+                    }
+                    Err(err) => {
+                        error!(
+                            "Invalid proxy_url in config, skipping tcp_proxy_config. proxy_url={:?}, error={}",
+                            proxy_url, err
+                        );
+                    }
+                }
+            }
+
+            // Set onion proxy config (for .onion address connections via Tor SOCKS5)
+            let onion_proxy_url = config.onion.onion_server.clone().map(|s| {
+                if s.starts_with("socks5://") {
+                    s
+                } else {
+                    format!("socks5://{}", s)
+                }
+            });
+            if let Some(ref onion_proxy_url) = onion_proxy_url {
+                use crate::fiber::proxy::check_proxy_url;
+
+                check_proxy_url(onion_proxy_url)
+                    .map_err(|e| anyhow::anyhow!("Invalid onion proxy url: {}", e))?;
+
+                info!("Set tcp_onion_config: {:?}", onion_proxy_url);
+                builder = builder.tcp_onion_config(onion_proxy_url);
+            }
+
             builder.build(handle)
         };
         #[cfg(target_arch = "wasm32")]
@@ -5252,12 +5490,40 @@ where
         }
 
         if !config.announce_private_addr.unwrap_or_default() {
-            announced_addrs.retain(|addr| {
-                multiaddr_to_socketaddr(addr)
-                    .map(|socket_addr| is_reachable(socket_addr.ip()))
-                    .unwrap_or_default()
-            });
+            announced_addrs.retain(crate::utils::is_addr_reachable);
         }
+
+        // Start Tor onion hidden service if configured
+        #[cfg(not(target_arch = "wasm32"))]
+        let onion_service_token = if config.onion.listen_on_onion {
+            match self
+                .start_onion_service(
+                    &config,
+                    &listening_addr,
+                    &my_peer_id,
+                    &tracker,
+                    myself.clone(),
+                )
+                .await
+            {
+                Ok(Some((addr, token))) => {
+                    info!("Onion service address: {}", addr);
+                    announced_addrs.push(addr);
+                    Some(token)
+                }
+                Ok(None) => {
+                    info!("Onion service not started: missing onion_server or proxy_url");
+                    None
+                }
+                Err(err) => {
+                    error!("Failed to start onion service: {}", err);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         #[cfg(not(target_arch = "wasm32"))]
         info!(
             "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
@@ -5310,6 +5576,8 @@ where
             default_shutdown_script,
             network: myself.clone(),
             control,
+            #[cfg(not(target_arch = "wasm32"))]
+            onion_service_token,
             peer_session_map: Default::default(),
             pending_save_peer_addresses: Default::default(),
             session_channels_map: Default::default(),
@@ -5451,6 +5719,13 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // Cancel the onion service background task if running
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(token) = state.onion_service_token.take() {
+            debug!("Cancelling onion service...");
+            token.cancel();
+        }
+
         myself
             .get_cell()
             .stop_children_and_wait(Some("Network actor stopped".to_string()), None)
@@ -5671,13 +5946,13 @@ pub async fn start_network<
     actor
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     let mut iter = addr.iter();
 
     iter.find_map(|proto| match proto {
         Protocol::Ws => Some(TransportType::Ws),
         Protocol::Wss => Some(TransportType::Wss),
+        Protocol::Onion3(_) => Some(TransportType::Onion),
         _ => None,
     })
     .unwrap_or(TransportType::Tcp)

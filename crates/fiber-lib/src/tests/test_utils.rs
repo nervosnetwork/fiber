@@ -101,6 +101,25 @@ static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub const MIN_RESERVED_CKB: u128 = 99 * CKB_SHANNONS as u128;
 pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000 * CKB_SHANNONS as u128;
 const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 10; // seconds
+const EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV: &str = "FNN_EVENT_WAIT_TIMEOUT_SECS";
+
+fn event_wait_timeout() -> Duration {
+    if let Some(timeout_secs) = env::var(EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+    {
+        return Duration::from_secs(timeout_secs);
+    }
+
+    if cfg!(feature = "bench") {
+        // Bench setup creates many peer connections and can occasionally take
+        // longer than the stricter unit-test timeout.
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(5)
+    }
+}
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -598,8 +617,35 @@ pub(crate) async fn create_n_nodes_network_with_params(
     n: usize,
     rpc_config: Option<RpcConfig>,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    create_n_nodes_network_with_params_and_gossip_intervals(amounts, n, rpc_config, None, None)
+        .await
+}
+
+#[allow(clippy::type_complexity)]
+async fn create_n_nodes_network_with_params_and_gossip_intervals(
+    amounts: &[((usize, usize), ChannelParameters)],
+    n: usize,
+    rpc_config: Option<RpcConfig>,
+    gossip_network_interval_ms: Option<u64>,
+    gossip_store_interval_ms: Option<u64>,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
     assert!(n >= 2);
-    let mut nodes = NetworkNode::new_interconnected_nodes(n, rpc_config).await;
+    let mut nodes = if gossip_network_interval_ms.is_none() && gossip_store_interval_ms.is_none() {
+        NetworkNode::new_interconnected_nodes(n, rpc_config).await
+    } else {
+        NetworkNode::new_n_interconnected_nodes_with_config(n, move |i| {
+            NetworkNodeConfigBuilder::new()
+                .node_name(Some(format!("node-{}", i)))
+                .base_dir_prefix(&format!("test-fnn-node-{}-", i))
+                .rpc_config(rpc_config.clone())
+                .fiber_config_updater(move |config| {
+                    config.gossip_network_maintenance_interval_ms = gossip_network_interval_ms;
+                    config.gossip_store_maintenance_interval_ms = gossip_store_interval_ms;
+                })
+                .build()
+        })
+        .await
+    };
     let mut channels = vec![];
 
     for (idx, ((i, j), channel_params)) in amounts.iter().enumerate() {
@@ -648,6 +694,27 @@ pub async fn create_n_nodes_network(
         .map(|((i, j), (a, b))| ((*i, *j), ChannelParameters::new(*a, *b)))
         .collect::<Vec<_>>();
     create_n_nodes_network_with_params(&amounts, n, None).await
+}
+
+#[allow(clippy::type_complexity)]
+pub async fn create_n_nodes_network_with_gossip_intervals(
+    amounts: &[((usize, usize), (u128, u128))],
+    n: usize,
+    gossip_network_interval_ms: Option<u64>,
+    gossip_store_interval_ms: Option<u64>,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    let amounts = amounts
+        .iter()
+        .map(|((i, j), (a, b))| ((*i, *j), ChannelParameters::new(*a, *b)))
+        .collect::<Vec<_>>();
+    create_n_nodes_network_with_params_and_gossip_intervals(
+        &amounts,
+        n,
+        None,
+        gossip_network_interval_ms,
+        gossip_store_interval_ms,
+    )
+    .await
 }
 
 /// Like `create_n_nodes_network`, but allows specifying whether each channel is public.
@@ -1556,10 +1623,10 @@ impl NetworkNode {
         // spawn a new thread to collect all the events from event_receiver
         tokio::spawn(async move {
             while let Some(event) = event_receiver.recv().await {
-                self_event_sender
-                    .send(event.clone())
-                    .await
-                    .expect("send event");
+                if self_event_sender.send(event.clone()).await.is_err() {
+                    debug!("event receiver dropped, stopping event forwarder task");
+                    break;
+                }
                 let unexpected_events = unexpected_events_clone.read().await;
                 let event_content = format!("{:?}", event);
                 for unexpected_event in unexpected_events.iter() {
@@ -1817,6 +1884,7 @@ impl NetworkNode {
     where
         F: Fn(&NetworkServiceEvent) -> Option<T>,
     {
+        let timeout = event_wait_timeout();
         loop {
             select! {
                 event = self.event_emitter.recv() => {
@@ -1831,8 +1899,12 @@ impl NetworkNode {
                         }
                     }
                 }
-                _ = sleep(Duration::from_secs(5)) => {
-                    panic!("Waiting for event timeout");
+                _ = sleep(timeout) => {
+                    panic!(
+                        "Waiting for event timeout after {:?}. You can adjust it with {}",
+                        timeout,
+                        EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV
+                    );
                 }
             }
         }
