@@ -101,6 +101,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `SettlementTlc`](#type-settlementtlc)
     * [Type `TLCId`](#type-tlcid)
     * [Type `TlcStatus`](#type-tlcstatus)
+    * [Type `TransportType`](#type-transporttype)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
@@ -994,6 +995,9 @@ Connect to a peer.
 * `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key of the peer to connect to.
  The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
+* `addr_type` - <em>Option<[TransportType](#type-transporttype)></em>, Filter addresses by transport type when connecting by pubkey.
+ If not specified, a random address is chosen from all available addresses.
+ This is useful for WASM environments where only `wss` addresses are supported.
 
 ##### Returns
 
@@ -1754,6 +1758,19 @@ The status of a tlc.
 
 * `Outbound` - <em>[OutboundTlcStatus](#type-outboundtlcstatus)</em>, Outbound tlc
 * `Inbound` - <em>[InboundTlcStatus](#type-inboundtlcstatus)</em>, Inbound tlc
+---
+
+<a id="#type-transporttype"></a>
+### Type `TransportType`
+
+The type of transport to filter by when resolving peer addresses.
+
+
+#### Enum with values of
+
+* `tcp` - TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
+* `ws` - WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
+* `wss` - WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
 ---
 
 <a id="#type-udtarginfo"></a>

@@ -29,7 +29,6 @@ use tentacle::{
     context::{ProtocolContext, ProtocolContextMutRef, SessionContext},
     service::{ProtocolHandle, ProtocolMeta, ServiceAsyncControl, SessionType},
     traits::ServiceProtocol,
-    utils::{is_reachable, multiaddr_to_socketaddr},
     SessionId,
 };
 use tokio::sync::oneshot;
@@ -1621,11 +1620,11 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
 
         if !self.announce_private_addr {
             if let BroadcastMessage::NodeAnnouncement(node_announcement) = &message {
-                if !node_announcement.addresses.iter().any(|addr| {
-                    multiaddr_to_socketaddr(addr)
-                        .map(|socket_addr| is_reachable(socket_addr.ip()))
-                        .unwrap_or_default()
-                }) {
+                if !node_announcement
+                    .addresses
+                    .iter()
+                    .any(crate::utils::is_addr_reachable)
+                {
                     return Err(GossipMessageProcessingError::ProcessingError(
                         "private address node announcement".to_string(),
                     ));

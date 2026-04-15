@@ -1,9 +1,12 @@
 import { Pubkey } from "./general"
 
-interface ConnectPeerParams {
-    address: string;
-    save?: boolean;
+type TransportType = "tcp" | "ws" | "wss";
 
+interface ConnectPeerParams {
+    address?: string;
+    pubkey?: Pubkey;
+    save?: boolean;
+    addr_type?: TransportType;
 }
 
 interface DisconnectPeerParams {
@@ -24,5 +27,6 @@ export type {
     ConnectPeerParams,
     DisconnectPeerParams,
     ListPeerResult,
+    TransportType,
     PeerInfo
  }

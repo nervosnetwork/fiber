@@ -24,9 +24,8 @@ use std::sync::Arc;
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-#[cfg(not(target_arch = "wasm32"))]
+use tentacle::utils::extract_peer_id;
 use tentacle::utils::TransportType;
-use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -343,7 +342,12 @@ pub enum NetworkActorCommand {
     // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr, bool, Option<RpcReplyPort<Result<(), String>>>),
     // Connect to a peer via pubkey, resolving address from local graph/saved state.
-    ConnectPeerWithPubkey(Pubkey, RpcReplyPort<Result<(), String>>),
+    // The optional TransportType filters addresses by transport type (e.g. Wss for WASM).
+    ConnectPeerWithPubkey(
+        Pubkey,
+        Option<TransportType>,
+        RpcReplyPort<Result<(), String>>,
+    ),
     DisconnectPeer(
         Pubkey,
         PeerDisconnectReason,
@@ -1630,13 +1634,23 @@ where
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
             }
-            NetworkActorCommand::ConnectPeerWithPubkey(pubkey, reply) => {
-                let address = state
-                    .get_peer_addresses_by_pubkey(&pubkey)
-                    .into_iter()
-                    .choose(&mut rand::thread_rng());
+            NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, reply) => {
+                let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
+                let address = if let Some(transport) = addr_type {
+                    addresses
+                        .into_iter()
+                        .filter(|addr| find_type(addr) == transport)
+                        .choose(&mut rand::thread_rng())
+                } else {
+                    addresses.into_iter().choose(&mut rand::thread_rng())
+                };
                 let Some(addr) = address else {
-                    let _ = reply.send(Err(Error::PeerNotFound(pubkey).to_string()));
+                    let err = if let Some(transport) = addr_type {
+                        Error::NoMatchingAddress(pubkey, transport)
+                    } else {
+                        Error::PeerNotFound(pubkey)
+                    };
+                    let _ = reply.send(Err(err.to_string()));
                     return Ok(());
                 };
                 match state.control.dial(addr, TargetProtocol::All).await {
@@ -5476,11 +5490,7 @@ where
         }
 
         if !config.announce_private_addr.unwrap_or_default() {
-            announced_addrs.retain(|addr| {
-                multiaddr_to_socketaddr(addr)
-                    .map(|socket_addr| is_reachable(socket_addr.ip()))
-                    .unwrap_or_default()
-            });
+            announced_addrs.retain(crate::utils::is_addr_reachable);
         }
 
         // Start Tor onion hidden service if configured
@@ -5936,7 +5946,6 @@ pub async fn start_network<
     actor
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     let mut iter = addr.iter();
 
