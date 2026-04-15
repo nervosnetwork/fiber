@@ -2788,6 +2788,12 @@ where
         match message {
             GossipActorMessage::ReceivedControl(control) => {
                 state.control = Some(control);
+                // If peers have already connected before control was received,
+                // immediately trigger network maintenance so we don't wait for
+                // the next periodic tick (up to 60s) to start syncing.
+                if !state.peer_states.is_empty() {
+                    myself.send_message(GossipActorMessage::TickNetworkMaintenance)?;
+                }
             }
 
             GossipActorMessage::PeerConnected(pubkey, session) => {
@@ -2797,6 +2803,18 @@ where
                 state
                     .peer_states
                     .insert(pubkey, PeerState::new(session.id, session.ty));
+                // Immediately trigger network maintenance to start syncing with
+                // the new peer, rather than waiting for the next periodic
+                // TickNetworkMaintenance (up to 60s in production).
+                // This eliminates the initial gossip sync delay after connecting
+                // to a bootnode, which is critical for WASM nodes that need
+                // peer addresses from gossip data quickly.
+                // Only send the tick if control is already available; otherwise
+                // the tick will be sent from the ReceivedControl handler once
+                // control arrives (to avoid a panic in send_message_to_peer).
+                if state.control.is_some() {
+                    myself.send_message(GossipActorMessage::TickNetworkMaintenance)?;
+                }
             }
             GossipActorMessage::PeerDisconnected(peer_id, _session) => {
                 state.peer_states.remove(&peer_id);
