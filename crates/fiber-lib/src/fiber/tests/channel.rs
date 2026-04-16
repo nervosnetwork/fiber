@@ -5358,6 +5358,7 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
     let connect_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
             node_b.pubkey,
+            None,
             PeerConnectSource::Manual,
             rpc_reply,
         ))

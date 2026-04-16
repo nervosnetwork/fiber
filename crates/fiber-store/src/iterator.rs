@@ -53,6 +53,19 @@ impl<'a, S: crate::backend::StorageBackend + ?Sized> PrefixIterator<'a, S> {
         iter
     }
 
+    /// Create a `PrefixIterator` that starts **after** `start_key` (exclusive cursor).
+    pub fn new_from(store: &'a S, prefix: Vec<u8>, start_key: Vec<u8>) -> Self {
+        let mut iter = Self {
+            store,
+            prefix,
+            buffer: Vec::new().into_iter(),
+            last_key: Some(start_key),
+            exhausted: false,
+        };
+        iter.fetch_batch();
+        iter
+    }
+
     /// Fetch the next batch of items from the backend.
     fn fetch_batch(&mut self) {
         let start = match self.last_key.take() {
