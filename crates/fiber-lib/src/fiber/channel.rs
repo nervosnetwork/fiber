@@ -585,7 +585,8 @@ where
                     && state.ephemeral_config.external_funding.signed_submitted
                     && matches!(
                         state.state,
-                        ChannelState::SigningCommitment(_)
+                        ChannelState::CollaboratingFundingTx(_)
+                            | ChannelState::SigningCommitment(_)
                             | ChannelState::AwaitingTxSignatures(_)
                             | ChannelState::AwaitingChannelReady(_)
                             | ChannelState::ChannelReady
@@ -634,6 +635,7 @@ where
 
                 if state.ephemeral_config.external_funding.enabled
                     && state.ephemeral_config.external_funding.signed_submitted
+                    && !state.is_acceptor
                     && state
                         .ephemeral_config
                         .external_funding
@@ -647,29 +649,32 @@ where
                             state.state
                         )));
                     };
-                    let new_witnesses: Vec<_> = tx_signatures
+                    let peer_witnesses: Vec<_> = tx_signatures
                         .witnesses
                         .into_iter()
                         .map(|x| x.pack())
                         .collect();
-                    debug!(
-                        "Updating external funding tx witnesses of {:?} to {:?}",
-                        funding_tx.calc_tx_hash(),
-                        new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
-                    );
                     let merged_witnesses =
-                        merge_external_funding_witnesses(funding_tx.witnesses(), new_witnesses);
-                    state.funding_tx = Some(
-                        funding_tx
-                            .as_advanced_builder()
-                            .set_witnesses(merged_witnesses.clone())
-                            .build()
-                            .data(),
+                        merge_external_funding_witnesses(funding_tx.witnesses(), peer_witnesses);
+                    let merged_funding_tx = funding_tx
+                        .as_advanced_builder()
+                        .set_witnesses(merged_witnesses)
+                        .build()
+                        .data();
+                    debug!(
+                        "Received peer TxSignatures after external funding tx {:?} was submitted; merging peer witnesses and replying with submitted witnesses",
+                        merged_funding_tx.calc_tx_hash(),
                     );
+                    let witnesses: Vec<Vec<u8>> = funding_tx
+                        .witnesses()
+                        .into_iter()
+                        .map(|x| x.unpack())
+                        .collect();
+                    state.funding_tx = Some(merged_funding_tx.clone());
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::FundingTransactionPending(
-                                state.must_get_funding_transaction().clone(),
+                                merged_funding_tx,
                                 state.must_get_funding_transaction_outpoint(),
                                 state.get_id(),
                             ),
@@ -681,10 +686,7 @@ where
                                 state.get_remote_pubkey(),
                                 FiberMessage::tx_signatures(TxSignatures {
                                     channel_id: state.get_id(),
-                                    witnesses: merged_witnesses
-                                        .into_iter()
-                                        .map(|x| x.unpack())
-                                        .collect(),
+                                    witnesses,
                                 }),
                             )),
                         ))
@@ -697,6 +699,7 @@ where
 
                 if state.ephemeral_config.external_funding.enabled
                     && state.ephemeral_config.external_funding.signed_submitted
+                    && !state.is_acceptor
                     && state
                         .ephemeral_config
                         .external_funding
@@ -704,7 +707,41 @@ where
                         .is_some()
                     && state.should_local_send_tx_signatures_first()
                 {
-                    state.handle_tx_signatures(Some(tx_signatures.witnesses))?;
+                    let Some(funding_tx) = state.funding_tx.clone() else {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Received TxSignatures message, but the channel's funding tx is none {:?}",
+                            state.state
+                        )));
+                    };
+                    let peer_witnesses: Vec<_> = tx_signatures
+                        .witnesses
+                        .into_iter()
+                        .map(|x| x.pack())
+                        .collect();
+                    let merged_witnesses =
+                        merge_external_funding_witnesses(funding_tx.witnesses(), peer_witnesses);
+                    let merged_funding_tx = funding_tx
+                        .as_advanced_builder()
+                        .set_witnesses(merged_witnesses)
+                        .build()
+                        .data();
+                    debug!(
+                        "Received peer TxSignatures after external funding tx {:?} was submitted; merging peer witnesses without re-signing",
+                        merged_funding_tx.calc_tx_hash(),
+                    );
+                    state.funding_tx = Some(merged_funding_tx.clone());
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                merged_funding_tx,
+                                state.must_get_funding_transaction_outpoint(),
+                                state.get_id(),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    state.update_state(ChannelState::AwaitingChannelReady(
+                        AwaitingChannelReadyFlags::empty(),
+                    ));
                     return Ok(());
                 }
 
@@ -6928,14 +6965,19 @@ impl ChannelActorState {
                     && self.ephemeral_config.external_funding.signed_submitted
                 {
                     if let Some(local_tx) = self.funding_tx.as_ref() {
-                        // External funding v1 boundary: peer must not modify tx structure
-                        // after user submits the signed final tx.
-                        let local_hash = local_tx.calc_tx_hash();
-                        let remote_hash = msg.tx.calc_tx_hash();
-                        if local_hash != remote_hash {
+                        // External funding v1 boundary: after the user submits a final signed
+                        // tx, peers may echo the same raw tx but must not replace witnesses.
+                        if local_tx.raw().as_slice() == msg.tx.raw().as_slice() {
+                            debug!(
+                                "Ignoring duplicate external funding TxUpdate for {:?} after signed tx submission",
+                                self.get_id()
+                            );
+                            return Ok(());
+                        } else {
                             error!(
                                 "External funding signed tx mismatch on TxUpdate: local_hash={:?}, remote_hash={:?}",
-                                local_hash, remote_hash
+                                local_tx.calc_tx_hash(),
+                                msg.tx.calc_tx_hash()
                             );
                             myself
                                 .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
@@ -7191,6 +7233,7 @@ impl ChannelActorState {
 
         if self.ephemeral_config.external_funding.enabled
             && self.ephemeral_config.external_funding.signed_submitted
+            && !self.is_acceptor
             && self
                 .ephemeral_config
                 .external_funding

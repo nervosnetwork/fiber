@@ -8563,6 +8563,17 @@ fn mock_sign_external_funding_tx(unsigned_tx: &Transaction) -> Transaction {
         .data()
 }
 
+fn mock_sign_external_funding_tx_with_witness(
+    unsigned_tx: &Transaction,
+    witness: Bytes,
+) -> Transaction {
+    unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![witness])
+        .build()
+        .data()
+}
+
 #[test]
 fn test_external_funding_witness_merge_preserves_existing_signatures() {
     let external_signature: Bytes = [1u8; 65].pack();
@@ -9533,6 +9544,88 @@ async fn test_external_funding_initiator_restart_after_signed_submit_resumes_han
     node_b
         .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
         .await;
+}
+
+#[tokio::test]
+async fn test_external_funding_initiator_send_tx_signatures_first_preserves_external_witness() {
+    init_tracing();
+
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("ext-fund-send-first-node-{}", i)))
+            .base_dir_prefix(&format!("test-ext-fund-send-first-node-{}-", i));
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount = Some(150_000_000_000);
+            });
+        }
+        builder.build()
+    })
+    .await
+    .try_into()
+    .expect("2 nodes");
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let external_witness: Bytes = [9u8; 65].pack();
+    let signed_tx =
+        mock_sign_external_funding_tx_with_witness(&unsigned_tx, external_witness.clone());
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    let mut last_state = None;
+    for _ in 0..50 {
+        let state = node_a.get_channel_actor_state(channel_id);
+        if matches!(
+            state.state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        ) {
+            last_state = Some(state);
+            break;
+        }
+        last_state = Some(state);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = last_state.expect("channel state should exist after submit");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        ),
+        "initiator should complete tx_signatures handshake without re-signing, got {:?}",
+        state.state
+    );
+
+    let funding_tx = state
+        .funding_tx
+        .clone()
+        .expect("funding tx should remain available after tx_signatures");
+    assert_eq!(
+        funding_tx
+            .witnesses()
+            .get(0)
+            .expect("first witness exists")
+            .raw_data(),
+        external_witness.raw_data(),
+        "initiator should preserve the external witness when it sends tx_signatures first"
+    );
+    assert!(
+        funding_tx.witnesses().len() >= signed_tx.witnesses().len(),
+        "initiator should keep submitted witnesses and merge peer witnesses"
+    );
 }
 
 #[tokio::test]
