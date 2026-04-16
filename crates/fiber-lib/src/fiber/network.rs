@@ -1455,6 +1455,15 @@ where
                     }
                 }
 
+                // Keep the persisted opening record keyed by the final channel id even if
+                // the in-memory channel map was already moved by another event path.
+                if let Some(mut record) = state.store.get_channel_open_record(&old_channel_id) {
+                    state.store.delete_channel_open_record(&old_channel_id);
+                    record.channel_id = new_channel_id;
+                    record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+                    state.store.insert_channel_open_record(record);
+                }
+
                 // Move the pending reply to the final channel id. The actual RPC response is
                 // sent only after tx collaboration finishes and the unsigned tx is frozen.
                 let reply = state
@@ -4139,6 +4148,12 @@ where
         .0;
         let temp_channel_id = rx.await.expect("msg received");
         self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
+
+        // Record the external-funding opening attempt under the temporary id.
+        // It will be re-keyed once the peer accepts and the final channel id is known.
+        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
+        self.store.insert_channel_open_record(record);
+
         Ok((channel, temp_channel_id))
     }
 

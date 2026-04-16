@@ -1,8 +1,8 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelActorStateStore, ReloadParams, ReplayOrderHint, UpdateCommand,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
-    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelActorStateStore, ChannelOpenRecordStore, ReloadParams, ReplayOrderHint,
+    UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -40,10 +40,10 @@ use ckb_types::{
 };
 use fiber_types::{
     derive_private_key, derive_tlc_pubkey, AddTlcCommand, AwaitingChannelReadyFlags,
-    AwaitingTxSignaturesFlags, ChannelConstraints, ChannelState, CollaboratingFundingTxFlags,
-    HashAlgorithm, InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData,
-    PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus, ChannelState,
+    CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, NegotiatingFundingFlags,
+    OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason,
+    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
@@ -7452,6 +7452,33 @@ async fn test_open_channel_with_external_funding() {
             .get_channel_actor_state_unchecked(channel_id)
             .is_none(),
         "channel state should not be persisted before signed external funding tx submission"
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_rekeys_channel_open_record_after_accept() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, _unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+
+    let record = node_a
+        .store
+        .get_channel_open_record(&channel_id)
+        .expect("channel open record should be keyed by final channel id");
+    assert_eq!(record.channel_id, channel_id);
+    assert_eq!(record.status, ChannelOpeningStatus::FundingTxBuilding);
+
+    let records = node_a.store.get_channel_open_records();
+    assert_eq!(
+        records.len(),
+        1,
+        "external funding open should not leave a stale temp-id open record"
+    );
+    assert_eq!(
+        records[0].channel_id, channel_id,
+        "remaining open record should use the final channel id"
     );
 }
 
