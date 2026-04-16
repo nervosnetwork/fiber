@@ -22,6 +22,7 @@ use crate::fiber::types::{
 };
 use crate::fiber::ChannelConnectivityState;
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::store::sample::StoreSample;
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::*;
 #[cfg(feature = "watchtower")]
@@ -9463,20 +9464,22 @@ async fn test_submit_signed_funding_tx_after_acceptor_restart_for_external_fundi
     );
 }
 
-#[tokio::test]
-async fn test_external_funding_hydrate_restores_early_peer_commitment_signed_state() {
-    init_tracing();
-
-    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
-    let (channel_id, _unsigned_tx) =
-        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
-
-    let mut persisted_state = node_a.get_channel_actor_state(channel_id);
-    persisted_state
-        .external_funding
-        .as_mut()
-        .expect("external funding state should exist")
-        .peer_commitment_signed_received = true;
+#[test]
+fn test_external_funding_hydrate_restores_early_peer_commitment_signed_state() {
+    let mut persisted_state = ChannelActorState::samples(42)
+        .into_iter()
+        .next()
+        .expect("sample channel state should exist");
+    persisted_state.state =
+        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING);
+    persisted_state.external_funding = Some(fiber_types::ExternalFundingPersistState {
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: vec![],
+        unsigned_funding_tx: Transaction::default(),
+        started_at_ms: now_timestamp_as_millis_u64(),
+        signed_submitted: false,
+        peer_commitment_signed_received: true,
+    });
     persisted_state.hydrate_external_funding_runtime();
 
     assert!(
@@ -9488,6 +9491,10 @@ async fn test_external_funding_hydrate_restores_early_peer_commitment_signed_sta
         ),
         "hydrate should restore early peer commitment_signed, got {:?}",
         persisted_state.state
+    );
+    assert!(
+        persisted_state.is_waiting_for_external_funding_submission(),
+        "pre-submit external funding should still use the external funding timeout after hydrate"
     );
 }
 

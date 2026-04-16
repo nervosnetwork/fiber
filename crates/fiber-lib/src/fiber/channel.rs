@@ -4019,7 +4019,7 @@ where
 
         // handle funding timeout
         if state.can_abort_funding_on_timeout() {
-            if state.state.is_awaiting_external_funding() {
+            if state.is_waiting_for_external_funding_submission() {
                 self.schedule_external_funding_timeout_check(&myself, state);
             } else {
                 self.schedule_timeout_event(
@@ -8745,13 +8745,16 @@ impl ChannelActorState {
         }
     }
 
+    pub(crate) fn is_waiting_for_external_funding_submission(&self) -> bool {
+        self.ephemeral_config.external_funding.enabled
+            && !self.ephemeral_config.external_funding.signed_submitted
+    }
+
     fn has_funding_timeout_elapsed(&self) -> bool {
         if !self.can_abort_funding_on_timeout() {
             return false;
         }
-        let waiting_for_external_submission = self.ephemeral_config.external_funding.enabled
-            && !self.ephemeral_config.external_funding.signed_submitted;
-        let (started_at, timeout_seconds) = if waiting_for_external_submission {
+        let (started_at, timeout_seconds) = if self.is_waiting_for_external_funding_submission() {
             (
                 self.ephemeral_config
                     .external_funding
