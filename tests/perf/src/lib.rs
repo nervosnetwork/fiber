@@ -19,6 +19,8 @@ const DEFAULT_NODE3_METRICS_URL: &str = "http://127.0.0.1:29116/metrics";
 const DEFAULT_GOSSIP_FINAL_METRICS_DRAIN_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_GOSSIP_FINAL_METRICS_DRAIN_POLL_MS: u64 = 250;
 const DEFAULT_GOSSIP_FINAL_METRICS_STABLE_POLLS: usize = 8;
+const DEFAULT_ROUTE_DISCOVERY_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_ROUTE_DISCOVERY_POLL_MS: u64 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GossipLoadMode {
@@ -607,17 +609,19 @@ impl TestContext {
     }
 
     /// Send a payment (keysend mode)
-    pub async fn send_payment(
+    pub async fn send_payment_with_options(
         &self,
         from_url: &str,
         target_pubkey: &str,
         amount: &str,
         keysend: bool,
+        dry_run: bool,
     ) -> TestResult<Value> {
         let params = json!([{
             "target_pubkey": target_pubkey,
             "amount": amount,
-            "keysend": keysend
+            "keysend": keysend,
+            "dry_run": dry_run,
         }]);
 
         sleep(Duration::from_millis(1000)).await;
@@ -633,6 +637,49 @@ impl TestContext {
         }
 
         Ok(result)
+    }
+
+    pub async fn send_payment(
+        &self,
+        from_url: &str,
+        target_pubkey: &str,
+        amount: &str,
+        keysend: bool,
+    ) -> TestResult<Value> {
+        self.send_payment_with_options(from_url, target_pubkey, amount, keysend, false)
+            .await
+    }
+
+    pub async fn wait_until_route_available(
+        &self,
+        from_url: &str,
+        target_pubkey: &str,
+        amount: &str,
+        keysend: bool,
+    ) -> TestResult<()> {
+        let timeout = Duration::from_secs(DEFAULT_ROUTE_DISCOVERY_TIMEOUT_SECS);
+        let poll_interval = Duration::from_millis(DEFAULT_ROUTE_DISCOVERY_POLL_MS);
+        let started = tokio::time::Instant::now();
+
+        loop {
+            match self
+                .send_payment_with_options(from_url, target_pubkey, amount, keysend, true)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(TestError::Rpc(message)) if message.contains("PathFind error: no path found") => {
+                    if started.elapsed() >= timeout {
+                        return Err(TestError::Assertion(format!(
+                            "Timed out waiting for payment route from {} to {} after {:?}: {}",
+                            from_url, target_pubkey, timeout, message
+                        )));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+
+            sleep(poll_interval).await;
+        }
     }
 
     pub async fn get_payment_status(
@@ -730,9 +777,24 @@ pub async fn run_integration_test() -> TestResult<()> {
     )
     .await?;
 
-    println!("💰 Step 6: Sending keysend payment...");
-    ctx.send_payment(&ctx.node1.rpc_url, NODE_3_PUBKEY, "0x1F4", true)
+    println!("💰 Step 6: Waiting for route discovery...");
+    ctx.wait_until_route_available(&ctx.node1.rpc_url, NODE_3_PUBKEY, "0x1F4", true)
         .await?;
+
+    println!("💰 Step 7: Sending keysend payment...");
+    let payment = ctx
+        .send_payment(&ctx.node1.rpc_url, NODE_3_PUBKEY, "0x1F4", true)
+        .await?;
+    let payment_hash = payment["result"]["payment_hash"]
+        .as_str()
+        .ok_or_else(|| TestError::Assertion("Expected payment_hash".to_string()))?;
+    let status = ctx.wait_until_final_status(&ctx.node1.rpc_url, payment_hash).await?;
+    if status != "Success" {
+        return Err(TestError::Assertion(format!(
+            "Expected payment success, got {}",
+            status
+        )));
+    }
 
     println!("🎉 Integration test completed successfully!");
     Ok(())
