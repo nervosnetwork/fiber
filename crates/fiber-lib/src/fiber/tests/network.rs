@@ -750,7 +750,7 @@ async fn test_prune_channel_announcement_and_receive_channel_update() {
     assert_eq!(
         node2
             .get_store()
-            .get_broadcast_messages_iter(&Cursor::default())
+            .get_broadcast_messages(&Cursor::default(), 0)
             .into_iter()
             .filter(|message| !matches!(
                 message,
@@ -789,7 +789,7 @@ async fn test_prune_channel_announcement_and_receive_channel_update() {
     assert_eq!(
         node2
             .get_store()
-            .get_broadcast_messages_iter(&Cursor::default())
+            .get_broadcast_messages(&Cursor::default(), 0)
             .into_iter()
             .filter(|message| !matches!(
                 message,

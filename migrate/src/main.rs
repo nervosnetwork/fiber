@@ -1,12 +1,12 @@
 use clap::Parser;
-use fiber_v070::store::{db_migrate::DbMigrate, Store};
+use fiber_store::{db_migrate::DbMigrate, Store};
 use fnn_migrate::migrations::*;
 use fnn_migrate::util::prompt;
+use std::cmp::Ordering;
 use std::path::Path;
 use std::process::exit;
-use std::{cmp::Ordering, sync::Arc};
+use std::sync::Arc;
 use tracing::error;
-use tracing_subscriber;
 
 include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
 
@@ -33,17 +33,13 @@ fn init_db_migrate(db: Store) -> DbAndDbMigrate {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the database
-    #[arg(short, long)]
-    path: String,
+    /// Fiber data directory (the store is at <dir>/store)
+    #[arg(short = 'd', long = "dir")]
+    dir: String,
 
     /// Skip confirmation prompts
-    #[arg(short, long, default_value_t = false, group = "mode")]
+    #[arg(short, long, default_value_t = false)]
     skip_confirm: bool,
-
-    /// Run db validation
-    #[arg(short, long, default_value_t = false, group = "mode")]
-    check_validate: bool,
 }
 
 fn run_migrate<P: AsRef<Path>>(
@@ -51,7 +47,11 @@ fn run_migrate<P: AsRef<Path>>(
     path: P,
     skip_confirm: bool,
 ) -> Result<DbAndDbMigrate, String> {
-    if let Err(_) = migrate.borrow_migrate().init_or_check(path.as_ref()) {
+    if migrate
+        .borrow_migrate()
+        .init_or_check(path.as_ref())
+        .is_err()
+    {
         let result = migrate.borrow_migrate().check();
         if result == Ordering::Less {
             if migrate.borrow_migrate().is_any_break_change() {
@@ -98,24 +98,14 @@ fn main() {
         .init();
 
     let args = Args::parse();
-    let path = Path::new(&args.path);
+    let store_path = Path::new(&args.dir).join("store");
     let skip_confirm = args.skip_confirm;
 
-    if args.check_validate {
-        if let Err(err) = Store::check_validate(path) {
-            eprintln!("db validate failed:\n{}", err);
-            exit(1);
-        } else {
-            println!("db validate success");
-            exit(0);
-        }
-    } else {
-        let db = Store::open_db(path).expect("failed to open db");
-        let migrate = init_db_migrate(db);
+    let db = Store::open_db(&store_path).expect("failed to open db");
+    let migrate = init_db_migrate(db);
 
-        if let Err(err) = run_migrate(migrate, path, skip_confirm) {
-            eprintln!("{}", err);
-            exit(1);
-        }
+    if let Err(err) = run_migrate(migrate, &store_path, skip_confirm) {
+        eprintln!("{}", err);
+        exit(1);
     }
 }

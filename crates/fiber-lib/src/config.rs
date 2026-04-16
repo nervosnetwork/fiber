@@ -23,6 +23,8 @@ pub struct Config {
     // ckb actor config, None represents that we should not run ckb actor
     pub ckb: Option<CkbConfig>,
     pub base_dir: PathBuf,
+    /// When true, validate the database and exit without starting services.
+    pub check_validate: bool,
 }
 
 impl Config {
@@ -109,6 +111,10 @@ pub mod native {
         #[arg(short, long, value_parser, num_args = 0.., value_delimiter = ',')]
         services: Vec<Service>,
 
+        /// Run database validation and exit
+        #[arg(long, default_value_t = false)]
+        check_validate: bool,
+
         /// config for fiber network
         #[command(flatten)]
         pub fiber: <FiberConfig as ClapSerde>::Opt,
@@ -156,6 +162,7 @@ pub mod native {
 
             // Base directory for all things to be stored to disk
             let base_dir = args.base_dir.clone().unwrap_or(get_default_base_dir());
+            let check_validate = args.check_validate;
 
             // Get config file by
             // 1. Using the explicitly set command line argument `config`
@@ -194,7 +201,7 @@ pub mod native {
                 args.services
             };
 
-            if services.is_empty() {
+            if services.is_empty() && !check_validate {
                 error!("Must run at least one service. Specifying services to run by command line or config file.");
                 print_help_and_exit(1);
             };
@@ -243,6 +250,7 @@ pub mod native {
                 rpc,
                 ckb,
                 base_dir,
+                check_validate,
             }
         }
     }
@@ -309,6 +317,7 @@ mod wasm {
                 rpc,
                 ckb,
                 base_dir: PathBuf::from_str(&database_prefix).unwrap(),
+                check_validate: false,
             }
         }
     }

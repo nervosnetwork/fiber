@@ -35,6 +35,26 @@ use tracing::debug;
 // Number of blocks to keep the committed funding tx in the exclusion map.
 // It is the same with the value used in the CKB SDK.
 const KEEP_BLOCK_PERIOD: u64 = 13;
+// SecpSighash uses a 65-byte recoverable signature in `WitnessArgs.lock`:
+// 64-byte compact signature + 1-byte recovery id. The full serialized witness
+// is larger because it also includes Molecule table/bytes headers.
+const SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES: usize = 65;
+
+pub(crate) fn secp_sighash_placeholder_witness() -> packed::WitnessArgs {
+    packed::WitnessArgs::new_builder()
+        .lock(
+            Some(molecule::bytes::Bytes::from(vec![
+                0u8;
+                SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES
+            ]))
+            .pack(),
+        )
+        .build()
+}
+
+pub(crate) fn is_secp_sighash_placeholder_witness(witness: &[u8]) -> bool {
+    witness == secp_sighash_placeholder_witness().as_slice()
+}
 
 /// Funding transaction wrapper.
 ///
@@ -383,16 +403,12 @@ impl FundingTxBuilder {
             None => packed::Transaction::default().as_advanced_builder(),
         };
 
-        let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-            .build();
-
         let tx_builder = builder
             .set_inputs(inputs)
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
             .set_cell_deps(cell_deps.into_iter().collect())
-            .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
+            .set_witnesses(vec![secp_sighash_placeholder_witness().as_bytes().pack()]);
         Ok(tx_builder.build())
     }
 
@@ -410,13 +426,9 @@ impl FundingTxBuilder {
         );
 
         let sender = self.context.funding_source_lock_script.clone();
-        let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-            .build();
-
         let balancer = CapacityBalancer::new_simple(
             sender.clone(),
-            placeholder_witness,
+            secp_sighash_placeholder_witness(),
             self.request.funding_fee_rate,
         );
 
@@ -499,7 +511,6 @@ impl FundingTxBuilder {
 
         tx.as_advanced_builder().set_cell_deps(cell_deps).build()
     }
-
     fn finalize_funding_tx_update(
         self,
         tx: TransactionView,
@@ -1064,5 +1075,14 @@ mod tests {
             Err(FundingError::OverflowError) => {}
             other => panic!("expected OverflowError, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_secp_sighash_placeholder_witness_matches_sdk_layout() {
+        let placeholder = secp_sighash_placeholder_witness();
+        let lock = placeholder.lock().to_opt().expect("has lock placeholder");
+
+        assert_eq!(lock.len(), SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES);
+        assert!(is_secp_sighash_placeholder_witness(placeholder.as_slice()));
     }
 }

@@ -656,7 +656,7 @@ where
     // Process them and set nodes and channels accordingly.
     pub(crate) fn load_from_store(&mut self) {
         loop {
-            let messages = self.store.get_broadcast_messages(&self.latest_cursor, None);
+            let messages = self.store.get_broadcast_messages(&self.latest_cursor, 0);
             if messages.is_empty() {
                 break;
             }
@@ -887,18 +887,27 @@ where
     }
 
     pub fn get_nodes_with_params(&self, limit: usize, after: Option<Cursor>) -> Vec<NodeInfo> {
-        let cursor = after.unwrap_or_default();
-        self.store
-            .get_broadcast_messages_iter(&cursor)
-            .into_iter()
-            .filter_map(|message| match message {
-                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
-                    Some(NodeInfo::from(node_announcement))
+        let mut cursor = after.unwrap_or_default();
+        let mut result = Vec::new();
+        loop {
+            let batch = self
+                .store
+                .get_broadcast_messages(&cursor, if limit > 0 { limit - result.len() } else { 0 });
+            if batch.is_empty() {
+                break;
+            }
+            for message in batch {
+                cursor = message.cursor();
+                if let BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) = message
+                {
+                    result.push(NodeInfo::from(node_announcement));
+                    if limit > 0 && result.len() >= limit {
+                        return result;
+                    }
                 }
-                _ => None,
-            })
-            .take(limit)
-            .collect()
+            }
+        }
+        result
     }
 
     pub fn get_node(&self, node_id: &Pubkey) -> Option<&NodeInfo> {
@@ -949,31 +958,36 @@ where
         limit: usize,
         after: Option<Cursor>,
     ) -> Vec<ChannelInfo> {
-        let cursor = after.unwrap_or_default();
-        self.store
-            .get_broadcast_messages_iter(&cursor)
-            .into_iter()
-            .filter_map(|message| match message {
-                BroadcastMessageWithTimestamp::ChannelAnnouncement(
+        let mut cursor = after.unwrap_or_default();
+        let mut result = Vec::new();
+        loop {
+            let batch = self
+                .store
+                .get_broadcast_messages(&cursor, if limit > 0 { limit - result.len() } else { 0 });
+            if batch.is_empty() {
+                break;
+            }
+            for message in batch {
+                cursor = message.cursor();
+                if let BroadcastMessageWithTimestamp::ChannelAnnouncement(
                     timestamp,
                     channel_announcement,
-                ) => {
+                ) = message
+                {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-
-                    // assuming channel is closed if disabled from the both side
                     let is_closed = channel_info.update_of_node1.is_some_and(|u| !u.enabled)
                         && channel_info.update_of_node2.is_some_and(|u| !u.enabled);
                     if !is_closed {
-                        Some(channel_info)
-                    } else {
-                        None
+                        result.push(channel_info);
+                        if limit > 0 && result.len() >= limit {
+                            return result;
+                        }
                     }
                 }
-                _ => None,
-            })
-            .take(limit)
-            .collect()
+            }
+        }
+        result
     }
 
     pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {

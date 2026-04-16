@@ -105,28 +105,19 @@ fn max_acceptable_gossip_message_timestamp() -> u64 {
 
 pub trait GossipMessageStore {
     /// The implementors should guarantee that the returned messages are sorted by timestamp in the ascending order.
-    fn get_broadcast_messages_iter(
-        &self,
-        after_cursor: &Cursor,
-    ) -> impl IntoIterator<Item = BroadcastMessageWithTimestamp>;
-
-    /// The implementors should guarantee that the returned messages are sorted by timestamp in the descending order.
-    fn get_broadcast_messages_iter_reverse(
-        &self,
-        before_cursor: Option<&Cursor>,
-        limit: usize,
-    ) -> impl IntoIterator<Item = BroadcastMessageWithTimestamp>;
-
+    /// `limit` controls the maximum number of messages to return; 0 means no limit (return all).
     fn get_broadcast_messages(
         &self,
         after_cursor: &Cursor,
-        count: Option<u16>,
-    ) -> Vec<BroadcastMessageWithTimestamp> {
-        self.get_broadcast_messages_iter(after_cursor)
-            .into_iter()
-            .take(count.unwrap_or(DEFAULT_NUM_OF_BROADCAST_MESSAGE) as usize)
-            .collect()
-    }
+        limit: usize,
+    ) -> Vec<BroadcastMessageWithTimestamp>;
+
+    /// The implementors should guarantee that the returned messages are sorted by timestamp in the descending order.
+    fn get_broadcast_messages_reverse(
+        &self,
+        before_cursor: Option<&Cursor>,
+        limit: usize,
+    ) -> Vec<BroadcastMessageWithTimestamp>;
 
     fn query_broadcast_messages<I: IntoIterator<Item = BroadcastMessageQuery>>(
         &self,
@@ -293,7 +284,7 @@ pub(crate) fn get_latest_startup_broadcast_message_cursor<S: GossipMessageStore>
         Some(local_pubkey) => {
             // TODO: Support lazy load of broadcast messages, know we just add a limit to the query to avoid loading too many messages into memory.
             store
-                .get_broadcast_messages_iter_reverse(None, 100)
+                .get_broadcast_messages_reverse(None, 100)
                 .into_iter()
                 .filter(|message| is_remote_cursor_candidate(store, local_pubkey, message))
                 .map(|message| message.cursor())
@@ -1723,9 +1714,8 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
                 };
                 let messages = state
                     .store
-                    .get_broadcast_messages(&cursor, Some(DEFAULT_NUM_OF_BROADCAST_MESSAGE))
-                    .into_iter()
-                    .collect::<Vec<_>>();
+                    .get_broadcast_messages(&cursor, DEFAULT_NUM_OF_BROADCAST_MESSAGE as usize);
+
                 trace!(
                     "Loaded messages for subscription #{} with cursor {:?} (number of messages {:?})",
                     id,
@@ -2840,9 +2830,11 @@ where
                         error!("Failed to check chain hash: {:?}", e);
                         return Ok(());
                     }
-                    if get_broadcast_messages.count > MAX_NUM_OF_BROADCAST_MESSAGES {
+                    if get_broadcast_messages.count == 0
+                        || get_broadcast_messages.count > MAX_NUM_OF_BROADCAST_MESSAGES
+                    {
                         warn!(
-                            "Received GetBroadcastMessages with too many messages: {:?}",
+                            "Received GetBroadcastMessages with invalid count: {:?}",
                             get_broadcast_messages.count
                         );
                         return Ok(());
@@ -2850,7 +2842,7 @@ where
                     let id = get_broadcast_messages.id;
                     let messages = state.get_store().get_broadcast_messages(
                         &get_broadcast_messages.after_cursor,
-                        Some(get_broadcast_messages.count),
+                        get_broadcast_messages.count as usize,
                     );
                     let result =
                         GossipMessage::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
