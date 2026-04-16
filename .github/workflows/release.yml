@@ -184,6 +184,7 @@ jobs:
           ghcr.io/${{ github.repository }}
           nervos/fiber
         flavor: |
+          # Keep auto latest disabled; the explicit latest tag below is only for stable releases.
           latest=false
         tags: |
           type=raw,value=edge-${{ matrix.arch }},enable=${{ github.ref == 'refs/heads/playground/release' }}
@@ -231,6 +232,7 @@ jobs:
           ghcr.io/${{ github.repository }}
           nervos/fiber
         flavor: |
+          # Keep auto latest disabled; the explicit latest tag below is only for stable releases.
           latest=false
         tags: |
           type=raw,value=edge,enable=${{ github.ref == 'refs/heads/playground/release' }}
