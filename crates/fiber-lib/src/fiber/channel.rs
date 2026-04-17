@@ -2595,7 +2595,7 @@ where
                         state.funding_tx = Some(tx);
                     }
                     _ => {
-                        error!("Invalid state. Expect channel state to be AwaitingTxSignatures, but bot {:?}", state.state);
+                        error!("Invalid state. Expect channel state to be AwaitingTxSignatures, but got {:?}", state.state);
                     }
                 }
                 Ok(())
