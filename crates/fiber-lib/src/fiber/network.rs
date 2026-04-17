@@ -1642,7 +1642,16 @@ where
                         .filter(|addr| find_type(addr) == transport)
                         .choose(&mut rand::thread_rng())
                 } else {
-                    addresses.into_iter().choose(&mut rand::thread_rng())
+                    // On native platforms, WSS is not supported. Exclude WSS addresses
+                    // so that a randomly chosen address is actually connectable.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let address = addresses
+                        .into_iter()
+                        .filter(|addr| find_type(addr) != TransportType::Wss)
+                        .choose(&mut rand::thread_rng());
+                    #[cfg(target_arch = "wasm32")]
+                    let address = addresses.into_iter().choose(&mut rand::thread_rng());
+                    address
                 };
                 let Some(addr) = address else {
                     let err = if let Some(transport) = addr_type {
