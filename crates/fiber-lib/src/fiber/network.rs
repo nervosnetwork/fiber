@@ -1642,13 +1642,27 @@ where
                         .filter(|addr| find_type(addr) == transport)
                         .choose(&mut rand::thread_rng())
                 } else {
-                    // On native platforms, WSS is not supported. Exclude WSS addresses
-                    // so that a randomly chosen address is actually connectable.
+                    // On native platforms, WSS is not supported, so exclude WSS addresses to
+                    // ensure the randomly chosen address is actually connectable.
+                    // On WASM, all address types (including WSS, which is the only supported
+                    // transport there) are candidates.
                     #[cfg(not(target_arch = "wasm32"))]
-                    let address = addresses
-                        .into_iter()
-                        .filter(|addr| find_type(addr) != TransportType::Wss)
-                        .choose(&mut rand::thread_rng());
+                    let address = {
+                        let (wss, non_wss): (Vec<_>, Vec<_>) = addresses
+                            .into_iter()
+                            .partition(|addr| find_type(addr) == TransportType::Wss);
+                        if non_wss.is_empty() && !wss.is_empty() {
+                            // The peer is known but has only WSS addresses, which are not
+                            // supported on native platforms.
+                            let _ = reply.send(Err(Error::NoMatchingAddress(
+                                pubkey,
+                                TransportType::Tcp,
+                            )
+                            .to_string()));
+                            return Ok(());
+                        }
+                        non_wss.into_iter().choose(&mut rand::thread_rng())
+                    };
                     #[cfg(target_arch = "wasm32")]
                     let address = addresses.into_iter().choose(&mut rand::thread_rng());
                     address
