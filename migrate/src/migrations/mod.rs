@@ -8,3 +8,4 @@ pub mod mig_20260204_pubkey_channel_index;
 pub mod mig_20260301_network_state_pubkey;
 pub mod mig_20260302_channel_open_record;
 pub mod mig_20260302_channel_replay_fields;
+pub mod mig_20260416_channel_connectivity_state;

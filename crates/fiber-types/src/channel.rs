@@ -1532,7 +1532,6 @@ pub struct ChannelActorData {
     /// A flag to indicate whether the channel is reestablishing,
     /// we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
-    pub connectivity_state: ChannelConnectivityState,
     pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
     pub created_at: SystemTime,
@@ -1545,6 +1544,9 @@ pub struct ChannelActorData {
     /// Tracks whether the last outbound sync message was RevokeAndAck.
     #[serde(default)]
     pub last_was_revoke: bool,
+
+    /// Runtime connectivity state persisted for restart recovery.
+    pub connectivity_state: ChannelConnectivityState,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
