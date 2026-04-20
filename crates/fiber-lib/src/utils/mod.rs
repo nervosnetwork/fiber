@@ -13,12 +13,18 @@ use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 ///
 /// For DNS-based addresses (`Dns4`/`Dns6`), we treat them as always reachable
 /// because a DNS name implies a publicly resolvable endpoint.
+///
+/// For Tor onion addresses (`Onion3`), we treat them as always reachable
+/// because they are publicly accessible via the Tor network.
 pub(crate) fn is_addr_reachable(addr: &Multiaddr) -> bool {
-    let has_dns = addr
-        .iter()
-        .any(|proto| matches!(proto, Protocol::Dns4(_) | Protocol::Dns6(_)));
+    let has_public_protocol = addr.iter().any(|proto| {
+        matches!(
+            proto,
+            Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Onion3(_)
+        )
+    });
 
-    if has_dns {
+    if has_public_protocol {
         return true;
     }
 
