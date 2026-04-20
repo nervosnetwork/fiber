@@ -37,7 +37,8 @@ assert {
 }
 
 script:pre-request {
-  // Keep tlc2 comfortably valid so only tlc1 expires during the offline window.
+  // Keep tlc2 valid across the same offline window so only tlc1 expires before
+  // the delayed remove_tlc sequence runs.
   let expiry = "0x" + (Date.now() + 1000 * 30).toString(16);
   bru.setVar("expiry", expiry);
 }
