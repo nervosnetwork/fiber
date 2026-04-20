@@ -1642,26 +1642,30 @@ where
                         .filter(|addr| find_type(addr) == transport)
                         .choose(&mut rand::thread_rng())
                 } else {
-                    // On native platforms, WSS is not supported, so exclude WSS addresses to
-                    // ensure the randomly chosen address is actually connectable.
-                    // On WASM, all address types (including WSS, which is the only supported
-                    // transport there) are candidates.
+                    // On native platforms, only TCP/DNS addresses are supported (not WS, WSS or
+                    // Onion). Select randomly from those, and return a clear error if the peer
+                    // only advertises non-TCP addresses.
+                    // On WASM, all address types (including WSS, the only transport supported
+                    // there) are candidates.
                     #[cfg(not(target_arch = "wasm32"))]
                     let address = {
-                        let (wss, non_wss): (Vec<_>, Vec<_>) = addresses
-                            .into_iter()
-                            .partition(|addr| find_type(addr) == TransportType::Wss);
-                        if non_wss.is_empty() && !wss.is_empty() {
-                            // The peer is known but has only WSS addresses, which are not
-                            // supported on native platforms.
-                            let _ = reply.send(Err(Error::NoMatchingAddress(
-                                pubkey,
-                                TransportType::Tcp,
-                            )
-                            .to_string()));
+                        let mut has_non_tcp = false;
+                        let mut tcp_addrs = Vec::new();
+                        for addr in addresses.into_iter() {
+                            if find_type(&addr) == TransportType::Tcp {
+                                tcp_addrs.push(addr);
+                            } else {
+                                has_non_tcp = true;
+                            }
+                        }
+                        if tcp_addrs.is_empty() && has_non_tcp {
+                            let _ = reply.send(Err(format!(
+                                "Peer {:?} has no TCP/DNS addresses available; only non-TCP addresses (WS/WSS/Onion) were found, which are unsupported on native platforms",
+                                pubkey
+                            )));
                             return Ok(());
                         }
-                        non_wss.into_iter().choose(&mut rand::thread_rng())
+                        tcp_addrs.into_iter().choose(&mut rand::thread_rng())
                     };
                     #[cfg(target_arch = "wasm32")]
                     let address = addresses.into_iter().choose(&mut rand::thread_rng());
