@@ -3012,7 +3012,7 @@ async fn test_trampoline_node_restart() {
     node_c
         .network_actor
         .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ))
         .expect("Failed to send settle command");
 

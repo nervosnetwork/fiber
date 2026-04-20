@@ -503,7 +503,7 @@ fn test_open_invoice_proceeds_to_settlement() {
 }
 
 #[test]
-fn test_received_invoice_proceeds_to_settlement() {
+fn test_received_hold_invoice_from_new_tlc_rejects() {
     let preimage = gen_rand_sha256_hash();
     let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
     let invoice = create_test_invoice(payment_hash, Some(1000), false);
@@ -520,8 +520,36 @@ fn test_received_invoice_proceeds_to_settlement() {
             None,
         ));
 
-    // Use hold path (empty channel_tlc_ids) so Received is allowed (hold-invoice re-entry with preimage).
-    let command = SettleTlcSetCommand::new(payment_hash, vec![], &store);
+    let command = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store);
+    let settlements = command.run();
+
+    assert_eq!(settlements.len(), 1);
+    assert!(!is_fulfill_settlement(&settlements[0]));
+    assert_eq!(
+        get_error_code(&settlements[0]),
+        Some(TlcErrorCode::HoldTlcTimeout)
+    );
+}
+
+#[test]
+fn test_received_hold_invoice_after_preimage_reveal_proceeds_to_settlement() {
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let invoice = create_test_invoice(payment_hash, Some(1000), false);
+    let channel_id = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(invoice, CkbInvoiceStatus::Received)
+        .with_preimage(payment_hash, preimage)
+        .with_hold_tlc(payment_hash, channel_id, 0)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ));
+
+    let command = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store);
     let settlements = command.run();
 
     assert_eq!(settlements.len(), 1);
@@ -1044,8 +1072,8 @@ fn test_received_invoice_can_be_settled_after_invoice_expiry() {
             None,
         ));
 
-    // Use hold path so Received is allowed (hold-invoice re-entry; invoice expiry is ignored for Received).
-    let command = SettleTlcSetCommand::new(payment_hash, vec![], &store);
+    // Use preimage-reveal retry path so Received is allowed and invoice expiry is ignored.
+    let command = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store);
     let settlements = command.run();
 
     // Should still succeed with fulfill (not fail)

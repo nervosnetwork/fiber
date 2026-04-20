@@ -91,7 +91,7 @@ use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
-use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
+use crate::utils::actor::ActorHandleLogGuard;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
@@ -366,8 +366,10 @@ pub enum NetworkActorCommand {
     TimeoutHoldTlc(Hash256, Hash256, u64),
     // Settle tlc set by given a list of `(channel_id, tlc_id)`
     SettleTlcSet(Hash256, Vec<(Hash256, u64)>),
-    // Settle hold tlc set saved for a payment hash
+    // Settle hold tlc set saved for a payment hash when a new TLC arrives.
     SettleHoldTlcSet(Hash256),
+    // Retry settling a hold tlc set after the invoice has already been marked Received.
+    SettleReceivedHoldTlcSet(Hash256),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(Pubkey, SessionId),
     // For internal use and debugging only. Most of the messages requires some
@@ -1855,6 +1857,7 @@ where
                 let mut with_channel_down_peers = HashSet::new();
                 let mut ready_channels_count = 0;
                 let mut shuttingdown_channels_count = 0;
+                let mut invoice_tlc_sets: HashMap<Hash256, Vec<(Hash256, u64)>> = HashMap::new();
                 for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(channel_state, ChannelState::ChannelReady) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
@@ -1871,23 +1874,38 @@ where
                             let committed_tlcs: Vec<_> = actor_state
                                 .tlc_state
                                 .get_committed_received_tlcs()
-                                .map(|tlc| (tlc.tlc_id, tlc.id(), tlc.payment_hash))
+                                .map(|tlc| {
+                                    (
+                                        tlc.tlc_id,
+                                        tlc.id(),
+                                        tlc.payment_hash,
+                                        actor_state
+                                            .waiting_forward_tlc_tasks
+                                            .contains_key(&tlc.tlc_id),
+                                    )
+                                })
                                 .collect();
 
-                            for (tlc_id, id, payment_hash) in committed_tlcs {
-                                // skip if tlc amount is not fulfilled invoice
-                                // this may happened if payment is mpp
-                                if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                                    // Re-fetch tlc for is_invoice_fulfilled check
-                                    if let Some(tlc) = actor_state.tlc_state.get(&tlc_id) {
-                                        if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
-                                            continue;
-                                        }
-                                    } else {
-                                        continue;
+                            for (_tlc_id, id, payment_hash, is_waiting_forward_result) in
+                                committed_tlcs
+                            {
+                                if self.store.get_invoice(&payment_hash).is_some() {
+                                    if self.store.get_invoice_status(&payment_hash)
+                                        == Some(CkbInvoiceStatus::Open)
+                                    {
+                                        invoice_tlc_sets
+                                            .entry(payment_hash)
+                                            .or_default()
+                                            .push((channel_id, id));
                                     }
+                                    continue;
                                 }
 
+                                if is_waiting_forward_result {
+                                    continue;
+                                }
+
+                                // process the non-invoice tlcs, such as keysend
                                 let Some(payment_preimage) = self.store.get_preimage(&payment_hash)
                                 else {
                                     continue;
@@ -2097,6 +2115,11 @@ where
                     }
                 }
 
+                for (payment_hash, channel_tlc_ids) in invoice_tlc_sets {
+                    self.settle_tlc_set(state, payment_hash, channel_tlc_ids)
+                        .await;
+                }
+
                 // update metrics
                 #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
                 {
@@ -2134,6 +2157,15 @@ where
                 // we retry timeout these tlcs.
                 let current_time = now_timestamp_as_millis_u64();
                 for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
+                    if self.store.get_preimage(&payment_hash).is_some() {
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                        continue;
+                    }
+
                     // timeout hold tlc
                     let already_timeout = hold_tlcs
                         .iter()
@@ -2155,7 +2187,10 @@ where
                 }
             }
             NetworkActorCommand::SettleHoldTlcSet(payment_hash) => {
-                self.settle_hold_tlc_set(state, payment_hash).await;
+                self.settle_hold_tlc_set(state, payment_hash, false).await;
+            }
+            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash) => {
+                self.settle_hold_tlc_set(state, payment_hash, true).await;
             }
             NetworkActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
                 self.settle_tlc_set(state, payment_hash, channel_tlc_ids)
@@ -2642,8 +2677,18 @@ where
         &self,
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
+        allow_received_invoice: bool,
     ) {
-        for tlc_settlement in self.settle_tlc_set(state, payment_hash, Vec::new()).await {
+        let settle_command = if allow_received_invoice {
+            SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &self.store)
+        } else {
+            SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store)
+        };
+
+        for tlc_settlement in self
+            .apply_tlc_settlements(state, settle_command.run())
+            .await
+        {
             self.store.remove_payment_hold_tlc(
                 &payment_hash,
                 &tlc_settlement.channel_id(),
@@ -2660,8 +2705,17 @@ where
     ) -> Vec<TlcSettlement> {
         let settle_command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &self.store);
 
+        self.apply_tlc_settlements(state, settle_command.run())
+            .await
+    }
+
+    async fn apply_tlc_settlements(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        settlements: Vec<TlcSettlement>,
+    ) -> Vec<TlcSettlement> {
         let mut success_settlements = Vec::new();
-        for tlc_settlement in settle_command.run() {
+        for tlc_settlement in settlements {
             let (send, _recv) = oneshot::channel();
             let rpc_reply = RpcReplyPort::from(send);
             match state
@@ -2913,7 +2967,7 @@ where
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ));
 
         Ok(())
@@ -5715,7 +5769,7 @@ where
             if !already_timeout {
                 myself
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+                        NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
