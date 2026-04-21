@@ -1642,34 +1642,13 @@ where
                         .filter(|addr| find_type(addr) == transport)
                         .choose(&mut rand::thread_rng())
                 } else {
-                    // On native platforms, only TCP/DNS addresses are supported (not WS, WSS or
-                    // Onion). Select randomly from those, and return a clear error if the peer
-                    // only advertises non-TCP addresses.
-                    // On WASM, all address types (including WSS, the only transport supported
-                    // there) are candidates.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let address = {
-                        let mut has_non_tcp = false;
-                        let mut tcp_addrs = Vec::new();
-                        for addr in addresses.into_iter() {
-                            if find_type(&addr) == TransportType::Tcp {
-                                tcp_addrs.push(addr);
-                            } else {
-                                has_non_tcp = true;
-                            }
-                        }
-                        if tcp_addrs.is_empty() && has_non_tcp {
-                            let _ = reply.send(Err(format!(
-                                "Peer {:?} has no TCP/DNS addresses available; only non-TCP addresses (for example WS/WSS/Onion) were found, and this default native selection path only considers TCP/DNS addresses",
-                                pubkey
-                            )));
-                            return Ok(());
-                        }
-                        tcp_addrs.into_iter().choose(&mut rand::thread_rng())
-                    };
-                    #[cfg(target_arch = "wasm32")]
-                    let address = addresses.into_iter().choose(&mut rand::thread_rng());
-                    address
+                    // When the caller does not request a specific transport, consider all
+                    // advertised addresses instead of hard-filtering native builds to TCP only.
+                    // Native builds may legitimately support transports such as `/ws` (and other
+                    // transports depending on runtime configuration), so the default selection
+                    // should not exclude them here before `dial` gets a chance to validate the
+                    // chosen address.
+                    addresses.into_iter().choose(&mut rand::thread_rng())
                 };
                 let Some(addr) = address else {
                     let err = if let Some(transport) = addr_type {
