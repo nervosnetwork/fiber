@@ -996,9 +996,9 @@ Connect to a peer.
  The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
 * `addr_type` - <em>Option<[TransportType](#type-transporttype)></em>, Filter addresses by transport type when connecting by pubkey.
- If not specified, on native platforms a random non-WSS address is chosen (since WSS is
- not supported natively), and on WASM a random address from all available addresses is
- chosen (WASM environments only support `wss`).
+ If not specified, on native platforms a random `tcp` address is chosen, and on WASM a
+ random address from all available addresses is chosen (WASM environments only support
+ `wss`).
 
 ##### Returns
 

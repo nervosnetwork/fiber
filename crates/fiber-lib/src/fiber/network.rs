@@ -1660,7 +1660,7 @@ where
                         }
                         if tcp_addrs.is_empty() && has_non_tcp {
                             let _ = reply.send(Err(format!(
-                                "Peer {:?} has no TCP/DNS addresses available; only non-TCP addresses (WS/WSS/Onion) were found, which are unsupported on native platforms",
+                                "Peer {:?} has no TCP/DNS addresses available; only non-TCP addresses (for example WS/WSS/Onion) were found, and this default native selection path only considers TCP/DNS addresses",
                                 pubkey
                             )));
                             return Ok(());
