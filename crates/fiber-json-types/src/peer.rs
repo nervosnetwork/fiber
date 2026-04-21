@@ -30,9 +30,7 @@ pub struct ConnectPeerParams {
     /// Whether to save the peer address to the peer store.
     pub save: Option<bool>,
     /// Filter addresses by transport type when connecting by pubkey.
-    /// If not specified, on native platforms a random TCP address is chosen, and on WASM a
-    /// random address from all available addresses is chosen (WASM environments only support
-    /// `wss`).
+    /// If not specified, a random address from all available addresses is chosen.
     pub addr_type: Option<TransportType>,
 }
 

@@ -1358,3 +1358,164 @@ async fn test_rpc_disconnect_peer_not_connected() {
         err
     );
 }
+
+#[tokio::test]
+async fn test_rpc_connect_peer_by_pubkey_unknown_peer() {
+    // When the pubkey has no known addresses, connect_peer should return a PeerNotFound error.
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-0".to_string()))
+            .base_dir_prefix("test-fnn-connect-pubkey-unknown-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    let fake_privkey = gen_rand_fiber_private_key();
+    let fake_pubkey =
+        fiber_json_types::Pubkey::from_slice(&fake_privkey.pubkey().serialize()).unwrap();
+
+    let res: Result<(), String> = node
+        .send_rpc_request(
+            "connect_peer",
+            ConnectPeerParams {
+                address: None,
+                pubkey: Some(fake_pubkey),
+                save: None,
+                addr_type: None,
+            },
+        )
+        .await;
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("Peer not found"),
+        "expected 'Peer not found' error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_rpc_connect_peer_by_pubkey_with_known_address() {
+    use crate::fiber::gossip::GossipMessageStore;
+    use crate::fiber::network::get_chain_hash;
+    use crate::fiber::{FeatureVector, NodeAnnouncement};
+    use crate::now_timestamp_as_millis_u64;
+    use fiber_types::protocol::AnnouncedNodeName;
+    use tentacle::multiaddr::MultiAddr;
+
+    // When the peer has a known address, connect_peer should attempt to dial (not return PeerNotFound).
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-0".to_string()))
+            .base_dir_prefix("test-fnn-connect-pubkey-known-addr-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    let fake_privkey = gen_rand_fiber_private_key();
+    let peer_pubkey = fake_privkey.pubkey();
+    let json_pubkey =
+        fiber_json_types::Pubkey::from_slice(&peer_pubkey.serialize()).unwrap();
+
+    // Store a NodeAnnouncement with a TCP address for the fake peer.
+    let tcp_addr: MultiAddr = "/ip4/127.0.0.1/tcp/19876"
+        .parse()
+        .expect("valid multiaddr");
+    let announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("test-peer").expect("valid name"),
+        FeatureVector::default(),
+        vec![tcp_addr],
+        &fake_privkey,
+        get_chain_hash(),
+        now_timestamp_as_millis_u64(),
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    node.store.save_node_announcement(announcement);
+
+    let res: Result<(), String> = node
+        .send_rpc_request(
+            "connect_peer",
+            ConnectPeerParams {
+                address: None,
+                pubkey: Some(json_pubkey),
+                save: None,
+                addr_type: None,
+            },
+        )
+        .await;
+    // The dial was initiated (Ok) or failed with a transport error — either way,
+    // it must NOT return a PeerNotFound error since the peer's address is known.
+    if let Err(err) = &res {
+        assert!(
+            !err.contains("Peer not found"),
+            "should not return PeerNotFound when peer has known addresses, got: {}",
+            err
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rpc_connect_peer_by_pubkey_addr_type_no_match() {
+    use crate::fiber::gossip::GossipMessageStore;
+    use crate::fiber::network::get_chain_hash;
+    use crate::fiber::{FeatureVector, NodeAnnouncement};
+    use crate::now_timestamp_as_millis_u64;
+    use fiber_types::protocol::AnnouncedNodeName;
+    use tentacle::multiaddr::MultiAddr;
+
+    // When the peer only has TCP addresses but addr_type=Wss is requested, return NoMatchingAddress.
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node-0".to_string()))
+            .base_dir_prefix("test-fnn-connect-pubkey-type-mismatch-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+
+    let fake_privkey = gen_rand_fiber_private_key();
+    let peer_pubkey = fake_privkey.pubkey();
+    let json_pubkey =
+        fiber_json_types::Pubkey::from_slice(&peer_pubkey.serialize()).unwrap();
+
+    // Store a NodeAnnouncement with only a TCP address.
+    let tcp_addr: MultiAddr = "/ip4/127.0.0.1/tcp/19877"
+        .parse()
+        .expect("valid multiaddr");
+    let announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("test-peer").expect("valid name"),
+        FeatureVector::default(),
+        vec![tcp_addr],
+        &fake_privkey,
+        get_chain_hash(),
+        now_timestamp_as_millis_u64(),
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    node.store.save_node_announcement(announcement);
+
+    // Request a WSS address — none exist, so NoMatchingAddress should be returned.
+    let res: Result<(), String> = node
+        .send_rpc_request(
+            "connect_peer",
+            ConnectPeerParams {
+                address: None,
+                pubkey: Some(json_pubkey),
+                save: None,
+                addr_type: Some(fiber_json_types::TransportType::Wss),
+            },
+        )
+        .await;
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("No matching address"),
+        "expected 'No matching address' error, got: {}",
+        err
+    );
+}
