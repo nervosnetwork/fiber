@@ -119,11 +119,17 @@ fn create_fake_node_announcement_message() -> NodeAnnouncement {
     create_node_announcement_message_with_priv_key(&priv_key)
 }
 
+fn build_ws_multiaddr(secure: bool) -> Multiaddr {
+    let mut addr = Multiaddr::from_str("/dns4/example.com/tcp/443").expect("valid base multiaddr");
+    addr.push(if secure { Protocol::Wss } else { Protocol::Ws });
+    addr
+}
+
 #[test]
 fn test_select_connect_peer_address_respects_explicit_transport_filter() {
     let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
-    let wss = Multiaddr::from_str("/dns/example.com/tcp/443/wss").expect("valid wss multiaddr");
+    let wss = build_ws_multiaddr(true);
 
     let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss], Some(TransportType::Ws));
 
@@ -135,7 +141,7 @@ fn test_select_connect_peer_address_respects_explicit_transport_filter() {
 fn test_select_connect_peer_address_defaults_to_tcp_on_native() {
     let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
-    let wss = Multiaddr::from_str("/dns/example.com/tcp/443/wss").expect("valid wss multiaddr");
+    let wss = build_ws_multiaddr(true);
 
     let selected = select_connect_peer_address(vec![tcp.clone(), ws, wss], None);
 
@@ -147,7 +153,7 @@ fn test_select_connect_peer_address_defaults_to_tcp_on_native() {
 fn test_select_connect_peer_address_defaults_to_websocket_on_wasm() {
     let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
-    let wss = Multiaddr::from_str("/dns/example.com/tcp/443/wss").expect("valid wss multiaddr");
+    let wss = build_ws_multiaddr(true);
 
     let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss.clone()], None);
 
