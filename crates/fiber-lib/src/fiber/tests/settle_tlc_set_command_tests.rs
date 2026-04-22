@@ -316,6 +316,7 @@ fn create_test_channel_state_with_tlc(
         deferred_peer_tlc_updates: std::collections::VecDeque::new(),
         ephemeral_config: Default::default(),
         private_key: None,
+        needs_backup: false,
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::store::actor::StoreActorMessage;
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::core::tx_pool::TxStatus;
@@ -932,6 +933,7 @@ pub struct NetworkActor<S, C> {
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
 }
@@ -955,6 +957,7 @@ where
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
         chain_client: C,
     ) -> Self {
@@ -962,6 +965,7 @@ where
             event_sender,
             chain_actor,
             store: store.clone(),
+            store_actor,
             network_graph,
             chain_client,
         }
@@ -1541,6 +1545,11 @@ where
                             flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
                             actor_state.state = ChannelState::Closed(flags);
                             self.store.insert_channel_actor_state(actor_state);
+                            if let Some(ref store_actor) = state.store_actor {
+                                store_actor
+                                    .cast(StoreActorMessage::RequestBackup)
+                                    .map_err(|e| Error::DBInternalError(e.to_string()))?;
+                            }
                             state.channels_funding_lock_script_cache.remove(&channel_id);
                             info!(
                                 "Channel {channel_id:?} on-chain settlement completed without a live actor"
@@ -3618,6 +3627,7 @@ where
 pub struct NetworkActorState<S, C> {
     store: S,
     state_to_be_persisted: PersistentNetworkActorState,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     announced_addrs: Vec<Multiaddr>,
@@ -4051,7 +4061,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
                     funding_amount,
@@ -4162,7 +4178,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
                     OpenChannelWithExternalFundingParameter {
@@ -4254,7 +4276,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
                     funding_amount,
@@ -4713,6 +4741,11 @@ where
                                 ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
                             ));
                             self.store.insert_channel_actor_state(state);
+                            if let Some(ref store_actor) = self.store_actor {
+                                store_actor
+                                    .cast(StoreActorMessage::RequestBackup)
+                                    .map_err(|e| Error::DBInternalError(e.to_string()))?;
+                            }
 
                             let _ = rpc_reply.send(Ok(()));
                             Ok(())
@@ -4828,6 +4861,7 @@ where
                 remote_pubkey,
                 self.network.clone(),
                 self.store.clone(),
+                self.store_actor.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
@@ -5816,6 +5850,7 @@ where
         let mut state = NetworkActorState {
             store: self.store.clone(),
             state_to_be_persisted,
+            store_actor: self.store_actor.clone(),
             node_name: config.announced_node_name,
             announced_addrs,
             auto_announce: config.auto_announce_node(),
@@ -6197,6 +6232,7 @@ pub async fn start_network<
     tracker: TaskTracker,
     root_actor: ActorCell,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> ActorRef<NetworkActorMessage> {
@@ -6208,6 +6244,7 @@ pub async fn start_network<
             event_sender,
             chain_actor,
             store,
+            store_actor,
             network_graph,
             chain_client,
         ),

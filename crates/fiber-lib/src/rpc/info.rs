@@ -1,5 +1,5 @@
 use crate::ckb::CkbConfig;
-use crate::fiber::{FiberConfig, NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
@@ -7,37 +7,28 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
 pub use fiber_json_types::NodeInfoResult;
-#[cfg(not(target_arch = "wasm32"))]
-use fiber_store::StorageBackend;
 use ractor::{call, ActorRef};
+
+use crate::store::actor::StoreActorMessage;
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-pub struct InfoRpcServerImpl<S> {
+pub struct InfoRpcServerImpl {
     actor: ActorRef<NetworkActorMessage>,
+    #[allow(unused)]
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     default_funding_lock_script: Script,
-
-    #[cfg(not(target_arch = "wasm32"))]
-    store: S,
-    #[cfg(not(target_arch = "wasm32"))]
-    ckb_key_path: PathBuf,
-    #[cfg(not(target_arch = "wasm32"))]
-    fiber_key_path: PathBuf,
-
-    #[cfg(target_arch = "wasm32")]
-    _marker: std::marker::PhantomData<S>,
 }
 
-impl<S: StoreInfo> InfoRpcServerImpl<S> {
+impl InfoRpcServerImpl {
     #[allow(unused_variables)]
     pub fn new(
         actor: ActorRef<NetworkActorMessage>,
-        store: S,
-        ckb_config: CkbConfig,
-        fiber_config: Option<FiberConfig>,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
+        config: CkbConfig,
     ) -> Self {
         #[cfg(not(test))]
-        let default_funding_lock_script = ckb_config
+        let default_funding_lock_script = config
             .get_default_funding_lock_script()
             .expect("get default funding lock script should be ok")
             .into();
@@ -47,32 +38,13 @@ impl<S: StoreInfo> InfoRpcServerImpl<S> {
         #[cfg(test)]
         let default_funding_lock_script = Default::default();
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let fiber_config = fiber_config.expect("fiber config should be set");
-
         InfoRpcServerImpl {
             actor,
+            store_actor,
             default_funding_lock_script,
-            #[cfg(not(target_arch = "wasm32"))]
-            store,
-            #[cfg(not(target_arch = "wasm32"))]
-            ckb_key_path: ckb_config.base_dir().join("key"),
-            #[cfg(not(target_arch = "wasm32"))]
-            fiber_key_path: fiber_config.base_dir().join("sk"),
-            #[cfg(target_arch = "wasm32")]
-            _marker: std::marker::PhantomData,
         }
     }
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-pub trait StoreInfo: StorageBackend + Clone + Send + Sync + 'static {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T> StoreInfo for T where T: StorageBackend + Clone + Send + Sync + 'static {}
-#[cfg(target_arch = "wasm32")]
-pub trait StoreInfo: Clone + Send + Sync + 'static {}
-#[cfg(target_arch = "wasm32")]
-impl<T> StoreInfo for T where T: Clone + Send + Sync + 'static {}
 
 /// The RPC module for node information.
 #[cfg(not(target_arch = "wasm32"))]
@@ -89,7 +61,7 @@ trait InfoRpc {
 
 #[async_trait::async_trait]
 #[cfg(not(target_arch = "wasm32"))]
-impl<S: StoreInfo> InfoRpcServer for InfoRpcServerImpl<S> {
+impl InfoRpcServer for InfoRpcServerImpl {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         self.node_info().await
     }
@@ -98,7 +70,7 @@ impl<S: StoreInfo> InfoRpcServer for InfoRpcServerImpl<S> {
         self.backup_now(target_path).await
     }
 }
-impl<S: StoreInfo> InfoRpcServerImpl<S> {
+impl InfoRpcServerImpl {
     pub async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
         let commit_hash = crate::get_git_commit_info();
@@ -130,34 +102,10 @@ impl<S: StoreInfo> InfoRpcServerImpl<S> {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn backup_now(&self, target_path: &Path) -> Result<(), ErrorObjectOwned> {
-        perform_key_backup(target_path, &self.ckb_key_path, &self.fiber_key_path)
-            .or_else(|e| log_and_error!(target_path, format!("Failed to backup keys: {e}")))?;
-
-        self.store
-            .backup(target_path)
-            .or_else(|e| log_and_error!(target_path, format!("Failed to backup: {e}")))
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-/// Backup the node key files to a specified path.
-fn perform_key_backup(
-    target_dir: &Path,
-    ckb_key_path: &Path,
-    fiber_key_path: &Path,
-) -> Result<(), String> {
-    let keys_to_copy = [(ckb_key_path, "key"), (fiber_key_path, "sk")];
-
-    for (src_file, dest_name) in keys_to_copy {
-        if src_file.exists() {
-            let dest_file = target_dir.join(dest_name);
-            if let Err(e) = std::fs::copy(src_file, &dest_file) {
-                return Err(format!("Failed to copy key file {:?}: {}", src_file, e));
-            }
-            tracing::info!("Successfully backed up key: {}", dest_name);
+        if let Some(ref store_actor) = self.store_actor {
+            handle_actor_call!(store_actor, StoreActorMessage::ForceBackup, target_path)
         } else {
-            tracing::warn!("Key file not found at {:?}, skipping", src_file);
+            log_and_error!(target_path, format!("Backup service is not initialized"))
         }
     }
-    Ok(())
 }

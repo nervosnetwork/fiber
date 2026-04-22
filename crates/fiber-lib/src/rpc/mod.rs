@@ -77,8 +77,8 @@ pub mod server {
     use tracing::debug;
 
     use super::biscuit::BiscuitAuth;
+    use crate::store::actor::StoreActorMessage;
     use crate::store::store_impl::StoreChange;
-    use fiber_store::StorageBackend;
     use ractor::{ActorCell, OutputPort};
 
     #[cfg(feature = "watchtower")]
@@ -267,13 +267,14 @@ pub mod server {
 
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
-    pub async fn start_rpc<S: RpcServerStore + StorageBackend + Clone + Send + Sync + 'static>(
+    pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
         config: RpcConfig,
         ckb_config: Option<CkbConfig>,
         fiber_config: Option<FiberConfig>,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
         supervisor: ActorCell,
         store_change_port: Option<Arc<OutputPort<StoreChange>>>,
@@ -322,9 +323,8 @@ pub mod server {
                     .merge(
                         InfoRpcServerImpl::new(
                             network_actor.clone(),
-                            store.clone(),
+                            store_actor,
                             ckb_config.clone().expect("ckb config should be set"),
-                            fiber_config,
                         )
                         .into_rpc(),
                     )

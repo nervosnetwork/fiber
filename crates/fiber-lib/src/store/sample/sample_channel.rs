@@ -37,6 +37,7 @@ impl ChannelActorState {
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
             private_key: None,
+            needs_backup: false,
         }
     }
 
@@ -59,6 +60,7 @@ impl ChannelActorState {
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
             private_key: None,
+            needs_backup: false,
         }
     }
 }

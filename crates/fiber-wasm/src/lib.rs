@@ -211,6 +211,7 @@ pub async fn fiber(
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
+                None,
                 network_graph.clone(),
                 default_shutdown_script,
             )
@@ -284,9 +285,8 @@ pub async fn fiber(
             graph: GraphRpcServerImpl::new(network_graph.clone(), store.clone()),
             info: InfoRpcServerImpl::new(
                 network_actor.clone(),
-                store.clone(),
-                config.ckb.unwrap_or_default(),
                 None,
+                config.ckb.unwrap_or_default(),
             ),
             invoice: InvoiceRpcServerImpl::new(
                 store.clone(),

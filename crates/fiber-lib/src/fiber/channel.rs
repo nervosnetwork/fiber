@@ -12,6 +12,7 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
+use crate::store::actor::StoreActorMessage;
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::utils::payment::is_invoice_fulfilled;
@@ -417,6 +418,7 @@ pub struct ChannelActor<S> {
     remote_pubkey: Pubkey,
     network: ActorRef<NetworkActorMessage>,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
 }
 
 impl<S> ChannelActor<S>
@@ -428,12 +430,14 @@ where
         remote_pubkey: Pubkey,
         network: ActorRef<NetworkActorMessage>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
     ) -> Self {
         Self {
             local_pubkey,
             remote_pubkey,
             network,
             store,
+            store_actor,
         }
     }
 
@@ -3873,6 +3877,14 @@ where
 
         if self.should_persist_channel_state(state) {
             self.store.insert_channel_actor_state(state.clone());
+            if state.needs_backup {
+                if let Some(ref store_actor) = self.store_actor {
+                    store_actor
+                        .cast(StoreActorMessage::RequestBackup)
+                        .map_err(|e| e.to_string())?;
+                }
+                state.needs_backup = false;
+            }
         } else {
             debug!(
                 "Skip persisting channel state during external funding pre-submission phase: {}",
@@ -4225,6 +4237,11 @@ pub struct ChannelActorState {
     // signing key
     #[doc = "skip_store"]
     pub private_key: Option<Privkey>,
+
+    // Indicates that the state has changed and a backup should be triggered
+    // at the end of the current message processing loop.
+    #[doc = "skip_store"]
+    pub needs_backup: bool,
 }
 
 impl std::ops::Deref for ChannelActorState {
@@ -4261,6 +4278,7 @@ impl<'de> Deserialize<'de> for ChannelActorState {
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
             private_key: None,
+            needs_backup: false,
         })
     }
 }
@@ -5176,6 +5194,7 @@ impl ChannelActorState {
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
+            needs_backup: true,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -5268,6 +5287,7 @@ impl ChannelActorState {
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
             private_key: Some(private_key),
+            needs_backup: true,
         };
         state.log_ack_state("[ack] new_outbound_channel");
         state
@@ -5395,11 +5415,14 @@ impl ChannelActorState {
     }
 
     pub(crate) fn update_state(&mut self, new_state: ChannelState) {
-        debug!(
-            "Updating channel state from {:?} to {:?}",
-            &self.state, &new_state
-        );
-        self.state = new_state;
+        if self.state != new_state {
+            debug!(
+                "Updating channel state from {:?} to {:?}",
+                &self.state, &new_state
+            );
+            self.state = new_state;
+            self.needs_backup = true;
+        }
     }
 
     pub(crate) fn local_is_node1(&self) -> bool {

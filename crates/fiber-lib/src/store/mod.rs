@@ -1,3 +1,4 @@
+pub mod actor;
 pub mod restore;
 #[cfg(any(test, feature = "sample"))]
 pub mod sample;
