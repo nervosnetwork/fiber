@@ -1,4 +1,5 @@
 use crate::util::convert;
+use fiber_store::{migration::Migration, StorageBackend, Store, StoreError};
 use fiber_v061::fiber::channel::{
     AddTlcCommand as OldAddTlcCommand, ChannelActorState as OldChannelActorState,
     RetryableTlcOperation as OldRetryableTlcOperation, TlcInfo as OldTlcInfo,
@@ -19,8 +20,6 @@ use fiber_v070::{
         SendPaymentData as NewSendPaymentData,
     },
     fiber::types::PaymentHopData as NewPaymentHopData,
-    store::{migration::Migration, Store},
-    Error,
 };
 use indicatif::ProgressBar;
 use std::collections::VecDeque;
@@ -32,6 +31,12 @@ const MIGRATION_DB_VERSION: &str = "20260203152333";
 
 pub struct MigrationObj {
     version: String,
+}
+
+impl Default for MigrationObj {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MigrationObj {
@@ -47,7 +52,7 @@ impl Migration for MigrationObj {
         &self,
         db: &'a Store,
         _pb: Arc<dyn Fn(u64) -> ProgressBar + Send + Sync>,
-    ) -> Result<&'a Store, Error> {
+    ) -> Result<&'a Store, StoreError> {
         info!(
             "MigrationObj::migrate to {} ...........",
             MIGRATION_DB_VERSION

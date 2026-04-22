@@ -1,11 +1,16 @@
 mod actor;
 pub use actor::{CchActor, CchArgs, CchMessage, ReceiveBTC, SendBTC};
 
+mod cch_fiber_agent;
+pub use cch_fiber_agent::{
+    CchFiberAgent, CchFiberAgentActor, CchFiberAgentHttpBackend, CchFiberAgentMessage,
+    CchFiberAgentRef,
+};
+
 mod error;
 pub use error::{CchError, CchResult, CchStoreError};
 
-pub mod trackers;
-pub use trackers::CchFiberStoreWatcher;
+mod trackers;
 
 mod config;
 pub use config::CchConfig;

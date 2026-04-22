@@ -140,6 +140,10 @@ impl OpenChannel {
         self.channel_flags.contains(ChannelFlags::ONE_WAY)
     }
 
+    pub fn is_external_funding(&self) -> bool {
+        self.channel_flags.contains(ChannelFlags::EXTERNAL_FUNDING)
+    }
+
     pub fn mem_size(&self) -> usize {
         let static_size = std::mem::size_of_val(self);
         let funding_udt_type_script_size = self

@@ -87,7 +87,10 @@ impl<'a> DbMigrate<'a> {
                                 .to_string(),
                         );
                     }
-                    return Err(format!("Fiber need to run some database migrations, please run `fnn-migrate -p {}` to start migrations.", path.as_ref().display()));
+                    // The path points to the store directory (e.g. <base_dir>/store),
+                    // use .parent() to get the fiber base directory for the fnn-migrate -d flag.
+                    let dir = path.as_ref().parent().unwrap_or(path.as_ref());
+                    return Err(format!("Fiber need to run some database migrations, please run `fnn-migrate -d {}` to start migrations.", dir.display()));
                 }
             }
         }

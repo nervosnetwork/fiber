@@ -1,0 +1,73 @@
+meta {
+  name: inspect shutdown tx
+  type: http
+  seq: 19
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_transaction",
+    "params": [
+      "{{EXTERNAL_FUNDING_SHUTDOWN_TX_HASH}}"
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.transaction.outputs: isDefined
+}
+
+script:post-response {
+  const fundingAmount = BigInt(bru.getVar("EXTERNAL_FUNDING_AMOUNT"));
+  const node2Script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  const outputs = res.body.result.transaction.outputs || [];
+  let shutdownRefund = BigInt(0);
+
+  for (const output of outputs) {
+    const lock = output.lock;
+    const sameScript =
+      lock &&
+      lock.code_hash === node2Script.code_hash &&
+      lock.hash_type === node2Script.hash_type &&
+      lock.args === node2Script.args;
+
+    if (sameScript) {
+      shutdownRefund += BigInt(output.capacity);
+    }
+  }
+
+  if (shutdownRefund <= BigInt(0)) {
+    throw new Error("shutdown tx should return capacity to node2");
+  }
+
+  if (shutdownRefund >= fundingAmount) {
+    throw new Error(
+      `node2 refund should be lower than funding_amount, refund=${shutdownRefund}, funding_amount=${fundingAmount}`,
+    );
+  }
+
+  const shutdownFee = fundingAmount - shutdownRefund;
+  const maxExpectedShutdownFee = BigInt("100000000");
+  if (shutdownFee <= BigInt(0) || shutdownFee > maxExpectedShutdownFee) {
+    throw new Error(
+      `unexpected shutdown fee, fee=${shutdownFee}, refund=${shutdownRefund}, funding_amount=${fundingAmount}`,
+    );
+  }
+
+  bru.setVar("EXTERNAL_FUNDING_SHUTDOWN_REFUND", shutdownRefund.toString());
+  bru.setVar("EXTERNAL_FUNDING_SHUTDOWN_FEE", shutdownFee.toString());
+}

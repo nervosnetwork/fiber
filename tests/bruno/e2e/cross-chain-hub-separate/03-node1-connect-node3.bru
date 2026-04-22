@@ -1,0 +1,37 @@
+meta {
+  name: 03-node1-connect-node3
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "connect_peer",
+    "params": [
+      {"address": "{{NODE3_ADDR}}"}
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isNull
+}
+
+script:post-response {
+  // Dialing a peer is async in tentacle. Sleep for some time to make sure
+  // we're connected to the peer.
+  await new Promise(r => setTimeout(r, 1000));
+}

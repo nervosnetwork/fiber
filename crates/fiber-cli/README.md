@@ -108,7 +108,7 @@ $ fnn-cli -u http://127.0.0.1:8227
  | |    _| || |_\| |____| | \ \
  |_|   |___|____/|______|_|  \_\
 
-[  fnn-cli version ]: 0.7.1
+[  fnn-cli version ]: 0.8.1
 [              url ]: http://127.0.0.1:8227
 [    output format ]: yaml
 [           status ]: Connected

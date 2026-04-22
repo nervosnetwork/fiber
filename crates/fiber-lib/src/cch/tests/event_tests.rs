@@ -157,9 +157,9 @@ fn test_invoice_status_received_maps_to_incoming_accepted() {
 }
 
 #[test]
-fn test_invoice_status_paid_maps_to_succeeded() {
+fn test_invoice_status_paid_maps_to_success() {
     let order_status: CchOrderStatus = CkbInvoiceStatus::Paid.into();
-    assert_eq!(order_status, CchOrderStatus::Succeeded);
+    assert_eq!(order_status, CchOrderStatus::Success);
 }
 
 #[test]
@@ -191,9 +191,9 @@ fn test_payment_status_inflight_maps_to_outgoing_in_flight() {
 }
 
 #[test]
-fn test_payment_status_success_maps_to_outgoing_succeeded() {
+fn test_payment_status_success_maps_to_outgoing_success() {
     let order_status: CchOrderStatus = PaymentStatus::Success.into();
-    assert_eq!(order_status, CchOrderStatus::OutgoingSucceeded);
+    assert_eq!(order_status, CchOrderStatus::OutgoingSuccess);
 }
 
 #[test]

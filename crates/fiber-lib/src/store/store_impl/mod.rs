@@ -268,7 +268,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         }
     }
 
-    for KVPair { key, value } in store.collect_by_prefix(&[]) {
+    for (key, value) in store.prefix_iterator([]) {
         if key.is_empty() {
             errors.insert("Encountered empty key".to_string());
             continue;
@@ -1292,7 +1292,7 @@ impl InvoiceStore for Store {
                 let options = PrefixIterOptions {
                     direction: IteratorDirection::Forward,
                     start_key: Some(&start_key),
-                    skip_while: None,
+                    start_key_exclusive: true,
                     limit,
                 };
                 self.collect_by_prefix_with(&prefix, options)
@@ -1305,7 +1305,7 @@ impl InvoiceStore for Store {
                 let options = PrefixIterOptions {
                     direction: IteratorDirection::Forward,
                     start_key: None,
-                    skip_while: None,
+                    start_key_exclusive: false,
                     limit,
                 };
                 self.collect_by_prefix_with(&prefix, options)
@@ -1401,46 +1401,21 @@ impl NetworkGraphStateStore for Store {
         status: Option<PaymentStatus>,
     ) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
-        match after {
-            Some(after_hash) => {
-                let start_key = [&[PAYMENT_SESSION_PREFIX], after_hash.as_ref()].concat();
-                // Start from the `after` key and skip it (exclusive cursor)
-                let after_hash_owned = after_hash;
-                self.collect_by_prefix_with(
-                    &prefix,
-                    PrefixIterOptions::new()
-                        .start_key(&start_key)
-                        .skip_while(Box::new(move |key| {
-                            // Skip the cursor key itself (keys are [prefix][hash])
-                            key.len() > 1 && key[1..] == *after_hash_owned.as_ref()
-                        })),
-                )
-                .into_iter()
-                .filter_map(|kv| {
-                    let session: PaymentSession =
-                        deserialize_from(kv.value.as_ref(), "PaymentSession");
-                    match status {
-                        Some(ref s) if session.status != *s => None,
-                        _ => Some(session.init_attempts(self)),
-                    }
-                })
-                .take(limit)
-                .collect()
+        let start_key = after.map(|h| [&[PAYMENT_SESSION_PREFIX], h.as_ref()].concat());
+        let iter = match start_key {
+            Some(key) => self.prefix_iterator_from(prefix, key),
+            None => self.prefix_iterator(prefix),
+        };
+
+        iter.filter_map(|(_key, value)| {
+            let session: PaymentSession = deserialize_from(&value, "PaymentSession");
+            match status {
+                Some(ref s) if session.status != *s => None,
+                _ => Some(session.init_attempts(self)),
             }
-            None => self
-                .collect_by_prefix(&prefix)
-                .into_iter()
-                .filter_map(|kv| {
-                    let session: PaymentSession =
-                        deserialize_from(kv.value.as_ref(), "PaymentSession");
-                    match status {
-                        Some(ref s) if session.status != *s => None,
-                        _ => Some(session.init_attempts(self)),
-                    }
-                })
-                .take(limit)
-                .collect(),
-        }
+        })
+        .take(limit)
+        .collect()
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
@@ -1840,31 +1815,63 @@ impl WatchtowerStore for Store {
 }
 
 impl GossipMessageStore for Store {
-    fn get_broadcast_messages_iter(
+    fn get_broadcast_messages(
         &self,
         after_cursor: &Cursor,
-    ) -> impl IntoIterator<Item = crate::fiber::types::BroadcastMessageWithTimestamp> {
+        limit: usize,
+    ) -> Vec<crate::fiber::types::BroadcastMessageWithTimestamp> {
         let cursor = after_cursor.to_bytes();
         let prefix = [BROADCAST_MESSAGE_PREFIX];
         let start = [&prefix, cursor.as_slice()].concat();
-        let start_cloned = start.clone();
-        // We should skip the value with the same cursor (after_cursor is exclusive).
-        self.collect_by_prefix_with(
-            &prefix,
-            PrefixIterOptions::new()
-                .start_key(&start)
-                .skip_while(Box::new(move |key: &[u8]| key == start_cloned)),
-        )
-        .into_iter()
-        .map(|kv| {
-            debug_assert_eq!(kv.key.len(), 1 + CURSOR_SIZE);
-            let mut timestamp_bytes = [0u8; 8];
-            timestamp_bytes.copy_from_slice(&kv.key[1..9]);
-            let timestamp = u64::from_be_bytes(timestamp_bytes);
-            let message: BroadcastMessage = deserialize_from(kv.value.as_ref(), "BroadcastMessage");
-            (message, timestamp).into()
-        })
-        .collect::<Vec<_>>()
+        let mut options = PrefixIterOptions::new()
+            .start_key(&start)
+            .start_key_exclusive();
+        if limit > 0 {
+            options = options.limit(limit);
+        }
+        self.collect_by_prefix_with(&prefix, options)
+            .into_iter()
+            .map(|kv| {
+                debug_assert_eq!(kv.key.len(), 1 + CURSOR_SIZE);
+                let mut timestamp_bytes = [0u8; 8];
+                timestamp_bytes.copy_from_slice(&kv.key[1..9]);
+                let timestamp = u64::from_be_bytes(timestamp_bytes);
+                let message: BroadcastMessage =
+                    deserialize_from(kv.value.as_ref(), "BroadcastMessage");
+                (message, timestamp).into()
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn get_broadcast_messages_reverse(
+        &self,
+        before_cursor: Option<&Cursor>,
+        limit: usize,
+    ) -> Vec<crate::fiber::types::BroadcastMessageWithTimestamp> {
+        let prefix = [BROADCAST_MESSAGE_PREFIX];
+        let mut options = PrefixIterOptions::new().reverse().limit(limit);
+
+        let start_cloned = before_cursor.map(|cursor| {
+            let cursor_bytes = cursor.to_bytes();
+            [&prefix, cursor_bytes.as_slice()].concat()
+        });
+
+        if let Some(start) = start_cloned.as_ref() {
+            options = options.start_key(start).start_key_exclusive();
+        }
+
+        self.collect_by_prefix_with(&prefix, options)
+            .into_iter()
+            .map(|kv| {
+                debug_assert_eq!(kv.key.len(), 1 + CURSOR_SIZE);
+                let mut timestamp_bytes = [0u8; 8];
+                timestamp_bytes.copy_from_slice(&kv.key[1..9]);
+                let timestamp = u64::from_be_bytes(timestamp_bytes);
+                let message: BroadcastMessage =
+                    deserialize_from(kv.value.as_ref(), "BroadcastMessage");
+                (message, timestamp).into()
+            })
+            .collect::<Vec<_>>()
     }
 
     fn get_broadcast_message_with_cursor(

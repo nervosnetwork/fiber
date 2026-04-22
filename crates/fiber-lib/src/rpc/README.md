@@ -25,12 +25,15 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `list_channels`](#channel-list_channels)
         * [Method `shutdown_channel`](#channel-shutdown_channel)
         * [Method `update_channel`](#channel-update_channel)
+        * [Method `open_channel_with_external_funding`](#channel-open_channel_with_external_funding)
+        * [Method `submit_signed_funding_tx`](#channel-submit_signed_funding_tx)
     * [Module Dev](#module-dev)
         * [Method `commitment_signed`](#dev-commitment_signed)
         * [Method `add_tlc`](#dev-add_tlc)
         * [Method `remove_tlc`](#dev-remove_tlc)
         * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
         * [Method `check_channel_shutdown`](#dev-check_channel_shutdown)
+        * [Method `sign_external_funding_tx`](#dev-sign_external_funding_tx)
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
         * [Method `graph_channels`](#graph-graph_channels)
@@ -91,8 +94,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `HopHint`](#type-hophint)
     * [Type `HopRequire`](#type-hoprequire)
     * [Type `Htlc`](#type-htlc)
+    * [Type `InboundTlcStatus`](#type-inboundtlcstatus)
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentEventInfo`](#type-paymenteventinfo)
     * [Type `PaymentHistoryAsset`](#type-paymenthistoryasset)
@@ -110,6 +115,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `SettlementTlc`](#type-settlementtlc)
     * [Type `TLCId`](#type-tlcid)
     * [Type `TlcStatus`](#type-tlcstatus)
+    * [Type `TransportType`](#type-transporttype)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
@@ -371,6 +377,82 @@ Updates a channel.
 
 
 
+<a id="channel-open_channel_with_external_funding"></a>
+#### Method `open_channel_with_external_funding`
+
+Opens a channel with external funding. The node will negotiate the channel with the peer,
+ but the user must sign the funding transaction themselves using their own wallet.
+
+ This is useful when the user wants to fund a channel from an external wallet
+ rather than having the node sign with its internal key.
+
+ Returns the final unsigned funding transaction after internal tx collaboration
+ has frozen the structure. The user must sign it and submit it with
+ `submit_signed_funding_tx` without changing the transaction structure.
+
+##### Params
+
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer to open a channel with.
+ The peer must already be connected through the [connect_peer](#peer-connect_peer) rpc first.
+* `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
+* `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
+* `shutdown_script` - <em>`Script`</em>, The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
+* `funding_lock_script` - <em>`Script`</em>, The lock script that controls the funding cells. The node will collect cells with this lock script
+ to build the funding transaction. The user must be able to sign for this lock script.
+* `funding_lock_script_cell_deps` - <em>`Option<Vec<CellDep>>`</em>, Optional extra cell deps required by `funding_lock_script`.
+ This is useful for custom wallet lock scripts whose deps are not part of the genesis defaults.
+* `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an
+ [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png)
+ in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
+* `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
+* `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.
+* `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 4 hours, which is 4 * 60 * 60 * 1000 milliseconds
+ Expect it >= 2/3 commitment_delay_epoch.
+ This parameter can be updated with rpc `update_channel` later.
+* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can send,
+ an optional parameter, default is 0, which means we can send any TLC is larger than 0.
+ This parameter can be updated with rpc `update_channel` later.
+* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+ The unit is millionths of the amount. default is 1000 which means 0.1%.
+ This parameter can be updated with rpc `update_channel` later.
+* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum value in flight for TLCs, an optional parameter.
+ This parameter can not be updated after channel is opened.
+* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+ This parameter can not be updated after channel is opened.
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel being opened.
+* `unsigned_funding_tx` - <em>`Transaction`</em>, The final unsigned funding transaction that needs to be signed.
+
+---
+
+
+
+<a id="channel-submit_signed_funding_tx"></a>
+#### Method `submit_signed_funding_tx`
+
+Submits a signed funding transaction for an externally funded channel.
+
+ After calling `open_channel_with_external_funding`, the user signs the returned
+ final negotiated unsigned transaction with their wallet and submits it here.
+ The signed transaction should be directly broadcastable and will not be structurally modified.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID returned from `open_channel_with_external_funding`.
+* `signed_funding_tx` - <em>`Transaction`</em>, The signed funding transaction.
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID.
+* `funding_tx_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the funding transaction that was submitted.
+
+---
+
+
+
 <a id="dev"></a>
 ### Module `Dev`
 RPC module for development purposes, this module is not intended to be used in production.
@@ -464,6 +546,29 @@ Manually trigger CheckShutdownTx on all channels
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="dev-sign_external_funding_tx"></a>
+#### Method `sign_external_funding_tx`
+
+Sign an external funding transaction with a provided private key.
+
+ This is a development-only RPC that signs an unsigned funding transaction
+ (returned from `open_channel_with_external_funding`) using the provided private key.
+ The signed transaction can then be submitted via `submit_signed_funding_tx`.
+
+##### Params
+
+* `unsigned_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The unsigned funding transaction returned from `open_channel_with_external_funding`.
+* `private_key` - <em>`String`</em>, The private key to sign the transaction, as a 0x-prefixed 32-byte hex string.
+ Note: This is a development-only RPC and the private key is provided directly.
+
+##### Returns
+
+* `signed_funding_tx` - <em>`ckb_jsonrpc_types::Transaction`</em>, The signed funding transaction that can be submitted via `submit_signed_funding_tx`.
 
 ---
 
@@ -1045,6 +1150,9 @@ Connect to a peer.
 * `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key of the peer to connect to.
  The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
+* `addr_type` - <em>Option<[TransportType](#type-transporttype)></em>, Filter addresses by transport type when connecting by pubkey.
+ If not specified, a random address is chosen from all available addresses.
+ This is useful for WASM environments where only `wss` addresses are supported.
 
 ##### Returns
 
@@ -1334,8 +1442,8 @@ The status of a cross-chain hub order, will update as the order progresses.
 * `Pending` - Order is created and waiting for the incoming invoice to collect enough TLCs.
 * `IncomingAccepted` - The incoming invoice collected the required TLCs and is ready to send outgoing payment to obtain the preimage.
 * `OutgoingInFlight` - The outgoing payment is in flight.
-* `OutgoingSucceeded` - The outgoing payment is settled and preimage has been obtained.
-* `Succeeded` - Both payments are settled and the order succeeds.
+* `OutgoingSuccess` - The outgoing payment is settled and preimage has been obtained.
+* `Success` - Both payments are settled and the order succeeds.
 * `Failed` - Order is failed.
 ---
 
@@ -1411,6 +1519,9 @@ The state of a channel.
 #### Enum with values of
 
 * `NegotiatingFunding` - <em>`NegotiatingFundingFlags`</em>, We are negotiating the parameters required for the channel prior to funding it.
+ For channels opened with external funding, this state is also used together with
+ `NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING` to indicate that we are waiting
+ for the user to sign and submit the funding transaction externally.
 * `CollaboratingFundingTx` - <em>`CollaboratingFundingTxFlags`</em>, We're collaborating with the other party on the funding transaction.
 * `SigningCommitment` - <em>`SigningCommitmentFlags`</em>, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
 * `AwaitingTxSignatures` - <em>`AwaitingTxSignaturesFlags`</em>, We've received and sent `commitment_signed` and are now waiting for both
@@ -1626,6 +1737,22 @@ The htlc data structure.
 * `status` - <em>[TlcStatus](#type-tlcstatus)</em>, The status of the htlc
 ---
 
+<a id="#type-inboundtlcstatus"></a>
+### Type `InboundTlcStatus`
+
+The status of an inbound tlc.
+
+
+#### Enum with values of
+
+* `RemoteAnnounced` - Received tlc from remote party, but not committed yet
+* `AnnounceWaitPrevAck` - We received another AddTlc peer message when we are waiting for the ack of the last one.
+* `AnnounceWaitAck` - We have sent commitment signed to peer and waiting ACK for confirming this AddTlc
+* `Committed` - We have received ACK from peer and Committed this tlc
+* `LocalRemoved` - We have removed this tlc, but haven't received ACK from peer
+* `RemoveAckConfirmed` - We have received the ACK for the RemoveTlc, it's safe to remove this tlc
+---
+
 <a id="#type-invoicedata"></a>
 ### Type `InvoiceData`
 
@@ -1657,6 +1784,22 @@ The Node information.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - <em>`u64`</em>, The minimum CKB funding amount for automatically accepting open channel requests.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, The UDT configuration infos of the node.
+---
+
+<a id="#type-outboundtlcstatus"></a>
+### Type `OutboundTlcStatus`
+
+The status of an outbound tlc.
+
+
+#### Enum with values of
+
+* `LocalAnnounced` - Offered tlc created and sent to remote party
+* `Committed` - Received ACK from remote party for this offered tlc
+* `RemoteRemoved` - Remote party removed this tlc
+* `RemoveWaitPrevAck` - We received another RemoveTlc message from peer when we are waiting for the ack of the last one.
+* `RemoveWaitAck` - We have sent commitment signed to peer and waiting ACK for confirming this RemoveTlc
+* `RemoveAckConfirmed` - We have received the ACK for the RemoveTlc, it's safe to remove this tlc
 ---
 
 <a id="#type-paymentcustomrecords"></a>
@@ -1895,6 +2038,19 @@ The status of a tlc.
 
 * `Outbound` - <em>[OutboundTlcStatus](#type-outboundtlcstatus)</em>, Outbound tlc
 * `Inbound` - <em>[InboundTlcStatus](#type-inboundtlcstatus)</em>, Inbound tlc
+---
+
+<a id="#type-transporttype"></a>
+### Type `TransportType`
+
+The type of transport to filter by when resolving peer addresses.
+
+
+#### Enum with values of
+
+* `tcp` - TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
+* `ws` - WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
+* `wss` - WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
 ---
 
 <a id="#type-udtarginfo"></a>

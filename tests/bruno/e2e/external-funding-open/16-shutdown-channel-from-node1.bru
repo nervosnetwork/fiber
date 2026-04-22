@@ -1,0 +1,54 @@
+meta {
+  name: shutdown channel from node1
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "shutdown_channel",
+    "params": [
+      {
+        "channel_id": "{{EXTERNAL_FUNDING_CHANNEL_ID}}",
+        "close_script": {},
+        "fee_rate": "0x3FC"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].close_script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  if (res.body.error) {
+    throw new Error(`shutdown_channel failed: ${res.body.error.message}`);
+  }
+
+  if (res.body.result !== null) {
+    throw new Error("shutdown_channel should return null");
+  }
+
+  bru.setVar("CLOSED_CHECK_ITERATION", 0);
+  await new Promise((r) => setTimeout(r, 1000));
+}

@@ -242,6 +242,7 @@ async fn test_rpc_list_peers() {
                 address: None,
                 pubkey: Some(node_1_pubkey),
                 save: Some(false),
+                addr_type: None,
             },
         )
         .await
@@ -1190,7 +1191,7 @@ fn test_rpc_status_enum_naming_consistency() {
         (
             ChannelState::Closed(CloseFlags::COOPERATIVE.into()),
             "Closed",
-            "Cooperative",
+            "COOPERATIVE",
         ),
     ];
 
@@ -1220,7 +1221,7 @@ fn test_rpc_status_enum_naming_consistency() {
                     expected_name, expected_flags, state_flags
                 );
             }
-            // state_flags should be PascalCase (no underscores, not hex)
+            // state_flags should be SCREAMING_SNAKE_CASE (not hex)
             assert!(
                 !state_flags.starts_with("0x"),
                 "state_flags should not be hex for {}, got: {}",
@@ -1238,20 +1239,20 @@ fn test_rpc_status_enum_naming_consistency() {
     let json_value: Value = serde_json::from_str(&json_str).unwrap();
 
     eprintln!("Serialized ChannelState with flags: {}", json_str);
-    // Verify state_flags field exists and is PascalCase
+    // Verify state_flags field exists and is SCREAMING_SNAKE_CASE
     if let Some(state_flags) = json_value.get("state_flags") {
         let flags_str = state_flags
             .as_str()
             .expect("state_flags should be a string");
         assert!(
             !flags_str.starts_with("0x"),
-            "state_flags should be PascalCase, not hex, got: {}",
+            "state_flags should be SCREAMING_SNAKE_CASE, not hex, got: {}",
             flags_str
         );
-        // Should contain both flag names in PascalCase
+        // Should contain both flag names in SCREAMING_SNAKE_CASE
         assert!(
-            flags_str.contains("OurInitSent") || flags_str.contains("TheirInitSent"),
-            "state_flags should contain flag names in PascalCase, got: {}",
+            flags_str.contains("OUR_INIT_SENT") || flags_str.contains("THEIR_INIT_SENT"),
+            "state_flags should contain flag names in SCREAMING_SNAKE_CASE, got: {}",
             flags_str
         );
     } else {
@@ -1277,6 +1278,7 @@ async fn test_rpc_connect_peer_empty_address() {
                 address: Some("".to_string()),
                 pubkey: None,
                 save: None,
+                addr_type: None,
             },
         )
         .await;
@@ -1307,6 +1309,7 @@ async fn test_rpc_connect_peer_no_address_no_pubkey() {
                 address: None,
                 pubkey: None,
                 save: None,
+                addr_type: None,
             },
         )
         .await;

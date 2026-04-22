@@ -1,0 +1,37 @@
+meta {
+  name: connect node1 to node3
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "connect_peer",
+    "params": [
+      {
+        "address": "{{NODE3_ADDR}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  if (res.body.error && !String(res.body.error.message).includes("Peer already connected")) {
+    throw new Error(`connect_peer failed: ${res.body.error.message}`);
+  }
+
+  await new Promise((r) => setTimeout(r, 1000));
+}

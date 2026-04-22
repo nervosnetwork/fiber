@@ -1,0 +1,62 @@
+meta {
+  name: check node2 balance after open
+  type: http
+  seq: 14
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].script = bru.getVar("NODE2_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const before = BigInt(bru.getVar("NODE2_BALANCE_BEFORE"));
+  const after = BigInt(res.body.result.capacity);
+  const fundingAmount = BigInt(bru.getVar("EXTERNAL_FUNDING_AMOUNT"));
+  const spent = before - after;
+
+  if (after > before) {
+    throw new Error(`node2 balance should not increase after open, before=${before}, after=${after}`);
+  }
+
+  if (spent <= BigInt(0)) {
+    throw new Error(`node2 balance should decrease after open, before=${before}, after=${after}`);
+  }
+
+  if (spent < fundingAmount) {
+    throw new Error(`node2 spent amount should cover funding_amount, spent=${spent}, funding_amount=${fundingAmount}`);
+  }
+
+  bru.setVar("NODE2_BALANCE_AFTER", after.toString());
+}

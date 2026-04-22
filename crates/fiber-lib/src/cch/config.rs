@@ -5,9 +5,9 @@ use clap_serde_derive::ClapSerde;
 /// Default cross-chain order relative expiry time in seconds.
 pub const DEFAULT_ORDER_EXPIRY_DELTA_SECONDS: u64 = 36 * 60 * 60; // 36 hours
 /// Default BTC final-hop HTLC expiry time in blocks.
-pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS: u64 = 180; // 30 hours
+pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS: u64 = 360; // 60 hours (~10 min/block)
 /// Default CKB final-hop HTLC expiry delta in seconds.
-pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS: u64 = 30 * 60 * 60; // 30 hours
+pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS: u64 = 60 * 60 * 60; // 60 hours
 /// Default minimum outgoing invoice relative expiry time in seconds.
 pub const DEFAULT_MIN_OUTGOING_INVOICE_EXPIRY_DELTA_SECONDS: u64 = 6 * 60 * 60; // 6 hours
 
@@ -119,9 +119,63 @@ pub struct CchConfig {
     #[default(false)]
     #[arg(skip)]
     pub ignore_startup_failure: bool,
+
+    /// Fiber RPC endpoint for connecting to an external Fiber node.
+    /// When set, CCH runs as a separate service and communicates with the Fiber node
+    /// via HTTP RPC and WebSocket subscriptions.
+    /// The address format should be http[s]://<host>:<port>.
+    /// If http is specified, the WebSocket connection will be ws://<host>:<port>;
+    /// if https is specified, the WebSocket connection will be wss://<host>:<port>.
+    #[default(None)]
+    #[arg(
+        name = "CCH_FIBER_RPC_URL",
+        long = "cch-fiber-rpc-url",
+        env,
+        help = "fiber endpoint, default is None. May be used to connect to an external fiber node with websocket and normal http jsonrpc support."
+    )]
+    pub fiber_rpc_url: Option<String>,
+
+    /// Full wrapped BTC type script as a JSON object, e.g.
+    /// `{"code_hash":"0x...", "hash_type":"type", "args":"0x..."}`.
+    /// Required when running CCH in standalone mode (without the Fiber/CKB services)
+    /// because the contracts context is not initialized.
+    /// When set, this takes precedence over constructing the script from the
+    /// contracts context with `wrapped_btc_type_script_args`.
+    #[default(None)]
+    #[arg(
+        name = "CCH_WRAPPED_BTC_TYPE_SCRIPT",
+        long = "cch-wrapped-btc-type-script",
+        env,
+        help = "Full wrapped BTC type script as JSON. Required in standalone mode where the contracts context is unavailable."
+    )]
+    pub wrapped_btc_type_script: Option<String>,
 }
 
 impl CchConfig {
+    /// Validate that the config is usable for standalone mode (no Fiber/CKB services).
+    ///
+    /// In standalone mode the contracts context is never initialized, so the
+    /// full wrapped BTC type script must be provided explicitly.
+    /// Returns `Ok(())` on success, or an error string describing the problem.
+    pub fn validate_standalone(&self) -> Result<(), String> {
+        match &self.wrapped_btc_type_script {
+            None => Err(
+                "CCH standalone mode requires `wrapped_btc_type_script` to be set \
+                 because the contracts context is not available"
+                    .to_string(),
+            ),
+            Some(json_str) => {
+                serde_json::from_str::<ckb_jsonrpc_types::Script>(json_str).map_err(|e| {
+                    format!(
+                        "failed to parse `wrapped_btc_type_script` config as Script JSON: {}",
+                        e
+                    )
+                })?;
+                Ok(())
+            }
+        }
+    }
+
     pub fn resolve_lnd_cert_path(&self) -> Option<PathBuf> {
         self.lnd_cert_path.as_ref().map(|lnd_cert_path| {
             let path = PathBuf::from(lnd_cert_path);
