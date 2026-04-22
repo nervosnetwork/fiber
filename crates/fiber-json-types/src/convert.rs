@@ -289,10 +289,8 @@ mod cch_conversions {
                 fiber_types::CchOrderStatus::OutgoingInFlight => {
                     JsonCchOrderStatus::OutgoingInFlight
                 }
-                fiber_types::CchOrderStatus::OutgoingSucceeded => {
-                    JsonCchOrderStatus::OutgoingSucceeded
-                }
-                fiber_types::CchOrderStatus::Succeeded => JsonCchOrderStatus::Succeeded,
+                fiber_types::CchOrderStatus::OutgoingSuccess => JsonCchOrderStatus::OutgoingSuccess,
+                fiber_types::CchOrderStatus::Success => JsonCchOrderStatus::Success,
                 fiber_types::CchOrderStatus::Failed => JsonCchOrderStatus::Failed,
             }
         }

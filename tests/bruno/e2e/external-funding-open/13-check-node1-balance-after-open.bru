@@ -1,0 +1,56 @@
+meta {
+  name: check node1 balance after open
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  if (bru.getVar("CHANNEL_READY") !== "true") {
+    throw new Error("Channel is not marked ready before open-balance checks");
+  }
+
+  const body = req.getBody();
+  body.params[0].script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const before = BigInt(bru.getVar("NODE1_BALANCE_BEFORE"));
+  const after = BigInt(res.body.result.capacity);
+
+  if (after !== before) {
+    throw new Error(`node1 balance should remain unchanged, before=${before}, after=${after}`);
+  }
+
+  bru.setVar("NODE1_BALANCE_AFTER", after.toString());
+}

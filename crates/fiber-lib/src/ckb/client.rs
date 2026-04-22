@@ -93,8 +93,7 @@ impl From<Pagination<Cell>> for GetCellsResponse {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 pub trait CkbChainClient: Send + Sync {
     async fn get_transaction(&self, hash: H256) -> Result<GetTxResponse, anyhow::Error>;
     async fn get_cells(
@@ -124,8 +123,7 @@ impl CkbRpcClient {
     }
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl CkbChainClient for CkbRpcClient {
     async fn get_transaction(&self, hash: H256) -> Result<GetTxResponse, anyhow::Error> {
         let client = self.config.ckb_rpc_client();

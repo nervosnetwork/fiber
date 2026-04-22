@@ -1,0 +1,55 @@
+meta {
+  name: submit signed funding tx
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "submit_signed_funding_tx",
+    "params": [
+      {
+        "channel_id": "{{EXTERNAL_FUNDING_CHANNEL_ID}}",
+        "signed_funding_tx": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const signedTx = bru.getVar("EXTERNAL_FUNDING_SIGNED_TX");
+  if (!signedTx || !Array.isArray(signedTx.witnesses)) {
+    throw new Error("Missing EXTERNAL_FUNDING_SIGNED_TX. Run the sign step first.");
+  }
+
+  const body = req.getBody();
+  body.params[0].signed_funding_tx = signedTx;
+  req.setBody(body);
+}
+
+script:post-response {
+  if (res.body.error) {
+    throw new Error(`submit_signed_funding_tx failed: ${res.body.error.message}`);
+  }
+
+  if (!res.body.result || !res.body.result.funding_tx_hash || !res.body.result.channel_id) {
+    throw new Error("submit_signed_funding_tx should return funding_tx_hash and channel_id");
+  }
+
+  bru.setVar("EXTERNAL_FUNDING_TX_HASH", res.body.result.funding_tx_hash);
+  bru.setVar("CHANNEL_READY", "false");
+  bru.setVar("READY_CHECK_ITERATION", 0);
+}

@@ -31,6 +31,4 @@ crates/fiber-lib/fuzz/corpus/
 crash-*
 package-lock.json
 target
-baseline.json
-current.json
-comparison_report.txt
+/tests/perf/artifacts/

@@ -24,6 +24,9 @@ pub enum FundingError {
     #[error("Peer sent us an invalid funding tx")]
     InvalidPeerFundingTx,
 
+    #[error("Insufficient cells available for funding: {0}")]
+    InsufficientCells(String),
+
     #[error("Failed to call CKB RPC: {0}")]
     CkbRpcError(#[from] RpcError),
 
@@ -40,13 +43,64 @@ pub enum FundingError {
     FromUtf8Error(#[from] std::string::FromUtf8Error),
 }
 
+/// Walk the `source()` chain of an error and return `true` if any link is a
+/// transient I/O or CKB RPC error (i.e. something likely to succeed on retry).
+///
+/// Because ckb-sdk wraps transport errors inside `anyhow::Error` (via
+/// `CellCollectorError`, `TransactionDependencyError`, etc.) and these are not
+/// always reachable through the standard `source()` chain, we additionally
+/// inspect the error's `Display` output for patterns typical of transient
+/// network/HTTP failures.
+fn error_chain_has_transient(err: &(dyn std::error::Error + 'static)) -> bool {
+    // First: walk the source chain looking for concrete transient types.
+    let mut cur: &dyn std::error::Error = err;
+    loop {
+        if cur.downcast_ref::<std::io::Error>().is_some() {
+            return true;
+        }
+        if cur.downcast_ref::<RpcError>().is_some() {
+            return true;
+        }
+        match cur.source() {
+            Some(next) => cur = next,
+            None => break,
+        }
+    }
+
+    // Second: fall back to checking the full error message for patterns that
+    // indicate transient transport / HTTP / connection errors. These are
+    // commonly produced by reqwest / hyper / io layers that get wrapped by
+    // anyhow inside the ckb-sdk cell collector / dependency provider.
+    let msg = err.to_string().to_lowercase();
+    msg.contains("connection reset")
+        || msg.contains("connection refused")
+        || msg.contains("connection aborted")
+        || msg.contains("broken pipe")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("temporarily unavailable")
+        || msg.contains("network is unreachable")
+        || msg.contains("eof")
+        || msg.contains("http error")
+}
+
 impl FundingError {
+    /// Returns `true` when the error is likely transient (network / RPC) and
+    /// the operation may succeed if retried.
+    ///
+    /// For `CkbTxBuilderError` and `CkbTxUnlockError` the cause chain is
+    /// inspected: the error is considered temporary only when a transient inner
+    /// error (e.g. `std::io::Error` or `ckb_sdk::RpcError`) is found.
+    ///
     pub fn is_temporary(&self) -> bool {
         use FundingError::*;
-        matches!(
-            self,
-            CkbRpcError(_) | RactorError(_) | IoError(_) | SerdeError(_) | FromUtf8Error(_)
-        )
+        match self {
+            AbsentTx | CkbRpcError(_) | RactorError(_) | IoError(_) | SerdeError(_)
+            | FromUtf8Error(_) => true,
+            CkbTxBuilderError(e) => error_chain_has_transient(e),
+            CkbTxUnlockError(e) => error_chain_has_transient(e),
+            _ => false,
+        }
     }
 }
 

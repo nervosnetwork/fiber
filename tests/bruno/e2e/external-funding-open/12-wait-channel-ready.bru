@@ -1,0 +1,64 @@
+meta {
+  name: wait channel ready
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE1_PUBKEY}}"
+      }
+    ]
+  }
+}
+
+vars:post-response {
+  READY_CHECK_MAX_ITERATIONS: 10
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const channelId = bru.getVar("EXTERNAL_FUNDING_CHANNEL_ID");
+  const channels = res.body.result.channels || [];
+  const channel = channels.find((item) => item.channel_id === channelId);
+  const stateName = channel && channel.state && channel.state.state_name;
+  const iteration = Number(bru.getVar("READY_CHECK_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("READY_CHECK_MAX_ITERATIONS"));
+
+  if (stateName === "ChannelReady") {
+    bru.setVar("CHANNEL_READY", "true");
+    bru.setVar("READY_CHECK_ITERATION", 0);
+    return;
+  }
+
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("READY_CHECK_ITERATION", iteration + 1);
+    bru.setNextRequest("generate epoch for funding tx");
+    return;
+  }
+
+  bru.setVar("READY_CHECK_ITERATION", 0);
+  throw new Error(
+    `channel did not reach ChannelReady, channel_id=${channelId}, last_state=${String(stateName)}`,
+  );
+}

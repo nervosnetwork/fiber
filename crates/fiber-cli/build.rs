@@ -1206,7 +1206,7 @@ fn main() {
         use fiber_json_types::*;
         // Re-import external types used as direct field types in Params structs.
         // These are not re-exported by fiber_json_types::*.
-        use ckb_jsonrpc_types::{EpochNumberWithFraction, JsonBytes, Script};
+        use ckb_jsonrpc_types::{CellDep, EpochNumberWithFraction, JsonBytes, Script, Transaction};
 
         /// Trait for types that can be used as CLI arguments.
         /// Generated implementations parse clap ArgMatches into the struct.

@@ -1,0 +1,69 @@
+meta {
+  name: check node3 balance after close
+  type: http
+  seq: 22
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_cells_capacity",
+    "params": [
+      {
+        "script_type": "lock",
+        "script": {}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].script = bru.getVar("NODE3_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const before = BigInt(bru.getVar("NODE3_BALANCE_BEFORE"));
+  const afterOpen = BigInt(bru.getVar("NODE3_BALANCE_AFTER"));
+  const afterClose = BigInt(res.body.result.capacity);
+  const returnedFromClose = afterClose - afterOpen;
+  const spentOnOpen = before - afterOpen;
+  const netLoss = before - afterClose;
+  const openFee = spentOnOpen - returnedFromClose;
+
+  if (afterClose <= afterOpen) {
+    throw new Error(`node3 balance should increase after close, after_open=${afterOpen}, after_close=${afterClose}`);
+  }
+
+  if (returnedFromClose >= spentOnOpen) {
+    throw new Error(
+      `node3 close refund should be lower than open spend, returned_from_close=${returnedFromClose}, spent_on_open=${spentOnOpen}`,
+    );
+  }
+
+  if (netLoss !== openFee) {
+    throw new Error(`node3 net loss should equal open fee, net_loss=${netLoss}, open_fee=${openFee}`);
+  }
+
+  if (netLoss <= BigInt(0)) {
+    throw new Error(`node3 should still lose some balance overall, before=${before}, after_close=${afterClose}`);
+  }
+}

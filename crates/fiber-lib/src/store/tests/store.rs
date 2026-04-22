@@ -1,6 +1,6 @@
 use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
-use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
@@ -15,6 +15,7 @@ use crate::fiber::{
     PaymentCustomRecords, PaymentSession, PaymentStatus, Privkey, Pubkey, PublicChannelInfo,
     RevocationData, SendPaymentData, SettlementData, SigningCommitmentFlags, TimedResult,
 };
+use crate::gen_rand_channel_outpoint;
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
@@ -133,9 +134,7 @@ fn test_store_get_broadcast_messages_iter() {
     let outpoint = channel_announcement.out_point().clone();
     store.save_channel_announcement(timestamp, channel_announcement.clone());
     let default_cursor = Cursor::default();
-    let mut iter = store
-        .get_broadcast_messages_iter(&default_cursor)
-        .into_iter();
+    let mut iter = store.get_broadcast_messages(&default_cursor, 0).into_iter();
     assert_eq!(
         iter.next(),
         Some(BroadcastMessageWithTimestamp::ChannelAnnouncement(
@@ -145,7 +144,7 @@ fn test_store_get_broadcast_messages_iter() {
     );
     assert_eq!(iter.next(), None);
     let cursor = Cursor::new(timestamp, BroadcastMessageID::ChannelAnnouncement(outpoint));
-    let mut iter = store.get_broadcast_messages_iter(&cursor).into_iter();
+    let mut iter = store.get_broadcast_messages(&cursor, 0).into_iter();
     assert_eq!(iter.next(), None);
 }
 
@@ -158,7 +157,7 @@ fn test_store_get_broadcast_messages() {
     let outpoint = channel_announcement.out_point().clone();
     store.save_channel_announcement(timestamp, channel_announcement.clone());
     let default_cursor = Cursor::default();
-    let result = store.get_broadcast_messages(&default_cursor, None);
+    let result = store.get_broadcast_messages(&default_cursor, 0);
     assert_eq!(
         result,
         vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
@@ -167,7 +166,7 @@ fn test_store_get_broadcast_messages() {
         )],
     );
     let cursor = Cursor::new(timestamp, BroadcastMessageID::ChannelAnnouncement(outpoint));
-    let result = store.get_broadcast_messages(&cursor, None);
+    let result = store.get_broadcast_messages(&cursor, 0);
     assert_eq!(result, vec![]);
 }
 
@@ -238,6 +237,119 @@ fn test_store_save_node_announcement() {
     store.save_node_announcement(node_announcement.clone());
     let new_node_announcement = store.get_latest_node_announcement(&pk);
     assert_eq!(new_node_announcement, Some(node_announcement));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_get_latest_startup_broadcast_message_cursor_skips_local_messages_conservatively() {
+    let (store, _dir) = generate_store();
+    let local_signer = gen_rand_local_signer();
+    let local_privkey: Privkey = (*local_signer.secret_key()).into();
+    let local_pubkey = local_privkey.pubkey();
+    let remote_signer = gen_rand_local_signer();
+    let remote_privkey: Privkey = (*remote_signer.secret_key()).into();
+    let remote_pubkey = remote_privkey.pubkey();
+    let remote_peer_signer = gen_rand_local_signer();
+    let remote_peer_pubkey: Pubkey = (*remote_peer_signer.pubkey()).into();
+    let announcement_signer = gen_rand_local_signer();
+    let x_only_pubkey = announcement_signer.x_only_pub_key();
+
+    let local_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("local").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &local_privkey,
+        get_chain_hash(),
+        10,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(local_node_announcement.clone());
+
+    let local_channel_outpoint = gen_rand_channel_outpoint();
+    let local_channel_announcement = ChannelAnnouncement::new_unsigned(
+        &local_pubkey,
+        &remote_pubkey,
+        local_channel_outpoint.clone(),
+        get_chain_hash(),
+        &x_only_pubkey,
+        0,
+        None,
+    );
+    store.save_channel_announcement(20, local_channel_announcement);
+    store.save_channel_update(new_channel_update_unsigned(
+        local_channel_outpoint,
+        30,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    ));
+
+    let remote_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("remote").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &remote_privkey,
+        get_chain_hash(),
+        40,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(remote_node_announcement);
+
+    let remote_channel_outpoint = gen_rand_channel_outpoint();
+    let remote_channel_announcement = ChannelAnnouncement::new_unsigned(
+        &remote_pubkey,
+        &remote_peer_pubkey,
+        remote_channel_outpoint.clone(),
+        get_chain_hash(),
+        &x_only_pubkey,
+        0,
+        None,
+    );
+    store.save_channel_announcement(50, remote_channel_announcement);
+    let remote_channel_update = new_channel_update_unsigned(
+        remote_channel_outpoint,
+        60,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    );
+    store.save_channel_update(remote_channel_update.clone());
+
+    store.save_channel_update(new_channel_update_unsigned(
+        gen_rand_channel_outpoint(),
+        70,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    ));
+
+    let newer_local_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("local").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &local_privkey,
+        get_chain_hash(),
+        80,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(newer_local_node_announcement);
+
+    assert_eq!(
+        get_latest_startup_broadcast_message_cursor(&store, Some(&local_pubkey)),
+        remote_channel_update.cursor()
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -568,6 +680,7 @@ fn test_channel_actor_state_store() {
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
@@ -702,6 +815,7 @@ fn test_serde_channel_actor_state_ciborium() {
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
@@ -2009,4 +2123,49 @@ fn test_store_payment_event_cursor_exhausted_returns_no_cursor() {
     let (events2, cursor2) = query_all_payment_events(&store, 0, u64::MAX, 2, c1);
     assert_eq!(events2.len(), 2);
     assert!(cursor2.is_none());
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_get_broadcast_messages_reverse_excludes_cursor() {
+    let (store, _dir) = generate_store();
+    let first_timestamp = now_timestamp_as_millis_u64();
+    let first_channel_announcement = mock_channel();
+    let first_outpoint = first_channel_announcement.out_point().clone();
+    store.save_channel_announcement(first_timestamp, first_channel_announcement.clone());
+
+    let second_timestamp = first_timestamp + 1;
+    let second_channel_announcement = mock_channel();
+    let second_outpoint = second_channel_announcement.out_point().clone();
+    store.save_channel_announcement(second_timestamp, second_channel_announcement.clone());
+
+    let latest = store.get_broadcast_messages_reverse(None, 1);
+    assert_eq!(
+        latest,
+        vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
+            second_timestamp,
+            second_channel_announcement.clone(),
+        )],
+    );
+
+    let before_cursor = Cursor::new(
+        second_timestamp,
+        BroadcastMessageID::ChannelAnnouncement(second_outpoint),
+    );
+    let previous = store.get_broadcast_messages_reverse(Some(&before_cursor), 1);
+    assert_eq!(
+        previous,
+        vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
+            first_timestamp,
+            first_channel_announcement,
+        )],
+    );
+
+    let first_cursor = Cursor::new(
+        first_timestamp,
+        BroadcastMessageID::ChannelAnnouncement(first_outpoint),
+    );
+    assert!(store
+        .get_broadcast_messages_reverse(Some(&first_cursor), 1)
+        .is_empty());
 }

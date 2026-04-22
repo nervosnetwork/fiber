@@ -105,8 +105,9 @@ impl<S> BiscuitAuthMiddleware<S> {
                     return true;
                 }
                 Err(err) => {
-                    tracing::debug!("Failed check_permission #{err:?}");
-                    return false;
+                    tracing::debug!("Failed get_rule #{err:?}");
+                    // no auth rule, but allow local rpc to proceed.
+                    return true;
                 }
             }
         }
