@@ -1636,17 +1636,13 @@ where
             }
             NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, reply) => {
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
-                let address = if let Some(transport) = addr_type {
-                    addresses
-                        .into_iter()
-                        .filter(|addr| find_type(addr) == transport)
-                        .choose(&mut rand::thread_rng())
-                } else {
-                    addresses.into_iter().choose(&mut rand::thread_rng())
-                };
+                let has_known_addresses = !addresses.is_empty();
+                let address = select_connect_peer_address(addresses.into_iter(), addr_type);
                 let Some(addr) = address else {
                     let err = if let Some(transport) = addr_type {
                         Error::NoMatchingAddress(pubkey, transport)
+                    } else if has_known_addresses {
+                        Error::NoSupportedAddress(pubkey)
                     } else {
                         Error::PeerNotFound(pubkey)
                     };
@@ -3147,12 +3143,14 @@ where
     ) -> TlcErr {
         let node_id = state.get_public_key();
         match error {
-            Error::ChannelNotFound(_) | Error::PeerNotFound(_) => TlcErr::new_channel_fail(
-                TlcErrorCode::UnknownNextPeer,
-                node_id,
-                channel_outpoint.clone(),
-                None,
-            ),
+            Error::ChannelNotFound(_) | Error::PeerNotFound(_) | Error::NoSupportedAddress(_) => {
+                TlcErr::new_channel_fail(
+                    TlcErrorCode::UnknownNextPeer,
+                    node_id,
+                    channel_outpoint.clone(),
+                    None,
+                )
+            }
             Error::ChannelError(_) => TlcErr::new_channel_fail(
                 TlcErrorCode::TemporaryChannelFailure,
                 node_id,
@@ -5956,6 +5954,37 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
         _ => None,
     })
     .unwrap_or(TransportType::Tcp)
+}
+
+pub(crate) fn select_connect_peer_address<I>(
+    addresses: I,
+    addr_type: Option<TransportType>,
+) -> Option<Multiaddr>
+where
+    I: IntoIterator<Item = Multiaddr>,
+{
+    let mut rng = rand::thread_rng();
+
+    match addr_type {
+        Some(transport) => addresses
+            .into_iter()
+            .filter(|addr| find_type(addr) == transport)
+            .choose(&mut rng),
+        None => addresses
+            .into_iter()
+            .filter(target_default_transport_matches)
+            .choose(&mut rng),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn target_default_transport_matches(addr: &Multiaddr) -> bool {
+    matches!(find_type(addr), TransportType::Ws | TransportType::Wss)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn target_default_transport_matches(addr: &Multiaddr) -> bool {
+    find_type(addr) == TransportType::Tcp
 }
 
 struct ToBeAcceptedChannels {

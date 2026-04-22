@@ -25,6 +25,8 @@ pub enum Error {
     PeerNotFound(Pubkey),
     #[error("No matching address for peer {0:?} with transport type {1:?}")]
     NoMatchingAddress(Pubkey, TransportType),
+    #[error("No supported address for peer {0:?} on this target")]
+    NoSupportedAddress(Pubkey),
     #[error("Channel not found error: {0:?}")]
     ChannelNotFound(Hash256),
     #[error("Failed to send tentacle message: {0}")]
