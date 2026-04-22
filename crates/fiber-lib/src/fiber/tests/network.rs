@@ -119,9 +119,9 @@ fn create_fake_node_announcement_message() -> NodeAnnouncement {
     create_node_announcement_message_with_priv_key(&priv_key)
 }
 
-fn build_ws_multiaddr(secure: bool) -> Multiaddr {
+fn build_ws_multiaddr(use_wss: bool) -> Multiaddr {
     let mut addr = Multiaddr::from_str("/dns4/example.com/tcp/443").expect("valid base multiaddr");
-    addr.push(if secure { Protocol::Wss } else { Protocol::Ws });
+    addr.push(if use_wss { Protocol::Wss } else { Protocol::Ws });
     addr
 }
 
