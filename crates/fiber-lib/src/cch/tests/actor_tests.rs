@@ -166,6 +166,7 @@ impl Actor for MockNetworkActor {
                     // Return success response - the executor will create CchTrackingEvent
                     let response = SendPaymentResponse {
                         payment_hash,
+                        payment_preimage: None,
                         status: PaymentStatus::Inflight,
                         created_at: SystemTime::now()
                             .duration_since(UNIX_EPOCH)

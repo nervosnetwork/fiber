@@ -602,6 +602,10 @@ impl From<PaymentSession> for SendPaymentResponse {
 
         Self {
             payment_hash: session.request.payment_hash,
+            payment_preimage: session
+                .attempts()
+                .find(|a| a.is_success())
+                .and_then(|a| a.preimage),
             status,
             failed_error: session.last_error.clone(),
             created_at: session.created_at,

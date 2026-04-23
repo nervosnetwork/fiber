@@ -24,6 +24,8 @@ pub mod rpc;
 pub mod store;
 #[cfg(feature = "watchtower")]
 pub mod watchtower;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod x402;
 
 mod errors;
 pub use errors::{Error, Result};

@@ -14,7 +14,7 @@ use crate::{
         channel::{ListChannelsParams, ListChannelsResult},
         graph::{GraphNodesParams, GraphNodesResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
-        payment::{GetPaymentCommandParams, GetPaymentCommandResult},
+        payment::{GetPaymentCommandParams, GetPaymentCommandResult, SendPaymentCommandParams},
         peer::{ConnectPeerParams, DisconnectPeerParams, ListPeersResult},
     },
     NetworkServiceEvent,
@@ -1114,6 +1114,90 @@ async fn test_rpc_cors_headers() {
             .contains_key("access-control-allow-headers"),
         "Preflight response should contain Access-Control-Allow-Headers header"
     );
+}
+
+#[tokio::test]
+async fn test_get_payment_exposes_payment_preimage_after_success() {
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                node_b_funding_amount: MIN_RESERVED_CKB,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let invoice_res: InvoiceResult = node_1
+        .send_rpc_request(
+            "new_invoice",
+            NewInvoiceParams {
+                amount: 1000,
+                description: Some("x402 proof test".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                expiry: Some(3600),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                payment_preimage: Some(payment_preimage.into()),
+                payment_hash: None,
+                hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
+                allow_mpp: Some(false),
+                allow_trampoline_routing: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+
+    let payment = node_0
+        .send_rpc_request::<_, GetPaymentCommandResult>(
+            "send_payment",
+            SendPaymentCommandParams {
+                target_pubkey: None,
+                amount: None,
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: Some(invoice_res.invoice_address),
+                timeout: None,
+                max_fee_amount: None,
+                max_fee_rate: None,
+                max_parts: None,
+                trampoline_hops: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: None,
+                custom_records: None,
+                hop_hints: None,
+                dry_run: None,
+            },
+        )
+        .await
+        .unwrap();
+    node_0.wait_until_success(payment.payment_hash.into()).await;
+
+    let payment: GetPaymentCommandResult = node_0
+        .send_rpc_request(
+            "get_payment",
+            GetPaymentCommandParams {
+                payment_hash: payment.payment_hash,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        payment.status,
+        fiber_json_types::payment::PaymentStatus::Success
+    );
+    assert_eq!(payment.payment_preimage, Some(payment_preimage.into()));
 }
 
 #[tokio::test]

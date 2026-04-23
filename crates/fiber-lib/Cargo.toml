@@ -137,6 +137,7 @@ jsonrpsee = { version = "0.25.1", features = [
   "macros",
   "http-client",
 ] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 fiber-store = { path = "../fiber-store", features = ["browser-test"] }
