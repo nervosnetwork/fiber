@@ -1176,13 +1176,7 @@ where
                             set.insert(new);
                         };
 
-                        // Update the opening record: rename from temp ID to final ID and advance status.
-                        if let Some(mut record) = state.store.get_channel_open_record(&old) {
-                            state.store.delete_channel_open_record(&old);
-                            record.channel_id = new;
-                            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
-                            state.store.insert_channel_open_record(record);
-                        }
+                        state.move_channel_open_record_to_final_id(&old, new);
 
                         debug!("Starting funding channel");
                         // TODO: Here we implies the one who receives AcceptChannel message
@@ -1454,6 +1448,8 @@ where
                         }
                     }
                 }
+
+                state.move_channel_open_record_to_final_id(&old_channel_id, new_channel_id);
 
                 // Move the pending reply to the final channel id. The actual RPC response is
                 // sent only after tx collaboration finishes and the unsigned tx is frozen.
@@ -3722,6 +3718,21 @@ where
         result
     }
 
+    fn move_channel_open_record_to_final_id(
+        &self,
+        temporary_channel_id: &Hash256,
+        final_channel_id: Hash256,
+    ) {
+        let Some(mut record) = self.store.get_channel_open_record(temporary_channel_id) else {
+            return;
+        };
+
+        self.store.delete_channel_open_record(temporary_channel_id);
+        record.channel_id = final_channel_id;
+        record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+        self.store.insert_channel_open_record(record);
+    }
+
     /// Check peer's node announcement and log warnings if funding amount is insufficient for auto-accept
     fn check_and_log_peer_auto_accept_requirements(
         node_info: &super::graph::NodeInfo,
@@ -4137,6 +4148,12 @@ where
         .0;
         let temp_channel_id = rx.await.expect("msg received");
         self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
+
+        // Record the external-funding opening attempt under the temporary id.
+        // It will be re-keyed once the peer accepts and the final channel id is known.
+        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
+        self.store.insert_channel_open_record(record);
+
         Ok((channel, temp_channel_id))
     }
 
@@ -4219,14 +4236,7 @@ where
         let new_id = rx.await.expect("msg received");
         self.on_channel_created(new_id, remote_pubkey, channel.clone());
 
-        // Re-key the inbound ChannelOpenRecord from the temp channel ID to the final channel ID
-        // and advance the status to FundingTxBuilding now that the channel has been accepted.
-        if let Some(mut record) = self.store.get_channel_open_record(&temp_channel_id) {
-            self.store.delete_channel_open_record(&temp_channel_id);
-            record.channel_id = new_id;
-            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
-            self.store.insert_channel_open_record(record);
-        }
+        self.move_channel_open_record_to_final_id(&temp_channel_id, new_id);
 
         Ok((channel, temp_channel_id, new_id))
     }
