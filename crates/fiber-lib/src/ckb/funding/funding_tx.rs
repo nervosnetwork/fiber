@@ -35,6 +35,18 @@ use tracing::debug;
 // Number of blocks to keep the committed funding tx in the exclusion map.
 // It is the same with the value used in the CKB SDK.
 const KEEP_BLOCK_PERIOD: u64 = 13;
+
+const INSUFFICIENT_UDT_CELLS_MSG: &str =
+    "can not find enough UDT owner cells for funding transaction";
+
+pub(crate) fn map_tx_builder_error(e: TxBuilderError) -> FundingError {
+    if e.to_string().contains(INSUFFICIENT_UDT_CELLS_MSG) {
+        FundingError::InsufficientCells(e.to_string())
+    } else {
+        FundingError::from(e)
+    }
+}
+
 // SecpSighash uses a 65-byte recoverable signature in `WitnessArgs.lock`:
 // 64-byte compact signature + 1-byte recovery id. The full serialized witness
 // is larger because it also includes Molecule table/bytes headers.
@@ -363,9 +375,7 @@ impl FundingTxBuilder {
                 }
             }
         }
-        Err(TxBuilderError::Other(anyhow!(
-            "can not find enough UDT owner cells for funding transaction"
-        )))
+        Err(TxBuilderError::Other(anyhow!(INSUFFICIENT_UDT_CELLS_MSG)))
     }
 
     async fn build_base_from_funding_cell(
@@ -474,16 +484,16 @@ impl FundingTxBuilder {
             .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
 
         #[cfg(not(target_arch = "wasm32"))]
-        let (tx, _) = self.build_unlocked(
+        let build_result = self.build_unlocked(
             &mut cell_collector,
             &cell_dep_resolver,
             &header_dep_resolver,
             &tx_dep_provider,
             &balancer,
             &unlockers,
-        )?;
+        );
         #[cfg(target_arch = "wasm32")]
-        let (tx, _) = self
+        let build_result = self
             .build_unlocked_async(
                 &mut cell_collector,
                 &cell_dep_resolver,
@@ -492,7 +502,8 @@ impl FundingTxBuilder {
                 &balancer,
                 &unlockers,
             )
-            .await?;
+            .await;
+        let (tx, _) = build_result.map_err(map_tx_builder_error)?;
 
         Ok(tx)
     }

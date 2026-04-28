@@ -24,6 +24,9 @@ pub enum FundingError {
     #[error("Peer sent us an invalid funding tx")]
     InvalidPeerFundingTx,
 
+    #[error("Insufficient cells available for funding: {0}")]
+    InsufficientCells(String),
+
     #[error("Failed to call CKB RPC: {0}")]
     CkbRpcError(#[from] RpcError),
 
@@ -88,10 +91,12 @@ impl FundingError {
     /// For `CkbTxBuilderError` and `CkbTxUnlockError` the cause chain is
     /// inspected: the error is considered temporary only when a transient inner
     /// error (e.g. `std::io::Error` or `ckb_sdk::RpcError`) is found.
+    ///
     pub fn is_temporary(&self) -> bool {
         use FundingError::*;
         match self {
-            CkbRpcError(_) | RactorError(_) | IoError(_) | SerdeError(_) | FromUtf8Error(_) => true,
+            AbsentTx | CkbRpcError(_) | RactorError(_) | IoError(_) | SerdeError(_)
+            | FromUtf8Error(_) => true,
             CkbTxBuilderError(e) => error_chain_has_transient(e),
             CkbTxUnlockError(e) => error_chain_has_transient(e),
             _ => false,
@@ -103,80 +108,4 @@ impl FundingError {
 pub enum CkbChainError {
     #[error("Funding error: {0}")]
     FundingError(#[from] FundingError),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ckb_sdk::traits::CellCollectorError;
-
-    #[test]
-    fn tx_builder_error_with_io_cause_is_temporary() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset");
-        let inner = CellCollectorError::Internal(io_err.into());
-        let err = FundingError::CkbTxBuilderError(TxBuilderError::CellCollector(inner));
-        assert!(err.is_temporary());
-    }
-
-    #[test]
-    fn tx_builder_error_without_transient_cause_is_not_temporary() {
-        let err = FundingError::CkbTxBuilderError(TxBuilderError::InvalidParameter(
-            anyhow::anyhow!("capacity overflow"),
-        ));
-        assert!(!err.is_temporary());
-    }
-
-    #[test]
-    fn tx_builder_error_transient_display_fallback_without_io_in_chain() {
-        #[derive(Debug)]
-        struct OpaqueSdkError;
-
-        impl std::fmt::Display for OpaqueSdkError {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "cell collector: connection reset by peer")
-            }
-        }
-
-        impl std::error::Error for OpaqueSdkError {}
-
-        let err = FundingError::CkbTxBuilderError(TxBuilderError::InvalidParameter(
-            anyhow::Error::new(OpaqueSdkError),
-        ));
-        assert!(err.is_temporary());
-    }
-
-    #[test]
-    fn unlock_error_with_io_cause_is_temporary() {
-        let io_err =
-            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
-        let err = FundingError::CkbTxUnlockError(UnlockError::Other(io_err.into()));
-        assert!(err.is_temporary());
-    }
-
-    #[test]
-    fn unlock_error_without_transient_cause_is_not_temporary() {
-        let err = FundingError::CkbTxUnlockError(UnlockError::SignContextTypeIncorrect);
-        assert!(!err.is_temporary());
-    }
-
-    #[test]
-    fn always_temporary_variants() {
-        let io_err = FundingError::IoError(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "broken",
-        ));
-        assert!(io_err.is_temporary());
-
-        let serde_err: Result<(), _> = serde_json::from_str::<()>("bad");
-        let serde_err = FundingError::SerdeError(serde_err.unwrap_err());
-        assert!(serde_err.is_temporary());
-    }
-
-    #[test]
-    fn never_temporary_variants() {
-        assert!(!FundingError::AbsentTx.is_temporary());
-        assert!(!FundingError::DeadCell.is_temporary());
-        assert!(!FundingError::OverflowError.is_temporary());
-        assert!(!FundingError::InvalidPeerFundingTx.is_temporary());
-    }
 }

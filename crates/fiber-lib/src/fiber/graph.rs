@@ -33,7 +33,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
-use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, trace, warn};
@@ -835,11 +834,9 @@ where
     ) -> Option<Cursor> {
         debug!("Processing node announcement: {:?}", &node_announcement);
         if !self.announce_private_addr {
-            node_announcement.addresses.retain(|addr| {
-                multiaddr_to_socketaddr(addr)
-                    .map(|socket_addr| is_reachable(socket_addr.ip()))
-                    .unwrap_or_default()
-            });
+            node_announcement
+                .addresses
+                .retain(crate::utils::is_addr_reachable);
 
             if node_announcement.addresses.is_empty() {
                 return None;

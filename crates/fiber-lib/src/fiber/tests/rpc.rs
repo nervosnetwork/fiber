@@ -242,6 +242,7 @@ async fn test_rpc_list_peers() {
                 address: None,
                 pubkey: Some(node_1_pubkey),
                 save: Some(false),
+                addr_type: None,
             },
         )
         .await
@@ -1277,6 +1278,7 @@ async fn test_rpc_connect_peer_empty_address() {
                 address: Some("".to_string()),
                 pubkey: None,
                 save: None,
+                addr_type: None,
             },
         )
         .await;
@@ -1307,6 +1309,7 @@ async fn test_rpc_connect_peer_no_address_no_pubkey() {
                 address: None,
                 pubkey: None,
                 save: None,
+                addr_type: None,
             },
         )
         .await;

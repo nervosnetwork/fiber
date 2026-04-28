@@ -101,9 +101,12 @@ If you want to keep the channel state, you may try to migrate the storage format
 
 3. Run the fnn-migrate (it can be found in the release binary package) to migrate the storage format:
 
-```bash
-fnn-migrate -p /folder-to/my-fnn/fiber/store
 ```
+./fnn-migrate -d /path/to/fiber-dir
+```
+
+The `-d` / `--dir` flag takes the Fiber data directory (same as `fnn -d`).
+The tool opens the RocksDB store at `<dir>/store` automatically.
 
 4. Replace the fnn binary with the new version and start the node again.
 
@@ -117,8 +120,9 @@ fnn-migrate -p /folder-to/my-fnn/fiber/store
 
 **We are in an actively developing stage, don't hesitate to [report issues](https://github.com/nervosnetwork/fiber/issues) or ask for help in the [channel of the Nervos dev community](https://discord.gg/BF9AJ4fzs6).**
 
-## Testnet deployment information
+## Network node documentation
 
-* [Testnet Public Nodes User Manual](./docs/testnet-nodes.md)
+* [Public Nodes User Manual](docs/public-nodes.md)
+* [Fiber Network Nodes](docs/network-nodes.md)
 
 [fiber-scripts]: https://github.com/nervosnetwork/fiber-scripts
