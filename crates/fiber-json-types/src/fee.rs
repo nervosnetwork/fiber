@@ -127,9 +127,6 @@ pub struct ForwardingHistoryParams {
     pub after: Option<JsonBytes>,
     /// Filter by asset. Omit or set to `null` to return events for all asset types.
     pub asset: Option<ForwardingHistoryAsset>,
-    /// Deprecated compatibility field for filtering by a specific UDT type script.
-    /// Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
-    pub udt_type_script: Option<Script>,
 }
 
 /// A single forwarding event as returned by the `forwarding_history` RPC.
@@ -269,8 +266,8 @@ pub struct PaymentHistoryParams {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct PaymentEventInfo {
-    /// The type of this event: "Send" or "Receive".
-    pub event_type: String,
+    /// The type of this event.
+    pub event_type: PaymentHistoryEventType,
     /// Timestamp when this event was recorded, in milliseconds since UNIX epoch.
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]

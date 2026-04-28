@@ -2365,13 +2365,10 @@ where
                 if let Some(tlc) = state.tlc_state.get_mut(&TLCId::Received(result.tlc_id)) {
                     tlc.forwarding_tlc = Some((channel_id, tlc_id));
                 } else {
-                    // This case should be unreachable because we have fixed the race condition where
-                    // intermediate nodes could settle the TLC locally.
-                    error!(
+                    warn!(
                         "TLC {:?} removed while waiting for forwarding result",
                         result.tlc_id
                     );
-                    debug_assert!(false, "TLC removed while waiting for forwarding result");
                 }
             }
             Err((ProcessingChannelError::WaitingTlcAck, _)) => {

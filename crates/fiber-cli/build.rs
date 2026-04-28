@@ -107,13 +107,20 @@ fn has_serde_untagged(attrs: &[syn::Attribute]) -> bool {
 }
 
 /// Collect all enum names in a parsed file that derive `Deserialize` and
-/// are suitable for simple string-based deserialization (i.e. NOT untagged).
-/// Untagged enums need full JSON parsing and will fall through to "json" mode.
+/// are suitable for simple string-based deserialization.
+/// Enums with payload variants need full JSON parsing and will fall through to "json" mode.
 fn collect_serde_enums(syntax: &syn::File) -> HashSet<String> {
     let mut enums = HashSet::new();
     for item in &syntax.items {
         if let syn::Item::Enum(e) = item {
-            if has_derive(&e.attrs, "Deserialize") && !has_serde_untagged(&e.attrs) {
+            let all_unit_variants = e
+                .variants
+                .iter()
+                .all(|variant| matches!(variant.fields, Fields::Unit));
+            if has_derive(&e.attrs, "Deserialize")
+                && !has_serde_untagged(&e.attrs)
+                && all_unit_variants
+            {
                 enums.insert(e.ident.to_string());
             }
         }

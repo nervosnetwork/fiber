@@ -12,6 +12,8 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
+use fiber_json_types::PaymentHistoryEventType;
+
 use super::app::{ActiveTab, App, ConfirmDialog, DetailPopup, InputMode};
 use super::tabs::channels::{ChannelView, ChannelsTab};
 use super::tabs::dashboard::DashboardTab;
@@ -1121,10 +1123,9 @@ fn draw_recent_payment_events(
                 format!("{}", event.amount)
             };
             let time_str = format_timestamp_short(event.timestamp);
-            let (type_label, type_color) = if event.event_type == "Send" {
-                ("Send", p.warning)
-            } else {
-                ("Recv", p.success)
+            let (type_label, type_color) = match event.event_type {
+                PaymentHistoryEventType::Send => ("Send", p.warning),
+                PaymentHistoryEventType::Receive => ("Recv", p.success),
             };
             let token_label = if event.udt_type_script.is_none() {
                 "CKB"

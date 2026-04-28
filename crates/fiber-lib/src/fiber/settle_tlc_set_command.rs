@@ -127,8 +127,12 @@ where
         }
 
         // Now we are sure the invoice is fulfilled, and `self.tlcs` is ready to be settled.
-        // Update invoice status to Received
-        self.mark_invoice_as_received_if_still_open(&invoice_status);
+        // Claim the invoice before fulfilling TLCs so concurrent duplicate payments cannot all win.
+        if !self.claim_invoice_if_still_open(&invoice_status) {
+            let mut settlements = self.reject_all(TlcErrorCode::HoldTlcTimeout);
+            settlements.append(&mut rejected);
+            return settlements;
+        }
 
         let mut settlements = self.try_settle_all();
         settlements.append(&mut rejected);
@@ -306,12 +310,18 @@ where
         Vec::new()
     }
 
-    fn mark_invoice_as_received_if_still_open(&self, invoice_status: &CkbInvoiceStatus) {
-        if *invoice_status == CkbInvoiceStatus::Open {
-            self.store
-                .update_invoice_status(&self.payment_hash, CkbInvoiceStatus::Received)
-                .expect("update invoice status failed");
+    fn claim_invoice_if_still_open(&self, invoice_status: &CkbInvoiceStatus) -> bool {
+        if *invoice_status != CkbInvoiceStatus::Open {
+            return true;
         }
+
+        self.store
+            .update_invoice_status_if_current(
+                &self.payment_hash,
+                CkbInvoiceStatus::Open,
+                CkbInvoiceStatus::Received,
+            )
+            .expect("update invoice status failed")
     }
 }
 

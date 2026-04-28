@@ -1177,13 +1177,7 @@ where
                             set.insert(new);
                         };
 
-                        // Update the opening record: rename from temp ID to final ID and advance status.
-                        if let Some(mut record) = state.store.get_channel_open_record(&old) {
-                            state.store.delete_channel_open_record(&old);
-                            record.channel_id = new;
-                            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
-                            state.store.insert_channel_open_record(record);
-                        }
+                        state.move_channel_open_record_to_final_id(&old, new);
 
                         debug!("Starting funding channel");
                         // TODO: Here we implies the one who receives AcceptChannel message
@@ -1456,6 +1450,8 @@ where
                     }
                 }
 
+                state.move_channel_open_record_to_final_id(&old_channel_id, new_channel_id);
+
                 // Move the pending reply to the final channel id. The actual RPC response is
                 // sent only after tx collaboration finishes and the unsigned tx is frozen.
                 let reply = state
@@ -1637,17 +1633,13 @@ where
             }
             NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, reply) => {
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
-                let address = if let Some(transport) = addr_type {
-                    addresses
-                        .into_iter()
-                        .filter(|addr| find_type(addr) == transport)
-                        .choose(&mut rand::thread_rng())
-                } else {
-                    addresses.into_iter().choose(&mut rand::thread_rng())
-                };
+                let has_known_addresses = !addresses.is_empty();
+                let address = select_connect_peer_address(addresses.into_iter(), addr_type);
                 let Some(addr) = address else {
                     let err = if let Some(transport) = addr_type {
                         Error::NoMatchingAddress(pubkey, transport)
+                    } else if has_known_addresses {
+                        Error::NoSupportedAddress(pubkey)
                     } else {
                         Error::PeerNotFound(pubkey)
                     };
@@ -1871,6 +1863,7 @@ where
                             if actor_state.reestablishing {
                                 continue;
                             }
+                            let channel_actor_running = state.channels.contains_key(&channel_id);
 
                             if !state.peer_session_map.contains_key(&pubkey) {
                                 with_channel_down_peers.insert(pubkey);
@@ -1884,15 +1877,30 @@ where
                                 .collect();
 
                             for (tlc_id, id, payment_hash) in committed_tlcs {
+                                let Some(tlc) = actor_state.tlc_state.get(&tlc_id) else {
+                                    continue;
+                                };
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                                    // Re-fetch tlc for is_invoice_fulfilled check
-                                    if let Some(tlc) = actor_state.tlc_state.get(&tlc_id) {
-                                        if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
-                                            continue;
-                                        }
-                                    } else {
+                                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                                        continue;
+                                    }
+                                } else if let Some(onion_packet) = &tlc.onion_packet {
+                                    if channel_actor_running {
+                                        continue;
+                                    }
+                                    let Ok(peeled_onion_packet) = onion_packet.clone().peel(
+                                        &state.private_key,
+                                        Some(payment_hash.as_ref()),
+                                        SECP256K1,
+                                    ) else {
+                                        continue;
+                                    };
+                                    if !peeled_onion_packet.is_last() {
+                                        // Without a local invoice, a non-final onion TLC is an
+                                        // in-flight forwarded payment. Do not settle it locally just
+                                        // because this node learned the preimage from another attempt.
                                         continue;
                                     }
                                 }
@@ -3148,12 +3156,14 @@ where
     ) -> TlcErr {
         let node_id = state.get_public_key();
         match error {
-            Error::ChannelNotFound(_) | Error::PeerNotFound(_) => TlcErr::new_channel_fail(
-                TlcErrorCode::UnknownNextPeer,
-                node_id,
-                channel_outpoint.clone(),
-                None,
-            ),
+            Error::ChannelNotFound(_) | Error::PeerNotFound(_) | Error::NoSupportedAddress(_) => {
+                TlcErr::new_channel_fail(
+                    TlcErrorCode::UnknownNextPeer,
+                    node_id,
+                    channel_outpoint.clone(),
+                    None,
+                )
+            }
             Error::ChannelError(_) => TlcErr::new_channel_fail(
                 TlcErrorCode::TemporaryChannelFailure,
                 node_id,
@@ -3726,6 +3736,21 @@ where
         result
     }
 
+    fn move_channel_open_record_to_final_id(
+        &self,
+        temporary_channel_id: &Hash256,
+        final_channel_id: Hash256,
+    ) {
+        let Some(mut record) = self.store.get_channel_open_record(temporary_channel_id) else {
+            return;
+        };
+
+        self.store.delete_channel_open_record(temporary_channel_id);
+        record.channel_id = final_channel_id;
+        record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+        self.store.insert_channel_open_record(record);
+    }
+
     /// Check peer's node announcement and log warnings if funding amount is insufficient for auto-accept
     fn check_and_log_peer_auto_accept_requirements(
         node_info: &super::graph::NodeInfo,
@@ -4141,6 +4166,12 @@ where
         .0;
         let temp_channel_id = rx.await.expect("msg received");
         self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
+
+        // Record the external-funding opening attempt under the temporary id.
+        // It will be re-keyed once the peer accepts and the final channel id is known.
+        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
+        self.store.insert_channel_open_record(record);
+
         Ok((channel, temp_channel_id))
     }
 
@@ -4223,14 +4254,7 @@ where
         let new_id = rx.await.expect("msg received");
         self.on_channel_created(new_id, remote_pubkey, channel.clone());
 
-        // Re-key the inbound ChannelOpenRecord from the temp channel ID to the final channel ID
-        // and advance the status to FundingTxBuilding now that the channel has been accepted.
-        if let Some(mut record) = self.store.get_channel_open_record(&temp_channel_id) {
-            self.store.delete_channel_open_record(&temp_channel_id);
-            record.channel_id = new_id;
-            record.update_status(ChannelOpeningStatus::FundingTxBuilding);
-            self.store.insert_channel_open_record(record);
-        }
+        self.move_channel_open_record_to_final_id(&temp_channel_id, new_id);
 
         Ok((channel, temp_channel_id, new_id))
     }
@@ -5960,6 +5984,37 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
         _ => None,
     })
     .unwrap_or(TransportType::Tcp)
+}
+
+pub(crate) fn select_connect_peer_address<I>(
+    addresses: I,
+    addr_type: Option<TransportType>,
+) -> Option<Multiaddr>
+where
+    I: IntoIterator<Item = Multiaddr>,
+{
+    let mut rng = rand::thread_rng();
+
+    match addr_type {
+        Some(transport) => addresses
+            .into_iter()
+            .filter(|addr| find_type(addr) == transport)
+            .choose(&mut rng),
+        None => addresses
+            .into_iter()
+            .filter(target_default_transport_matches)
+            .choose(&mut rng),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn target_default_transport_matches(addr: &Multiaddr) -> bool {
+    matches!(find_type(addr), TransportType::Ws | TransportType::Wss)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn target_default_transport_matches(addr: &Multiaddr) -> bool {
+    find_type(addr) == TransportType::Tcp
 }
 
 struct ToBeAcceptedChannels {

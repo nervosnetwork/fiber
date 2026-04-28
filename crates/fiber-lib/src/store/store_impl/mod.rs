@@ -7,7 +7,7 @@ use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
@@ -59,6 +59,7 @@ use tracing::info;
 pub struct Store {
     inner: fiber_store::Store,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
+    invoice_status_update_lock: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for Store {
@@ -241,6 +242,7 @@ pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
     Ok(Store {
         inner: db,
         watcher: None,
+        invoice_status_update_lock: Default::default(),
     })
 }
 
@@ -255,6 +257,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let store = Store {
         inner: db,
         watcher: None,
+        invoice_status_update_lock: Default::default(),
     };
     let mut errors = HashSet::new();
 
@@ -1247,6 +1250,38 @@ impl InvoiceStore for Store {
             invoice_status: status,
         });
         Ok(())
+    }
+
+    fn update_invoice_status_if_current(
+        &self,
+        id: &Hash256,
+        current: CkbInvoiceStatus,
+        status: CkbInvoiceStatus,
+    ) -> Result<bool, InvoiceError> {
+        let should_notify = {
+            let _guard = self
+                .invoice_status_update_lock
+                .lock()
+                .expect("invoice status update lock poisoned");
+            self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
+            if self.get_invoice_status(id) != Some(current) {
+                return Ok(false);
+            }
+
+            let mut batch = self.batch();
+            let kv = KeyValue::CkbInvoiceStatus(*id, status);
+            batch.put(kv.key(), kv.value());
+            batch.commit();
+            true
+        };
+
+        if should_notify {
+            self.notify(StoreChange::PutCkbInvoiceStatus {
+                payment_hash: *id,
+                invoice_status: status,
+            });
+        }
+        Ok(should_notify)
     }
 
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {

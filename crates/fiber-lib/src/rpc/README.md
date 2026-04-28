@@ -696,8 +696,6 @@ Returns individual forwarding events with optional time range, asset filter,
  response to retrieve the next page of results. Omit or set to `null` to
  start from the beginning.
 * `asset` - <em>Option<[ForwardingHistoryAsset](#type-forwardinghistoryasset)></em>, Filter by asset. Omit or set to `null` to return events for all asset types.
-* `udt_type_script` - <em>`Option<Script>`</em>, Deprecated compatibility field for filtering by a specific UDT type script.
- Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
 
 ##### Returns
 
@@ -1151,8 +1149,8 @@ Connect to a peer.
  The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
 * `addr_type` - <em>Option<[TransportType](#type-transporttype)></em>, Filter addresses by transport type when connecting by pubkey.
- If not specified, a random address is chosen from all available addresses.
- This is useful for WASM environments where only `wss` addresses are supported.
+ If not specified, the node uses target-specific defaults:
+ native builds choose from `tcp` addresses only, while wasm builds choose from `ws`/`wss`.
 
 ##### Returns
 
@@ -1831,7 +1829,7 @@ A single payment event as returned by the `payment_history` RPC.
 
 #### Fields
 
-* `event_type` - <em>`String`</em>, The type of this event: "Send" or "Receive".
+* `event_type` - <em>[PaymentHistoryEventType](#type-paymenthistoryeventtype)</em>, The type of this event.
 * `timestamp` - <em>`u64`</em>, Timestamp when this event was recorded, in milliseconds since UNIX epoch.
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID through which the TLC was sent or received.
 * `amount` - <em>`u128`</em>, The payment amount.

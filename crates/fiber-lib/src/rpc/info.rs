@@ -316,7 +316,7 @@ pub fn forwarding_history_impl(
         ));
     }
 
-    let asset = forwarding_history_asset_selector(&params)?;
+    let asset = forwarding_history_asset_selector(&params);
     let after_cursor = params
         .after
         .as_ref()
@@ -358,29 +358,14 @@ pub fn forwarding_history_impl(
     })
 }
 
-fn forwarding_history_asset_selector(
-    params: &ForwardingHistoryParams,
-) -> Result<AssetSelector, ErrorObjectOwned> {
-    if params.asset.is_some() && params.udt_type_script.is_some() {
-        return Err(ErrorObjectOwned::owned(
-            INVALID_PARAMS_CODE,
-            "use either `asset` or deprecated `udt_type_script`, not both",
-            Some(params),
-        ));
-    }
-
-    let selector = match &params.asset {
+fn forwarding_history_asset_selector(params: &ForwardingHistoryParams) -> AssetSelector {
+    match &params.asset {
         Some(ForwardingHistoryAsset::Ckb) => AssetSelector::Ckb,
         Some(ForwardingHistoryAsset::Udt { udt_type_script }) => {
             AssetSelector::Udt(udt_type_script.clone().into())
         }
-        None => match &params.udt_type_script {
-            Some(script) => AssetSelector::Udt(script.clone().into()),
-            None => AssetSelector::All,
-        },
-    };
-
-    Ok(selector)
+        None => AssetSelector::All,
+    }
 }
 
 /// Core sent payment report logic.
@@ -516,8 +501,8 @@ pub fn payment_history_impl(
         .into_iter()
         .map(|e| PaymentEventInfo {
             event_type: match e.event_type {
-                PaymentEventType::Send => "Send".to_string(),
-                PaymentEventType::Receive => "Receive".to_string(),
+                PaymentEventType::Send => PaymentHistoryEventType::Send,
+                PaymentEventType::Receive => PaymentHistoryEventType::Receive,
             },
             timestamp: e.timestamp,
             channel_id: e.channel_id.into(),

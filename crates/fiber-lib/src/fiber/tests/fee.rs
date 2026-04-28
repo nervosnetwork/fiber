@@ -734,9 +734,12 @@ async fn test_payment_history_defaults() {
     assert_eq!(result.total_count, 2);
     assert_eq!(result.events.len(), 2);
     assert_eq!(result.events[0].amount, 100);
-    assert_eq!(result.events[0].event_type, "Send");
+    assert_eq!(result.events[0].event_type, PaymentHistoryEventType::Send);
     assert_eq!(result.events[1].amount, 200);
-    assert_eq!(result.events[1].event_type, "Receive");
+    assert_eq!(
+        result.events[1].event_type,
+        PaymentHistoryEventType::Receive
+    );
 }
 
 #[tokio::test]
@@ -844,7 +847,10 @@ async fn test_payment_history_filter_by_udt() {
     .unwrap();
     assert_eq!(result.total_count, 1);
     assert_eq!(result.events[0].amount, 200);
-    assert_eq!(result.events[0].event_type, "Receive");
+    assert_eq!(
+        result.events[0].event_type,
+        PaymentHistoryEventType::Receive
+    );
     assert!(result.events[0].udt_type_script.is_some());
 }
 
@@ -898,7 +904,10 @@ async fn test_payment_history_filter_by_event_type() {
     .unwrap();
 
     assert_eq!(result.total_count, 1);
-    assert_eq!(result.events[0].event_type, "Receive");
+    assert_eq!(
+        result.events[0].event_type,
+        PaymentHistoryEventType::Receive
+    );
     assert_eq!(result.events[0].amount, 200);
 }
 
@@ -951,7 +960,7 @@ async fn test_payment_history_event_fields_mapped() {
 
     assert_eq!(result.events.len(), 1);
     let info = &result.events[0];
-    assert_eq!(info.event_type, "Send");
+    assert_eq!(info.event_type, PaymentHistoryEventType::Send);
     assert_eq!(info.timestamp, now);
     assert_eq!(info.amount, 500);
     assert_eq!(info.fee, 10);
@@ -976,11 +985,7 @@ async fn test_payment_history_returns_both_types() {
     let result = payment_history_impl(&store, PaymentHistoryParams::default()).unwrap();
     assert_eq!(result.total_count, 2);
 
-    let types: Vec<&str> = result
-        .events
-        .iter()
-        .map(|e| e.event_type.as_str())
-        .collect();
-    assert!(types.contains(&"Send"));
-    assert!(types.contains(&"Receive"));
+    let types: Vec<_> = result.events.iter().map(|e| e.event_type).collect();
+    assert!(types.contains(&PaymentHistoryEventType::Send));
+    assert!(types.contains(&PaymentHistoryEventType::Receive));
 }
