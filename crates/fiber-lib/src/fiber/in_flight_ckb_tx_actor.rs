@@ -37,7 +37,7 @@ fn is_permanent_error(err: &RpcError) -> bool {
 // Waiting for https://github.com/nervosnetwork/ckb/pull/4583/ to be released.
 const DUMMY_FUNDING_TX_INDEX: u32 = 0;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum InFlightCkbTxKind {
     /// Funding(channel_id)
     Funding(Hash256),
@@ -172,6 +172,13 @@ where
         myself: ActorRef<InFlightCkbTxActorMessage>,
         state: &mut InFlightCkbTxActorState,
     ) -> Result<(), ActorProcessingErr> {
+        tracing::debug!(
+            "InFlightCkbTxActor starting: tx_hash={}, tx_kind={:?}, confirmations={}, will_broadcast={}",
+            self.tx_hash,
+            self.tx_kind,
+            self.confirmations,
+            state.transaction.is_some(),
+        );
         // start tx tracer
         let tracing_request = |tx| {
             CkbChainMessage::CreateTxTracer(CkbTxTracer {
@@ -204,7 +211,7 @@ where
         &self,
         myself: ActorRef<InFlightCkbTxActorMessage>,
     ) -> Result<(), ActorProcessingErr> {
-        tracing::debug!("Executing send_tx_interval...");
+        tracing::debug!("Executing send_tx_interval for tx {}", self.tx_hash);
         let message = InFlightCkbTxActorMessage::Internal(InternalMessage::SendTx);
 
         // send once immediately
@@ -228,7 +235,11 @@ where
             Some(tx) => tx,
             None => return Ok(()),
         };
-        tracing::debug!("Executing send_tx...");
+        tracing::debug!(
+            "Executing send_tx for {} ({:?})",
+            self.tx_hash,
+            self.tx_kind
+        );
         match ractor::call_t!(
             self.chain_actor,
             CkbChainMessage::SendTx,
@@ -268,6 +279,12 @@ where
         myself: ActorRef<InFlightCkbTxActorMessage>,
         result: CkbTxTracingResult,
     ) -> Result<(), ActorProcessingErr> {
+        tracing::debug!(
+            "Reporting tracing result for tx {} ({:?}): status={:?}",
+            self.tx_hash,
+            self.tx_kind,
+            result.tx_status,
+        );
         let message = match (self.tx_kind.clone(), result.tx_status) {
             (
                 InFlightCkbTxKind::Funding(..),

@@ -2,7 +2,7 @@ use ckb_sdk::RpcError;
 use ckb_types::{core::TransactionView, packed, prelude::IntoTransactionView as _};
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use strum::AsRefStr;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::{
     ckb::contracts::{get_script_by_contract, Contract},
@@ -131,6 +131,17 @@ impl Actor for CkbChainActor {
         );
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
+                debug!(
+                    "[{}] Funding request received: local_amount={}, remote_amount={}, local_reserved_ckb={}, remote_reserved_ckb={}, fee_rate={}, has_udt={}, has_existing_tx={}",
+                    myself.get_name().unwrap_or_default(),
+                    request.local_amount,
+                    request.remote_amount,
+                    request.local_reserved_ckb_amount,
+                    request.remote_reserved_ckb_amount,
+                    request.funding_fee_rate,
+                    request.udt_type_script.is_some(),
+                    tx.as_ref().is_some(),
+                );
                 let context = state.build_funding_context(request.script.clone());
                 let result = match state.config.funding_tx_shell_builder_as_deref() {
                     None => {
@@ -139,6 +150,18 @@ impl Actor for CkbChainActor {
                     }
                     Some(shell_script) => fund_via_shell(shell_script, tx, request, context).await,
                 };
+                match &result {
+                    Ok(funding_tx) => debug!(
+                        "[{}] Funding request succeeded: tx_hash={:?}",
+                        myself.get_name().unwrap_or_default(),
+                        funding_tx.as_ref().map(|t| t.hash()),
+                    ),
+                    Err(err) => debug!(
+                        "[{}] Funding request failed: {}",
+                        myself.get_name().unwrap_or_default(),
+                        err,
+                    ),
+                }
                 let _ = reply_port.send(result);
             }
             CkbChainMessage::BuildUnsignedFundingTx {
@@ -149,6 +172,15 @@ impl Actor for CkbChainActor {
                 funding_cell_lock_script,
                 reply,
             } => {
+                debug!(
+                    "[{}] BuildUnsignedFundingTx: local_amount={}, remote_amount={}, fee_rate={}, has_udt={}, funding_source_lock_hash={}",
+                    myself.get_name().unwrap_or_default(),
+                    request.local_amount,
+                    request.remote_amount,
+                    request.funding_fee_rate,
+                    request.udt_type_script.is_some(),
+                    funding_source_lock_script.calc_script_hash(),
+                );
                 let context = FundingContext {
                     rpc_url: state.config.rpc_url.clone(),
                     funding_source_lock_script,
@@ -162,6 +194,13 @@ impl Actor for CkbChainActor {
                         &mut state.live_cells_exclusion_map,
                     )
                     .await;
+                if let Err(ref err) = result {
+                    debug!(
+                        "[{}] BuildUnsignedFundingTx failed: {}",
+                        myself.get_name().unwrap_or_default(),
+                        err,
+                    );
+                }
                 let _ = reply.send(result);
             }
             CkbChainMessage::VerifyFundingTx {
@@ -170,11 +209,27 @@ impl Actor for CkbChainActor {
                 funding_cell_lock_script,
                 reply,
             } => {
+                let local_tx_hash = local_tx.calc_tx_hash();
+                let remote_tx_hash = remote_tx.calc_tx_hash();
+                debug!(
+                    "[{}] VerifyFundingTx: local_tx_hash={}, remote_tx_hash={}",
+                    myself.get_name().unwrap_or_default(),
+                    local_tx_hash,
+                    remote_tx_hash,
+                );
                 let mut funding_tx: FundingTx = local_tx.into();
                 let context = state.build_funding_context(funding_cell_lock_script);
                 let result = funding_tx
                     .update_for_peer(remote_tx.into_view(), context)
                     .await;
+                if let Err(ref err) = result {
+                    debug!(
+                        "[{}] VerifyFundingTx failed for remote_tx_hash={}: {}",
+                        myself.get_name().unwrap_or_default(),
+                        remote_tx_hash,
+                        err,
+                    );
+                }
                 let _ = reply.send(result);
             }
             CkbChainMessage::AddFundingTx(tx) => {
@@ -190,8 +245,27 @@ impl Actor for CkbChainActor {
             }
             CkbChainMessage::Sign(tx, reply_port) => {
                 if !reply_port.is_closed() {
+                    let tx_hash = tx.as_ref().map(|t| t.hash());
+                    debug!(
+                        "[{}] Signing funding tx: tx_hash={:?}",
+                        myself.get_name().unwrap_or_default(),
+                        tx_hash,
+                    );
                     let rpc_url = state.config.rpc_url.clone();
                     let result = state.signer.sign_funding_tx(tx, rpc_url).await;
+                    match &result {
+                        Ok(signed) => debug!(
+                            "[{}] Funding tx signed: tx_hash={:?}",
+                            myself.get_name().unwrap_or_default(),
+                            signed.as_ref().map(|t| t.hash()),
+                        ),
+                        Err(err) => debug!(
+                            "[{}] Funding tx signing failed for {:?}: {}",
+                            myself.get_name().unwrap_or_default(),
+                            tx_hash,
+                            err,
+                        ),
+                    }
                     if !reply_port.is_closed() {
                         // ignore error
                         let _ = reply_port.send(result);
@@ -200,8 +274,20 @@ impl Actor for CkbChainActor {
             }
             CkbChainMessage::SendTx(tx, reply_port) => {
                 let ckb_client = state.config.ckb_rpc_client();
+                trace!(
+                    "[{}] Sending tx {} to CKB node",
+                    myself.get_name().unwrap_or_default(),
+                    tx.hash(),
+                );
                 let result = match ckb_client.send_transaction(tx.data().into(), None).await {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        debug!(
+                            "[{}] Tx {} accepted by CKB node",
+                            myself.get_name().unwrap_or_default(),
+                            tx.hash(),
+                        );
+                        Ok(())
+                    }
                     Err(err) => {
                         //FIXME(yukang): RBF or duplicated transaction handling
                         match err {
