@@ -1193,7 +1193,7 @@ mod info_fee_cli_tests {
         assert!(params.end_time.is_none());
         assert!(params.limit.is_none());
         assert!(params.after.is_none());
-        assert!(params.udt_type_script.is_none());
+        assert!(params.asset.is_none());
     }
 
     #[test]
@@ -1220,18 +1220,18 @@ mod info_fee_cli_tests {
 
     #[test]
     fn test_forwarding_history_with_udt_filter() {
-        let script_json = r#"{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}"#;
+        let asset_json = r#"{"asset_type":"udt","udt_type_script":{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}}"#;
         let matches = parse_args(
             ForwardingHistoryParams::augment_command,
-            &["test", "--udt-type-script", script_json],
+            &["test", "--asset", asset_json],
         );
         let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
-        assert!(params.udt_type_script.is_some());
+        assert!(params.asset.is_some());
     }
 
     #[test]
     fn test_forwarding_history_all_params() {
-        let script_json = r#"{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}"#;
+        let asset_json = r#"{"asset_type":"udt","udt_type_script":{"code_hash":"0x0000000000000000000000000000000000000000000000000000000000000001","hash_type":"type","args":"0x1234"}}"#;
         let matches = parse_args(
             ForwardingHistoryParams::augment_command,
             &[
@@ -1244,8 +1244,8 @@ mod info_fee_cli_tests {
                 "25",
                 "--after",
                 "0xaabbccdd",
-                "--udt-type-script",
-                script_json,
+                "--asset",
+                asset_json,
             ],
         );
         let params = ForwardingHistoryParams::from_arg_matches(&matches).unwrap();
@@ -1253,7 +1253,7 @@ mod info_fee_cli_tests {
         assert_eq!(params.end_time, Some(9000));
         assert_eq!(params.limit, Some(25));
         assert!(params.after.is_some());
-        assert!(params.udt_type_script.is_some());
+        assert!(params.asset.is_some());
     }
 }
 

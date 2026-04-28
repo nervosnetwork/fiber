@@ -694,8 +694,6 @@ Returns individual forwarding events with optional time range, asset filter,
  response to retrieve the next page of results. Omit or set to `null` to
  start from the beginning.
 * `asset` - <em>Option<[ForwardingHistoryAsset](#type-forwardinghistoryasset)></em>, Filter by asset. Omit or set to `null` to return events for all asset types.
-* `udt_type_script` - <em>`Option<Script>`</em>, Deprecated compatibility field for filtering by a specific UDT type script.
- Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
 
 ##### Returns
 

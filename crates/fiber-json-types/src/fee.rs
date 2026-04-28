@@ -127,9 +127,6 @@ pub struct ForwardingHistoryParams {
     pub after: Option<JsonBytes>,
     /// Filter by asset. Omit or set to `null` to return events for all asset types.
     pub asset: Option<ForwardingHistoryAsset>,
-    /// Deprecated compatibility field for filtering by a specific UDT type script.
-    /// Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
-    pub udt_type_script: Option<Script>,
 }
 
 /// A single forwarding event as returned by the `forwarding_history` RPC.
