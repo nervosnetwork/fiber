@@ -501,8 +501,8 @@ pub fn payment_history_impl(
         .into_iter()
         .map(|e| PaymentEventInfo {
             event_type: match e.event_type {
-                PaymentEventType::Send => "Send".to_string(),
-                PaymentEventType::Receive => "Receive".to_string(),
+                PaymentEventType::Send => PaymentHistoryEventType::Send,
+                PaymentEventType::Receive => PaymentHistoryEventType::Receive,
             },
             timestamp: e.timestamp,
             channel_id: e.channel_id.into(),

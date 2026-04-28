@@ -266,8 +266,8 @@ pub struct PaymentHistoryParams {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct PaymentEventInfo {
-    /// The type of this event: "Send" or "Receive".
-    pub event_type: String,
+    /// The type of this event.
+    pub event_type: PaymentHistoryEventType,
     /// Timestamp when this event was recorded, in milliseconds since UNIX epoch.
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]

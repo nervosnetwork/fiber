@@ -1794,7 +1794,7 @@ A single payment event as returned by the `payment_history` RPC.
 
 #### Fields
 
-* `event_type` - <em>`String`</em>, The type of this event: "Send" or "Receive".
+* `event_type` - <em>[PaymentHistoryEventType](#type-paymenthistoryeventtype)</em>, The type of this event.
 * `timestamp` - <em>`u64`</em>, Timestamp when this event was recorded, in milliseconds since UNIX epoch.
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID through which the TLC was sent or received.
 * `amount` - <em>`u128`</em>, The payment amount.
