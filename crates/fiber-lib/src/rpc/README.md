@@ -757,8 +757,6 @@ Returns individual send/receive payment events with optional time range,
  start from the beginning.
 * `asset` - <em>Option<[PaymentHistoryAsset](#type-paymenthistoryasset)></em>, Filter by asset. Omit or set to `null` to return events for all asset types.
 * `event_type` - <em>Option<[PaymentHistoryEventType](#type-paymenthistoryeventtype)></em>, Optional filter by payment event type.
-* `udt_type_script` - <em>`Option<Script>`</em>, Deprecated compatibility field for filtering by a specific UDT type script.
- Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
 
 ##### Returns
 
