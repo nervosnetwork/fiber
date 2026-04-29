@@ -257,9 +257,6 @@ pub struct PaymentHistoryParams {
     pub asset: Option<PaymentHistoryAsset>,
     /// Optional filter by payment event type.
     pub event_type: Option<PaymentHistoryEventType>,
-    /// Deprecated compatibility field for filtering by a specific UDT type script.
-    /// Prefer `asset: { "asset_type": "udt", "udt_type_script": ... }`.
-    pub udt_type_script: Option<Script>,
 }
 
 /// A single payment event as returned by the `payment_history` RPC.

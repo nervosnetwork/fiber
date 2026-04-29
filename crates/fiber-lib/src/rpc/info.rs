@@ -523,23 +523,12 @@ pub fn payment_history_impl(
 fn payment_history_asset_selector(
     params: &PaymentHistoryParams,
 ) -> Result<AssetSelector, ErrorObjectOwned> {
-    if params.asset.is_some() && params.udt_type_script.is_some() {
-        return Err(ErrorObjectOwned::owned(
-            INVALID_PARAMS_CODE,
-            "use either `asset` or deprecated `udt_type_script`, not both",
-            Some(params),
-        ));
-    }
-
     let selector = match &params.asset {
         Some(PaymentHistoryAsset::Ckb) => AssetSelector::Ckb,
         Some(PaymentHistoryAsset::Udt { udt_type_script }) => {
             AssetSelector::Udt(udt_type_script.clone().into())
         }
-        None => match &params.udt_type_script {
-            Some(script) => AssetSelector::Udt(script.clone().into()),
-            None => AssetSelector::All,
-        },
+        None => AssetSelector::All,
     };
 
     Ok(selector)

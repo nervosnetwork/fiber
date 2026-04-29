@@ -1472,7 +1472,6 @@ mod info_fee_cli_tests {
         assert!(params.after.is_none());
         assert!(params.asset.is_none());
         assert!(params.event_type.is_none());
-        assert!(params.udt_type_script.is_none());
     }
 
     #[test]
@@ -1515,7 +1514,6 @@ mod info_fee_cli_tests {
             Some(PaymentHistoryAsset::Udt { .. })
         ));
         assert_eq!(params.event_type, Some(PaymentHistoryEventType::Send));
-        assert!(params.udt_type_script.is_none());
     }
 
     #[test]
