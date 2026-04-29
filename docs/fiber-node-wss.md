@@ -158,21 +158,56 @@ http {
 
 Add an A record for the domain fiber.example.com to your Fiber node's IP address in your domain registrar.
 
-## Get Your node's addresses
 
+## Connect to Your Node via WSS
+
+**Option A — Connect by explicit WSS address:**
 Prerequisites:
 
-- Fiber node config.yml announced_addrs add public IP
-- Your node's RPC port is 8227
+- In your Fiber node's `config.yml`, add the WSS multiaddr to `announced_addrs` so that
+  browser/WASM clients can discover and connect to your node via the P2P graph:
 
+```yaml
+announced_addrs:
+    - /ip4/<your-public-ip>/tcp/8228
+    - /dns4/fiber.example.com/tcp/443/wss
 ```
-curl -s -X POST http://127.0.0.1:8227 -H "Content-Type: application/json" -d '{
+
+
+```sh
+curl -s -X POST http://127.0.0.1:8227 \
+  -H "Content-Type: application/json" \
+  -d '{
     "id": 42,
     "jsonrpc": "2.0",
-    "method": "node_info",
-    "params": []
-}' |jq '.result.addresses[0]' |awk -F '/p2p/' '{print $2}'
+    "method": "connect_peer",
+    "params": [{ "address": "/dns4/fiber.example.com/tcp/443/wss" }]
+  }'
 ```
 
-## Connect via the WSS address
-/dns4/{Your-Domain-Name}/tcp/443/wss/p2p/{Your-Fiber-Node-Addresses}
+**Option B — Connect by pubkey (requires WSS address to be propagated via gossip):**
+
+- First, make sure you have completed the Update announced_addrs step and restarted your node so the WSS address has been broadcast to the network.
+
+Get your node's pubkey:
+
+```sh
+curl -s -X POST http://127.0.0.1:8227 \
+  -H "Content-Type: application/json" \
+  -d '{"id": 42, "jsonrpc": "2.0", "method": "node_info", "params": []}' \
+  | jq -r '.result.pubkey'
+```
+
+Then connect using the pubkey:
+
+
+```sh
+curl -s -X POST http://127.0.0.1:8227 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "connect_peer",
+    "params": [{ "pubkey": "<your-node-pubkey>", "addr_type": "wss" }]
+  }'
+  ```
