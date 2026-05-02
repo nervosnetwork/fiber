@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
@@ -326,7 +328,7 @@ where
             .store
             .get_payment_sessions_with_limit(limit, after, status);
 
-        let payments: Vec<GetPaymentCommandResult> = sessions
+        let mut payments: Vec<GetPaymentCommandResult> = sessions
             .into_iter()
             .map(|session| {
                 let response: crate::fiber::network::SendPaymentResponse = session.into();
@@ -335,6 +337,7 @@ where
             .collect();
 
         let last_cursor = payments.last().map(|p| p.payment_hash);
+        payments.sort_by_key(|p| Reverse(p.created_at));
 
         Ok(ListPaymentsResult {
             payments,

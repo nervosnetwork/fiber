@@ -1,24 +1,29 @@
 //!
-//! +--------------+----------------------+-----------------------------+
-//! | KeyPrefix::  | Key::                | Value::                     |
-//! +--------------+----------------------+-----------------------------+
-//! | 0            | Hash256              | ChannelActorState           |
-//! | 16           | Pubkey               | PersistentNetworkActorState |
-//! | 32           | Hash256              | CkbInvoice                  |
-//! | 33           | Payment_hash         | CkbInvoice Preimage         |
-//! | 34           | Payment_hash         | CkbInvoice Status           |
-//! | 48           | Hash256              | PendingCommitDiff           |
-//! | 64           | Pubkey | Hash256     | ChannelState                |
-//! | 65           | OutPoint             | ChannelId                   |
-//! | 96           | Cursor               | BroadcastMessage            |
-//! | 97           | BroadcastMessageID   | u64                         |
-//! | 192          | Hash256              | PaymentSession              |
-//! | 193          | OutPoint | Direction | TimedResult                 |
-//! | 194          | Hash256              | PaymentCustomRecords        |
-//! | 224          | Hash256              | ChannelData                 |
-//! | 201          | Hash256              | ChannelOpenRecord           |
-//! | 232          | Payment_hash         | CchOrder                    |
-//! +--------------+----------------------+-----------------------------+
+//! +--------------+-----------------------------------------+-----------------------------+
+//! | KeyPrefix::  | Key::                                   | Value::                     |
+//! +--------------+-----------------------------------------+-----------------------------+
+//! | 0            | Hash256                                 | ChannelActorState           |
+//! | 16           | Pubkey                                  | PersistentNetworkActorState |
+//! | 32           | Hash256                                 | CkbInvoice                  |
+//! | 33           | Payment_hash                            | CkbInvoice Preimage         |
+//! | 34           | Payment_hash                            | CkbInvoice Status           |
+//! | 48           | Hash256                                 | PendingCommitDiff           |
+//! | 64           | Pubkey | Hash256                        | ChannelState                |
+//! | 65           | OutPoint                                | ChannelId                   |
+//! | 96           | Cursor                                  | BroadcastMessage            |
+//! | 97           | BroadcastMessageID                      | u64                         |
+//! | 192          | Hash256                                 | PaymentSession              |
+//! | 193          | OutPoint | Direction                    | TimedResult                 |
+//! | 194          | Hash256                                 | PaymentCustomRecords        |
+//! | 224          | Hash256                                 | ChannelData                 |
+//! | 201          | Hash256                                 | ChannelOpenRecord           |
+//! | 232          | Payment_hash                            | CchOrder                    |
+//! | 240          | Timestamp | Payment_hash | Channel_id   | ForwardingEvent             |
+//! | 241          | Timestamp | Payment_hash | Channel_id   | PaymentEvent                |
+//! | 242          | Asset_id | Timestamp | Payment_hash...  | ForwardingEvent Asset Index |
+//! | 243          | Asset_id | Timestamp | Payment_hash...  | PaymentEvent Asset Index    |
+//! | 244          | Kind | Timestamp | Payment_hash...      | PaymentEvent Kind Index     |
+//! +--------------+-----------------------------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
 pub const PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;
@@ -51,3 +56,8 @@ mod watchtower {
 pub use watchtower::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CCH_ORDER_PREFIX: u8 = 232;
+pub const FORWARDING_EVENT_PREFIX: u8 = 240;
+pub const PAYMENT_EVENT_PREFIX: u8 = 241;
+pub const FORWARDING_EVENT_ASSET_INDEX_PREFIX: u8 = 242;
+pub const PAYMENT_EVENT_ASSET_INDEX_PREFIX: u8 = 243;
+pub const PAYMENT_EVENT_KIND_INDEX_PREFIX: u8 = 244;

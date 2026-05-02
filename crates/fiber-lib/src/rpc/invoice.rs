@@ -19,13 +19,14 @@ use jsonrpsee::types::ErrorObjectOwned;
 use ractor::{call, ActorRef};
 use rand::Rng;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
+use std::cmp::Reverse;
 use std::time::Duration;
 use tentacle::secio::SecioKeyPair;
 
 pub use fiber_json_types::{
     Attribute, CkbInvoice, GetInvoiceResult, InvoiceData, InvoiceParams, InvoiceResult,
-    NewInvoiceParams, ParseInvoiceParams, ParseInvoiceResult, SettleInvoiceParams,
-    SettleInvoiceResult,
+    ListInvoicesParams, ListInvoicesResult, NewInvoiceParams, ParseInvoiceParams,
+    ParseInvoiceResult, SettleInvoiceParams, SettleInvoiceResult,
 };
 
 /// RPC module for invoice management.
@@ -66,6 +67,13 @@ trait InvoiceRpc {
         &self,
         settle_invoice: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned>;
+
+    /// Lists all invoices, optionally filtered by status.
+    #[method(name = "list_invoices")]
+    async fn list_invoices(
+        &self,
+        params: ListInvoicesParams,
+    ) -> Result<ListInvoicesResult, ErrorObjectOwned>;
 }
 
 pub struct InvoiceRpcServerImpl<S> {
@@ -159,6 +167,14 @@ where
         settle_invoice: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
         self.settle_invoice(settle_invoice).await
+    }
+
+    /// Lists all invoices, optionally filtered by status.
+    async fn list_invoices(
+        &self,
+        params: ListInvoicesParams,
+    ) -> Result<ListInvoicesResult, ErrorObjectOwned> {
+        self.list_invoices(params).await
     }
 }
 
@@ -389,5 +405,35 @@ where
         };
 
         handle_actor_call!(network_actor, message, params).map(|_| SettleInvoiceResult {})
+    }
+
+    pub async fn list_invoices(
+        &self,
+        params: ListInvoicesParams,
+    ) -> Result<ListInvoicesResult, ErrorObjectOwned> {
+        let default_limit: u64 = 15;
+        let limit = params.limit.unwrap_or(default_limit) as usize;
+
+        let after = params.after.map(fiber_types::Hash256::from);
+        let status = params.status.map(fiber_types::CkbInvoiceStatus::from);
+
+        let results = self.store.get_invoices_with_limit(limit, after, status);
+
+        let mut invoices: Vec<GetInvoiceResult> = results
+            .into_iter()
+            .map(|(invoice, status)| GetInvoiceResult {
+                invoice_address: invoice.to_string(),
+                invoice: invoice.into(),
+                status: status.into(),
+            })
+            .collect();
+
+        let last_cursor = invoices.last().map(|i| i.invoice.data.payment_hash);
+        invoices.sort_by_key(|i| Reverse(i.invoice.data.timestamp));
+
+        Ok(ListInvoicesResult {
+            invoices,
+            last_cursor,
+        })
     }
 }

@@ -1,6 +1,8 @@
 mod channel;
 mod channel_commit_diff;
 mod features;
+#[cfg(not(target_arch = "wasm32"))]
+mod fee;
 mod gossip;
 mod graph;
 mod hash_algorithm;

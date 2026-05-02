@@ -51,8 +51,8 @@ use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
     ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
-    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    PaymentEventStore, ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand,
+    StopReason, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::gossip::{
     get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
@@ -798,6 +798,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + PaymentEventStore
         + Clone
         + Send
         + Sync
@@ -1862,6 +1863,7 @@ where
                             if actor_state.reestablishing {
                                 continue;
                             }
+                            let channel_actor_running = state.channels.contains_key(&channel_id);
 
                             if !state.peer_session_map.contains_key(&pubkey) {
                                 with_channel_down_peers.insert(pubkey);
@@ -1875,15 +1877,30 @@ where
                                 .collect();
 
                             for (tlc_id, id, payment_hash) in committed_tlcs {
+                                let Some(tlc) = actor_state.tlc_state.get(&tlc_id) else {
+                                    continue;
+                                };
                                 // skip if tlc amount is not fulfilled invoice
                                 // this may happened if payment is mpp
                                 if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                                    // Re-fetch tlc for is_invoice_fulfilled check
-                                    if let Some(tlc) = actor_state.tlc_state.get(&tlc_id) {
-                                        if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
-                                            continue;
-                                        }
-                                    } else {
+                                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                                        continue;
+                                    }
+                                } else if let Some(onion_packet) = &tlc.onion_packet {
+                                    if channel_actor_running {
+                                        continue;
+                                    }
+                                    let Ok(peeled_onion_packet) = onion_packet.clone().peel(
+                                        &state.private_key,
+                                        Some(payment_hash.as_ref()),
+                                        SECP256K1,
+                                    ) else {
+                                        continue;
+                                    };
+                                    if !peeled_onion_packet.is_last() {
+                                        // Without a local invoice, a non-final onion TLC is an
+                                        // in-flight forwarded payment. Do not settle it locally just
+                                        // because this node learned the preimage from another attempt.
                                         continue;
                                     }
                                 }
@@ -3659,6 +3676,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + PaymentEventStore
         + Clone
         + Send
         + Sync
@@ -5298,6 +5316,7 @@ where
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + PaymentEventStore
         + Clone
         + Send
         + Sync
@@ -5914,6 +5933,7 @@ pub async fn start_network<
         + GossipMessageStore
         + PreimageStore
         + InvoiceStore
+        + PaymentEventStore
         + Clone
         + Send
         + Sync

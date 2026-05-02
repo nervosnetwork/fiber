@@ -16,7 +16,25 @@ pub trait InvoiceStore {
         id: &Hash256,
         status: CkbInvoiceStatus,
     ) -> Result<(), InvoiceError>;
+    fn update_invoice_status_if_current(
+        &self,
+        id: &Hash256,
+        current: CkbInvoiceStatus,
+        status: CkbInvoiceStatus,
+    ) -> Result<bool, InvoiceError> {
+        if self.get_invoice_status(id) != Some(current) {
+            return Ok(false);
+        }
+        self.update_invoice_status(id, status)?;
+        Ok(true)
+    }
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus>;
+    fn get_invoices_with_limit(
+        &self,
+        limit: usize,
+        after: Option<Hash256>,
+        status: Option<CkbInvoiceStatus>,
+    ) -> Vec<(CkbInvoice, CkbInvoiceStatus)>;
 }
 
 pub trait PreimageStore {
