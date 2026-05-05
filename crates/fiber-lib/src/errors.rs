@@ -25,6 +25,15 @@ pub enum Error {
     PeerNotFound(Pubkey),
     #[error("No matching address for peer {0:?} with transport type {1:?}")]
     NoMatchingAddress(Pubkey, TransportType),
+    #[error(
+        "No supported address for peer {0:?} on this target; expected transports: {supported_transports}. Add a supported address or specify `addr_type` explicitly",
+        supported_transports = if cfg!(target_arch = "wasm32") {
+            "ws/wss"
+        } else {
+            "tcp"
+        }
+    )]
+    NoSupportedAddress(Pubkey),
     #[error("Channel not found error: {0:?}")]
     ChannelNotFound(Hash256),
     #[error("Failed to send tentacle message: {0}")]

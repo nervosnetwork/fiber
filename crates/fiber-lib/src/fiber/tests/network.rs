@@ -9,7 +9,10 @@ use crate::{
     fiber::{
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
-        network::{AcceptChannelCommand, DebugEvent, NetworkActorStateStore, OpenChannelCommand},
+        network::{
+            select_connect_peer_address, AcceptChannelCommand, DebugEvent, NetworkActorStateStore,
+            OpenChannelCommand,
+        },
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
             broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
@@ -38,6 +41,7 @@ use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
     multiaddr::{MultiAddr, Multiaddr, Protocol},
     secio::PeerId,
+    utils::TransportType,
 };
 
 fn get_test_priv_key() -> Privkey {
@@ -113,6 +117,47 @@ fn create_node_announcement_message_with_priv_key(priv_key: &Privkey) -> NodeAnn
 fn create_fake_node_announcement_message() -> NodeAnnouncement {
     let priv_key = get_test_priv_key();
     create_node_announcement_message_with_priv_key(&priv_key)
+}
+
+fn build_ws_multiaddr(use_wss: bool) -> Multiaddr {
+    let mut addr = Multiaddr::from_str("/dns4/example.com/tcp/443").expect("valid base multiaddr");
+    addr.push(if use_wss { Protocol::Wss } else { Protocol::Ws });
+    addr
+}
+
+#[test]
+fn test_select_connect_peer_address_respects_explicit_transport_filter() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
+    let wss = build_ws_multiaddr(true);
+
+    let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss], Some(TransportType::Ws));
+
+    assert_eq!(selected, Some(ws));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_select_connect_peer_address_defaults_to_tcp_on_native() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
+    let wss = build_ws_multiaddr(true);
+
+    let selected = select_connect_peer_address(vec![tcp.clone(), ws, wss], None);
+
+    assert_eq!(selected, Some(tcp));
+}
+
+#[cfg(target_arch = "wasm32")]
+#[test]
+fn test_select_connect_peer_address_defaults_to_websocket_on_wasm() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
+    let wss = build_ws_multiaddr(true);
+
+    let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss.clone()], None);
+
+    assert!(matches!(selected, Some(addr) if addr == ws || addr == wss));
 }
 
 #[cfg(not(target_arch = "wasm32"))]

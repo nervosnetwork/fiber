@@ -1408,9 +1408,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.0"
+version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b193af5b67834b676abd72466a96c1024e6a6ad978a1f484bd90b85c94041351"
+checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -1452,9 +1452,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.6.0"
+version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1110bd8a634a1ab8cb04345d8d878267d57c3cf1b38d91b71af6686408bbca6a"
+checksum = "f2ce8604710f6733aa641a2b3731eaa1e8b3d9973d5e3565da11800813f997a9"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -4991,7 +4991,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -5635,9 +5635,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.10"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -6644,9 +6644,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.51.1"
+version = "1.52.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f66bf9585cda4b724d3e78ab34b73fb2bbaba9011b9bfdf69dc836382ea13b8c"
+checksum = "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6"
 dependencies = [
  "bytes",
  "libc",
