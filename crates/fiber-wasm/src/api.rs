@@ -2,7 +2,9 @@ use std::sync::OnceLock;
 
 use fnn::{
     fiber::{
-        channel::ChannelActorStateStore, gossip::GossipMessageStore, graph::NetworkGraphStateStore,
+        channel::{ChannelActorStateStore, PaymentEventStore},
+        gossip::GossipMessageStore,
+        graph::NetworkGraphStateStore,
     },
     invoice::InvoiceStore,
     rpc::{
@@ -26,17 +28,18 @@ pub(crate) struct FiberWasm<
         + Send
         + Sync
         + 'static,
+    InfoStoreType: PaymentEventStore + Send + Sync + 'static,
     InvoiceStoreType: InvoiceStore + Send + Sync + 'static,
     PaymentStoreType: ChannelActorStateStore + Send + Sync + 'static,
 > {
     pub(crate) channel: ChannelRpcServerImpl<ChannelStoreType>,
     pub(crate) graph: GraphRpcServerImpl<GraphStoreType>,
-    pub(crate) info: InfoRpcServerImpl,
+    pub(crate) info: InfoRpcServerImpl<InfoStoreType>,
     pub(crate) invoice: InvoiceRpcServerImpl<InvoiceStoreType>,
     pub(crate) payment: PaymentRpcServerImpl<PaymentStoreType>,
     pub(crate) peer: PeerRpcServerImpl,
 }
-pub(crate) type WrappedFiberWasm = FiberWasm<Store, Store, Store, Store>;
+pub(crate) type WrappedFiberWasm = FiberWasm<Store, Store, Store, Store, Store>;
 
 pub(crate) static FIBER_WASM: OnceLock<WrappedFiberWasm> = OnceLock::new();
 

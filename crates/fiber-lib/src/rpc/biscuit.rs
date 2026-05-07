@@ -110,6 +110,15 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
 
     // info
     b.rule("node_info", r#"allow if read("node");"#);
+
+    // fee && payment report
+    b.rule("fee_report", r#"allow if read("node");"#);
+    b.rule("forwarding_history", r#"allow if read("node");"#);
+    b.rule("sent_payment_report", r#"allow if read("node");"#);
+    b.rule("received_payment_report", r#"allow if read("node");"#);
+    b.rule("payment_history", r#"allow if read("node");"#);
+
+    // invoice
     b.rule("new_invoice", r#"allow if write("invoices");"#);
     b.rule("parse_invoice", r#"allow if read("invoices");"#);
     b.rule("get_invoice", r#"allow if read("invoices");"#);

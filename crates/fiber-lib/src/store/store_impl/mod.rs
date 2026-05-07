@@ -1,3 +1,4 @@
+use ckb_hash::blake2b_256;
 #[cfg(feature = "watchtower")]
 use ckb_types::packed::Script;
 
@@ -16,7 +17,11 @@ use crate::fiber::types::HoldTlc;
 use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff},
+        channel::{
+            AssetSelector, ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore,
+            CommitDiff, ForwardingHistoryCursor, ForwardingHistoryQuery, PaymentEventStore,
+            PaymentHistoryCursor, PaymentHistoryQuery,
+        },
         graph::NetworkGraphStateStore,
         network::NetworkActorStateStore,
         payment::PaymentSessionExt,
@@ -31,8 +36,9 @@ use fiber_types::schema::*;
 use fiber_types::CchOrder;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
+    Cursor, Direction, ForwardingEvent, Hash256, PaymentCustomRecords, PaymentEvent,
+    PaymentEventType, PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey,
+    TimedResult, CURSOR_SIZE,
 };
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
@@ -126,6 +132,106 @@ where
 {
     bincode::deserialize(slice)
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
+}
+
+const PAYMENT_QUERY_FILTER_BATCH_SIZE: usize = 1000;
+
+fn forwarding_event_primary_key_from_cursor(cursor: &ForwardingHistoryCursor) -> Vec<u8> {
+    [
+        &[FORWARDING_EVENT_PREFIX],
+        &cursor.timestamp().to_be_bytes()[..],
+        cursor.payment_hash().as_ref(),
+        cursor.incoming_channel_id().as_ref(),
+    ]
+    .concat()
+}
+
+fn forwarding_event_asset_id(udt_type_script: &Option<ckb_types::packed::Script>) -> [u8; 33] {
+    let mut asset_id = [0u8; 33];
+    match udt_type_script {
+        None => asset_id[0] = 0,
+        Some(script) => {
+            asset_id[0] = 1;
+            asset_id[1..].copy_from_slice(&blake2b_256(script.as_slice()));
+        }
+    }
+    asset_id
+}
+
+fn forwarding_event_asset_index_prefix(asset: &AssetSelector) -> Option<Vec<u8>> {
+    asset
+        .asset_id()
+        .map(|asset_id| [&[FORWARDING_EVENT_ASSET_INDEX_PREFIX], asset_id.as_slice()].concat())
+}
+
+fn forwarding_event_asset_index_key(event: &ForwardingEvent) -> Vec<u8> {
+    let asset_id = forwarding_event_asset_id(&event.udt_type_script);
+    [
+        &[FORWARDING_EVENT_ASSET_INDEX_PREFIX],
+        asset_id.as_slice(),
+        &event.timestamp.to_be_bytes()[..],
+        event.payment_hash.as_ref(),
+        event.incoming_channel_id.as_ref(),
+    ]
+    .concat()
+}
+
+fn payment_event_primary_key_from_cursor(cursor: &PaymentHistoryCursor) -> Vec<u8> {
+    [
+        &[PAYMENT_EVENT_PREFIX],
+        &cursor.timestamp().to_be_bytes()[..],
+        cursor.payment_hash().as_ref(),
+        cursor.channel_id().as_ref(),
+    ]
+    .concat()
+}
+
+fn payment_event_asset_id(udt_type_script: &Option<ckb_types::packed::Script>) -> [u8; 33] {
+    let mut asset_id = [0u8; 33];
+    match udt_type_script {
+        None => asset_id[0] = 0,
+        Some(script) => {
+            asset_id[0] = 1;
+            asset_id[1..].copy_from_slice(&blake2b_256(script.as_slice()));
+        }
+    }
+    asset_id
+}
+
+fn payment_event_asset_index_prefix(asset: &AssetSelector) -> Option<Vec<u8>> {
+    asset
+        .asset_id()
+        .map(|asset_id| [&[PAYMENT_EVENT_ASSET_INDEX_PREFIX], asset_id.as_slice()].concat())
+}
+
+fn payment_event_asset_index_key(event: &PaymentEvent) -> Vec<u8> {
+    let asset_id = payment_event_asset_id(&event.udt_type_script);
+    [
+        &[PAYMENT_EVENT_ASSET_INDEX_PREFIX],
+        asset_id.as_slice(),
+        &event.timestamp.to_be_bytes()[..],
+        event.payment_hash.as_ref(),
+        event.channel_id.as_ref(),
+    ]
+    .concat()
+}
+
+fn payment_event_type_tag(event_type: PaymentEventType) -> u8 {
+    match event_type {
+        PaymentEventType::Send => 0,
+        PaymentEventType::Receive => 1,
+    }
+}
+
+fn payment_event_kind_index_key(event: &PaymentEvent) -> Vec<u8> {
+    [
+        &[PAYMENT_EVENT_KIND_INDEX_PREFIX],
+        &[payment_event_type_tag(event.event_type)],
+        &event.timestamp.to_be_bytes()[..],
+        event.payment_hash.as_ref(),
+        event.channel_id.as_ref(),
+    ]
+    .concat()
 }
 
 /// Open a store at `path`, with migration check.
@@ -245,6 +351,19 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
+            FORWARDING_EVENT_PREFIX => {
+                check_deserialization::<ForwardingEvent>(
+                    &value,
+                    "FORWARDING_EVENT_PREFIX",
+                    &mut errors,
+                );
+            }
+            FORWARDING_EVENT_ASSET_INDEX_PREFIX => {}
+            PAYMENT_EVENT_PREFIX => {
+                check_deserialization::<PaymentEvent>(&value, "PAYMENT_EVENT_PREFIX", &mut errors);
+            }
+            PAYMENT_EVENT_ASSET_INDEX_PREFIX => {}
+            PAYMENT_EVENT_KIND_INDEX_PREFIX => {}
             _ => {}
         }
     }
@@ -271,7 +390,6 @@ fn parse_hold_tlc(key: &[u8], value: &[u8]) -> (Hash256, HoldTlc) {
         .expect("channel_id should be 32 bytes");
 
     let tlc_id: u64 = u64::from_le_bytes(key[65..].try_into().expect("tlc_id should be 8 bytes"));
-
     let expired_at: u64 = deserialize_from(value, "HoldTlc");
 
     let hold_tlc = HoldTlc {
@@ -312,6 +430,8 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
+    ForwardingEvent(ForwardingEvent),
+    PaymentEvent(PaymentEvent),
 }
 
 /// Recorded store changes.
@@ -435,6 +555,20 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
+            KeyValue::ForwardingEvent(event) => [
+                &[FORWARDING_EVENT_PREFIX],
+                &event.timestamp.to_be_bytes()[..],
+                event.payment_hash.as_ref(),
+                event.incoming_channel_id.as_ref(),
+            ]
+            .concat(),
+            KeyValue::PaymentEvent(event) => [
+                &[PAYMENT_EVENT_PREFIX],
+                &event.timestamp.to_be_bytes()[..],
+                event.payment_hash.as_ref(),
+                event.channel_id.as_ref(),
+            ]
+            .concat(),
         }
     }
 
@@ -477,6 +611,8 @@ impl StoreKeyValue for KeyValue {
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
+            KeyValue::ForwardingEvent(event) => serialize_to_vec(event, "ForwardingEvent"),
+            KeyValue::PaymentEvent(event) => serialize_to_vec(event, "PaymentEvent"),
         }
     }
 }
@@ -702,6 +838,358 @@ impl ChannelOpenRecordStore for Store {
     fn delete_channel_open_record(&self, channel_id: &Hash256) {
         let key = [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat();
         self.delete(key);
+    }
+}
+
+impl PaymentEventStore for Store {
+    fn insert_forwarding_event(&self, event: ForwardingEvent) {
+        let mut batch = self.batch();
+        let kv = KeyValue::ForwardingEvent(event.clone());
+        batch.put(kv.key(), kv.value());
+        batch.put(forwarding_event_asset_index_key(&event), []);
+        batch.commit();
+    }
+
+    fn query_forwarding_events(
+        &self,
+        query: ForwardingHistoryQuery,
+    ) -> Result<(Vec<ForwardingEvent>, Option<ForwardingHistoryCursor>), String> {
+        let ForwardingHistoryQuery {
+            asset,
+            start_time,
+            end_time,
+            limit,
+            after,
+        } = query;
+
+        if let Some(cursor) = &after {
+            cursor.validate_for(&asset)?;
+        }
+
+        let (mut raw, from_asset_index) = if let Some(prefix) =
+            forwarding_event_asset_index_prefix(&asset)
+        {
+            let start_key = match after.as_ref() {
+                Some(cursor) => [
+                    prefix.as_slice(),
+                    &cursor.timestamp().to_be_bytes()[..],
+                    cursor.payment_hash().as_ref(),
+                    cursor.incoming_channel_id().as_ref(),
+                ]
+                .concat(),
+                None => [prefix.as_slice(), &start_time.to_be_bytes()[..]].concat(),
+            };
+
+            let end_key: Vec<u8> = [
+                prefix.as_slice(),
+                &end_time.saturating_add(1).to_be_bytes()[..],
+            ]
+            .concat();
+            let take_while_fn: TakeWhileFn = Box::new(move |key: &[u8]| key < end_key.as_slice());
+            let fetch_limit = if after.is_some() {
+                limit + 2
+            } else {
+                limit + 1
+            };
+
+            (
+                self.collect_iterator(
+                    start_key,
+                    IteratorDirection::Forward,
+                    take_while_fn,
+                    fetch_limit,
+                ),
+                true,
+            )
+        } else {
+            let after_cursor = after.as_ref().map(forwarding_event_primary_key_from_cursor);
+            let end_key: Vec<u8> = [
+                &[FORWARDING_EVENT_PREFIX],
+                &end_time.saturating_add(1).to_be_bytes()[..],
+            ]
+            .concat();
+            let take_while_fn: TakeWhileFn = Box::new(move |key: &[u8]| key < end_key.as_slice());
+            let start_key = match after_cursor.as_deref() {
+                Some(cursor) => cursor.to_vec(),
+                None => [&[FORWARDING_EVENT_PREFIX], &start_time.to_be_bytes()[..]].concat(),
+            };
+            let fetch_limit = if after_cursor.is_some() {
+                limit + 2
+            } else {
+                limit + 1
+            };
+
+            let mut raw = self.collect_iterator(
+                start_key,
+                IteratorDirection::Forward,
+                take_while_fn,
+                fetch_limit,
+            );
+            if let Some(cursor) = after_cursor.as_deref() {
+                if raw.first().map(|kv| kv.key.as_slice()) == Some(cursor) {
+                    raw.remove(0);
+                }
+            }
+
+            (raw, false)
+        };
+
+        if let Some(cursor) = &after {
+            let cursor_key = if from_asset_index {
+                let prefix = forwarding_event_asset_index_prefix(&asset)
+                    .expect("asset index prefix must exist when using asset index");
+                [
+                    prefix.as_slice(),
+                    &cursor.timestamp().to_be_bytes()[..],
+                    cursor.payment_hash().as_ref(),
+                    cursor.incoming_channel_id().as_ref(),
+                ]
+                .concat()
+            } else {
+                forwarding_event_primary_key_from_cursor(cursor)
+            };
+
+            if raw.first().map(|kv| kv.key.as_slice()) == Some(cursor_key.as_slice()) {
+                raw.remove(0);
+            }
+        }
+
+        let has_next_page = raw.len() > limit;
+        raw.truncate(limit);
+
+        let events: Vec<ForwardingEvent> = if from_asset_index {
+            raw.into_iter()
+                .map(|kv| {
+                    let primary_key = [&[FORWARDING_EVENT_PREFIX], &kv.key[34..]].concat();
+                    let value = self
+                        .get(primary_key)
+                        .ok_or_else(|| "forwarding event asset index is out of sync".to_string())?;
+                    Ok(deserialize_from::<ForwardingEvent>(
+                        value.as_ref(),
+                        "ForwardingEvent",
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        } else {
+            raw.into_iter()
+                .map(|kv| deserialize_from::<ForwardingEvent>(kv.value.as_ref(), "ForwardingEvent"))
+                .collect()
+        };
+
+        let last_cursor = if has_next_page {
+            events
+                .last()
+                .map(|event| ForwardingHistoryCursor::new(&asset, event))
+        } else {
+            None
+        };
+
+        Ok((events, last_cursor))
+    }
+
+    fn insert_payment_event(&self, event: PaymentEvent) {
+        let mut batch = self.batch();
+        let kv = KeyValue::PaymentEvent(event.clone());
+        batch.put(kv.key(), kv.value());
+        batch.put(payment_event_asset_index_key(&event), []);
+        batch.put(payment_event_kind_index_key(&event), []);
+        batch.commit();
+    }
+
+    fn query_payment_events(
+        &self,
+        query: PaymentHistoryQuery,
+    ) -> Result<(Vec<PaymentEvent>, Option<PaymentHistoryCursor>), String> {
+        let PaymentHistoryQuery {
+            asset,
+            event_type,
+            start_time,
+            end_time,
+            limit,
+            after,
+        } = query;
+
+        let query = PaymentHistoryQuery {
+            asset,
+            event_type,
+            start_time,
+            end_time,
+            limit,
+            after,
+        };
+
+        if let Some(cursor) = &query.after {
+            cursor.validate_for(&query)?;
+        }
+
+        enum PaymentScan {
+            Primary,
+            Asset(Vec<u8>),
+            EventType(u8),
+        }
+
+        let scan = if let Some(prefix) = payment_event_asset_index_prefix(&query.asset) {
+            PaymentScan::Asset(prefix)
+        } else if let Some(event_type) = query.event_type {
+            PaymentScan::EventType(payment_event_type_tag(event_type))
+        } else {
+            PaymentScan::Primary
+        };
+
+        let needs_post_filter = query.asset != AssetSelector::All && query.event_type.is_some();
+        let mut collected: Vec<PaymentEvent> = Vec::with_capacity(query.limit);
+        let mut scan_after_key = query.after.as_ref().map(|cursor| match &scan {
+            PaymentScan::Primary => payment_event_primary_key_from_cursor(cursor),
+            PaymentScan::Asset(prefix) => [
+                prefix.as_slice(),
+                &cursor.timestamp().to_be_bytes()[..],
+                cursor.payment_hash().as_ref(),
+                cursor.channel_id().as_ref(),
+            ]
+            .concat(),
+            PaymentScan::EventType(kind) => [
+                &[PAYMENT_EVENT_KIND_INDEX_PREFIX],
+                &[*kind],
+                &cursor.timestamp().to_be_bytes()[..],
+                cursor.payment_hash().as_ref(),
+                cursor.channel_id().as_ref(),
+            ]
+            .concat(),
+        });
+        let mut has_more_scan = false;
+        let mut saw_overflow_match = false;
+
+        loop {
+            let remaining = query.limit.saturating_sub(collected.len());
+            if remaining == 0 {
+                break;
+            }
+
+            let page_limit = if needs_post_filter {
+                remaining.max(PAYMENT_QUERY_FILTER_BATCH_SIZE)
+            } else {
+                remaining
+            };
+
+            let (start_key, end_key, prefix_len) = match &scan {
+                PaymentScan::Primary => (
+                    scan_after_key.clone().unwrap_or_else(|| {
+                        [&[PAYMENT_EVENT_PREFIX], &query.start_time.to_be_bytes()[..]].concat()
+                    }),
+                    [
+                        &[PAYMENT_EVENT_PREFIX],
+                        &query.end_time.saturating_add(1).to_be_bytes()[..],
+                    ]
+                    .concat(),
+                    1usize,
+                ),
+                PaymentScan::Asset(prefix) => (
+                    scan_after_key.clone().unwrap_or_else(|| {
+                        [prefix.as_slice(), &query.start_time.to_be_bytes()[..]].concat()
+                    }),
+                    [
+                        prefix.as_slice(),
+                        &query.end_time.saturating_add(1).to_be_bytes()[..],
+                    ]
+                    .concat(),
+                    34usize,
+                ),
+                PaymentScan::EventType(kind) => (
+                    scan_after_key.clone().unwrap_or_else(|| {
+                        [
+                            &[PAYMENT_EVENT_KIND_INDEX_PREFIX],
+                            &[*kind],
+                            &query.start_time.to_be_bytes()[..],
+                        ]
+                        .concat()
+                    }),
+                    [
+                        &[PAYMENT_EVENT_KIND_INDEX_PREFIX],
+                        &[*kind],
+                        &query.end_time.saturating_add(1).to_be_bytes()[..],
+                    ]
+                    .concat(),
+                    2usize,
+                ),
+            };
+            let take_while_fn: TakeWhileFn = Box::new(move |key: &[u8]| key < end_key.as_slice());
+            let fetch_limit = if scan_after_key.is_some() {
+                page_limit + 2
+            } else {
+                page_limit + 1
+            };
+
+            let mut raw = self.collect_iterator(
+                start_key,
+                IteratorDirection::Forward,
+                take_while_fn,
+                fetch_limit,
+            );
+
+            if let Some(cursor_key) = scan_after_key.as_deref() {
+                if raw.first().map(|kv| kv.key.as_slice()) == Some(cursor_key) {
+                    raw.remove(0);
+                }
+            }
+
+            let next_scan_after_key = if raw.len() > page_limit {
+                raw.get(page_limit - 1).map(|kv| kv.key.clone())
+            } else {
+                None
+            };
+            raw.truncate(page_limit);
+
+            let page_events: Vec<PaymentEvent> = match &scan {
+                PaymentScan::Primary => raw
+                    .into_iter()
+                    .map(|kv| deserialize_from::<PaymentEvent>(kv.value.as_ref(), "PaymentEvent"))
+                    .collect(),
+                PaymentScan::Asset(_) | PaymentScan::EventType(_) => raw
+                    .into_iter()
+                    .map(|kv| {
+                        let primary_key = [&[PAYMENT_EVENT_PREFIX], &kv.key[prefix_len..]].concat();
+                        let value = self
+                            .get(primary_key)
+                            .ok_or_else(|| "payment event index is out of sync".to_string())?;
+                        Ok(deserialize_from::<PaymentEvent>(
+                            value.as_ref(),
+                            "PaymentEvent",
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            };
+
+            for event in page_events {
+                if query.asset.matches(&event.udt_type_script)
+                    && query
+                        .event_type
+                        .map(|expected| expected == event.event_type)
+                        .unwrap_or(true)
+                {
+                    if collected.len() < query.limit {
+                        collected.push(event);
+                    } else {
+                        saw_overflow_match = true;
+                    }
+                }
+            }
+
+            has_more_scan = next_scan_after_key.is_some();
+            if !has_more_scan || collected.len() >= query.limit {
+                break;
+            }
+            scan_after_key = next_scan_after_key;
+        }
+
+        let last_cursor = if has_more_scan || saw_overflow_match {
+            collected
+                .last()
+                .map(|event| PaymentHistoryCursor::new(&query, event))
+        } else {
+            None
+        };
+
+        Ok((collected, last_cursor))
     }
 }
 
