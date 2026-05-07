@@ -3347,6 +3347,16 @@ where
         transaction: Transaction,
         request: FundingRequest,
     ) -> crate::Result<()> {
+        debug!(
+            "do_update_channel_funding: channel_id={:?}, attempt={}/{}, local_amount={}, remote_amount={}, fee_rate={}, has_udt={}",
+            channel_id,
+            retry_count + 1,
+            FUNDING_RETRY_MAX_TOTAL_ATTEMPTS,
+            request.local_amount,
+            request.remote_amount,
+            request.funding_fee_rate,
+            request.udt_type_script.is_some(),
+        );
         let tx_for_retry = transaction.clone();
         let request_for_retry = request.clone();
         let old_tx = transaction.into_view();
@@ -3414,6 +3424,15 @@ where
     ) -> crate::Result<()> {
         let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
         let has_partial_witnesses = partial_witnesses.is_some();
+        debug!(
+            "do_sign_funding_tx: channel_id={:?}, target={:?}, tx_hash={:?}, has_partial_witnesses={}, attempt={}/{}",
+            channel_id,
+            target,
+            tx_hash,
+            has_partial_witnesses,
+            retry_count + 1,
+            FUNDING_RETRY_MAX_TOTAL_ATTEMPTS,
+        );
 
         let funding_tx_for_retry = funding_tx.clone();
         let partial_witnesses_for_retry = partial_witnesses.clone();
@@ -3545,6 +3564,12 @@ where
         tx: FundingTx,
         request: FundingRequest,
     ) -> Result<FundingTx, FundingError> {
+        trace!(
+            "Forwarding Fund request to ckb chain actor: local_amount={}, remote_amount={}, fee_rate={}",
+            request.local_amount,
+            request.remote_amount,
+            request.funding_fee_rate,
+        );
         call_t!(
             self.chain_actor.clone(),
             CkbChainMessage::Fund,
@@ -4294,6 +4319,14 @@ where
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
         let tx_hash = tx.hash().into();
+        debug!(
+            "Spawning InFlightCkbTxActor: tx_hash={:?}, tx_kind={:?}, confirmations={}, inputs={}, outputs={}",
+            tx_hash,
+            tx_kind,
+            CKB_TX_TRACING_CONFIRMATIONS,
+            tx.inputs().len(),
+            tx.outputs().len(),
+        );
 
         let handler = InFlightCkbTxActor {
             chain_actor: self.chain_actor.clone(),
@@ -4318,6 +4351,7 @@ where
     }
 
     pub async fn abort_funding(&mut self, channel_id_or_outpoint: Either<Hash256, OutPoint>) {
+        debug!("abort_funding called with {:?}", channel_id_or_outpoint);
         let channel_id = match channel_id_or_outpoint {
             Either::Left(channel_id) => channel_id,
             Either::Right(outpoint) => match self.pending_channels.remove(&outpoint) {
