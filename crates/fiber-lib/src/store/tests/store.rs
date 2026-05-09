@@ -687,6 +687,7 @@ fn test_channel_actor_state_store() {
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
+        funding_abort_detail: None,
         private_key: None,
     };
 
@@ -825,6 +826,7 @@ fn sample_channel_actor_state(
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
+        funding_abort_detail: None,
         private_key: None,
     }
 }

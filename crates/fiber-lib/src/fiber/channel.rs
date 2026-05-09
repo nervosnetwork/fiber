@@ -897,8 +897,12 @@ where
                     .await?;
                 Ok(())
             }
-            FiberChannelMessage::TxAbort(_) => {
+            FiberChannelMessage::TxAbort(tx_abort) => {
                 if state.state.can_abort_funding() {
+                    if !tx_abort.message.is_empty() {
+                        state.funding_abort_detail =
+                            Some(String::from_utf8_lossy(&tx_abort.message).into_owned());
+                    }
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     myself.stop(Some("Funding abort".to_string()));
                 }
@@ -3196,14 +3200,21 @@ where
                 debug_event!(self.network, "ChannelActorStopped");
                 if reason == StopReason::Abandon {
                     state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
-                } else if reason == StopReason::AbortFunding {
+                } else if reason.is_abort_funding() {
+                    if let Some(detail) = reason.funding_abort_detail() {
+                        state.funding_abort_detail = Some(detail.to_string());
+                    }
+                    let abort_detail = state
+                        .funding_abort_detail
+                        .clone()
+                        .unwrap_or_else(|| "funding aborted".to_string());
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     let abort_message = FiberMessageWithTarget {
                         target: state.get_remote_pubkey(),
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxAbort(TxAbort {
                                 channel_id: state.get_id(),
-                                message: "funding aborted".as_bytes().to_vec(),
+                                message: abort_detail.into_bytes(),
                             }),
                         ),
                     };
@@ -4047,7 +4058,11 @@ where
         let stop_reason = match state.state {
             ChannelState::Closed(flags) => match flags {
                 CloseFlags::ABANDONED => StopReason::Abandon,
-                CloseFlags::FUNDING_ABORTED => StopReason::AbortFunding,
+                CloseFlags::FUNDING_ABORTED => state
+                    .funding_abort_detail
+                    .clone()
+                    .map(StopReason::AbortFundingWithDetail)
+                    .unwrap_or(StopReason::AbortFunding),
                 _ => StopReason::Closed,
             },
             _ => StopReason::PeerDisConnected,
@@ -4295,6 +4310,9 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub ephemeral_config: ChannelEphemeralConfig,
 
+    #[doc = "skip_store"]
+    pub funding_abort_detail: Option<String>,
+
     // signing key
     #[doc = "skip_store"]
     pub private_key: Option<Privkey>,
@@ -4358,6 +4376,7 @@ impl<'de> Deserialize<'de> for ChannelActorState {
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
+            funding_abort_detail: None,
             private_key: None,
         };
         state.hydrate_external_funding_runtime();
@@ -4372,8 +4391,25 @@ pub struct ClosedChannel {}
 pub enum StopReason {
     Abandon,
     AbortFunding,
+    AbortFundingWithDetail(String),
     Closed,
     PeerDisConnected,
+}
+
+impl StopReason {
+    pub(crate) fn is_abort_funding(&self) -> bool {
+        matches!(
+            self,
+            StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_)
+        )
+    }
+
+    pub(crate) fn funding_abort_detail(&self) -> Option<&str> {
+        match self {
+            StopReason::AbortFundingWithDetail(detail) => Some(detail),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, AsRefStr)]
@@ -5269,6 +5305,7 @@ impl ChannelActorState {
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
+            funding_abort_detail: None,
             private_key: Some(private_key),
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
@@ -5362,6 +5399,7 @@ impl ChannelActorState {
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
+            funding_abort_detail: None,
             private_key: Some(private_key),
         };
         state.log_ack_state("[ack] new_outbound_channel");
@@ -7001,9 +7039,10 @@ impl ChannelActorState {
                         err
                     );
                     if !err.is_temporary() {
+                        let abort_reason = err.to_string();
                         myself
                             .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
-                                StopReason::AbortFunding,
+                                StopReason::AbortFundingWithDetail(abort_reason),
                             )))
                             .expect("myself alive");
                     }
