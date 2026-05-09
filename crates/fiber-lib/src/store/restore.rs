@@ -16,6 +16,7 @@ pub fn restore(restore_path: &Path, base_path: &Path) -> Result<()> {
     for mut channel in store.get_all_channel_states() {
         if channel.is_risk_of_penalty() {
             channel.update_state(ChannelState::Stale);
+            store.insert_channel_actor_state(channel);
         }
     }
     Ok(())
