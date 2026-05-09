@@ -1,15 +1,15 @@
+use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{
-    CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore, SettleInvoiceError,
+    CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
 use crate::rpc::invoice::NewInvoiceParams;
 use crate::tests::test_utils::{
     create_n_nodes_network, create_n_nodes_network_with_params, gen_rpc_config, init_tracing,
-    ChannelParameters, NetworkNode, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
+    wait_until_timeout, ChannelParameters, NetworkNode, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
 };
-use fiber_types::Hash256;
-use fiber_types::HashAlgorithm;
+use fiber_types::{ChannelState, CloseFlags, Hash256, HashAlgorithm};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
@@ -374,4 +374,109 @@ async fn test_send_mpp_to_hold_invoice() {
     dbg!(node_0_balance, node_1_balance);
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_force_close_keeps_preimage_for_onchain_split() {
+    fn has_received_tlc(node: &NetworkNode, channel_id: Hash256, payment_hash: Hash256) -> bool {
+        node.store
+            .get_channel_actor_state(&channel_id)
+            .is_some_and(|state| {
+                state
+                    .tlc_state
+                    .all_tlcs()
+                    .any(|tlc| tlc.is_received() && tlc.payment_hash == payment_hash)
+            })
+    }
+
+    init_tracing();
+
+    let amount = 20000000000;
+    let upstream_capacity = 12000000000;
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + upstream_capacity, MIN_RESERVED_CKB),
+            ),
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + upstream_capacity, MIN_RESERVED_CKB),
+            ),
+            ((1, 2), (MIN_RESERVED_CKB + amount * 2, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::default()
+        .hash(payment_preimage.as_ref())
+        .into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .payee_pub_key(node_2.get_public_key().into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+    node_2.insert_invoice(invoice.clone(), None);
+
+    let response = node_0
+        .send_payment(SendPaymentCommand {
+            max_parts: Some(2),
+            dry_run: false,
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send mpp payment");
+    assert_eq!(response.payment_hash, payment_hash);
+
+    node_0.wait_until_inflight(payment_hash).await;
+    wait_until_timeout(30_000, || {
+        node_2.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    wait_until_timeout(30_000, || {
+        has_received_tlc(&node_1, channels[0], payment_hash)
+            && has_received_tlc(&node_1, channels[1], payment_hash)
+    })
+    .await;
+
+    node_1
+        .send_shutdown(channels[0], true)
+        .await
+        .expect("force shutdown one upstream channel");
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    node_1
+        .send_channel_shutdown_tx_confirmed_event(node_0.pubkey, channels[0], true)
+        .await;
+    wait_until_timeout(30_000, || {
+        matches!(
+            node_1.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+        )
+    })
+    .await;
+
+    node_2
+        .settle_invoice(&payment_hash, payment_preimage)
+        .await
+        .expect("settle invoice");
+    wait_until_timeout(30_000, || {
+        !has_received_tlc(&node_1, channels[1], payment_hash)
+    })
+    .await;
+
+    assert!(
+        has_received_tlc(&node_1, channels[0], payment_hash),
+        "the force-closed split should remain pending for on-chain settlement"
+    );
+    assert!(
+        node_1.store.get_preimage(&payment_hash).is_some(),
+        "the forwarding node must keep the preimage for the on-chain split"
+    );
 }

@@ -1673,9 +1673,12 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
-            // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
-            // incase watchtower may need preimage to settledown
-            if tlc_info.is_received() || tlc_info.forwarding_tlc.is_none() {
+            // Keep the preimage for forwarded TLCs that may still need it later:
+            // outbound forwarding keeps the old behavior, while inbound forwarding keeps it
+            // only when another same-hash TLC is already on the on-chain settlement path.
+            if tlc_info.forwarding_tlc.is_none()
+                || !self.has_onchain_tlc_for_payment_hash(state, tlc_info.payment_hash)
+            {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
@@ -1722,6 +1725,35 @@ where
             }
         }
         Ok(())
+    }
+
+    fn has_onchain_tlc_for_payment_hash(
+        &self,
+        current_state: &ChannelActorState,
+        payment_hash: Hash256,
+    ) -> bool {
+        let has_onchain_tlc = |state: &ChannelActorState| {
+            matches!(
+                state.state,
+                ChannelState::Closed(flags)
+                    if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+            ) && state
+                .tlc_state
+                .all_tlcs()
+                .any(|tlc| tlc.payment_hash == payment_hash)
+        };
+
+        if has_onchain_tlc(current_state) {
+            return true;
+        }
+
+        let current_channel_id = current_state.get_id();
+        self.store
+            .get_channel_states(None)
+            .into_iter()
+            .filter(|(_, channel_id, _)| *channel_id != current_channel_id)
+            .filter_map(|(_, channel_id, _)| self.store.get_channel_actor_state(&channel_id))
+            .any(|state| has_onchain_tlc(&state))
     }
 
     fn remove_preimage(&self, payment_hash: Hash256) {
