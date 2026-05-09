@@ -8,6 +8,8 @@ This collection covers a minimal external-funding happy path with three dev node
 
 The flow verifies that node1 acts as the channel initiator without spending its own CKB, and that the external funding is returned to node2 after close.
 
+> Note: this Bruno flow depends on the dev-only `sign_external_funding_tx` RPC, which is compiled only when Rust `debug_assertions` are enabled. Official release binaries do not expose this method and will return `Method not found`.
+
 ## Key Files
 
 For a quicker read through the main external-funding flow, these are good files to start with:
@@ -62,6 +64,8 @@ The Bruno collection now follows a more request-oriented layout:
 ## Running
 
 Start dev nodes first:
+
+The node start script and restart helper default to `TEST_ENV=debug`, which builds `fnn` with `debug_assertions` enabled. Do not use `TEST_ENV=release` for this flow unless you provide your own external signing step instead of `sign_external_funding_tx`.
 
 ```bash
 REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/external-funding-open
