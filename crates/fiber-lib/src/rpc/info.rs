@@ -10,8 +10,6 @@ pub use fiber_json_types::NodeInfoResult;
 use ractor::{call, ActorRef};
 
 use crate::store::actor::StoreActorMessage;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
 
 pub struct InfoRpcServerImpl {
     actor: ActorRef<NetworkActorMessage>,
@@ -56,7 +54,7 @@ trait InfoRpc {
 
     /// Backup the node information.
     #[method(name = "backup_now")]
-    async fn backup_now(&self, target_path: &Path) -> Result<(), ErrorObjectOwned>;
+    async fn backup_now(&self) -> Result<(), ErrorObjectOwned>;
 }
 
 #[async_trait::async_trait]
@@ -66,8 +64,8 @@ impl InfoRpcServer for InfoRpcServerImpl {
         self.node_info().await
     }
 
-    async fn backup_now(&self, target_path: &Path) -> Result<(), ErrorObjectOwned> {
-        self.backup_now(target_path).await
+    async fn backup_now(&self) -> Result<(), ErrorObjectOwned> {
+        self.backup_now().await
     }
 }
 impl InfoRpcServerImpl {
@@ -101,11 +99,11 @@ impl InfoRpcServerImpl {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn backup_now(&self, target_path: &Path) -> Result<(), ErrorObjectOwned> {
+    pub async fn backup_now(&self) -> Result<(), ErrorObjectOwned> {
         if let Some(ref store_actor) = self.store_actor {
-            handle_actor_call!(store_actor, StoreActorMessage::ForceBackup, target_path)
+            handle_actor_call!(store_actor, StoreActorMessage::ForceBackup, None::<()>)
         } else {
-            log_and_error!(target_path, format!("Backup service is not initialized"))
+            log_and_error!(None::<()>, format!("Backup service is not initialized"))
         }
     }
 }

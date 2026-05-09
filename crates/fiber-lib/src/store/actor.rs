@@ -144,11 +144,7 @@ where
                     state.backup_interval_hours
                 );
                 #[cfg(not(any(target_arch = "wasm32", test)))]
-                perform_key_backup(
-                    &backup_path,
-                    &state.ckb_key_path,
-                    &state.fiber_key_path,
-                )?;
+                perform_key_backup(&backup_path, &state.ckb_key_path, &state.fiber_key_path)?;
                 Ok(())
             }
             Err(e) => {
