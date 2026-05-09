@@ -1,4 +1,5 @@
 use fiber_store::StorageBackend;
+use fiber_types::now_timestamp_as_millis_u64;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 #[cfg(not(any(target_arch = "wasm32", test)))]
 use std::path::Path;
@@ -134,18 +135,20 @@ where
 {
     async fn do_backup(&self, state: &mut StoreActorState<S>) -> Result<(), String> {
         info!("StoreActor: Starting backup to {:?}", state.backup_path);
-        #[cfg(not(any(target_arch = "wasm32", test)))]
-        perform_key_backup(
-            &state.backup_path,
-            &state.ckb_key_path,
-            &state.fiber_key_path,
-        )?;
-        match state.store.backup(&state.backup_path) {
+        let timestamp = now_timestamp_as_millis_u64().to_string();
+        let backup_path = state.backup_path.join(timestamp);
+        match state.store.backup(&backup_path) {
             Ok(_) => {
                 info!(
                     "StoreActor: Backup successful. Next routine backup in {} hours.",
                     state.backup_interval_hours
                 );
+                #[cfg(not(any(target_arch = "wasm32", test)))]
+                perform_key_backup(
+                    &backup_path,
+                    &state.ckb_key_path,
+                    &state.fiber_key_path,
+                )?;
                 Ok(())
             }
             Err(e) => {
