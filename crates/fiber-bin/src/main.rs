@@ -108,7 +108,7 @@ pub async fn main() -> Result<(), ExitMessage> {
             .map_err(|err| ExitMessage(format!("Failed to restore database: {}", err)))?;
 
         info!("Successfully restored database to {:?}.", store_path);
-        info!("All channels have been marked as 'Stale' for safety audit.");
+        info!("Channels may have been marked as 'Stale' for safety audit.");
 
         std::process::exit(0);
     }

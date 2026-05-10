@@ -7,10 +7,13 @@ use std::path::Path;
 use tracing::info;
 
 pub fn restore(restore_path: &Path, base_path: &Path) -> Result<()> {
-    let store = open_store(base_path).map_err(Error::DBInternalError)?;
     #[cfg(not(target_arch = "wasm32"))]
     restore_node_keys(restore_path, base_path)?;
-    store.restore(restore_path, base_path)?;
+    {
+        let store = open_store(base_path).map_err(Error::DBInternalError)?;
+        store.restore(restore_path, base_path)?;
+    }
+    let store = open_store(base_path).map_err(Error::DBInternalError)?;
 
     info!("Scanning stale channels.");
     for mut channel in store.get_all_channel_states() {
