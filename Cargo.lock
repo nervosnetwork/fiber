@@ -1155,9 +1155,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-resource"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2506778afe47d63f18135709864244b886611a583dc0edf3a6a12e1ba96a6373"
+checksum = "eb6f48de85e149cd09639d89b4d02b09cb7c2a0c10d06211523231f9c353d581"
 dependencies = [
  "ckb-system-scripts 0.5.4",
  "ckb-types",
