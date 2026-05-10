@@ -258,6 +258,13 @@ pub enum ChannelState {
     Closed(CloseFlags),
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelConnectivityState {
+    Online,
+    Offline,
+    Syncing,
+}
+
 impl ChannelState {
     pub fn is_awaiting_external_funding(&self) -> bool {
         matches!(
@@ -1537,6 +1544,9 @@ pub struct ChannelActorData {
     /// Tracks whether the last outbound sync message was RevokeAndAck.
     #[serde(default)]
     pub last_was_revoke: bool,
+
+    /// Runtime connectivity state persisted for restart recovery.
+    pub connectivity_state: ChannelConnectivityState,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {

@@ -2,10 +2,10 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::channel::{
-    AddTlcCommand, ChannelActorData, ChannelBasePublicKeys, ChannelConstraints, ChannelState,
-    ChannelTlcInfo, CommitmentNumbers, InMemorySigner, PendingTlcs, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevokeAndAck, ShutdownInfo, TLCId, TlcInfo, TlcState,
-    TlcStatus,
+    AddTlcCommand, ChannelActorData, ChannelBasePublicKeys, ChannelConnectivityState,
+    ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentNumbers, InMemorySigner,
+    PendingTlcs, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck,
+    ShutdownInfo, TLCId, TlcInfo, TlcState, TlcStatus,
 };
 use crate::channel::{InboundTlcStatus, OutboundTlcStatus};
 use crate::crate_time::SystemTime;
@@ -118,6 +118,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         remote_shutdown_info: None,
         shutdown_transaction_hash: None,
         reestablishing: false,
+        connectivity_state: ChannelConnectivityState::Online,
         last_revoke_ack_msg: None,
         pending_replay_updates: vec![],
         last_was_revoke: false,
@@ -342,6 +343,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         remote_shutdown_info: Some(shutdown_info),
         shutdown_transaction_hash: Some(ckb_types::H256(super::deterministic_hash(seed, 950))),
         reestablishing: true,
+        connectivity_state: ChannelConnectivityState::Syncing,
         last_revoke_ack_msg: Some(revoke_and_ack),
         pending_replay_updates: vec![],
         last_was_revoke: true,

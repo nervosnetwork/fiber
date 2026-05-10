@@ -297,6 +297,7 @@ fn create_test_channel_state_with_tlc(
             shutdown_transaction_hash: None,
             latest_commitment_transaction: None,
             reestablishing: false,
+            connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
