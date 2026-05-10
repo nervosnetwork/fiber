@@ -3,6 +3,7 @@ name = "fiber-json-types"
 version = "0.9.0-rc1"
 edition = "2021"
 description = "RPC JSON request/response types for the Fiber Network"
+license = "MIT"
 
 [dependencies]
 # Serialization
