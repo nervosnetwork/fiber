@@ -3,6 +3,7 @@ name = "fiber-types"
 version = "0.9.0-rc1"
 edition = "2021"
 description = "Core domain types for the Fiber Network"
+license = "MIT"
 
 [dependencies]
 # Serialization
