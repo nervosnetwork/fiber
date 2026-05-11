@@ -5,12 +5,16 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::backend::StorageBackend;
+use crate::iterator::{IteratorDirection, KVPair};
 
 /// Minimal object-safe store trait for migration operations.
 /// All `StorageBackend` implementations automatically implement this.
 pub trait MigrationStore {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn put(&self, key: &[u8], value: &[u8]);
+
+    /// Collect all key-value pairs whose keys start with the given prefix.
+    fn collect_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
 }
 
 impl<T: StorageBackend + ?Sized> MigrationStore for T {
@@ -20,6 +24,17 @@ impl<T: StorageBackend + ?Sized> MigrationStore for T {
 
     fn put(&self, key: &[u8], value: &[u8]) {
         StorageBackend::put(self, key, value)
+    }
+
+    fn collect_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let owned_prefix = prefix.to_vec();
+        let pairs: Vec<KVPair> = self.collect_iterator(
+            owned_prefix.clone(),
+            IteratorDirection::Forward,
+            Box::new(move |key| key.starts_with(&owned_prefix)),
+            0,
+        );
+        pairs.into_iter().map(|kv| (kv.key, kv.value)).collect()
     }
 }
 
