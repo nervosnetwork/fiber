@@ -5860,7 +5860,6 @@ where
 
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
-        let peer_channel_index = PeerChannelIndex::build(&self.store);
 
         let mut state = NetworkActorState {
             store: self.store.clone(),
