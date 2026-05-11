@@ -9,9 +9,6 @@ build = "build.rs"
 # Logging
 tracing = "0.1"
 
-# Migration progress UI
-indicatif = "0.18"
-
 # Error handling
 thiserror = "1.0.58"
 
@@ -19,7 +16,6 @@ thiserror = "1.0.58"
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-console = "0.16.0"
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
   "lz4",
 ], default-features = false, optional = true }

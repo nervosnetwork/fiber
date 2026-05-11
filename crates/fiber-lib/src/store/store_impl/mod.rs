@@ -26,6 +26,9 @@ use crate::{
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
 use fiber_store::db_migrate::DbMigrate;
+use fiber_store::migration::{
+    MigrateConfirmFn, MigrateProgressFn, INIT_DB_VERSION, MIGRATION_VERSION_KEY,
+};
 use fiber_types::schema::*;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::CchOrder;
@@ -128,20 +131,37 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
-/// Open a store at `path`, with migration check.
+/// Open a store at `path`, running auto-migration with auto-confirm.
+/// Use this when no user interaction is needed (e.g. tests, simple setups).
 pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
+    open_store_with_migration(path, Box::new(|_| true), Box::new(|_| {}))
+}
+
+/// Open a store at `path`, running auto-migration with custom confirm/progress callbacks.
+/// Use this when user interaction is required (e.g. CLI, WASM).
+pub fn open_store_with_migration<P: AsRef<Path>>(
+    path: P,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<Store, String> {
     let db = fiber_store::Store::open_db(path.as_ref())?;
-    check_migrate(path, &db)?;
+    run_auto_migrate(&db, confirm_fn, progress_fn)?;
     Ok(Store {
         inner: db,
         watcher: None,
     })
 }
 
-fn check_migrate<P: AsRef<Path>>(path: P, db: &fiber_store::Store) -> Result<(), String> {
-    let migrate = DbMigrate::new(db);
-    migrate.init_or_check(path)?;
-    Ok(())
+fn run_auto_migrate(
+    db: &fiber_store::Store,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<(), String> {
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    migrate
+        .auto_migrate(db, confirm_fn, progress_fn)
+        .map_err(|e| e.to_string())
 }
 
 pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
@@ -250,8 +270,46 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     }
 
     let mut errors: Vec<String> = errors.into_iter().collect();
-    if let Err(version_err) = check_migrate(path, &store.inner) {
-        errors.push(version_err);
+    {
+        let mut migrate = DbMigrate::new();
+        fiber_store::migrations::register_all_migrations(&mut migrate);
+        let ordering = migrate.check(&store.inner);
+        match ordering {
+            std::cmp::Ordering::Greater => {
+                let db_version = store
+                    .inner
+                    .get(MIGRATION_VERSION_KEY)
+                    .map(|v| String::from_utf8(v).unwrap_or_default())
+                    .unwrap_or_default();
+                errors.push(format!(
+                    "Database version ({}) is newer than the binary. \
+                     Please upgrade fiber to a newer version.",
+                    db_version
+                ));
+            }
+            std::cmp::Ordering::Less => {
+                let db_version = store
+                    .inner
+                    .get(MIGRATION_VERSION_KEY)
+                    .map(|v| String::from_utf8(v).unwrap_or_default())
+                    .unwrap_or_default();
+                let mut msg = format!(
+                    "Database version ({}) is older than the binary. Migration needed.",
+                    db_version
+                );
+                // If the DB is older than the initial migration epoch, the user
+                // must run the legacy fnn-migrate tool first.
+                if db_version.as_str() < INIT_DB_VERSION {
+                    msg.push_str(&format!(
+                        " DB version {} predates the unified migration epoch ({}). \
+                         Run fnn-migrate v0.8.x to upgrade before starting this binary.",
+                        db_version, INIT_DB_VERSION
+                    ));
+                }
+                errors.push(msg);
+            }
+            std::cmp::Ordering::Equal => {}
+        }
     }
     if errors.is_empty() {
         info!("All keys and values in the store are valid.");

@@ -25,7 +25,6 @@ check:
 	cargo check --no-default-features --features sqlite $(NATIVE_PACKAGES)
 	rustup target add wasm32-unknown-unknown
 	cargo check --target wasm32-unknown-unknown -p fiber-types --all-features
-	cd migrate && cargo check --locked
 
 .PHONY: clippy
 clippy:
