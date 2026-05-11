@@ -18,7 +18,7 @@ use crate::utils::payment::is_invoice_fulfilled;
 use crate::{
     ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
-        FundingRequest,
+        is_secp_sighash_placeholder_witness, FundingRequest,
     },
     fiber::{
         config::{DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
@@ -3124,6 +3124,13 @@ where
                     .update_close_transaction_confirmed(tx_hash, force, close_by_us)
                     .await?;
                 debug_event!(self.network, "ChannelClosed");
+                if matches!(
+                    state.state,
+                    ChannelState::Closed(flags)
+                        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                ) {
+                    myself.stop(Some(format!("ChannelStopped: {:?}", StopReason::Closed)));
+                }
             }
             ChannelEvent::CheckActiveChannel => {
                 if state.peer_does_not_reply_ack_in_time() && !state.is_closed() {
@@ -4493,6 +4500,7 @@ impl ChannelActorState {
             ChannelState::ChannelReady
             | ChannelState::NegotiatingFunding(..)
             | ChannelState::SigningCommitment(..)
+            | ChannelState::AwaitingTxSignatures(..)
             | ChannelState::AwaitingChannelReady(..)
             | ChannelState::CollaboratingFundingTx(..) => {
                 Some(OfflineChannelRestoreMode::ReestablishPeer)
@@ -7163,12 +7171,10 @@ impl ChannelActorState {
                 if !flags.is_empty() {
                     // In the old code, signatures are not saved. Reset the state and resign the
                     // funding tx if signatures does not match the flags.
-                    let placeholder_witness = packed::WitnessArgs::new_builder()
-                        .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
-                        .build()
-                        .as_bytes()
-                        .to_vec();
-                    if witnesses.iter().any(|w| w == &placeholder_witness) {
+                    if witnesses
+                        .iter()
+                        .any(|w| is_secp_sighash_placeholder_witness(w))
+                    {
                         flags = AwaitingTxSignaturesFlags::empty();
                         self.update_state(ChannelState::AwaitingTxSignatures(flags));
                     }

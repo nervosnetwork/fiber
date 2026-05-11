@@ -1,8 +1,8 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelActorStateStore, ReloadParams, ReplayOrderHint, UpdateCommand,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
-    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    AddTlcResponse, ChannelActorStateStore, ChannelOpenRecordStore, ReloadParams, ReplayOrderHint,
+    UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -47,11 +47,11 @@ use ckb_types::{
 };
 use fiber_types::{
     derive_private_key, derive_tlc_pubkey, AddTlcCommand, AwaitingChannelReadyFlags,
-    AwaitingTxSignaturesFlags, ChannelConstraints, ChannelState, CollaboratingFundingTxFlags,
-    HashAlgorithm, InMemorySigner, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData,
-    PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcStatus,
-    NO_SHARED_SECRET,
+    AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus, ChannelState,
+    CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, NegotiatingFundingFlags,
+    OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket,
+    TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
@@ -5358,6 +5358,7 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
     let connect_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
             node_b.pubkey,
+            None,
             PeerConnectSource::Manual,
             rpc_reply,
         ))
@@ -5375,6 +5376,70 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
     node_a
         .expect_debug_event("PeerReconnectBackoffScheduled")
         .await;
+}
+
+#[tokio::test]
+async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let first_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+            node_b.pubkey,
+            PeerDisconnectReason::Requested,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        first_disconnect_result.is_ok(),
+        "first manual disconnect should succeed: {:?}",
+        first_disconnect_result
+    );
+
+    node_a
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey),
+        )
+        .await;
+
+    let second_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+            node_b.pubkey,
+            PeerDisconnectReason::Requested,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node_a alive");
+    let err = second_disconnect_result
+        .expect_err("second manual disconnect should report the already-disconnected peer");
+    assert!(
+        err.contains("is not connected"),
+        "expected already-disconnected error, got: {err}"
+    );
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::MaintainConnections,
+        ))
+        .expect("node_a alive");
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            node_a.expect_event(
+                |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
+            ),
+        )
+        .await
+        .is_err(),
+        "repeated manual disconnect should keep automatic reconnect suppressed"
+    );
+
+    node_b.stop().await;
 }
 
 #[tokio::test]
@@ -7579,6 +7644,80 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
     );
 }
 
+#[tokio::test]
+async fn test_cooperative_close_stops_channel_actor_immediately() {
+    init_tracing();
+
+    let (node_a, _node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    node_a
+        .send_shutdown(channel_id, false)
+        .await
+        .expect("cooperatively shutdown channel");
+
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::Closed(CloseFlags::COOPERATIVE)
+        )
+    })
+    .await;
+
+    wait_until_async_timeout(|| async {
+        let control_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Update(
+                        UpdateCommand {
+                            enabled: None,
+                            tlc_expiry_delta: None,
+                            tlc_minimum_value: None,
+                            tlc_fee_proportional_millionths: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_a alive");
+
+        control_result.is_err()
+            && matches!(
+                node_a
+                    .get_channel_actor_state_unchecked(channel_id)
+                    .map(|state| state.state),
+                Some(ChannelState::Closed(CloseFlags::COOPERATIVE))
+            )
+    })
+    .await;
+
+    let control_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    let err = control_result.expect_err("cooperative close should stop the channel actor");
+    assert!(
+        err.contains("Channel not found error"),
+        "expected cooperative close to remove the live actor, got: {err}"
+    );
+}
+
 /// Test for issue #938: Channel funding is aborted after restart when stuck in NegotiatingFunding
 ///
 /// This test verifies that the fix works correctly:
@@ -8444,6 +8583,33 @@ async fn test_open_channel_with_external_funding() {
             .get_channel_actor_state_unchecked(channel_id)
             .is_none(),
         "channel state should not be persisted before signed external funding tx submission"
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_rekeys_channel_open_record_after_accept() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, _unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+
+    let record = node_a
+        .store
+        .get_channel_open_record(&channel_id)
+        .expect("channel open record should be keyed by final channel id");
+    assert_eq!(record.channel_id, channel_id);
+    assert_eq!(record.status, ChannelOpeningStatus::FundingTxBuilding);
+
+    let records = node_a.store.get_channel_open_records();
+    assert_eq!(
+        records.len(),
+        1,
+        "external funding open should not leave a stale temp-id open record"
+    );
+    assert_eq!(
+        records[0].channel_id, channel_id,
+        "remaining open record should use the final channel id"
     );
 }
 

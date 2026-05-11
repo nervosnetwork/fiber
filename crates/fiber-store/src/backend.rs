@@ -1,4 +1,4 @@
-use crate::iterator::{IteratorDirection, KVPair};
+use crate::iterator::{IteratorDirection, KVPair, PrefixIterator};
 
 /// A function that determines whether to keep taking items during iteration.
 /// Returns `true` to continue taking, `false` to stop.
@@ -48,4 +48,28 @@ pub trait StorageBackend: Send + Sync {
         take_while_fn: TakeWhileFn,
         limit: usize,
     ) -> Vec<KVPair>;
+
+    /// Return a lazy iterator over all key-value pairs whose keys start with
+    /// `prefix`.
+    ///
+    /// This is primarily used by the migration tool (`fnn-migrate`) and
+    /// `check_validate` to scan store prefixes without loading every entry into
+    /// memory at once. Normal business logic should use higher-level query
+    /// methods instead.
+    ///
+    /// The default implementation batches calls to [`Self::collect_iterator`]
+    /// so that only a bounded number of entries are held in memory at any time.
+    fn prefix_iterator(&self, prefix: impl Into<Vec<u8>>) -> PrefixIterator<'_, Self> {
+        PrefixIterator::new(self, prefix.into())
+    }
+
+    /// Like [`prefix_iterator`](Self::prefix_iterator), but starts iteration
+    /// **after** `start_key` (exclusive cursor).
+    fn prefix_iterator_from(
+        &self,
+        prefix: impl Into<Vec<u8>>,
+        start_key: impl Into<Vec<u8>>,
+    ) -> PrefixIterator<'_, Self> {
+        PrefixIterator::new_from(self, prefix.into(), start_key.into())
+    }
 }

@@ -83,8 +83,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `HopHint`](#type-hophint)
     * [Type `HopRequire`](#type-hoprequire)
     * [Type `Htlc`](#type-htlc)
+    * [Type `InboundTlcStatus`](#type-inboundtlcstatus)
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `NodeInfo`](#type-nodeinfo)
+    * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentStatus`](#type-paymentstatus)
     * [Type `PeerInfo`](#type-peerinfo)
@@ -99,6 +101,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `SettlementTlc`](#type-settlementtlc)
     * [Type `TLCId`](#type-tlcid)
     * [Type `TlcStatus`](#type-tlcstatus)
+    * [Type `TransportType`](#type-transporttype)
     * [Type `UdtArgInfo`](#type-udtarginfo)
     * [Type `UdtCellDep`](#type-udtcelldep)
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
@@ -992,6 +995,9 @@ Connect to a peer.
 * `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key of the peer to connect to.
  The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
+* `addr_type` - <em>Option<[TransportType](#type-transporttype)></em>, Filter addresses by transport type when connecting by pubkey.
+ If not specified, the node uses target-specific defaults:
+ native builds choose from `tcp` addresses only, while wasm builds choose from `ws`/`wss`.
 
 ##### Returns
 
@@ -1492,6 +1498,22 @@ The htlc data structure.
 * `status` - <em>[TlcStatus](#type-tlcstatus)</em>, The status of the htlc
 ---
 
+<a id="#type-inboundtlcstatus"></a>
+### Type `InboundTlcStatus`
+
+The status of an inbound tlc.
+
+
+#### Enum with values of
+
+* `RemoteAnnounced` - Received tlc from remote party, but not committed yet
+* `AnnounceWaitPrevAck` - We received another AddTlc peer message when we are waiting for the ack of the last one.
+* `AnnounceWaitAck` - We have sent commitment signed to peer and waiting ACK for confirming this AddTlc
+* `Committed` - We have received ACK from peer and Committed this tlc
+* `LocalRemoved` - We have removed this tlc, but haven't received ACK from peer
+* `RemoveAckConfirmed` - We have received the ACK for the RemoveTlc, it's safe to remove this tlc
+---
+
 <a id="#type-invoicedata"></a>
 ### Type `InvoiceData`
 
@@ -1523,6 +1545,22 @@ The Node information.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the node.
 * `auto_accept_min_ckb_funding_amount` - <em>`u64`</em>, The minimum CKB funding amount for automatically accepting open channel requests.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, The UDT configuration infos of the node.
+---
+
+<a id="#type-outboundtlcstatus"></a>
+### Type `OutboundTlcStatus`
+
+The status of an outbound tlc.
+
+
+#### Enum with values of
+
+* `LocalAnnounced` - Offered tlc created and sent to remote party
+* `Committed` - Received ACK from remote party for this offered tlc
+* `RemoteRemoved` - Remote party removed this tlc
+* `RemoveWaitPrevAck` - We received another RemoveTlc message from peer when we are waiting for the ack of the last one.
+* `RemoveWaitAck` - We have sent commitment signed to peer and waiting ACK for confirming this RemoveTlc
+* `RemoveAckConfirmed` - We have received the ACK for the RemoveTlc, it's safe to remove this tlc
 ---
 
 <a id="#type-paymentcustomrecords"></a>
@@ -1720,6 +1758,19 @@ The status of a tlc.
 
 * `Outbound` - <em>[OutboundTlcStatus](#type-outboundtlcstatus)</em>, Outbound tlc
 * `Inbound` - <em>[InboundTlcStatus](#type-inboundtlcstatus)</em>, Inbound tlc
+---
+
+<a id="#type-transporttype"></a>
+### Type `TransportType`
+
+The type of transport to filter by when resolving peer addresses.
+
+
+#### Enum with values of
+
+* `tcp` - TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
+* `ws` - WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
+* `wss` - WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
 ---
 
 <a id="#type-udtarginfo"></a>

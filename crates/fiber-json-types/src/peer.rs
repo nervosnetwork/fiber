@@ -5,6 +5,18 @@ use crate::serde_utils::Pubkey;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// The type of transport to filter by when resolving peer addresses.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportType {
+    /// TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
+    Tcp,
+    /// WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
+    Ws,
+    /// WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
+    Wss,
+}
+
 /// Parameters for connecting to a peer.
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct ConnectPeerParams {
@@ -17,6 +29,10 @@ pub struct ConnectPeerParams {
     pub pubkey: Option<Pubkey>,
     /// Whether to save the peer address to the peer store.
     pub save: Option<bool>,
+    /// Filter addresses by transport type when connecting by pubkey.
+    /// If not specified, the node uses target-specific defaults:
+    /// native builds choose from `tcp` addresses only, while wasm builds choose from `ws`/`wss`.
+    pub addr_type: Option<TransportType>,
 }
 
 /// Parameters for disconnecting from a peer.

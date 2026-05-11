@@ -37,9 +37,9 @@ assert {
 }
 
 script:pre-request {
-  // Keep tlc1 alive through force-close + disconnect, then let it expire while
-  // the peer is offline before node2 sends the delayed remove_tlc.
-  let expiry = "0x" + (Date.now() + 1000 * 15).toString(16);
+  // Keep this beyond the channel delay so periodic off-chain checks do not fail
+  // the TLC before this case reaches the force-close preimage settlement path.
+  let expiry = "0x" + (Date.now() + 1000 * 60 * 60 * 2).toString(16);
   bru.setVar("expiry", expiry);
 }
 

@@ -9,7 +9,9 @@ use molecule::prelude::Byte;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tokio::sync::RwLock;
 
-use crate::tests::test_utils::{establish_channel_between_nodes, ChannelParameters, NetworkNode};
+use crate::tests::test_utils::{
+    establish_channel_between_nodes, ChannelParameters, NetworkNode, NetworkNodeConfigBuilder,
+};
 use crate::{
     ckb::tests::test_utils::MockCkbChainClient,
     fiber::{
@@ -938,6 +940,63 @@ async fn test_our_own_channel_gossip_message_propagated() {
     }
 }
 
+// Regression test: verify that gossip syncing starts immediately when a peer
+// connects, without waiting for the periodic TickNetworkMaintenance interval.
+// With a 1-hour maintenance interval, syncing would be severely delayed unless
+// PeerConnected triggers an immediate tick (as introduced by this fix).
+#[tokio::test]
+async fn test_gossip_sync_starts_immediately_on_peer_connect() {
+    crate::tests::test_utils::init_tracing();
+
+    // Use a very large gossip maintenance interval to ensure sync is driven by
+    // the immediate PeerConnected trigger, not the periodic tick.
+    const LARGE_INTERVAL_MS: u64 = 3_600_000; // 1 hour
+
+    // Create node A with large maintenance interval and inject a node announcement
+    // before connecting node B, so B must sync it via active sync on connection.
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |c| {
+                c.gossip_network_maintenance_interval_ms = Some(LARGE_INTERVAL_MS);
+            })
+            .build(),
+    )
+    .await;
+
+    let (_, announcement) = gen_rand_node_announcement();
+    node_a.send_message_to_gossip_actor(GossipActorMessage::TryBroadcastMessages(vec![
+        BroadcastMessageWithTimestamp::NodeAnnouncement(announcement.clone()),
+    ]));
+
+    // Give node A a moment to store the announcement before node B connects.
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let mut node_b = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |c| {
+                c.gossip_network_maintenance_interval_ms = Some(LARGE_INTERVAL_MS);
+            })
+            .build(),
+    )
+    .await;
+
+    // Connect B to A: this should immediately trigger active sync on B.
+    node_b.connect_to(&mut node_a).await;
+
+    // Wait a short time (well under the 1-hour maintenance interval).
+    // With the fix, B should have actively synced A's announcement by now.
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let synced = node_b
+        .get_store()
+        .get_latest_node_announcement(&announcement.node_id);
+    assert!(
+        synced.is_some(),
+        "node B should have synced the gossip announcement from node A immediately after connecting, \
+         without waiting for the periodic maintenance interval"
+    );
+}
+
 // We may need to run this test multiple times to check if the gossip messages are really propagated.
 #[tokio::test]
 async fn test_never_miss_any_message() {
@@ -971,9 +1030,8 @@ async fn test_gossip_store_prune_all_messages() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages_iter(&Cursor::default())
-            .into_iter()
-            .count(),
+            .get_broadcast_messages(&Cursor::default(), 0)
+            .len(),
         num_messages
     );
 
@@ -988,9 +1046,8 @@ async fn test_gossip_store_prune_all_messages() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages_iter(&Cursor::default())
-            .into_iter()
-            .count(),
+            .get_broadcast_messages(&Cursor::default(), 0)
+            .len(),
         0
     );
 }
@@ -1028,7 +1085,7 @@ async fn test_gossip_store_prune_channel_announcement() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         1
     );
@@ -1050,7 +1107,7 @@ async fn test_gossip_store_prune_channel_announcement() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None),
+            .get_broadcast_messages(&Cursor::default(), 0),
         vec![]
     );
 }
@@ -1120,7 +1177,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -1159,7 +1216,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -1198,7 +1255,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None)
+            .get_broadcast_messages(&Cursor::default(), 0)
             .len(),
         3
     );
@@ -1237,7 +1294,7 @@ async fn test_gossip_store_prune_channel_update() {
     assert_eq!(
         context
             .get_store()
-            .get_broadcast_messages(&Cursor::default(), None),
+            .get_broadcast_messages(&Cursor::default(), 0),
         vec![]
     );
 }

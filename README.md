@@ -64,6 +64,10 @@ rm ./ckb/exported-key
 FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' RUST_LOG='info' ./fnn -c config.yml -d .
 ```
 
+## Run with Docker
+
+Fiber release tags publish official container images to Docker Hub at `nervos/fiber` and mirror the same tags to GHCR at `ghcr.io/nervosnetwork/fiber`. Detailed Docker usage, including startup, local builds, `fnn-cli`, and migration, is documented in [docker/README.md](./docker/README.md).
+
 ## Testnet compatibility issues
 
 FNN is still under development, the protocol and storage format may changed between versions. We strongly recommend you to close the channel before upgrading the node, otherwise, you may lose channel data and funds!
@@ -88,8 +92,11 @@ If you want to keep the channel state, you may try to migrate the storage format
 3. Run the fnn-migrate (it can be found in the release binary package) to migrate the storage format:
 
 ```
-fnn-migrate -p /folder-to/my-fnn/fiber/store
+./fnn-migrate -d /path/to/fiber-dir
 ```
+
+The `-d` / `--dir` flag takes the Fiber data directory (same as `fnn -d`).
+The tool opens the RocksDB store at `<dir>/store` automatically.
 
 4. Replace the fnn binary with the new version and start the node again.
 
@@ -103,8 +110,9 @@ fnn-migrate -p /folder-to/my-fnn/fiber/store
 
 **We are in an actively developing stage, don't hesitate to [report issues](https://github.com/nervosnetwork/fiber/issues) or ask for help in the [channel of the Nervos dev community](https://discord.gg/BF9AJ4fzs6).**
 
-## Testnet deployment information
+## Network node documentation
 
-* [Testnet Public Nodes User Manual](./docs/testnet-nodes.md)
+* [Public Nodes User Manual](docs/public-nodes.md)
+* [Fiber Network Nodes](docs/network-nodes.md)
 
 [fiber-scripts]: https://github.com/nervosnetwork/fiber-scripts

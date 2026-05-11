@@ -7,11 +7,21 @@ use fiber_types::{Multiaddr, Pubkey};
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 use std::convert::TryFrom;
+use tentacle::utils::TransportType;
 
 use ractor::call;
 use ractor::ActorRef;
 
 pub use fiber_json_types::{ConnectPeerParams, DisconnectPeerParams, ListPeersResult, PeerInfo};
+
+/// Convert a JSON-RPC transport type to the internal tentacle transport type.
+fn to_transport_type(t: fiber_json_types::TransportType) -> TransportType {
+    match t {
+        fiber_json_types::TransportType::Tcp => TransportType::Tcp,
+        fiber_json_types::TransportType::Ws => TransportType::Ws,
+        fiber_json_types::TransportType::Wss => TransportType::Wss,
+    }
+}
 
 /// RPC module for peer management.
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,9 +93,11 @@ impl PeerRpcServerImpl {
 
         if let Some(pubkey_str) = params.pubkey {
             let pubkey = Pubkey::try_from(pubkey_str).rpc_err(&params)?;
+            let addr_transport = params.addr_type.map(to_transport_type);
             let message = |rpc_reply| {
                 NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
                     pubkey,
+                    addr_transport,
                     PeerConnectSource::Manual,
                     rpc_reply,
                 ))
