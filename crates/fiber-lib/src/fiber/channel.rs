@@ -1673,12 +1673,13 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
-            // Keep the preimage for forwarded TLCs that may still need it later:
-            // outbound forwarding keeps the old behavior, while inbound forwarding keeps it
-            // only when another same-hash TLC is already on the on-chain settlement path.
-            if tlc_info.forwarding_tlc.is_none()
-                || !self.has_onchain_tlc_for_payment_hash(state, tlc_info.payment_hash)
-            {
+            // Keep the preimage for outbound forwarded TLCs until the inbound side finishes.
+            // For inbound forwarded TLCs, keep it while another same-hash TLC still needs
+            // on-chain settlement.
+            let should_remove_preimage = tlc_info.forwarding_tlc.is_none()
+                || (tlc_info.is_received()
+                    && !self.has_onchain_tlc_for_payment_hash(state, tlc_info.payment_hash));
+            if should_remove_preimage {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
@@ -1732,15 +1733,19 @@ where
         current_state: &ChannelActorState,
         payment_hash: Hash256,
     ) -> bool {
-        let has_onchain_tlc = |state: &ChannelActorState| {
+        let is_waiting_onchain_settlement = |channel_state: &ChannelState| {
             matches!(
-                state.state,
+                channel_state,
                 ChannelState::Closed(flags)
                     if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-            ) && state
-                .tlc_state
-                .all_tlcs()
-                .any(|tlc| tlc.payment_hash == payment_hash)
+            )
+        };
+        let has_onchain_tlc = |state: &ChannelActorState| {
+            is_waiting_onchain_settlement(&state.state)
+                && state
+                    .tlc_state
+                    .all_tlcs()
+                    .any(|tlc| tlc.payment_hash == payment_hash)
         };
 
         if has_onchain_tlc(current_state) {
@@ -1751,7 +1756,9 @@ where
         self.store
             .get_channel_states(None)
             .into_iter()
-            .filter(|(_, channel_id, _)| *channel_id != current_channel_id)
+            .filter(|(_, channel_id, channel_state)| {
+                *channel_id != current_channel_id && is_waiting_onchain_settlement(channel_state)
+            })
             .filter_map(|(_, channel_id, _)| self.store.get_channel_actor_state(&channel_id))
             .any(|state| has_onchain_tlc(&state))
     }
