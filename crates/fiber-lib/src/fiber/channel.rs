@@ -4537,9 +4537,8 @@ impl ChannelActorState {
             | ChannelState::SigningCommitment(..)
             | ChannelState::AwaitingTxSignatures(..)
             | ChannelState::AwaitingChannelReady(..)
-            | ChannelState::CollaboratingFundingTx(..) => {
-                Some(OfflineChannelRestoreMode::ReestablishPeer)
-            }
+            | ChannelState::CollaboratingFundingTx(..)
+            | ChannelState::Stale => Some(OfflineChannelRestoreMode::ReestablishPeer),
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) =>
             {
