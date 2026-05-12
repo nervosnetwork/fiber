@@ -62,7 +62,10 @@ fn main() {
 
     // Generate register_migrations function
     let mut reg_code = String::new();
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")
+        .unwrap()
+        .escape_default()
+        .to_string();
 
     // Module declarations with #[path] to locate files in src/migrations/
     // Using #[path] because mod declarations inside include!-ed files
