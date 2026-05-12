@@ -161,10 +161,6 @@ function Convert-ToPowerShellLiteral {
     return "'" + ($Value -replace "'", "''") + "'"
 }
 
-function Restart-InstallerFromRemoteFileIfNeeded {
-    return $false
-}
-
 function Invoke-InteractiveConsoleCommand {
     param(
         [string]$FilePath,
@@ -339,19 +335,42 @@ function Set-KeyFilePermissions {
 
     try {
         $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-        $acl = Get-Acl $Path
+        if ($null -eq $currentIdentity -or $null -eq $currentIdentity.User) {
+            throw "Could not determine the current Windows user."
+        }
+
+        # Match chmod 600 semantics: disable inheritance and grant only the
+        # current Windows user read/write access to the private key file.
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
         $acl.SetAccessRuleProtection($true, $false)
+        foreach ($accessRule in @($acl.Access)) {
+            [void]$acl.RemoveAccessRuleAll($accessRule)
+        }
+
+        $rights = [System.Security.AccessControl.FileSystemRights]::Read -bor [System.Security.AccessControl.FileSystemRights]::Write
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $currentIdentity.Name,
-            [System.Security.AccessControl.FileSystemRights]::Read -bor [System.Security.AccessControl.FileSystemRights]::Write,
+            $currentIdentity.User,
+            $rights,
             [System.Security.AccessControl.AccessControlType]::Allow
         )
-        $acl.SetAccessRule($rule)
-        Set-Acl $Path $acl
+        $acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+
+        $updatedAcl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        if (-not $updatedAcl.AreAccessRulesProtected) {
+            throw "Set-Acl completed, but inherited ACL rules are still enabled."
+        }
+
+        $inheritedRules = @($updatedAcl.Access | Where-Object { $_.IsInherited })
+        if ($inheritedRules.Count -gt 0) {
+            throw "Set-Acl completed, but inherited ACL entries are still present."
+        }
     }
     catch {
-        Write-FnnWarning "Saved the private key, but could not tighten file permissions automatically."
-        Write-Host "  Review the ACL for $Path manually if this machine is shared."
+        Write-FnnError "Saved the private key, but could not tighten file permissions automatically."
+        Write-Host "  Expected ACL: inheritance disabled; current Windows user has Read/Write access."
+        Write-Host "  Error: $($_.Exception.Message)"
+        exit 1
     }
 }
 
@@ -655,6 +674,14 @@ function Backup-ExistingInstallPath {
 
     Move-Item -LiteralPath $ExistingPath -Destination $BackupPath
     Write-Success "Backed up existing install path to $BackupPath"
+
+    $backedUpCkbCli = Join-Path $BackupPath "ckb-cli.exe"
+    if (Test-Path $backedUpCkbCli -PathType Leaf) {
+        New-Item -ItemType Directory -Path $ExistingPath -Force | Out-Null
+        $restoredCkbCli = Join-Path $ExistingPath "ckb-cli.exe"
+        Copy-Item -LiteralPath $backedUpCkbCli -Destination $restoredCkbCli -Force
+        Write-Success "Preserved existing ckb-cli at $restoredCkbCli"
+    }
 }
 
 function Prepare-InstallDir {

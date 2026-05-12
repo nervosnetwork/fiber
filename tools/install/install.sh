@@ -15,35 +15,34 @@ DEFAULT_MAINNET_CKB_RPC_URL="https://mainnet.ckb.dev/"
 NETWORK_MARKER_FILE_NAME=".fiber-network"
 
 setup_install_colors() {
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    NC='\033[0m'
+    RED="$(printf '\033[0;31m')"
+    GREEN="$(printf '\033[0;32m')"
+    YELLOW="$(printf '\033[1;33m')"
+    BLUE="$(printf '\033[0;34m')"
+    NC="$(printf '\033[0m')"
 }
 
 print_header() {
-    echo -e "${BLUE}"
-    echo "=========================================="
-    echo "    Fiber Network Node (FNN) Installer"
-    echo "=========================================="
-    echo -e "${NC}"
+    printf '%s\n' \
+        "${BLUE}==========================================" \
+        "    Fiber Network Node (FNN) Installer" \
+        "==========================================${NC}"
 }
 
 print_success() {
-    echo -e "${GREEN}✓ $1${NC}"
+    printf '%s\n' "${GREEN}✓ $1${NC}"
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠ $1${NC}"
+    printf '%s\n' "${YELLOW}⚠ $1${NC}"
 }
 
 print_error() {
-    echo -e "${RED}✗ $1${NC}"
+    printf '%s\n' "${RED}✗ $1${NC}"
 }
 
 print_info() {
-    echo -e "${BLUE}ℹ $1${NC}"
+    printf '%s\n' "${BLUE}ℹ $1${NC}"
 }
 
 ensure_success() {
@@ -575,8 +574,8 @@ detect_platform() {
             case "$ARCH" in
                 x86_64) FNN_BINARY_NAME="fnn_v${FNN_VERSION}-x86_64-darwin-portable.tar.gz" ;;
                 arm64)
-                    FNN_BINARY_ARCH="x86_64"
-                    FNN_BINARY_NAME="fnn_v${FNN_VERSION}-x86_64-darwin-portable.tar.gz"
+                    FNN_BINARY_ARCH="aarch64"
+                    FNN_BINARY_NAME="fnn_v${FNN_VERSION}-aarch64-darwin-portable.tar.gz"
                     ;;
                 *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
             esac
@@ -633,6 +632,10 @@ install_fnn_binary() {
 
     if ! download_file "$download_url" "${temp_dir}/${FNN_BINARY_NAME}" progress; then
         print_error "Failed to download FNN binary"
+        if [ "$PLATFORM" = "Darwin" ] && [ "$ARCH" = "arm64" ]; then
+            echo "  This installer no longer falls back to the x86_64 Darwin bundle on Apple Silicon."
+            echo "  Publish ${FNN_BINARY_NAME}, choose a release version that includes it, or use --local-binary."
+        fi
         rm -rf "$temp_dir"
         exit 1
     fi
@@ -921,9 +924,18 @@ generate_install_backup_dir() {
 backup_existing_install_path() {
     local install_dir="$1"
     local backup_dir="$2"
+    local backed_up_ckb_cli="$backup_dir/ckb-cli"
+    local restored_ckb_cli="$install_dir/ckb-cli"
 
     mv "$install_dir" "$backup_dir"
     print_success "Backed up existing install path to $backup_dir"
+
+    if [ -f "$backed_up_ckb_cli" ]; then
+        mkdir -p "$install_dir"
+        cp "$backed_up_ckb_cli" "$restored_ckb_cli"
+        chmod +x "$restored_ckb_cli"
+        print_success "Preserved existing ckb-cli at $restored_ckb_cli"
+    fi
 }
 
 prepare_install_dir() {
@@ -1322,9 +1334,10 @@ show_funding_info() {
     local lock_arg="$1"
 
     echo ""
-    echo -e "${YELLOW}=========================================="
-    echo "    IMPORTANT: Fund Your Account"
-    echo "==========================================${NC}"
+    printf '%s\n' \
+        "${YELLOW}==========================================" \
+        "    IMPORTANT: Fund Your Account" \
+        "==========================================${NC}"
     echo ""
 
     # Get the address from ckb-cli
@@ -1362,7 +1375,7 @@ show_funding_info() {
     echo "How to check your balance:"
     echo "  ckb-cli wallet get-capacity --lock-arg $lock_arg"
     echo ""
-    echo -e "${YELLOW}Remember: You must have CKB tokens before opening channels!${NC}"
+    printf '%s\n' "${YELLOW}Remember: You must have CKB tokens before opening channels!${NC}"
     echo ""
 }
 
@@ -1430,9 +1443,10 @@ EOF
 
     # Show password reminder
     echo ""
-    echo -e "${YELLOW}=========================================="
-    echo "    IMPORTANT: Save Your Password"
-    echo "==========================================${NC}"
+    printf '%s\n' \
+        "${YELLOW}==========================================" \
+        "    IMPORTANT: Save Your Password" \
+        "==========================================${NC}"
     echo ""
     echo "The FIBER_SECRET_KEY_PASSWORD is used to encrypt your private key."
     echo "You will need this password EVERY TIME you start the node."
@@ -1453,7 +1467,7 @@ EOF
     echo "   export FIBER_SECRET_KEY_PASSWORD=\"your-password\""
     echo "   ./start-node.sh"
     echo ""
-    echo -e "${RED}⚠️  Security Warning:${NC}"
+    printf '%s\n' "${RED}⚠️  Security Warning:${NC}"
     echo "   - Never commit passwords to version control"
     echo "   - Keep your password in a secure password manager"
     echo "   - The password cannot be recovered if lost!"
@@ -1478,9 +1492,10 @@ print_summary() {
     local can_start_now=1
 
     echo ""
-    echo -e "${GREEN}=========================================="
-    echo "    Installation Complete!"
-    echo "==========================================${NC}"
+    printf '%s\n' \
+        "${GREEN}==========================================" \
+        "    Installation Complete!" \
+        "==========================================${NC}"
     echo ""
     echo "Your Fiber Network Node is installed at:"
     echo "  $INSTALL_DIR"
