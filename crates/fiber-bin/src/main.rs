@@ -532,11 +532,11 @@ fn forward_event_to_actor(
                 .send_message(WatchtowerMessage::CreatePreimage(payment_hash, preimage))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
-        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
-            // ignore, the store of channel actor already has removed the preimage
-            watchtower_actor
-                .send_message(WatchtowerMessage::RemovePreimage(payment_hash))
-                .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
+        NetworkServiceEvent::PreimageRemoved(_payment_hash) => {
+            // PreimageRemoved is a payment-hash scoped local cleanup signal. MPP splits can share
+            // the same payment hash while only some of them have completed off-chain, so forwarding
+            // this to watchtower can delete a preimage that another split still needs on-chain.
+            // Watchtower preimage cleanup must be channel-aware.
         }
         _ => {
             // ignore other non-watchtower related events

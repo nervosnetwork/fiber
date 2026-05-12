@@ -605,6 +605,135 @@ async fn test_mpp_force_close_keeps_preimage_for_onchain_split() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_payer_force_close_keeps_watchtower_preimage_for_onchain_split() {
+    fn has_received_tlc(node: &NetworkNode, channel_id: Hash256, payment_hash: Hash256) -> bool {
+        node.store
+            .get_channel_actor_state(&channel_id)
+            .is_some_and(|state| {
+                state
+                    .tlc_state
+                    .all_tlcs()
+                    .any(|tlc| tlc.is_received() && tlc.payment_hash == payment_hash)
+            })
+    }
+
+    init_tracing();
+
+    let amount = 20000000000;
+    let upstream_capacity = 12000000000;
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + upstream_capacity, MIN_RESERVED_CKB),
+            ),
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + upstream_capacity, MIN_RESERVED_CKB),
+            ),
+            ((1, 2), (MIN_RESERVED_CKB + amount * 2, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::default()
+        .hash(payment_preimage.as_ref())
+        .into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .payee_pub_key(node_2.get_public_key().into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build()
+        .expect("build invoice success");
+    node_2.insert_invoice(invoice.clone(), None);
+
+    let response = node_0
+        .send_payment(SendPaymentCommand {
+            max_parts: Some(2),
+            dry_run: false,
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send mpp payment");
+    assert_eq!(response.payment_hash, payment_hash);
+
+    node_0.wait_until_inflight(payment_hash).await;
+    wait_until_timeout(30_000, || {
+        node_2.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    wait_until_timeout(30_000, || {
+        has_received_tlc(&node_1, channels[0], payment_hash)
+            && has_received_tlc(&node_1, channels[1], payment_hash)
+    })
+    .await;
+
+    node_0
+        .send_shutdown(channels[0], true)
+        .await
+        .expect("payer force shutdowns one upstream channel");
+    let tx_hash = TransactionBuilder::default().build().hash();
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ClosingTransactionConfirmed(
+                node_0.pubkey,
+                channels[0],
+                tx_hash,
+                true,
+                false,
+            ),
+        ))
+        .expect("node_1 network actor alive");
+
+    wait_until_timeout(30_000, || {
+        matches!(
+            node_1.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE)
+        )
+    })
+    .await;
+
+    node_2
+        .settle_invoice(&payment_hash, payment_preimage)
+        .await
+        .expect("settle invoice after the payer force-close tx is confirmed");
+
+    wait_until_timeout(30_000, || {
+        !has_received_tlc(&node_1, channels[1], payment_hash)
+    })
+    .await;
+
+    assert!(
+        has_received_tlc(&node_1, channels[0], payment_hash),
+        "the payer-force-closed split should remain pending for on-chain settlement"
+    );
+    assert!(
+        node_1.store.get_preimage(&payment_hash).is_some(),
+        "the forwarding node must keep the local preimage for the on-chain split"
+    );
+
+    let preimage_events = collect_preimage_events(&mut node_1, payment_hash).await;
+    assert!(
+        preimage_events
+            .iter()
+            .any(|event| matches!(event, WatchtowerPreimageEvent::Created(_))),
+        "the forwarding node should reveal the preimage to watchtower, preimage events: {preimage_events:?}"
+    );
+    replay_watchtower_preimage_events(&node_1, payment_hash, &preimage_events);
+    assert!(
+        node_1.store.get_watch_preimage(&payment_hash).is_some(),
+        "watchtower must keep the preimage after the payer force-closes one same-hash MPP split; preimage events: {preimage_events:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_mpp_force_close_pending_confirmation_removes_watchtower_preimage_repro() {
     fn has_received_tlc(node: &NetworkNode, channel_id: Hash256, payment_hash: Hash256) -> bool {
         node.store
