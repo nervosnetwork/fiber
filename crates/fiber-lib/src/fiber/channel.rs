@@ -1733,15 +1733,19 @@ where
         current_state: &ChannelActorState,
         payment_hash: Hash256,
     ) -> bool {
-        let is_waiting_onchain_settlement = |channel_state: &ChannelState| {
+        let is_waiting_onchain_resolution = |channel_state: &ChannelState| {
             matches!(
                 channel_state,
                 ChannelState::Closed(flags)
                     if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+            ) || matches!(
+                channel_state,
+                ChannelState::ShuttingDown(flags)
+                    if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
             )
         };
         let has_onchain_tlc = |state: &ChannelActorState| {
-            is_waiting_onchain_settlement(&state.state)
+            is_waiting_onchain_resolution(&state.state)
                 && state
                     .tlc_state
                     .all_tlcs()
@@ -1757,7 +1761,7 @@ where
             .get_channel_states(None)
             .into_iter()
             .filter(|(_, channel_id, channel_state)| {
-                *channel_id != current_channel_id && is_waiting_onchain_settlement(channel_state)
+                *channel_id != current_channel_id && is_waiting_onchain_resolution(channel_state)
             })
             .filter_map(|(_, channel_id, _)| self.store.get_channel_actor_state(&channel_id))
             .any(|state| has_onchain_tlc(&state))
