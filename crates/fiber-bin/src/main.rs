@@ -12,9 +12,8 @@ use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
 use fnn::rpc::server::start_rpc;
 use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
-use fnn::store::open_store;
-use fnn::store::restore::restore;
 use fnn::store::open_store_with_migration;
+use fnn::store::restore::restore;
 use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
