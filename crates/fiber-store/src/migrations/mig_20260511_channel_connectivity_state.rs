@@ -74,12 +74,19 @@ impl Migration for MigrationObj {
                     )
                 })?;
 
-            let new_bytes = bincode::serialize(&new).map_err(|e| {
+            let mut new_bytes = bincode::serialize(&new).map_err(|e| {
                 format!(
                     "Failed to serialize new ChannelActorData: {}",
                     e
                 )
             })?;
+            let external_funding_none = bincode::serialize(&Option::<()>::None).map_err(|e| {
+                format!(
+                    "Failed to serialize default external_funding: {}",
+                    e
+                )
+            })?;
+            new_bytes.extend(external_funding_none);
 
             store.put(&key, &new_bytes);
             migrated += 1;
