@@ -9736,11 +9736,8 @@ async fn test_external_funding_timeout_still_applies_after_restart() {
         open_external_funding_channel(&nodes[0], &nodes[1], 100_000_000_000).await;
 
     nodes[0].restart().await;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    let (left, right) = nodes.split_at_mut(1);
-    left[0].connect_to(&mut right[0]).await;
 
-    left[0]
+    nodes[0]
         .expect_event(
             move |event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id),
         )

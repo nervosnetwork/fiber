@@ -3722,8 +3722,6 @@ where
                     }
                     OfflineChannelRestoreMode::WatchChain => channel.mark_watching_chain_offline(),
                 }
-                let external_funding_recovery_state =
-                    self.store.get_external_funding_recovery_state(&channel_id);
                 channel.network = Some(self.network.clone());
                 channel.ephemeral_config = args.ephemeral_config.clone();
                 channel.hydrate_external_funding_runtime();

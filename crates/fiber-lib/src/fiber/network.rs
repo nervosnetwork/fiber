@@ -2597,7 +2597,7 @@ where
                     }
 
                     if let Err(err) = state
-                        .reestablish_channel(channel_state.get_remote_pubkey(), channel_id)
+                        .restore_offline_channel(channel_state.get_remote_pubkey(), channel_id)
                         .await
                     {
                         error!(
