@@ -8,6 +8,7 @@ use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use fnn::fiber::network::init_chain_hash;
+use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::{
     Config,
     actors::RootActor,
@@ -23,7 +24,7 @@ use fnn::{
         invoice::InvoiceRpcServerImpl, payment::PaymentRpcServerImpl, peer::PeerRpcServerImpl,
     },
     start_network,
-    store::open_store,
+    store::open_store_with_migration,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
 };
 use jsonrpsee::wasm_client::WasmClientBuilder;
@@ -51,6 +52,22 @@ fn js_err(msg: String) -> Result<(), JsValue> {
 const FIBER_STATE_BEFORE_STARTING: u8 = 0;
 const FIBER_STATE_STARTED: u8 = 1;
 const FIBER_STATE_PANICKED: u8 = 2;
+
+fn wasm_confirm(plan: MigrationPlan) -> bool {
+    tracing::info!("{}", plan.message);
+    // In WASM/browser context, auto-confirm migrations.
+    // The browser user has already chosen to open the app.
+    true
+}
+
+fn wasm_progress(progress: MigrationProgress) {
+    tracing::info!(
+        "[{}/{}] {}",
+        progress.current_step,
+        progress.total_steps,
+        progress.message
+    );
+}
 
 static FIBER_STATE: AtomicU8 = AtomicU8::new(FIBER_STATE_BEFORE_STARTING);
 static ROOT_ACTOR: OnceLock<ActorRef<String>> = OnceLock::new();
@@ -123,7 +140,9 @@ pub async fn fiber(
         })?
         .store_path();
 
-    let store = open_store(store_path).map_err(|err| exit_to_js(ExitMessage(err.to_string())))?;
+    let store =
+        open_store_with_migration(store_path, Box::new(wasm_confirm), Box::new(wasm_progress))
+            .map_err(|err| exit_to_js(ExitMessage(err.to_string())))?;
     debug!("Store initialized");
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();

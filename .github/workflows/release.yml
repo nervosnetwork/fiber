@@ -96,9 +96,6 @@ jobs:
         export OPENSSL_INCLUDE_DIR=${PWD_DIR}/openssl-1.1.1s/include
         export OPENSSL_STATIC=1
         cargo build --release --locked --features portable
-        cd migrate
-        cargo build --release --locked
-        cd ..
     - if: matrix.os == 'ubuntu-22.04-arm'
       name: Build aarch64 linux portable
       run: |
@@ -113,18 +110,15 @@ jobs:
         export OPENSSL_INCLUDE_DIR=${PWD_DIR}/openssl-1.1.1s/include
         export OPENSSL_STATIC=1
         cargo build --release --locked --features portable
-        cd migrate
-        cargo build --release --locked
-        cd ..
     - if: matrix.os == 'ubuntu-24.04'
       name: Build linux
-      run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
+      run: cargo build --release --locked
     - if: startsWith(matrix.os, 'macos-15')
       name: Build macos portable
-      run: cargo build --release --locked --features portable && cd migrate && cargo build --release --locked && cd ..
+      run: cargo build --release --locked --features portable
     - if: matrix.os == 'windows-2022'
       name: Build windows
-      run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
+      run: cargo build --release --locked
     - name: Get the Version
       id: get_version
       shell: bash
@@ -136,8 +130,7 @@ jobs:
         pkgname="fnn_${{ steps.get_version.outputs.VERSION }}-${{ matrix.pkg_suffix }}.tar.gz"
         cp "target/release/fnn${{ matrix.bin_suffix }}" "fnn${{ matrix.bin_suffix }}"
         cp "target/release/fnn-cli${{ matrix.bin_suffix }}" "fnn-cli${{ matrix.bin_suffix }}"
-        cp "migrate/target/release/fnn-migrate${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}"
-        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "fnn-cli${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}" "config"
+        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "fnn-cli${{ matrix.bin_suffix }}" "config"
         echo "PKGNAME=${pkgname}" >> $GITHUB_OUTPUT
     - name: Upload Release Asset
       uses: softprops/action-gh-release@v1
@@ -256,3 +249,33 @@ jobs:
             "${tag}-amd64" \
             "${tag}-arm64"
         done <<< "$DOCKER_TAGS"
+  publish-crates:
+    name: Publish fiber-types and fiber-json-types to crates.io
+    runs-on: ubuntu-latest
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish fiber-types
+        run: cargo publish -p fiber-types
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Publish fiber-json-types (retry until index updated)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          for i in $(seq 1 10); do
+            if cargo publish -p fiber-json-types 2>&1; then
+              echo "fiber-json-types published successfully"
+              exit 0
+            fi
+            echo "Attempt $i/10 failed, retrying in 30s..."
+            sleep 30
+          done
+          echo "Failed to publish fiber-json-types after 10 attempts"
+          exit 1

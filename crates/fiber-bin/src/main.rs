@@ -14,6 +14,8 @@ use fnn::rpc::server::start_rpc;
 use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
 use fnn::store::open_store;
 use fnn::store::restore::restore;
+use fnn::store::open_store_with_migration;
+use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -27,6 +29,7 @@ use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +41,29 @@ use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
+
+fn cli_confirm(plan: MigrationPlan) -> bool {
+    eprintln!("{}", plan.message);
+    if plan.has_break_change {
+        eprintln!(
+            "WARNING: This migration contains breaking changes. \
+             You should shutdown all channels and backup your data."
+        );
+    }
+    eprint!("Continue? [y/N] ");
+    std::io::stderr().flush().unwrap();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes")
+}
+
+fn cli_progress(progress: MigrationProgress) {
+    eprintln!(
+        "[{}/{}] {}",
+        progress.current_step, progress.total_steps, progress.message
+    );
+}
 
 #[tokio::main]
 pub async fn main() -> Result<(), ExitMessage> {
@@ -119,8 +145,9 @@ pub async fn main() -> Result<(), ExitMessage> {
 
     // Derive store_path: prefer fiber config, fall back to base_dir/fiber/store
     let store_path = parsed_fiber_config.store_path();
-
-    let raw_store = open_store(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let raw_store =
+        open_store_with_migration(store_path, Box::new(cli_confirm), Box::new(cli_progress))
+            .map_err(|err| ExitMessage(err.to_string()))?;
 
     if config.cch.is_some() || config.rpc.is_some() {
         let port = Arc::new(OutputPort::default());
