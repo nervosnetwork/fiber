@@ -96,9 +96,6 @@ jobs:
         export OPENSSL_INCLUDE_DIR=${PWD_DIR}/openssl-1.1.1s/include
         export OPENSSL_STATIC=1
         cargo build --release --locked --features portable
-        cd migrate
-        cargo build --release --locked
-        cd ..
     - if: matrix.os == 'ubuntu-22.04-arm'
       name: Build aarch64 linux portable
       run: |
@@ -113,18 +110,15 @@ jobs:
         export OPENSSL_INCLUDE_DIR=${PWD_DIR}/openssl-1.1.1s/include
         export OPENSSL_STATIC=1
         cargo build --release --locked --features portable
-        cd migrate
-        cargo build --release --locked
-        cd ..
     - if: matrix.os == 'ubuntu-24.04'
       name: Build linux
-      run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
+      run: cargo build --release --locked
     - if: startsWith(matrix.os, 'macos-15')
       name: Build macos portable
-      run: cargo build --release --locked --features portable && cd migrate && cargo build --release --locked && cd ..
+      run: cargo build --release --locked --features portable
     - if: matrix.os == 'windows-2022'
       name: Build windows
-      run: cargo build --release --locked && cd migrate && cargo build --release --locked && cd ..
+      run: cargo build --release --locked
     - name: Get the Version
       id: get_version
       shell: bash
@@ -136,8 +130,7 @@ jobs:
         pkgname="fnn_${{ steps.get_version.outputs.VERSION }}-${{ matrix.pkg_suffix }}.tar.gz"
         cp "target/release/fnn${{ matrix.bin_suffix }}" "fnn${{ matrix.bin_suffix }}"
         cp "target/release/fnn-cli${{ matrix.bin_suffix }}" "fnn-cli${{ matrix.bin_suffix }}"
-        cp "migrate/target/release/fnn-migrate${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}"
-        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "fnn-cli${{ matrix.bin_suffix }}" "fnn-migrate${{ matrix.bin_suffix }}" "config"
+        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "fnn-cli${{ matrix.bin_suffix }}" "config"
         echo "PKGNAME=${pkgname}" >> $GITHUB_OUTPUT
     - name: Upload Release Asset
       uses: softprops/action-gh-release@v1

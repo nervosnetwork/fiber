@@ -30,7 +30,6 @@ futures = "0.3.30"
 getrandom = "0.3"
 git-version = "0.3.9"
 hex = "0.4.3"
-indicatif = "0.18"
 lightning-invoice = { version = "0.33" }
 molecule = { version = "0.9.2", default-features = false }
 musig2 = { version = "0.2.4", features = ["secp256k1", "serde"] }
@@ -128,7 +127,6 @@ ciborium = "0.2.2"
 ckb-testtool = "1"
 fiber-types = { path = "../fiber-types", features = ["sample"] }
 futures = "0.3.31"
-ouroboros = "0.18.5"
 tempfile = "3.10.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

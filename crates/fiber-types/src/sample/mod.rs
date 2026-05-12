@@ -13,7 +13,7 @@
 /// let samples = ChannelActorData::samples(42);
 /// for (i, sample) in samples.iter().enumerate() {
 ///     let bytes = bincode::serialize(sample).unwrap();
-///     std::fs::write(format!("fixtures/v0.7.0/channel_state_{}.bin", i), bytes).unwrap();
+///     std::fs::write(format!("fixtures/v0.8.0/channel_state_{}.bin", i), bytes).unwrap();
 /// }
 ///
 /// // Verify fixtures from a previous version still deserialize
