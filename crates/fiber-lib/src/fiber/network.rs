@@ -2257,10 +2257,10 @@ where
                 self.retry_hold_tlc_sets(&myself);
             }
             NetworkActorCommand::SettleHoldTlcSet(payment_hash) => {
-                self.settle_hold_tlc_set(state, payment_hash, false).await;
+                self.settle_hold_tlc_set(state, payment_hash).await;
             }
             NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash) => {
-                self.settle_hold_tlc_set(state, payment_hash, true).await;
+                self.settle_received_hold_tlc_set(state, payment_hash).await;
             }
             NetworkActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
                 self.settle_tlc_set(state, payment_hash, channel_tlc_ids)
@@ -2985,18 +2985,30 @@ where
         &self,
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
-        allow_received_invoice: bool,
     ) {
-        let settle_command = if allow_received_invoice {
-            SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &self.store)
-        } else {
-            SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store)
-        };
+        let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store).run();
+        self.apply_hold_tlc_settlements(state, payment_hash, settlements)
+            .await;
+    }
 
-        for tlc_settlement in self
-            .apply_tlc_settlements(state, settle_command.run())
-            .await
-        {
+    async fn settle_received_hold_tlc_set(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        payment_hash: Hash256,
+    ) {
+        let settlements =
+            SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &self.store).run();
+        self.apply_hold_tlc_settlements(state, payment_hash, settlements)
+            .await;
+    }
+
+    async fn apply_hold_tlc_settlements(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        payment_hash: Hash256,
+        settlements: Vec<TlcSettlement>,
+    ) {
+        for tlc_settlement in self.apply_tlc_settlements(state, settlements).await {
             self.store.remove_payment_hold_tlc(
                 &payment_hash,
                 &tlc_settlement.channel_id(),
