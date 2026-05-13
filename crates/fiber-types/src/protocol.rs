@@ -96,6 +96,9 @@ impl AnnouncedNodeName {
         if slice.len() > 32 {
             return Err("Node Alias can not be longer than 32 bytes".to_string());
         }
+        let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+        std::str::from_utf8(&slice[..end]).map_err(|err| err.to_string())?;
+
         let mut bytes = [0; 32];
         bytes[..slice.len()].copy_from_slice(slice);
         Ok(Self(bytes))
@@ -106,12 +109,16 @@ impl AnnouncedNodeName {
         Self::from_slice(str_bytes)
     }
 
-    pub fn as_str(&self) -> &str {
+    fn try_as_str(&self) -> Result<&str, std::str::Utf8Error> {
         let end = self.0.iter().position(|&b| b == 0).unwrap_or(self.0.len());
         if end == 0 {
-            return "";
+            return Ok("");
         }
-        std::str::from_utf8(&self.0[..end]).expect("valid utf8 string")
+        std::str::from_utf8(&self.0[..end])
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.try_as_str().unwrap_or_default()
     }
 }
 
@@ -138,7 +145,7 @@ impl Serialize for AnnouncedNodeName {
     where
         S: Serializer,
     {
-        serializer.serialize_str(std::str::from_utf8(&self.0).expect("valid utf8 string"))
+        serializer.serialize_str(self.try_as_str().map_err(serde::ser::Error::custom)?)
     }
 }
 
@@ -1237,5 +1244,67 @@ impl TryFrom<molecule_gossip::Cursor> for Cursor {
             timestamp,
             message_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_announcement_with_raw_name(raw_name: [u8; 32]) -> molecule_gossip::NodeAnnouncement {
+        let private_key = Privkey::from_slice(&[42u8; 32]);
+        let announcement = NodeAnnouncement::new_signed(
+            AnnouncedNodeName::from_string("valid-node").expect("valid node name"),
+            FeatureVector::default(),
+            vec![],
+            &private_key,
+            Hash256::default(),
+            1,
+            0,
+            UdtCfgInfos::default(),
+            "test".to_string(),
+        );
+        let molecule_announcement = molecule_gossip::NodeAnnouncement::from(announcement);
+
+        molecule_gossip::NodeAnnouncement::new_builder()
+            .signature(molecule_announcement.signature())
+            .features(molecule_announcement.features())
+            .timestamp(molecule_announcement.timestamp())
+            .node_id(molecule_announcement.node_id())
+            .version(molecule_announcement.version())
+            .node_name(u8_32_as_byte_32(&raw_name))
+            .address(molecule_announcement.address())
+            .chain_hash(molecule_announcement.chain_hash())
+            .auto_accept_min_ckb_funding_amount(
+                molecule_announcement.auto_accept_min_ckb_funding_amount(),
+            )
+            .udt_cfg_infos(molecule_announcement.udt_cfg_infos())
+            .build()
+    }
+
+    #[test]
+    fn node_announcement_from_molecule_rejects_non_utf8_node_name() {
+        let mut raw_name = [0u8; 32];
+        raw_name[0] = b'f';
+        raw_name[1] = 0xff;
+
+        let err = NodeAnnouncement::try_from(node_announcement_with_raw_name(raw_name))
+            .expect_err("invalid UTF-8 node_name must be rejected");
+        assert!(err.to_string().contains("Invalid node_name"));
+    }
+
+    #[test]
+    fn malformed_announced_node_name_debug_and_serialize_do_not_panic() {
+        let mut raw_name = [0u8; 32];
+        raw_name[0] = b'f';
+        raw_name[1] = 0xff;
+        let node_name = AnnouncedNodeName(raw_name);
+
+        let debug_result = std::panic::catch_unwind(|| format!("{node_name:?}"));
+        assert!(debug_result.is_ok());
+
+        let serialize_result = std::panic::catch_unwind(|| serde_json::to_string(&node_name));
+        assert!(serialize_result.is_ok());
+        assert!(serialize_result.expect("panic checked").is_err());
     }
 }
