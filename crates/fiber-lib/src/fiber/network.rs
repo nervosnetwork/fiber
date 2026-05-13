@@ -51,7 +51,7 @@ use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
     ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
-    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, ShutdownCommand, StopReason,
+    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
 use super::gossip::{
@@ -2094,66 +2094,8 @@ where
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
-                // peer has active channels but down
-                let mut with_channel_down_peers = HashSet::new();
-                let mut ready_channels_count = 0;
-                let mut shuttingdown_channels_count = 0;
-                let mut invoice_tlc_sets: HashMap<Hash256, Vec<(Hash256, u64)>> = HashMap::new();
-                for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
-                    if matches!(channel_state, ChannelState::ChannelReady) {
-                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                            ready_channels_count += 1;
-                            if actor_state.reestablishing {
-                                continue;
-                            }
-
-                            if !state.peer_session_map.contains_key(&pubkey) {
-                                with_channel_down_peers.insert(pubkey);
-                            }
-
-                            // Collect TLC data before async operations to avoid holding iterator across await
-                            let committed_tlcs: Vec<_> = actor_state
-                                .tlc_state
-                                .get_committed_received_tlcs()
-                                .map(|tlc| {
-                                    (
-                                        tlc.tlc_id,
-                                        tlc.id(),
-                                        tlc.payment_hash,
-                                        actor_state
-                                            .waiting_forward_tlc_tasks
-                                            .contains_key(&tlc.tlc_id),
-                                    )
-                                })
-                                .collect();
-
-                            self.handle_committed_received_tlcs(
-                                state,
-                                channel_id,
-                                committed_tlcs,
-                                &mut invoice_tlc_sets,
-                            )
-                            .await;
-
-                            self.handle_expiring_received_tlcs(
-                                state,
-                                channel_id,
-                                &actor_state,
-                                now,
-                            )
-                            .await;
-
-                            self.force_close_if_offered_tlc_expired(
-                                state,
-                                channel_id,
-                                &actor_state,
-                                now,
-                            )
-                            .await;
-                        }
-                    } else if matches!(channel_state, ChannelState::ShuttingDown(..)) {
-                        shuttingdown_channels_count += 1;
-                    } else if matches!(
+                for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
+                    if matches!(
                         channel_state,
                         ChannelState::Closed(flags)
                             if flags.intersects(
@@ -2217,42 +2159,6 @@ where
                         }
                     }
                 }
-
-                self.settle_invoice_tlc_sets_from_check_channels(state, invoice_tlc_sets)
-                    .await;
-
-                // update metrics
-                #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-                {
-                    // channels
-                    metrics::gauge!(crate::metrics::DOWN_WITH_CHANNEL_PEER_COUNT)
-                        .set(with_channel_down_peers.len() as u32);
-                    metrics::gauge!(crate::metrics::TOTAL_CHANNEL_COUNT)
-                        .set((ready_channels_count + shuttingdown_channels_count) as u32);
-                    metrics::gauge!(crate::metrics::READY_CHANNEL_COUNT)
-                        .set(ready_channels_count as u32);
-                    metrics::gauge!(crate::metrics::SHUTTING_DOWN_CHANNEL_COUNT)
-                        .set(shuttingdown_channels_count as u32);
-                    metrics::gauge!(crate::metrics::INFLIGHT_PAYMENTS_COUNT)
-                        .set(state.inflight_payments.len() as u32);
-
-                    // peers
-                    let total_peers = state.peer_session_map.len();
-                    let outbound_peers = state
-                        .peer_session_map
-                        .iter()
-                        .filter(|(_id, peer)| peer.session_type.is_outbound())
-                        .count();
-                    let inbound_peers = total_peers - outbound_peers;
-                    metrics::gauge!(crate::metrics::TOTAL_PEER_COUNT).set(total_peers as u32);
-                    metrics::gauge!(crate::metrics::INBOUND_PEER_COUNT).set(inbound_peers as u32);
-                    metrics::gauge!(crate::metrics::OUTBOUND_PEER_COUNT).set(outbound_peers as u32);
-                }
-                debug!(
-                    "Check channels: {} ready channels {} shutting down channels, found {} peers down with channels",
-                    ready_channels_count, shuttingdown_channels_count,
-                    with_channel_down_peers.len()
-                );
 
                 self.retry_hold_tlc_sets(&myself);
             }
@@ -2711,173 +2617,6 @@ where
                 ChannelCommand::RemoveTlc(remove_tlc_command, rpc_reply),
             )
             .await
-    }
-
-    async fn settle_invoice_tlc_sets_from_check_channels(
-        &self,
-        state: &mut NetworkActorState<S, C>,
-        invoice_tlc_sets: HashMap<Hash256, Vec<(Hash256, u64)>>,
-    ) {
-        for (payment_hash, channel_tlc_ids) in invoice_tlc_sets {
-            self.settle_tlc_set(state, payment_hash, channel_tlc_ids)
-                .await;
-        }
-    }
-
-    fn tlc_expiry_delay_milliseconds(actor_state: &ChannelActorState) -> u64 {
-        let delay_epoch =
-            EpochNumberWithFraction::from_full_value(actor_state.commitment_delay_epoch);
-        tlc_expiry_delay(&delay_epoch)
-    }
-
-    async fn handle_committed_received_tlcs(
-        &self,
-        state: &mut NetworkActorState<S, C>,
-        channel_id: Hash256,
-        committed_tlcs: Vec<(TLCId, u64, Hash256, bool)>,
-        invoice_tlc_sets: &mut HashMap<Hash256, Vec<(Hash256, u64)>>,
-    ) {
-        for (_tlc_id, id, payment_hash, is_waiting_forward_result) in committed_tlcs {
-            if self.store.get_invoice(&payment_hash).is_some() {
-                if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Open) {
-                    invoice_tlc_sets
-                        .entry(payment_hash)
-                        .or_default()
-                        .push((channel_id, id));
-                }
-                continue;
-            }
-
-            if is_waiting_forward_result {
-                continue;
-            }
-
-            // process the non-invoice tlcs, such as keysend
-            let Some(payment_preimage) = self.store.get_preimage(&payment_hash) else {
-                continue;
-            };
-            debug!(
-                "Found payment preimage for channel {:?} tlc {:?}",
-                channel_id, id
-            );
-            if self
-                .store
-                .get_invoice_status(&payment_hash)
-                .is_some_and(|s| !matches!(s, CkbInvoiceStatus::Open | CkbInvoiceStatus::Received))
-            {
-                continue;
-            }
-
-            if let Err(err) = self
-                .send_remove_tlc_to_channel(
-                    state,
-                    channel_id,
-                    RemoveTlcCommand {
-                        id,
-                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                            payment_preimage,
-                        }),
-                    },
-                )
-                .await
-            {
-                error!(
-                    "Failed to remove tlc {:?} with preimage for channel {:?}: {}",
-                    id, channel_id, err
-                );
-            }
-        }
-    }
-
-    async fn handle_expiring_received_tlcs(
-        &self,
-        state: &mut NetworkActorState<S, C>,
-        channel_id: Hash256,
-        actor_state: &ChannelActorState,
-        now: u64,
-    ) {
-        let epoch_delay_milliseconds = Self::tlc_expiry_delay_milliseconds(actor_state);
-        // For received tlcs, check whether the tlc is expired. If so we send
-        // RemoveTlc to previous hop. Even if later hop sends backup RemoveTlc
-        // to us later, it will be ignored.
-        let expect_expiry =
-            now + epoch_delay_milliseconds + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
-        let expiring_received_tlcs = actor_state
-            .tlc_state
-            .get_committed_received_tlcs()
-            .filter(|tlc| tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry)
-            .map(|tlc| (tlc.id(), tlc.shared_secret))
-            .collect::<Vec<_>>();
-
-        for (tlc_id, shared_secret) in expiring_received_tlcs {
-            info!(
-                "Removing expired tlc {:?} for channel {:?}",
-                tlc_id, channel_id
-            );
-            if let Err(err) = self
-                .send_remove_tlc_to_channel(
-                    state,
-                    channel_id,
-                    RemoveTlcCommand {
-                        id: tlc_id,
-                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                            &shared_secret,
-                        )),
-                    },
-                )
-                .await
-            {
-                error!(
-                    "Failed to remove expired tlc {:?} for channel {:?}: {}",
-                    tlc_id, channel_id, err
-                );
-            }
-        }
-    }
-
-    async fn force_close_if_offered_tlc_expired(
-        &self,
-        state: &mut NetworkActorState<S, C>,
-        channel_id: Hash256,
-        actor_state: &ChannelActorState,
-        now: u64,
-    ) {
-        // Check whether the next hop has already sent us the RemoveTlc message
-        // for the offered expired tlc. If not, we will force close the channel.
-        let epoch_delay_milliseconds = Self::tlc_expiry_delay_milliseconds(actor_state);
-        let expect_expiry = now + epoch_delay_milliseconds;
-        if actor_state
-            .tlc_state
-            .get_expired_offered_tlcs(expect_expiry)
-            .next()
-            .is_none()
-        {
-            return;
-        }
-
-        info!(
-            "Force closing channel {:?} due to expired offered tlc",
-            channel_id
-        );
-        let (send, _recv) = oneshot::channel();
-        let rpc_reply = RpcReplyPort::from(send);
-        if let Err(err) = state
-            .send_command_to_channel(
-                channel_id,
-                ChannelCommand::Shutdown(
-                    ShutdownCommand {
-                        close_script: None,
-                        fee_rate: None,
-                        force: true,
-                    },
-                    rpc_reply,
-                ),
-            )
-            .await
-        {
-            error!("Failed to force close channel {:?}: {}", channel_id, err);
-        }
     }
 
     fn retry_hold_tlc_sets(&self, myself: &ActorRef<NetworkActorMessage>) {
@@ -6257,21 +5996,8 @@ where
             NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown)
         });
 
-        // Trigger mmp tlc set fulfill check and hold tlc timeout
-        let now = now_timestamp_as_millis_u64();
-        for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
-            // timeout hold tlc
-            let already_timeout = hold_tlcs
-                .iter()
-                .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
-            if !already_timeout {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            }
-        }
+        // Trigger hold tlc fulfill retry and timeout checks at startup.
+        self.retry_hold_tlc_sets(&myself);
         debug_event!(myself, "network actor started");
         Ok(())
     }
