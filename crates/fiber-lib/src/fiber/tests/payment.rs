@@ -32,6 +32,7 @@ use crate::tests::test_utils::*;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;
+use bech32::{encode, u5, Variant};
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,6 +41,7 @@ use fiber_types::HashAlgorithm;
 use fiber_types::HopHint;
 use fiber_types::RemoveTlcFulfill;
 use fiber_types::SessionRoute;
+use fiber_types::SIGNATURE_U5_SIZE;
 use ractor::call;
 use secp256k1::SECP256K1;
 use std::collections::{HashMap, HashSet};
@@ -7646,4 +7648,44 @@ async fn test_send_payment_max_fee_rate_limit() {
     .expect("payment data ok");
 
     assert_eq!(payment_data.max_fee_amount, Some(10));
+}
+
+fn malicious_invoice_that_used_to_panic_parser() -> String {
+    let mut data = vec![u5::try_from_u8(0).expect("valid unsigned invoice marker")];
+    data.extend(std::iter::repeat_n(
+        u5::try_from_u8(31).expect("valid u5"),
+        SIGNATURE_U5_SIZE,
+    ));
+    encode("fibb", data, Variant::Bech32m).expect("valid bech32m invoice wrapper")
+}
+
+#[test]
+fn test_send_payment_malicious_invoice_does_not_crash_node_entrypoint() {
+    let command = SendPaymentCommand {
+        target_pubkey: Some(gen_rand_fiber_public_key()),
+        amount: Some(1000),
+        payment_hash: Some(gen_rand_sha256_hash()),
+        invoice: Some(malicious_invoice_that_used_to_panic_parser()),
+        ..Default::default()
+    };
+
+    // NetworkActor handles SendPayment by calling this builder first. Before
+    // invoice parser errors were propagated, this malformed invoice payload
+    // could panic there and take down the actor.
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(move || {
+        command.build_send_payment_data()
+    }));
+    let err = result
+        .expect("malicious invoice must be rejected without panicking")
+        .expect_err("malicious invoice must not build a payment request");
+
+    match err {
+        crate::Error::InvalidParameter(message) => {
+            assert!(
+                message.contains("invoice is invalid"),
+                "unexpected validation error: {message}"
+            );
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }

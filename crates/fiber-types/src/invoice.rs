@@ -120,6 +120,21 @@ pub enum InvoiceError {
     /// Deprecated attribute.
     #[error("Deprecated attribute: {0}")]
     DeprecatedAttribute(String),
+    /// Failed to decompress invoice data.
+    #[error("Failed to decompress invoice data: {0}")]
+    DecompressionError(String),
+    /// Decompressed invoice data exceeds the parser limit.
+    #[error("Invoice data length {len} exceeds max length {max}")]
+    InvoiceDataTooLong { len: usize, max: usize },
+    /// Invoice text attribute is not valid UTF-8.
+    #[error("Invalid UTF-8 in invoice {0} attribute")]
+    InvalidUtf8Attribute(&'static str),
+    /// Invoice payee public key is malformed.
+    #[error("Invalid payee public key")]
+    InvalidPayeePublicKey,
+    /// Invoice signature contains malformed base32 data.
+    #[error("Invalid signature encoding")]
+    InvalidSignatureEncoding,
 }
 
 /// Size of the signature in u5 encoding.
@@ -127,6 +142,13 @@ pub const SIGNATURE_U5_SIZE: usize = 104;
 
 /// Maximum allowed length for an invoice description.
 pub const MAX_DESCRIPTION_LENGTH: usize = 639;
+
+/// Maximum decompressed molecule payload accepted by the invoice parser.
+///
+/// Current invoices only need a few hundred bytes for fixed fields plus the
+/// 639-byte description limit. This leaves room for scripts, fallback
+/// addresses and future attributes while bounding compressed-input expansion.
+pub const MAX_INVOICE_DATA_LENGTH: usize = 16 * 1024;
 
 /// Encodes bytes and returns the compressed form.
 /// This is used for encoding the invoice data, to make the final Invoice encoded address shorter.
@@ -146,20 +168,30 @@ pub(crate) fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
     Ok(compressed_writer.get_ref().get_ref().clone())
 }
 
-/// Decompresses the data.
-pub(crate) fn ar_decompress(data: &[u8]) -> IoResult<Vec<u8>> {
+fn ar_decompress_with_limit(data: &[u8], max_len: usize) -> Result<Vec<u8>, InvoiceError> {
     let mut model = Model::builder().num_bits(8).eof(EOFKind::EndAddOne).build();
     let mut input_reader = BitReader::<_, MSB>::new(data);
     let mut decoder = ArithmeticDecoder::new(48);
     let mut decompressed_data = vec![];
 
     while !decoder.finished() {
-        let sym = decoder.decode(&model, &mut input_reader)?;
+        let sym = decoder
+            .decode(&model, &mut input_reader)
+            .map_err(|err| InvoiceError::DecompressionError(err.to_string()))?;
         model.update_symbol(sym);
         decompressed_data.push(sym as u8);
+
+        if !decoder.finished() && decompressed_data.len() > max_len {
+            return Err(InvoiceError::InvoiceDataTooLong {
+                len: decompressed_data.len(),
+                max: max_len,
+            });
+        }
     }
 
-    decompressed_data.pop(); // remove the EOF
+    decompressed_data
+        .pop()
+        .ok_or_else(|| InvoiceError::DecompressionError("missing EOF marker".to_string()))?;
     Ok(decompressed_data)
 }
 
@@ -496,13 +528,14 @@ impl InvoiceSignature {
             ));
         }
         let recoverable_signature_bytes =
-            Vec::<u8>::from_base32(signature).expect("bytes from base32");
+            Vec::<u8>::from_base32(signature).map_err(InvoiceError::Bech32Error)?;
         let sig = &recoverable_signature_bytes[0..64];
         let recovery_id = RecoveryId::try_from(recoverable_signature_bytes[64] as i32)
-            .expect("Recovery ID from i32");
+            .map_err(|_| InvoiceError::InvalidRecoveryId)?;
 
         Ok(InvoiceSignature(
-            RecoverableSignature::from_compact(sig, recovery_id).expect("signature from compact"),
+            RecoverableSignature::from_compact(sig, recovery_id)
+                .map_err(|_| InvoiceError::InvalidSignature)?,
         ))
     }
 }
@@ -619,10 +652,9 @@ impl CkbInvoice {
     }
 
     fn validate_signature(&self) -> bool {
-        if self.signature.is_none() {
+        let Some(signature) = self.signature.as_ref() else {
             return true;
-        }
-        let signature = self.signature.as_ref().expect("expect signature");
+        };
         let included_pub_key = self.payee_pub_key();
 
         let mut recovered_pub_key = Option::None;
@@ -634,9 +666,9 @@ impl CkbInvoice {
             recovered_pub_key = Some(recovered);
         }
 
-        let pub_key = included_pub_key
-            .or(recovered_pub_key.as_ref())
-            .expect("One is always present");
+        let Some(pub_key) = included_pub_key.or(recovered_pub_key.as_ref()) else {
+            return false;
+        };
 
         let hash = secp256k1::Message::from_digest_slice(&self.hash()[..])
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
@@ -666,7 +698,7 @@ impl CkbInvoice {
             &self
                 .signature
                 .as_ref()
-                .expect("signature must be present")
+                .ok_or(secp256k1::Error::InvalidSignature)?
                 .0,
         )
     }
@@ -884,7 +916,7 @@ impl FromStr for CkbInvoice {
         };
         let data_part =
             Vec::<u8>::from_base32(&data[1..data_end]).map_err(InvoiceError::Bech32Error)?;
-        let data_part = ar_decompress(&data_part).expect("decompress invoice data");
+        let data_part = ar_decompress_with_limit(&data_part, MAX_INVOICE_DATA_LENGTH)?;
         let invoice_data = gen_invoice::RawInvoiceData::from_slice(&data_part)
             .map_err(|err| InvoiceError::MoleculeError(VerificationError(err)))?;
         let signature = if is_signed {
@@ -899,7 +931,7 @@ impl FromStr for CkbInvoice {
             currency,
             amount,
             signature,
-            data: invoice_data.try_into().expect("pack invoice data"),
+            data: invoice_data.try_into()?,
         };
         invoice.check_signature()?;
         Ok(invoice)
@@ -950,7 +982,7 @@ impl From<InvoiceData> for gen_invoice::RawInvoiceData {
 }
 
 impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
-    type Error = VerificationError;
+    type Error = InvoiceError;
 
     fn try_from(data: gen_invoice::RawInvoiceData) -> Result<Self, Self::Error> {
         Ok(InvoiceData {
@@ -959,8 +991,8 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
             attrs: data
                 .attrs()
                 .into_iter()
-                .map(|a| a.into())
-                .collect::<Vec<Attribute>>(),
+                .map(Attribute::try_from)
+                .collect::<Result<Vec<Attribute>, InvoiceError>>()?,
         })
     }
 }
@@ -1015,13 +1047,16 @@ impl From<Attribute> for InvoiceAttr {
     }
 }
 
-impl From<InvoiceAttr> for Attribute {
-    fn from(attr: InvoiceAttr) -> Self {
-        match attr.to_enum() {
+impl TryFrom<InvoiceAttr> for Attribute {
+    type Error = InvoiceError;
+
+    fn try_from(attr: InvoiceAttr) -> Result<Self, Self::Error> {
+        let attr = match attr.to_enum() {
             InvoiceAttrUnion::Description(x) => {
                 let value: Vec<u8> = x.value().unpack();
                 Attribute::Description(
-                    String::from_utf8(value).expect("decode utf8 string from bytes"),
+                    String::from_utf8(value)
+                        .map_err(|_| InvoiceError::InvalidUtf8Attribute("description"))?,
                 )
             }
             InvoiceAttrUnion::ExpiryTime(x) => {
@@ -1039,7 +1074,8 @@ impl From<InvoiceAttr> for Attribute {
             InvoiceAttrUnion::FallbackAddr(x) => {
                 let value: Vec<u8> = x.value().unpack();
                 Attribute::FallbackAddr(
-                    String::from_utf8(value).expect("decode utf8 string from bytes"),
+                    String::from_utf8(value)
+                        .map_err(|_| InvoiceError::InvalidUtf8Attribute("fallback_addr"))?,
                 )
             }
             InvoiceAttrUnion::Feature(x) => {
@@ -1049,7 +1085,8 @@ impl From<InvoiceAttr> for Attribute {
             InvoiceAttrUnion::PayeePublicKey(x) => {
                 let value: Vec<u8> = x.value().unpack();
                 Attribute::PayeePublicKey(
-                    PublicKey::from_slice(&value).expect("Public key from slice"),
+                    PublicKey::from_slice(&value)
+                        .map_err(|_| InvoiceError::InvalidPayeePublicKey)?,
                 )
             }
             InvoiceAttrUnion::HashAlgorithm(x) => {
@@ -1059,7 +1096,8 @@ impl From<InvoiceAttr> for Attribute {
                 Attribute::HashAlgorithm(hash_algorithm)
             }
             InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
-        }
+        };
+        Ok(attr)
     }
 }
 
@@ -1078,16 +1116,21 @@ impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
                 .try_into()
                 .map_err(|e: UnknownCurrencyError| InvoiceError::UnknownCurrency(e.0))?,
             amount: invoice.amount().to_opt().map(|x| x.unpack()),
-            signature: invoice.signature().to_opt().map(|x| {
-                InvoiceSignature::from_base32_checked(
-                    &x.as_bytes()
+            signature: invoice
+                .signature()
+                .to_opt()
+                .map(|x| {
+                    let signature = x
+                        .as_bytes()
                         .into_iter()
-                        .map(|x| u5::try_from_u8(x).expect("u5 from u8"))
-                        .collect::<Vec<u5>>(),
-                )
-                .expect("signature must be present")
-            }),
-            data: InvoiceData::try_from(invoice.data()).map_err(InvoiceError::MoleculeError)?,
+                        .map(|x| {
+                            u5::try_from_u8(x).map_err(|_| InvoiceError::InvalidSignatureEncoding)
+                        })
+                        .collect::<Result<Vec<u5>, InvoiceError>>()?;
+                    InvoiceSignature::from_base32_checked(&signature)
+                })
+                .transpose()?,
+            data: InvoiceData::try_from(invoice.data())?,
         })
     }
 }
@@ -1193,8 +1236,125 @@ fn test_compress() {
     let bytes = input.as_bytes();
     let compressed = ar_encompress(input.as_bytes()).unwrap();
 
-    let decompressed = ar_decompress(&compressed).unwrap();
+    let decompressed = ar_decompress_with_limit(&compressed, MAX_INVOICE_DATA_LENGTH).unwrap();
     let decompressed_str = std::str::from_utf8(&decompressed).unwrap();
     assert_eq!(input, decompressed_str);
     assert!(compressed.len() < bytes.len());
+}
+
+#[cfg(test)]
+fn raw_invoice_data_with_attrs(attrs: Vec<InvoiceAttr>) -> gen_invoice::RawInvoiceData {
+    RawInvoiceDataBuilder::default()
+        .timestamp(0u128.pack())
+        .payment_hash(PaymentHash::new_builder().set([Byte::new(0); 32]).build())
+        .attrs(InvoiceAttrsVec::new_builder().set(attrs).build())
+        .build()
+}
+
+#[cfg(test)]
+fn encode_unsigned_invoice(raw_invoice_data: gen_invoice::RawInvoiceData) -> String {
+    let compressed = ar_encompress(raw_invoice_data.as_slice()).unwrap();
+    let mut data = vec![u5::try_from_u8(0).unwrap()];
+    data.extend(compressed.to_base32());
+    assert!(data.len() >= SIGNATURE_U5_SIZE);
+    encode("fibb", data, Variant::Bech32m).unwrap()
+}
+
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_parse_malformed_compressed_invoice_returns_error_without_panic() {
+    let mut data = vec![u5::try_from_u8(0).unwrap()];
+    data.extend(std::iter::repeat(u5::try_from_u8(31).unwrap()).take(SIGNATURE_U5_SIZE));
+    let invoice = encode("fibb", data, Variant::Bech32m).unwrap();
+
+    let result = std::panic::catch_unwind(|| CkbInvoice::from_str(&invoice));
+
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_err());
+}
+
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_decompressed_invoice_data_length_is_limited() {
+    let payload = vec![0u8; MAX_INVOICE_DATA_LENGTH + 1];
+    let compressed = ar_encompress(&payload).unwrap();
+
+    let result = ar_decompress_with_limit(&compressed, MAX_INVOICE_DATA_LENGTH);
+
+    assert!(matches!(
+        result,
+        Err(InvoiceError::InvoiceDataTooLong {
+            len,
+            max: MAX_INVOICE_DATA_LENGTH,
+        }) if len > MAX_INVOICE_DATA_LENGTH
+    ));
+}
+
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_malformed_text_attribute_returns_error_without_panic() {
+    let attr = InvoiceAttr::new_builder()
+        .set(InvoiceAttrUnion::Description(
+            Description::new_builder()
+                .value(vec![0xff; 200].pack())
+                .build(),
+        ))
+        .build();
+    let invoice = encode_unsigned_invoice(raw_invoice_data_with_attrs(vec![attr]));
+
+    let result = std::panic::catch_unwind(|| CkbInvoice::from_str(&invoice));
+
+    assert!(matches!(
+        result,
+        Ok(Err(InvoiceError::InvalidUtf8Attribute("description")))
+    ));
+}
+
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_malformed_payee_public_key_returns_error_without_panic() {
+    let attr = InvoiceAttr::new_builder()
+        .set(InvoiceAttrUnion::PayeePublicKey(
+            PayeePublicKey::new_builder()
+                .value(vec![1, 2, 3].pack())
+                .build(),
+        ))
+        .build();
+    let raw_invoice_data = raw_invoice_data_with_attrs(vec![attr]);
+
+    let result = std::panic::catch_unwind(|| InvoiceData::try_from(raw_invoice_data));
+
+    assert!(matches!(
+        result,
+        Ok(Err(InvoiceError::InvalidPayeePublicKey))
+    ));
+}
+
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_malformed_raw_invoice_signature_returns_error_without_panic() {
+    let signature = gen_invoice::Signature::new_builder()
+        .set([Byte::new(32); SIGNATURE_U5_SIZE])
+        .build();
+    let raw_invoice = gen_invoice::RawCkbInvoiceBuilder::default()
+        .currency(Byte::new(Currency::Fibb as u8))
+        .signature(
+            gen_invoice::SignatureOpt::new_builder()
+                .set(Some(signature))
+                .build(),
+        )
+        .data(raw_invoice_data_with_attrs(vec![]))
+        .build();
+
+    let result = std::panic::catch_unwind(|| CkbInvoice::try_from(raw_invoice));
+
+    assert!(matches!(
+        result,
+        Ok(Err(InvoiceError::InvalidSignatureEncoding))
+    ));
 }
