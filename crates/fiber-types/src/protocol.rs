@@ -338,15 +338,15 @@ impl FeatureVector {
         self.is_set(bit) || self.is_set(bit ^ 1)
     }
 
-    pub fn compatible_with(&self, other: &Self) -> bool {
-        if self
-            .enabled_features()
+    fn has_unsupported_required_features(&self, other: &Self) -> bool {
+        self.enabled_features()
             .iter()
             .any(|&bit| self.requires_feature(bit) && !other.supports_feature(bit))
-        {
-            return false;
-        }
-        true
+    }
+
+    pub fn compatible_with(&self, other: &Self) -> bool {
+        !self.has_unsupported_required_features(other)
+            && !other.has_unsupported_required_features(self)
     }
 }
 

@@ -189,6 +189,14 @@ fn test_feature_compatibility() {
     assert!(vector.compatible_with(&vector2));
     vector2.unset_gossip_queries_required();
     assert!(!vector.compatible_with(&vector2));
+
+    vector2.set_gossip_queries_optional();
+    vector2.set_feature(100);
+    assert!(!vector.compatible_with(&vector2));
+    vector2.unset_feature(100);
+    assert!(vector.compatible_with(&vector2));
+    vector2.set_feature(101);
+    assert!(vector.compatible_with(&vector2));
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
