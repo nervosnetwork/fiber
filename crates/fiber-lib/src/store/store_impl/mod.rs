@@ -579,6 +579,42 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
+    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
+        if old_id == &state.id {
+            self.insert_channel_actor_state(state);
+            return;
+        }
+
+        let old_state = self.get_channel_actor_state(old_id);
+        let mut batch = self.batch();
+
+        if let Some(old_state) = old_state {
+            batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], old_id.as_ref()].concat());
+            let remote_pubkey_bytes = old_state.get_remote_pubkey().serialize();
+            batch.delete(
+                [
+                    &[PUBKEY_CHANNEL_ID_PREFIX][..],
+                    &remote_pubkey_bytes[..],
+                    old_id.as_ref(),
+                ]
+                .concat(),
+            );
+            if let Some(outpoint) = old_state.get_funding_transaction_outpoint() {
+                batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
+            }
+        }
+
+        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
+        batch.put(kv.key(), kv.value());
+        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
+            batch.put(kv.key(), kv.value());
+        }
+        let kv = KeyValue::ChannelActorState(state.id, state);
+        batch.put(kv.key(), kv.value());
+        batch.commit();
+    }
+
     fn delete_channel_actor_state(&self, id: &Hash256) {
         if let Some(state) = self.get_channel_actor_state(id) {
             let mut batch = self.batch();

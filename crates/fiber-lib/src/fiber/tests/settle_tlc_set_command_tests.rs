@@ -130,6 +130,12 @@ impl ChannelActorStateStore for MockStore {
         self.channel_states.borrow_mut().insert(channel_id, state);
     }
 
+    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
+        self.channel_states.borrow_mut().remove(old_id);
+        let channel_id = state.id;
+        self.channel_states.borrow_mut().insert(channel_id, state);
+    }
+
     fn delete_channel_actor_state(&self, id: &Hash256) {
         self.channel_states.borrow_mut().remove(id);
     }
@@ -301,6 +307,7 @@ fn create_test_channel_state_with_tlc(
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
+            external_funding: None,
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,

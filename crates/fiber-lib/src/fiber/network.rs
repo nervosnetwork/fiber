@@ -2573,13 +2573,40 @@ where
                 );
 
                 if !state.channels.contains_key(&channel_id) {
-                    let err = Error::ChannelNotFound(channel_id);
-                    error!(
-                        "Failed to send SubmitExternalFundingTx command to channel {:?}: {:?}",
-                        channel_id, err
-                    );
-                    let _ = reply.send(Err(err.to_string()));
-                    return Ok(());
+                    let Some(channel_state) = state.store.get_channel_actor_state(&channel_id)
+                    else {
+                        let err = Error::ChannelNotFound(channel_id);
+                        error!(
+                            "Failed to send SubmitExternalFundingTx command to channel {:?}: {:?}",
+                            channel_id, err
+                        );
+                        let _ = reply.send(Err(err.to_string()));
+                        return Ok(());
+                    };
+
+                    if channel_state.is_closed() {
+                        let err = Error::ChannelError(ProcessingChannelError::InvalidState(
+                            format!("Channel {:x} is already closed", &channel_id),
+                        ));
+                        error!(
+                            "Failed to restore channel {:?} for SubmitExternalFundingTx: {:?}",
+                            channel_id, err
+                        );
+                        let _ = reply.send(Err(err.to_string()));
+                        return Ok(());
+                    }
+
+                    if let Err(err) = state
+                        .restore_offline_channel(channel_state.get_remote_pubkey(), channel_id)
+                        .await
+                    {
+                        error!(
+                            "Failed to restore channel {:?} for SubmitExternalFundingTx: {:?}",
+                            channel_id, err
+                        );
+                        let _ = reply.send(Err(err.to_string()));
+                        return Ok(());
+                    }
                 }
 
                 // Forward the command to the channel actor

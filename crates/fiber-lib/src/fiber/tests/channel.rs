@@ -1,8 +1,9 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelActorStateStore, ChannelOpenRecordStore, ReloadParams, ReplayOrderHint,
-    UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    merge_external_funding_witnesses, AddTlcResponse, ChannelActorState, ChannelActorStateStore,
+    ChannelOpenRecordStore, ReloadParams, ReplayOrderHint, UpdateCommand,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
+    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -21,6 +22,7 @@ use crate::fiber::types::{
 };
 use crate::fiber::ChannelConnectivityState;
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::store::sample::StoreSample;
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::*;
 #[cfg(feature = "watchtower")]
@@ -42,7 +44,7 @@ use crate::{
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
     core::{tx_pool::TxStatus, FeeRate},
-    packed::{CellDep, CellInput, Script, Transaction},
+    packed::{Bytes, CellDep, CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use fiber_types::{
@@ -8554,6 +8556,123 @@ async fn open_external_funding_channel(
     (result.channel_id, result.unsigned_funding_tx)
 }
 
+fn mock_sign_external_funding_tx(unsigned_tx: &Transaction) -> Transaction {
+    unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data()
+}
+
+fn mock_sign_external_funding_tx_with_witness(
+    unsigned_tx: &Transaction,
+    witness: Bytes,
+) -> Transaction {
+    unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![witness])
+        .build()
+        .data()
+}
+
+#[test]
+fn test_external_funding_witness_merge_preserves_existing_signatures() {
+    let external_signature: Bytes = [1u8; 65].pack();
+    let local_placeholder = Bytes::default();
+    let remote_placeholder = Bytes::default();
+    let remote_signature: Bytes = [2u8; 65].pack();
+    let remote_extra_signature: Bytes = [3u8; 65].pack();
+    let local_tx = Transaction::default()
+        .as_advanced_builder()
+        .set_witnesses(vec![external_signature.clone(), local_placeholder])
+        .build();
+
+    let merged = merge_external_funding_witnesses(
+        local_tx.witnesses(),
+        vec![
+            remote_placeholder,
+            remote_signature.clone(),
+            remote_extra_signature.clone(),
+        ],
+    );
+
+    assert_eq!(merged[0], external_signature);
+    assert_eq!(merged[1], remote_signature);
+    assert_eq!(merged[2], remote_extra_signature);
+}
+
+async fn wait_for_external_funding_post_submit_progress(
+    node: &NetworkNode,
+    channel_id: Hash256,
+) -> ChannelActorState {
+    for _ in 0..50 {
+        if let Some(state) = node.get_channel_actor_state_unchecked(channel_id) {
+            if matches!(
+                state.state,
+                ChannelState::AwaitingTxSignatures(_)
+                    | ChannelState::AwaitingChannelReady(_)
+                    | ChannelState::ChannelReady
+            ) {
+                return state;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = node
+        .get_channel_actor_state_unchecked(channel_id)
+        .expect("channel state should still exist after restart");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "channel should progress beyond commitment signing after restart, got {:?}",
+        state.state
+    );
+    state
+}
+
+async fn wait_for_external_funding_submitted_in_flight(
+    node: &NetworkNode,
+    channel_id: Hash256,
+) -> ChannelActorState {
+    for _ in 0..50 {
+        if let Some(state) = node.get_channel_actor_state_unchecked(channel_id) {
+            if matches!(
+                state.state,
+                ChannelState::CollaboratingFundingTx(_)
+                    | ChannelState::SigningCommitment(_)
+                    | ChannelState::AwaitingTxSignatures(_)
+                    | ChannelState::AwaitingChannelReady(_)
+                    | ChannelState::ChannelReady
+            ) {
+                return state;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = node
+        .get_channel_actor_state_unchecked(channel_id)
+        .expect("channel state should still exist before restart");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "channel should enter submitted external funding flow before restart, got {:?}",
+        state.state
+    );
+    state
+}
+
 #[tokio::test]
 async fn test_open_channel_with_external_funding() {
     init_tracing();
@@ -8576,13 +8695,26 @@ async fn test_open_channel_with_external_funding() {
         "unsigned funding tx should have at least one output"
     );
 
-    // Between open and submit for external funding, channel state is runtime-only and should
-    // not be persisted in local store.
+    let persisted_state = node_a
+        .get_channel_actor_state_unchecked(channel_id)
+        .expect("channel state should persist minimal external funding recovery state");
     assert!(
-        node_a
-            .get_channel_actor_state_unchecked(channel_id)
-            .is_none(),
-        "channel state should not be persisted before signed external funding tx submission"
+        persisted_state.state.is_awaiting_external_funding(),
+        "channel should wait for external funding submit, got {:?}",
+        persisted_state.state
+    );
+    let external_funding_state = persisted_state
+        .external_funding
+        .as_ref()
+        .expect("persisted external funding state should exist");
+    assert_eq!(
+        external_funding_state.unsigned_funding_tx.raw().as_slice(),
+        unsigned_tx.raw().as_slice(),
+        "persisted unsigned tx should match returned unsigned tx"
+    );
+    assert!(
+        !external_funding_state.signed_submitted,
+        "persisted state should still wait for signed submit"
     );
 }
 
@@ -9224,5 +9356,439 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
     assert!(
         state.is_some(),
         "channel should not be aborted by stale external funding timeout"
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_after_restart_for_external_funding() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx after restart success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "channel should continue after restart submit, got {:?}",
+        state.state
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_after_acceptor_restart_for_external_funding() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    node_b.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx after acceptor restart success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    for _ in 0..40 {
+        let maybe_state = node_b.get_channel_actor_state_unchecked(channel_id);
+        if let Some(state) = maybe_state {
+            if matches!(
+                state.state,
+                ChannelState::CollaboratingFundingTx(_)
+                    | ChannelState::SigningCommitment(_)
+                    | ChannelState::AwaitingTxSignatures(_)
+                    | ChannelState::AwaitingChannelReady(_)
+                    | ChannelState::ChannelReady
+            ) {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = node_b
+        .get_channel_actor_state_unchecked(channel_id)
+        .expect("acceptor channel state should be restorable after restart");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "acceptor should continue after restart submit, got {:?}",
+        state.state
+    );
+}
+
+#[test]
+fn test_external_funding_hydrate_restores_early_peer_commitment_signed_state() {
+    let mut persisted_state = ChannelActorState::samples(42)
+        .into_iter()
+        .next()
+        .expect("sample channel state should exist");
+    persisted_state.state =
+        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING);
+    persisted_state.external_funding = Some(fiber_types::ExternalFundingPersistState {
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: vec![],
+        unsigned_funding_tx: Transaction::default(),
+        started_at_ms: now_timestamp_as_millis_u64(),
+        signed_submitted: false,
+        peer_commitment_signed_received: true,
+    });
+    persisted_state.hydrate_external_funding_runtime();
+
+    assert!(
+        matches!(
+            persisted_state.state,
+            ChannelState::SigningCommitment(flags)
+                if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+                    && !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
+        ),
+        "hydrate should restore early peer commitment_signed, got {:?}",
+        persisted_state.state
+    );
+    assert!(
+        persisted_state.is_waiting_for_external_funding_submission(),
+        "pre-submit external funding should still use the external funding timeout after hydrate"
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_initiator_restart_after_signed_submit_resumes_handshake() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+
+    let state = wait_for_external_funding_post_submit_progress(&node_a, channel_id).await;
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "initiator should resume external funding handshake after restart, got {:?}",
+        state.state
+    );
+
+    assert!(
+        matches!(
+            node_a.submit_tx(signed_tx.clone().into_view()).await,
+            TxStatus::Committed(..)
+        ),
+        "funding tx should be committed after initiator restart"
+    );
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+}
+
+#[tokio::test]
+async fn test_external_funding_initiator_send_tx_signatures_first_preserves_external_witness() {
+    init_tracing();
+
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("ext-fund-send-first-node-{}", i)))
+            .base_dir_prefix(&format!("test-ext-fund-send-first-node-{}-", i));
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount = Some(150_000_000_000);
+            });
+        }
+        builder.build()
+    })
+    .await
+    .try_into()
+    .expect("2 nodes");
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let external_witness: Bytes = [9u8; 65].pack();
+    let signed_tx =
+        mock_sign_external_funding_tx_with_witness(&unsigned_tx, external_witness.clone());
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    let mut last_state = None;
+    for _ in 0..50 {
+        let state = node_a.get_channel_actor_state(channel_id);
+        if matches!(
+            state.state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        ) {
+            last_state = Some(state);
+            break;
+        }
+        last_state = Some(state);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = last_state.expect("channel state should exist after submit");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        ),
+        "initiator should complete tx_signatures handshake without re-signing, got {:?}",
+        state.state
+    );
+
+    let funding_tx = state
+        .funding_tx
+        .clone()
+        .expect("funding tx should remain available after tx_signatures");
+    assert_eq!(
+        funding_tx
+            .witnesses()
+            .get(0)
+            .expect("first witness exists")
+            .raw_data(),
+        external_witness.raw_data(),
+        "initiator should preserve the external witness when it sends tx_signatures first"
+    );
+    assert!(
+        funding_tx.witnesses().len() >= signed_tx.witnesses().len(),
+        "initiator should keep submitted witnesses and merge peer witnesses"
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_acceptor_restart_after_signed_submit_resumes_handshake() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    let pre_restart_state =
+        wait_for_external_funding_submitted_in_flight(&node_b, channel_id).await;
+    assert!(
+        matches!(
+            pre_restart_state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "acceptor should persist submitted external funding state before restart, got {:?}",
+        pre_restart_state.state
+    );
+
+    node_b.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+
+    let state = wait_for_external_funding_post_submit_progress(&node_b, channel_id).await;
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "acceptor should resume external funding handshake after restart, got {:?}",
+        state.state
+    );
+
+    assert!(
+        matches!(
+            node_a.submit_tx(signed_tx.clone().into_view()).await,
+            TxStatus::Committed(..)
+        ),
+        "funding tx should be committed after acceptor restart"
+    );
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+}
+
+#[tokio::test]
+async fn test_external_funding_timeout_still_applies_after_restart() {
+    init_tracing();
+
+    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("restart-timeout-node-{}", i)))
+            .base_dir_prefix(&format!("test-restart-timeout-node-{}-", i));
+        if i == 0 {
+            builder = builder.fiber_config_updater(|config| {
+                config.external_funding_timeout_seconds = 1;
+            });
+        }
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+
+    let (channel_id, _unsigned_tx) =
+        open_external_funding_channel(&nodes[0], &nodes[1], 100_000_000_000).await;
+
+    nodes[0].restart().await;
+
+    nodes[0]
+        .expect_event(
+            move |event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn test_external_funding_state_cleared_after_terminal_path() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message).expect("node_a alive");
+    assert!(
+        submit_result.is_ok(),
+        "submit signed funding tx should succeed"
+    );
+
+    assert!(
+        matches!(
+            node_a.submit_tx(signed_tx.clone().into_view()).await,
+            TxStatus::Committed(..)
+        ),
+        "funding tx should be committed"
+    );
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(matches!(state.state, ChannelState::ChannelReady));
+    assert!(
+        state.external_funding.is_none(),
+        "persisted external funding state should be cleared after channel ready"
     );
 }

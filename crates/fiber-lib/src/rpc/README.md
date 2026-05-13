@@ -425,6 +425,10 @@ Submits a signed funding transaction for an externally funded channel.
  final negotiated unsigned transaction with their wallet and submits it here.
  The signed transaction should be directly broadcastable and will not be structurally modified.
 
+ External signers must keep `inputs`, `outputs`, `outputs_data`, and `cell_deps`
+ unchanged. See the [external funding guide](../../../../docs/external-funding.md)
+ for signing details and examples.
+
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID returned from `open_channel_with_external_funding`.
