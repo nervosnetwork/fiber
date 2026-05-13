@@ -3971,18 +3971,17 @@ where
 
         if state.ephemeral_config.external_funding.enabled {
             state.persist_external_funding_state();
-
         }
         self.store.insert_channel_actor_state(state.clone());
 
         if state.needs_backup {
-                if let Some(ref store_actor) = self.store_actor {
-                    store_actor
-                        .cast(StoreActorMessage::RequestBackup)
-                        .map_err(|e| e.to_string())?;
-                }
-                state.needs_backup = false;
+            if let Some(ref store_actor) = self.store_actor {
+                store_actor
+                    .cast(StoreActorMessage::RequestBackup)
+                    .map_err(|e| e.to_string())?;
             }
+            state.needs_backup = false;
+        }
 
         let channel_id = state.get_id();
         let mut immediate_tlc_sets = HashMap::<Hash256, Vec<(Hash256, u64)>>::new();
@@ -4399,7 +4398,6 @@ impl<'de> Deserialize<'de> for ChannelActorState {
         };
         state.hydrate_external_funding_runtime();
         Ok(state)
-
     }
 }
 
@@ -5624,7 +5622,6 @@ impl ChannelActorState {
     }
 
     pub(crate) fn update_state(&mut self, new_state: ChannelState) {
-
         if self.state != new_state {
             debug!(
                 "Updating channel state from {:?} to {:?}",
@@ -8894,7 +8891,6 @@ impl ChannelActorState {
         Ok(())
     }
 }
-
 
 pub trait ChannelActorStateStore {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;

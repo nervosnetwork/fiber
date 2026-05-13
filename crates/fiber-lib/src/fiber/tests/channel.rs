@@ -9489,8 +9489,10 @@ async fn test_channel_stale_audit_failure_blocks_channel() {
     assert!(
         current_state.reestablishing,
         "Should still be in reestablishing phase"
-        );
+    );
 }
+
+#[tokio::test]
 async fn test_submit_signed_funding_tx_after_restart_for_external_funding() {
     init_tracing();
 
