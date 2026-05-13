@@ -183,8 +183,13 @@ impl InternalResult {
         assert!(len >= 2);
         let error_code = tlc_err.error_code;
         error!(
-            "Payment failed at node index {}: len: {:?} error_code: {:?}",
-            index, len, error_code
+            "Payment failed at node index {}: len: {:?} error_code: {:?} error_node={:?} error_channel={:?} route={:?}",
+            index,
+            len,
+            error_code,
+            tlc_err.error_node_id(),
+            tlc_err.error_channel_outpoint(),
+            nodes
         );
         if index == 0 {
             // we get error from the source node

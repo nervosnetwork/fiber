@@ -5,6 +5,8 @@ fiber:
   # Node name announced to the Fiber network. It is shown in RPC responses,
   # the TUI header, and the network graph.
   # announced_node_name: "my-fiber-node"
+  # Disable automatic peer reconnect backoff after disconnects.
+  # enable_peer_reconnect_backoff: true
   bootnode_addrs:
     - "/ip4/54.179.226.154/tcp/8228/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
     - "/ip4/16.163.7.105/tcp/8228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"

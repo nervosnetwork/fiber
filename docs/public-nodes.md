@@ -84,16 +84,16 @@ For example, if nodeA funds 499 CKB and the public node contributes 250 CKB:
    ```bash
    # Create local node directories
    mkdir -p $FNNDIR/nodeA/ckb $FNNDIR/nodeB/ckb
-   
+
    # Create accounts for nodeA and nodeB (replace <lock_arg_a/b> with the lock_arg from each output)
    ./ckb-cli account new  # -> nodeA account
    ./ckb-cli account export --lock-arg <lock_arg_a> --extended-privkey-path exported-key-a
    head -n 1 ./exported-key-a > $FNNDIR/nodeA/ckb/key && chmod 600 $FNNDIR/nodeA/ckb/key
-   
+
    ./ckb-cli account new  # -> nodeB account
    ./ckb-cli account export --lock-arg <lock_arg_b> --extended-privkey-path exported-key-b
    head -n 1 ./exported-key-b > $FNNDIR/nodeB/ckb/key && chmod 600 $FNNDIR/nodeB/ckb/key
-   
+
    # Verify keys
    ./ckb-cli util key-info --privkey-path $FNNDIR/nodeA/ckb/key
    ./ckb-cli util key-info --privkey-path $FNNDIR/nodeB/ckb/key
