@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use crate::rpc::watchtower::{
-    CreatePreimageParams, CreateWatchChannelParams, RemoveWatchChannelParams,
+    CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
     UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
     WatchtowerRpcClient,
 };
@@ -116,11 +116,13 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                 .await
                 .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
         }
-        NetworkServiceEvent::PreimageRemoved(_payment_hash) => {
-            // PreimageRemoved is a payment-hash scoped local cleanup signal. MPP splits can share
-            // the same payment hash while only some of them have completed off-chain, so forwarding
-            // this to watchtower can delete a preimage that another split still needs on-chain.
-            // Watchtower preimage cleanup must be channel-aware.
+        NetworkServiceEvent::PreimageRemoved(payment_hash) => {
+            watchtower_client
+                .remove_preimage(RemovePreimageParams {
+                    payment_hash: payment_hash.into(),
+                })
+                .await
+                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
         }
         _ => {
             // ignore other non-watchtower related events

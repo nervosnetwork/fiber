@@ -17,7 +17,10 @@ use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
-use fiber_types::{ChannelState, CloseFlags, Hash256, HashAlgorithm, NodeId, ShuttingDownFlags};
+use fiber_types::{
+    ChannelState, CloseFlags, Hash256, HashAlgorithm, NodeId, Privkey, SettlementData,
+    SettlementTlc, ShuttingDownFlags, TLCId,
+};
 use ractor::{ActorProcessingErr, ActorRef};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -116,11 +119,46 @@ fn replay_watchtower_preimage_events(
                     .insert_watch_preimage(NodeId::local(), payment_hash, *preimage);
             }
             WatchtowerPreimageEvent::Removed => {
-                // Hash-scoped preimage removal is only local cleanup. Watchtower must keep the
-                // preimage until channel-aware settlement cleanup can prove no watched TLC needs it.
+                node.store
+                    .remove_watch_preimage(NodeId::local(), payment_hash);
             }
         }
     }
+}
+
+fn insert_watch_channel_with_pending_tlc(
+    node: &NetworkNode,
+    channel_id: Hash256,
+    payment_hash: Hash256,
+) {
+    let local_settlement_key = Privkey::from(&[1; 32]);
+    let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
+    let local_funding_pubkey = Privkey::from(&[3; 32]).pubkey();
+    let remote_funding_pubkey = Privkey::from(&[4; 32]).pubkey();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(0),
+            hash_algorithm: HashAlgorithm::default(),
+            payment_amount: 42,
+            payment_hash,
+            expiry: u64::MAX,
+            local_key: Privkey::from(&[5; 32]),
+            remote_key: Privkey::from(&[6; 32]).pubkey(),
+        }],
+    };
+
+    node.store.insert_watch_channel(
+        NodeId::local(),
+        channel_id,
+        None,
+        local_settlement_key,
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
+        settlement_data,
+    );
 }
 
 #[tokio::test]
@@ -726,6 +764,7 @@ async fn test_mpp_payer_force_close_keeps_watchtower_preimage_for_onchain_split(
             .any(|event| matches!(event, WatchtowerPreimageEvent::Created(_))),
         "the forwarding node should reveal the preimage to watchtower, preimage events: {preimage_events:?}"
     );
+    insert_watch_channel_with_pending_tlc(&node_1, channels[0], payment_hash);
     replay_watchtower_preimage_events(&node_1, payment_hash, &preimage_events);
     assert!(
         node_1.store.get_watch_preimage(&payment_hash).is_some(),
@@ -903,6 +942,7 @@ async fn test_mpp_force_close_pending_confirmation_removes_watchtower_preimage_r
             .any(|event| matches!(event, WatchtowerPreimageEvent::Created(_))),
         "the forwarding node should reveal the preimage to watchtower, preimage events: {preimage_events:?}"
     );
+    insert_watch_channel_with_pending_tlc(&node_1, channels[0], payment_hash);
     replay_watchtower_preimage_events(&node_1, payment_hash, &preimage_events);
     assert!(
         node_1.store.get_watch_preimage(&payment_hash).is_some(),
