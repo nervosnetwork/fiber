@@ -1277,18 +1277,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "console"
-version = "0.16.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
-dependencies = [
- "encode_unicode",
- "libc",
- "unicode-width 0.2.2",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1858,12 +1846,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
-
-[[package]]
 name = "enum-repr-derive"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1941,11 +1923,11 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-json-types"
-version = "0.8.1"
+version = "0.9.0-rc1"
 dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-types",
+ "fiber-types 0.9.0-rc1",
  "hex",
  "molecule",
  "musig2",
@@ -1970,14 +1952,16 @@ dependencies = [
 
 [[package]]
 name = "fiber-store"
-version = "0.8.1"
+version = "0.9.0-rc1"
 dependencies = [
  "anyhow",
+ "bincode 1.3.3",
  "ckb-rocksdb",
- "console",
  "console_error_panic_hook",
+ "fiber-types 0.8.1",
+ "fiber-types 0.9.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
  "fiber-wasm-db-common",
- "indicatif",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
  "wasm-bindgen",
@@ -1987,6 +1971,42 @@ dependencies = [
 [[package]]
 name = "fiber-types"
 version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f18f27f637a959376639318b6159ecf458f5163466dc2d71795bfcf8fe2f2f1"
+dependencies = [
+ "anyhow",
+ "arcode",
+ "bech32 0.9.1",
+ "bincode 1.3.3",
+ "bitflags 2.11.0",
+ "bs58",
+ "ckb-gen-types",
+ "ckb-hash",
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "fiber-sphinx",
+ "getrandom 0.2.17",
+ "hex",
+ "molecule",
+ "musig2",
+ "nom",
+ "num_enum",
+ "paste",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2 0.10.9",
+ "strum 0.26.3",
+ "tentacle-multiaddr",
+ "thiserror 1.0.69",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "fiber-types"
+version = "0.9.0-rc1"
 dependencies = [
  "anyhow",
  "arcode",
@@ -2003,6 +2023,42 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "lightning-invoice",
+ "molecule",
+ "musig2",
+ "nom",
+ "num_enum",
+ "paste",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2 0.10.9",
+ "strum 0.26.3",
+ "tentacle-multiaddr",
+ "thiserror 1.0.69",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "fiber-types"
+version = "0.9.0-rc1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a62fb6b5b97cdd8fe3b3de36525e58acd3e37bbc2c503984f64ac778169414f"
+dependencies = [
+ "anyhow",
+ "arcode",
+ "bech32 0.9.1",
+ "bincode 1.3.3",
+ "bitflags 2.11.0",
+ "bs58",
+ "ckb-gen-types",
+ "ckb-hash",
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "fiber-sphinx",
+ "getrandom 0.2.17",
+ "hex",
  "molecule",
  "musig2",
  "nom",
@@ -2054,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.8.1"
+version = "0.9.0-rc1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2075,14 +2131,13 @@ dependencies = [
  "fiber-json-types",
  "fiber-sphinx",
  "fiber-store",
- "fiber-types",
+ "fiber-types 0.9.0-rc1",
  "futures",
  "getrandom 0.3.4",
  "git-version",
  "hex",
  "home",
  "hyper 1.8.1",
- "indicatif",
  "jsonrpsee 0.25.1",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
@@ -2975,19 +3030,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indicatif"
-version = "0.18.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb"
-dependencies = [
- "console",
- "portable-atomic",
- "unicode-width 0.2.2",
- "unit-prefix",
- "web-time",
-]
-
-[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3574,7 +3616,7 @@ dependencies = [
  "miette-derive",
  "once_cell",
  "thiserror 1.0.69",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -3823,15 +3865,14 @@ dependencies = [
 
 [[package]]
 name = "openssl"
-version = "0.10.78"
+version = "0.10.79"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f38c4372413cdaaf3cc79dd92d29d7d9f5ab09b51b10dded508fb90bb70b9222"
+checksum = "bf0b434746ee2832f4f0baf10137e1cabb18cbe6912c69e2e33263c45250f542"
 dependencies = [
  "bitflags 2.11.0",
  "cfg-if",
  "foreign-types",
  "libc",
- "once_cell",
  "openssl-macros",
  "openssl-sys",
 ]
@@ -3864,9 +3905,9 @@ dependencies = [
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.114"
+version = "0.9.115"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13ce1245cd07fcc4cfdb438f7507b0c7e4f3849a69fd84d52374c66d83741bb6"
+checksum = "158fe5b292746440aa6e7a7e690e55aeb72d41505e2804c23c6973ad0e9c9781"
 dependencies = [
  "cc",
  "libc",
@@ -4199,12 +4240,6 @@ dependencies = [
  "opaque-debug",
  "universal-hash",
 ]
-
-[[package]]
-name = "portable-atomic"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "potential_utf"
@@ -6204,22 +6239,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
-name = "unicode-width"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
-
-[[package]]
 name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "unit-prefix"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
 name = "universal-hash"

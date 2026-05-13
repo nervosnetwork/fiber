@@ -1,4 +1,4 @@
-use crate::fiber::network::PeerDisconnectReason;
+use crate::fiber::network::{PeerConnectSource, PeerDisconnectReason};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::log_and_error;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
@@ -84,6 +84,7 @@ impl PeerRpcServerImpl {
                 NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
                     address,
                     save,
+                    PeerConnectSource::Manual,
                     Some(rpc_reply),
                 ))
             };
@@ -97,6 +98,7 @@ impl PeerRpcServerImpl {
                 NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
                     pubkey,
                     addr_transport,
+                    PeerConnectSource::Manual,
                     rpc_reply,
                 ))
             };
