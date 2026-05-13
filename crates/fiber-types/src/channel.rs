@@ -1564,7 +1564,27 @@ pub struct ChannelActorData {
 
     /// Persisted state for an in-progress external funding flow.
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_external_funding_tail")]
     pub external_funding: Option<ExternalFundingPersistState>,
+}
+
+fn deserialize_external_funding_tail<'de, D>(
+    deserializer: D,
+) -> Result<Option<ExternalFundingPersistState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<ExternalFundingPersistState>::deserialize(deserializer) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let message = error.to_string();
+            if message.contains("unexpected end of file") {
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
