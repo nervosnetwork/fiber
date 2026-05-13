@@ -268,6 +268,20 @@ pub enum ChannelConnectivityState {
     Syncing,
 }
 
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExternalFundingPersistState {
+    #[serde_as(as = "EntityHex")]
+    pub funding_lock_script: Script,
+    #[serde_as(as = "Vec<EntityHex>")]
+    pub funding_lock_script_cell_deps: Vec<ckb_types::packed::CellDep>,
+    #[serde_as(as = "EntityHex")]
+    pub unsigned_funding_tx: Transaction,
+    pub started_at_ms: u64,
+    pub signed_submitted: bool,
+    pub peer_commitment_signed_received: bool,
+}
+
 impl ChannelState {
     pub fn is_awaiting_external_funding(&self) -> bool {
         matches!(
@@ -1550,6 +1564,10 @@ pub struct ChannelActorData {
 
     /// Runtime connectivity state persisted for restart recovery.
     pub connectivity_state: ChannelConnectivityState,
+
+    /// Persisted state for an in-progress external funding flow.
+    #[serde(default)]
+    pub external_funding: Option<ExternalFundingPersistState>,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {

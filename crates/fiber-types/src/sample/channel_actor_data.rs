@@ -122,6 +122,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         last_revoke_ack_msg: None,
         pending_replay_updates: vec![],
         last_was_revoke: false,
+        external_funding: None,
         created_at: SystemTime::UNIX_EPOCH,
     }
 }
@@ -347,6 +348,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         last_revoke_ack_msg: Some(revoke_and_ack),
         pending_replay_updates: vec![],
         last_was_revoke: true,
+        external_funding: None,
         created_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_704_067_200_000),
     }
 }

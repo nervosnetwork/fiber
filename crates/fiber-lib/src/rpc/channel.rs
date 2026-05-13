@@ -91,6 +91,10 @@ trait ChannelRpc {
     /// After calling `open_channel_with_external_funding`, the user signs the returned
     /// final negotiated unsigned transaction with their wallet and submits it here.
     /// The signed transaction should be directly broadcastable and will not be structurally modified.
+    ///
+    /// External signers must keep `inputs`, `outputs`, `outputs_data`, and `cell_deps`
+    /// unchanged. See the [external funding guide](../../../../docs/external-funding.md)
+    /// for signing details and examples.
     #[method(name = "submit_signed_funding_tx")]
     async fn submit_signed_funding_tx(
         &self,
