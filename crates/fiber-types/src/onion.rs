@@ -113,6 +113,13 @@ impl TlcErrPacket {
         use secp256k1::{PublicKey, SecretKey};
 
         if self.is_plaintext() {
+            if !hops_public_keys.is_empty() {
+                tracing::warn!(
+                    target: "fnn::fiber::types::TlcErrPacket",
+                    "reject plaintext TLC error packet from remote route"
+                );
+                return None;
+            }
             let error = TlcErr::deserialize(&self.onion_packet[32..]);
             if error.is_some() {
                 return error;
