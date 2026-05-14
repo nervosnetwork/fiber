@@ -1614,7 +1614,13 @@ where
             custom_records,
         }) = last_hop_inner_onion
         {
-            if forward_amount != add_tlc.amount || add_tlc.amount != final_amount {
+            let inner_mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
+            let final_amount_matches = inner_mpp_record
+                .as_ref()
+                .map(|record| record.total_amount == final_amount && add_tlc.amount <= final_amount)
+                .unwrap_or(add_tlc.amount == final_amount);
+
+            if forward_amount != add_tlc.amount || !final_amount_matches {
                 error!(
                     "final amount mismatch for trampoline final hop: {:?}, {:?}, {:?} add_tlc.amount: {:?}",
                     payment_hash, forward_amount, final_amount, add_tlc.amount
@@ -1636,7 +1642,7 @@ where
             }
 
             final_payment_preimage = payment_preimage;
-            mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
+            mpp_record = inner_mpp_record;
             final_custom_records = custom_records;
         } else {
             if forward_amount != add_tlc.amount {
