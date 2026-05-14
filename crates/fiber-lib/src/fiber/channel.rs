@@ -1784,34 +1784,7 @@ where
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
-                // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
-                // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
-                // into a new error created with the *outer* shared secret (for this hop).
-                let remove_reason = match remove_reason.clone() {
-                    RemoveTlcReason::RemoveTlcFail(inner_error_packet)
-                        if tlc_info.is_trampoline_hop =>
-                    {
-                        match TlcErrPacket::new_trampoline_failed(
-                            TlcErrorCode::TemporaryNodeFailure,
-                            self.get_local_pubkey(),
-                            inner_error_packet.onion_packet.clone(),
-                            &tlc_info.shared_secret,
-                        ) {
-                            Some(wrapper) => RemoveTlcReason::RemoveTlcFail(wrapper),
-                            None => {
-                                error!(
-                                    "Trampoline failure wrapper missing upstream shared secret for channel {:?} tlc {:?}",
-                                    state.get_id(),
-                                    tlc_id
-                                );
-                                RemoveTlcReason::RemoveTlcFail(
-                                    inner_error_packet.backward(&tlc_info.shared_secret),
-                                )
-                            }
-                        }
-                    }
-                    other => other.backward(&tlc_info.shared_secret),
-                };
+                let remove_reason = remove_reason.backward(&tlc_info.shared_secret);
 
                 let _ = self.register_retryable_relay_tlc_remove(
                     TLCId::Received(previous_tlc_id),
