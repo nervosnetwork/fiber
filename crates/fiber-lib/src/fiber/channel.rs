@@ -1609,12 +1609,18 @@ where
 
         if let Some(TrampolineHopPayload::Final {
             final_amount,
-            final_tlc_expiry_delta: _,
+            final_tlc_expiry_delta,
             payment_preimage,
             custom_records,
         }) = last_hop_inner_onion
         {
-            if forward_amount != add_tlc.amount || forward_amount > final_amount {
+            let inner_mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
+            let final_amount_matches = inner_mpp_record
+                .as_ref()
+                .map(|record| record.total_amount == final_amount && add_tlc.amount <= final_amount)
+                .unwrap_or(add_tlc.amount == final_amount);
+
+            if forward_amount != add_tlc.amount || !final_amount_matches {
                 error!(
                     "final amount mismatch for trampoline final hop: {:?}, {:?}, {:?} add_tlc.amount: {:?}",
                     payment_hash, forward_amount, final_amount, add_tlc.amount
@@ -1622,8 +1628,21 @@ where
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
 
+            if add_tlc.expiry < peeled_payment_expiry {
+                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+            }
+
+            let Some(min_final_expiry) =
+                now_timestamp_as_millis_u64().checked_add(final_tlc_expiry_delta)
+            else {
+                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+            };
+            if add_tlc.expiry < min_final_expiry {
+                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+            }
+
             final_payment_preimage = payment_preimage;
-            mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
+            mpp_record = inner_mpp_record;
             final_custom_records = custom_records;
         } else {
             if forward_amount != add_tlc.amount {
