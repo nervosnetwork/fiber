@@ -723,7 +723,14 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
             inner_error_packet: inner_err_packet.onion_packet.clone(),
         }),
     };
-    let wrapper_packet = TlcErrPacket::new(wrapper_err.clone(), &hops_ss[0]);
+    let wrapper_packet = TlcErrPacket::new_trampoline_failed(
+        inner_err.error_code,
+        trampoline_node_id,
+        inner_err_packet.onion_packet.clone(),
+        &hops_ss[0],
+    )
+    .expect("non-plaintext trampoline wrapper");
+    assert!(!wrapper_packet.is_plaintext());
 
     let decoded = wrapper_packet
         .decode(session_key.as_ref(), hops_path.clone())
@@ -734,10 +741,10 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_trampoline_failed_wrapper_rejects_plaintext_for_direct_trampoline_hop() {
+fn test_direct_trampoline_failed_wrapper_uses_outer_shared_secret() {
     // Payer -> trampoline is a direct hop. There is no intermediate node before the trampoline
-    // that could re-encrypt or otherwise hide a plaintext failure packet, so the payer must reject
-    // a TrampolineFailed wrapper that was not encrypted with the outer hop shared secret.
+    // that could re-encrypt or otherwise hide a plaintext failure packet, so the trampoline wrapper
+    // must be created with the outer hop shared secret.
     let trampoline = Pubkey(
         PublicKey::from_str("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619")
             .expect("valid public key")
@@ -745,6 +752,9 @@ fn test_trampoline_failed_wrapper_rejects_plaintext_for_direct_trampoline_hop() 
     );
     let hops_path = vec![trampoline];
     let session_key = SecretKey::from_slice(&[0x43; 32]).expect("32 bytes, within curve order");
+    let hops_keys: Vec<PublicKey> = hops_path.iter().map(|k| k.into()).collect();
+    let hops_ss: Vec<[u8; 32]> =
+        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1).collect();
     let inner_error_packet = TlcErrPacket::new(
         TlcErr::new(TlcErrorCode::TemporaryNodeFailure),
         &NO_SHARED_SECRET,
@@ -753,18 +763,33 @@ fn test_trampoline_failed_wrapper_rejects_plaintext_for_direct_trampoline_hop() 
         error_code: TlcErrorCode::TemporaryNodeFailure,
         extra_data: Some(TlcErrData::TrampolineFailed {
             node_id: trampoline,
-            inner_error_packet: inner_error_packet.onion_packet,
+            inner_error_packet: inner_error_packet.onion_packet.clone(),
         }),
     };
 
-    let plaintext_wrapper = TlcErrPacket::new(wrapper_err, &NO_SHARED_SECRET);
-    assert!(plaintext_wrapper.is_plaintext());
     assert!(
-        plaintext_wrapper
-            .decode(session_key.as_ref(), hops_path)
-            .is_none(),
-        "payer must not accept plaintext trampoline failure from a remote hop"
+        TlcErrPacket::new_trampoline_failed(
+            wrapper_err.error_code,
+            trampoline,
+            inner_error_packet.onion_packet.clone(),
+            &NO_SHARED_SECRET,
+        )
+        .is_none(),
+        "trampoline wrapper must not be created with NO_SHARED_SECRET"
     );
+
+    let wrapper_packet = TlcErrPacket::new_trampoline_failed(
+        wrapper_err.error_code,
+        trampoline,
+        inner_error_packet.onion_packet,
+        &hops_ss[0],
+    )
+    .expect("direct trampoline wrapper uses outer shared secret");
+    assert!(!wrapper_packet.is_plaintext());
+    let decoded = wrapper_packet
+        .decode(session_key.as_ref(), hops_path)
+        .expect("payer decodes direct trampoline wrapper");
+    assert_eq!(decoded, wrapper_err);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

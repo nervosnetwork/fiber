@@ -64,8 +64,8 @@ use fiber_types::{
     PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey,
     Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
     RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -1791,15 +1791,24 @@ where
                     RemoveTlcReason::RemoveTlcFail(inner_error_packet)
                         if tlc_info.is_trampoline_hop =>
                     {
-                        let mut tlc_err = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
-                        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
-                            node_id: self.get_local_pubkey(),
-                            inner_error_packet: inner_error_packet.onion_packet,
-                        });
-                        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            tlc_err,
+                        match TlcErrPacket::new_trampoline_failed(
+                            TlcErrorCode::TemporaryNodeFailure,
+                            self.get_local_pubkey(),
+                            inner_error_packet.onion_packet.clone(),
                             &tlc_info.shared_secret,
-                        ))
+                        ) {
+                            Some(wrapper) => RemoveTlcReason::RemoveTlcFail(wrapper),
+                            None => {
+                                error!(
+                                    "Trampoline failure wrapper missing upstream shared secret for channel {:?} tlc {:?}",
+                                    state.get_id(),
+                                    tlc_id
+                                );
+                                RemoveTlcReason::RemoveTlcFail(
+                                    inner_error_packet.backward(&tlc_info.shared_secret),
+                                )
+                            }
+                        }
                     }
                     other => other.backward(&tlc_info.shared_secret),
                 };

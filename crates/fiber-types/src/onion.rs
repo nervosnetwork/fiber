@@ -6,7 +6,7 @@
 use crate::gen::fiber as molecule_fiber;
 use crate::payment::{
     BasicMppPaymentData, CurrentPaymentHopData, PaymentCustomRecords, PaymentHopData, TlcErr,
-    USER_CUSTOM_RECORDS_MAX_INDEX,
+    TlcErrData, TlcErrorCode, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ckb_types::prelude::{Pack, Unpack};
 use fiber_sphinx::OnionErrorPacket;
@@ -113,13 +113,6 @@ impl TlcErrPacket {
         use secp256k1::{PublicKey, SecretKey};
 
         if self.is_plaintext() {
-            if !hops_public_keys.is_empty() {
-                tracing::warn!(
-                    target: "fnn::fiber::types::TlcErrPacket",
-                    "reject plaintext TLC error packet from remote route"
-                );
-                return None;
-            }
             let error = TlcErr::deserialize(&self.onion_packet[32..]);
             if error.is_some() {
                 return error;
@@ -149,6 +142,26 @@ impl TlcErrPacket {
                 }
                 error
             })
+    }
+
+    /// Create a trampoline failure wrapper encrypted with the upstream outer shared secret.
+    /// Returning `None` means the caller would have produced a plaintext trampoline wrapper.
+    pub fn new_trampoline_failed(
+        error_code: TlcErrorCode,
+        node_id: crate::Pubkey,
+        inner_error_packet: Vec<u8>,
+        shared_secret: &[u8; 32],
+    ) -> Option<Self> {
+        if shared_secret == &NO_SHARED_SECRET {
+            return None;
+        }
+
+        let mut tlc_err = TlcErr::new(error_code);
+        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
+            node_id,
+            inner_error_packet,
+        });
+        Some(Self::new(tlc_err, shared_secret))
     }
 }
 

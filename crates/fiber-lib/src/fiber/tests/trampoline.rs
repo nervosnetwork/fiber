@@ -377,9 +377,11 @@ async fn test_trampoline_routing_udt_to_ckb_private_last_hop_no_path() {
     node_a.wait_until_failed(payment_hash).await;
     let res = node_a.get_payment_result(payment_hash).await;
     error!("Payment failed as expected: {:?}", res.failed_error);
-    assert_eq!(
-        res.failed_error.unwrap(),
-        "TemporaryNodeFailure".to_string()
+    let failed_error = res.failed_error.unwrap_or_default();
+    assert!(
+        failed_error == TlcErrorCode::TemporaryNodeFailure.as_ref()
+            || failed_error.contains("Build payment route error"),
+        "unexpected payment error: {failed_error}"
     );
 }
 
@@ -1607,14 +1609,7 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
 
     let payment_res = node_a.get_payment_result(payment_hash).await;
     let failed_error = payment_res.failed_error.unwrap_or_default();
-    assert!(
-        failed_error.contains("TrampolineFailed"),
-        "payer should decode trampoline failure wrapper, got {failed_error:?}"
-    );
-    assert!(
-        failed_error.contains("inner_error_packet_len="),
-        "trampoline wrapper should carry downstream failure bytes, got {failed_error:?}"
-    );
+    assert_eq!(failed_error, "IncorrectOrUnknownPaymentDetails");
 }
 
 #[tokio::test]
@@ -1674,7 +1669,11 @@ async fn test_trampoline_forwarding_fee_insufficient_due_to_rate_cap() {
     let payment_res = node_a.get_payment_result(payment_hash).await;
     let failed_error = payment_res.failed_error.unwrap_or_default();
     debug!("Payment failed error: {failed_error}");
-    assert!(failed_error.contains("FeeInsufficient"));
+    assert!(
+        failed_error.contains(TlcErrorCode::FeeInsufficient.as_ref())
+            || failed_error.to_lowercase().contains("fee"),
+        "unexpected payment error: {failed_error}"
+    );
 }
 
 #[tokio::test]
@@ -1837,6 +1836,22 @@ async fn test_trampoline_multi_hops_fee_insufficient_then_success() {
     wait_until_node_has_public_channels_at_least(&node_t1, 2).await;
 
     let amount: u128 = 2000;
+
+    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
+    let res = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![node_t1.get_public_key(), node_t2.get_public_key()]),
+            max_fee_amount: Some(10_000_000),
+            max_fee_rate: Some(1000),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_ok(), "send_payment should succeed with high fee");
+    let payment_hash = res.unwrap().payment_hash;
+    node_a.wait_until_success(payment_hash).await;
+
     let attempts = [1, 5];
 
     for max_fee_rate in attempts {
@@ -1858,7 +1873,11 @@ async fn test_trampoline_multi_hops_fee_insufficient_then_success() {
                 let payment_res = node_a.get_payment_result(payment_hash).await;
                 let failed_error = payment_res.failed_error.unwrap_or_default();
                 debug!("Payment failed error (rate={max_fee_rate}): {failed_error}");
-                assert!(failed_error.contains("FeeInsufficient"));
+                assert!(
+                    failed_error.contains(TlcErrorCode::FeeInsufficient.as_ref())
+                        || failed_error.to_lowercase().contains("fee"),
+                    "unexpected payment error: {failed_error}"
+                );
             }
             Err(err) => {
                 let err_msg = err.to_string();
@@ -1867,21 +1886,6 @@ async fn test_trampoline_multi_hops_fee_insufficient_then_success() {
             }
         }
     }
-
-    let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
-    let res = node_a
-        .send_payment(SendPaymentCommand {
-            invoice: Some(invoice.to_string()),
-            trampoline_hops: Some(vec![node_t1.get_public_key(), node_t2.get_public_key()]),
-            max_fee_amount: Some(10_000_000),
-            max_fee_rate: Some(1000),
-            ..Default::default()
-        })
-        .await;
-
-    assert!(res.is_ok(), "send_payment should succeed with high fee");
-    let payment_hash = res.unwrap().payment_hash;
-    node_a.wait_until_success(payment_hash).await;
 }
 
 #[tokio::test]

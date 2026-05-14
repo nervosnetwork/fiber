@@ -105,8 +105,8 @@ use fiber_types::{
     FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket,
-    TlcErrorCode, TrampolineContext, UdtCfgInfos,
+    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
+    TrampolineContext, UdtCfgInfos,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -5466,18 +5466,22 @@ where
                             .unwrap_or_else(|| {
                                 TlcErrPacket::new(TlcErr::new(error_code), &[0u8; 32]).onion_packet
                             });
-                        let mut tlc_err = TlcErr::new(error_code);
-                        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
-                            node_id: self.get_public_key(),
+                        let Some(wrapper_packet) = TlcErrPacket::new_trampoline_failed(
+                            error_code,
+                            self.get_public_key(),
                             inner_error_packet,
-                        });
+                            &shared_secret,
+                        ) else {
+                            warn!(
+                                "Trampoline payment failed with plaintext upstream shared secret for channel {:?} tlc {}",
+                                prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
+                            );
+                            continue;
+                        };
                         let command = ChannelCommand::RemoveTlc(
                             RemoveTlcCommand {
                                 id: prev_tlc.prev_tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    tlc_err,
-                                    &shared_secret,
-                                )),
+                                reason: RemoveTlcReason::RemoveTlcFail(wrapper_packet),
                             },
                             rpc_reply,
                         );
