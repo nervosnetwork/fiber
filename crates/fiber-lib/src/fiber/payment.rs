@@ -1744,18 +1744,11 @@ where
                         debug_event!(self.network, "InvalidOnionError");
                         TlcErr::new(TlcErrorCode::InvalidOnionError)
                     });
-                let need_to_retry = if matches!(
-                    tlc_error.extra_data,
-                    Some(TlcErrData::TrampolineFailed { .. })
-                ) {
-                    false
-                } else {
-                    self.network_graph.write().await.record_attempt_fail(
-                        &attempt,
-                        tlc_error.clone(),
-                        false,
-                    )
-                };
+                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
+                    &attempt,
+                    tlc_error.clone(),
+                    false,
+                );
                 debug!(
                     "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
                     payment_hash,
