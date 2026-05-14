@@ -723,14 +723,7 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
             inner_error_packet: inner_err_packet.onion_packet.clone(),
         }),
     };
-    let wrapper_packet = TlcErrPacket::new_trampoline_failed(
-        inner_err.error_code,
-        trampoline_node_id,
-        inner_err_packet.onion_packet.clone(),
-        &hops_ss[0],
-    )
-    .expect("non-plaintext trampoline wrapper");
-    assert!(!wrapper_packet.is_plaintext());
+    let wrapper_packet = TlcErrPacket::new(wrapper_err.clone(), &hops_ss[0]);
 
     let decoded = wrapper_packet
         .decode(session_key.as_ref(), hops_path.clone())

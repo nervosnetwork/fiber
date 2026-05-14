@@ -1241,7 +1241,14 @@ where
             match build_route_result {
                 Err(e) => {
                     error!("build_payment_routes failed to build route: {}", e);
-                    let error = format!("Failed to build route, {}", e);
+                    let error = if session.request.trampoline_context.is_some() {
+                        session
+                            .last_error_code
+                            .get_or_insert(TlcErrorCode::TemporaryNodeFailure);
+                        TlcErrorCode::TemporaryNodeFailure.as_ref().to_string()
+                    } else {
+                        format!("Failed to build route, {}", e)
+                    };
                     return Err(Error::SendPaymentError(error));
                 }
                 Ok(mut hops) => {
@@ -1387,7 +1394,7 @@ where
                 cur_max_fee, local_fee
             );
             return Err(Error::SendPaymentError(
-                "Trampoline forwarding fee insufficient".to_string(),
+                TlcErrorCode::FeeInsufficient.as_ref().to_string(),
             ));
         }
         *max_fee = Some(cur_max_fee - local_fee);
@@ -1737,11 +1744,18 @@ where
                         debug_event!(self.network, "InvalidOnionError");
                         TlcErr::new(TlcErrorCode::InvalidOnionError)
                     });
-                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
-                    &attempt,
-                    tlc_error.clone(),
-                    false,
-                );
+                let need_to_retry = if matches!(
+                    tlc_error.extra_data,
+                    Some(TlcErrData::TrampolineFailed { .. })
+                ) {
+                    false
+                } else {
+                    self.network_graph.write().await.record_attempt_fail(
+                        &attempt,
+                        tlc_error.clone(),
+                        false,
+                    )
+                };
                 debug!(
                     "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
                     payment_hash,
