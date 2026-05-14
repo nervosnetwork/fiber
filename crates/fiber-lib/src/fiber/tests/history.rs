@@ -104,21 +104,26 @@ fn test_trampoline_failure_does_not_mark_outer_route_history() {
             channel_outpoint: gen_rand_channel_outpoint(),
         },
     ];
-    let tlc_err = TlcErr {
-        error_code: TlcErrorCode::FeeInsufficient,
-        extra_data: Some(TlcErrData::TrampolineFailed {
-            node_id: trampoline,
-            inner_error_packet: vec![1, 2, 3],
-        }),
-    };
+    for (error_code, expected_retry) in [
+        (TlcErrorCode::FeeInsufficient, false),
+        (TlcErrorCode::IncorrectOrUnknownPaymentDetails, false),
+    ] {
+        let tlc_err = TlcErr {
+            error_code,
+            extra_data: Some(TlcErrData::TrampolineFailed {
+                node_id: trampoline,
+                inner_error_packet: vec![1, 2, 3],
+            }),
+        };
 
-    let mut result = InternalResult::default();
-    let need_retry = result.record_payment_fail(&nodes, tlc_err);
+        let mut result = InternalResult::default();
+        let need_retry = result.record_payment_fail(&nodes, tlc_err);
 
-    assert!(!need_retry);
-    assert!(result.pairs.is_empty());
-    assert!(result.nodes_to_channel_map.is_empty());
-    assert!(result.fail_node.is_none());
+        assert_eq!(need_retry, expected_retry);
+        assert!(result.pairs.is_empty());
+        assert!(result.nodes_to_channel_map.is_empty());
+        assert!(result.fail_node.is_none());
+    }
 }
 
 #[test]

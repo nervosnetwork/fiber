@@ -172,12 +172,12 @@ impl InternalResult {
             );
             // The payer can decode the trampoline failure wrapper, but the inner route was chosen
             // by the trampoline node and is not represented in this payment route. Do not penalize
-            // the visible route or retry the same trampoline path automatically.
+            // the visible route. Use the wrapped error code only to decide whether the payer may
+            // try another trampoline route.
             return false;
         }
 
         let mut need_retry = true;
-
         let error_index = nodes
             .iter()
             .position(|s| Some(s.pubkey) == tlc_err.error_node_id());
