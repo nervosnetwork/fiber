@@ -105,8 +105,8 @@ use fiber_types::{
     FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos,
+    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket,
+    TlcErrorCode, TrampolineContext, UdtCfgInfos,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -880,7 +880,7 @@ pub enum NetworkActorEvent {
     ChannelActorStopped(Hash256, StopReason),
 
     // A payment actor stopped event.
-    PaymentActorStopped(Hash256),
+    PaymentActorStopped(Hash256, Option<TlcErrPacket>),
 
     // Channel settlement check completed - channel is fully settled on-chain.
     ChannelSettlementCompleted(Hash256),
@@ -1520,8 +1520,10 @@ where
                 }
                 state.on_channel_actor_stopped(channel_id, reason).await;
             }
-            NetworkActorEvent::PaymentActorStopped(payment_hash) => {
-                state.on_payment_actor_stopped(payment_hash).await;
+            NetworkActorEvent::PaymentActorStopped(payment_hash, last_error_packet) => {
+                state
+                    .on_payment_actor_stopped(payment_hash, last_error_packet)
+                    .await;
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
                 if let Some(channel_actor) = state.channels.get(&channel_id) {
@@ -5393,7 +5395,11 @@ where
         .await;
     }
 
-    async fn on_payment_actor_stopped(&mut self, payment_hash: Hash256) {
+    async fn on_payment_actor_stopped(
+        &mut self,
+        payment_hash: Hash256,
+        last_error_packet: Option<TlcErrPacket>,
+    ) {
         debug!("Payment actor stopped {payment_hash}");
         if self.inflight_payments.remove(&payment_hash).is_none() {
             error!("Can't find inflight payment actor");
@@ -5447,12 +5453,29 @@ where
                     for prev_tlc in &context.previous_tlcs {
                         let (send, _recv) = oneshot::channel();
                         let rpc_reply = RpcReplyPort::from(send);
-                        let shared_secret = prev_tlc.shared_secret.unwrap_or([0u8; 32]);
+                        let Some(shared_secret) = prev_tlc.shared_secret else {
+                            warn!(
+                                "Trampoline payment failed without upstream shared secret for channel {:?} tlc {}",
+                                prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
+                            );
+                            continue;
+                        };
+                        let inner_error_packet = last_error_packet
+                            .as_ref()
+                            .map(|packet| packet.onion_packet.clone())
+                            .unwrap_or_else(|| {
+                                TlcErrPacket::new(TlcErr::new(error_code), &[0u8; 32]).onion_packet
+                            });
+                        let mut tlc_err = TlcErr::new(error_code);
+                        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
+                            node_id: self.get_public_key(),
+                            inner_error_packet,
+                        });
                         let command = ChannelCommand::RemoveTlc(
                             RemoveTlcCommand {
                                 id: prev_tlc.prev_tlc_id,
                                 reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    TlcErr::new(error_code),
+                                    tlc_err,
                                     &shared_secret,
                                 )),
                             },

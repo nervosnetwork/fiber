@@ -1606,7 +1606,15 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
     node_a.wait_until_failed(payment_hash).await;
 
     let payment_res = node_a.get_payment_result(payment_hash).await;
-    assert!(payment_res.failed_error.is_some());
+    let failed_error = payment_res.failed_error.unwrap_or_default();
+    assert!(
+        failed_error.contains("TrampolineFailed"),
+        "payer should decode trampoline failure wrapper, got {failed_error:?}"
+    );
+    assert!(
+        failed_error.contains("inner_error_packet_len="),
+        "trampoline wrapper should carry downstream failure bytes, got {failed_error:?}"
+    );
 }
 
 #[tokio::test]

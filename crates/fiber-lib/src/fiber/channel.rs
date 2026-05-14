@@ -2280,10 +2280,11 @@ where
             NetworkActorCommand::SendPaymentOnionPacket(
                 SendOnionPacketCommand {
                     peeled_onion_packet: peeled_onion_packet.clone(),
-                    previous_tlc: Some(PrevTlcInfo::new(
+                    previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
                         state.get_id(),
                         u64::from(tlc_id),
                         forward_fee,
+                        peeled_onion_packet.shared_secret,
                     )),
                     payment_hash,
                     // forward tlc always set attempt_id to None
