@@ -1025,14 +1025,22 @@ where
         let previous_remote_nonce = state.last_committed_remote_nonce.clone();
         let next_commitment_nonce = commitment_signed.next_commitment_nonce.clone();
         // build commitment tx and verify signature from remote, if passed send ACK for partner
-        if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
-            error!(
-                "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
-                err,
-                state.get_id()
-            );
-            self.notify_network_actor_shutdown_me(state);
-            return Err(err);
+        let commitment_signed_processed = match state
+            .verify_commitment_signed_and_send_ack(commitment_signed.clone())
+        {
+            Ok(processed) => processed,
+            Err(err) => {
+                error!(
+                        "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
+                        err,
+                        state.get_id()
+                    );
+                self.notify_network_actor_shutdown_me(state);
+                return Err(err);
+            }
+        };
+        if !commitment_signed_processed {
+            return Ok(());
         }
         if was_waiting_ack_before_verify {
             self.set_pending_commit_diff_replay_order_hint(
@@ -7061,7 +7069,16 @@ impl ChannelActorState {
     fn verify_commitment_signed_and_send_ack(
         &mut self,
         commitment_signed: CommitmentSigned,
-    ) -> ProcessingChannelResult {
+    ) -> Result<bool, ProcessingChannelError> {
+        if self.is_duplicate_external_funding_commitment_signed(&commitment_signed) {
+            debug!(
+                "Ignoring duplicate external funding CommitmentSigned for channel {:?} in state {:?}",
+                self.get_id(),
+                self.state
+            );
+            return Ok(false);
+        }
+
         let flags = match self.state {
             ChannelState::CollaboratingFundingTx(flags)
                 if !flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) =>
@@ -7153,7 +7170,7 @@ impl ChannelActorState {
         }
         self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
         self.latest_commitment_transaction = Some(commitment_tx.data());
-        Ok(())
+        Ok(true)
     }
 
     fn maybe_transfer_to_tx_signatures(
@@ -7627,6 +7644,75 @@ impl ChannelActorState {
         Ok(())
     }
 
+    fn should_replay_external_funding_commitment_on_reestablish(&self) -> bool {
+        self.ephemeral_config.external_funding.enabled
+            && self.ephemeral_config.external_funding.signed_submitted
+            && matches!(self.state, ChannelState::AwaitingTxSignatures(_))
+    }
+
+    fn is_duplicate_external_funding_commitment_signed(
+        &self,
+        commitment_signed: &CommitmentSigned,
+    ) -> bool {
+        let duplicate_external_funding_nonce = self.ephemeral_config.external_funding.enabled
+            && self.ephemeral_config.external_funding.signed_submitted
+            && self.last_committed_remote_nonce.as_ref()
+                == Some(&commitment_signed.next_commitment_nonce);
+        if !duplicate_external_funding_nonce {
+            return false;
+        }
+
+        matches!(
+            self.state,
+            ChannelState::SigningCommitment(flags)
+                if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+        ) || matches!(
+            self.state,
+            ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_)
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_duplicate_external_funding_commitment_signed_for_test(
+        &self,
+        commitment_signed: &CommitmentSigned,
+    ) -> bool {
+        self.is_duplicate_external_funding_commitment_signed(commitment_signed)
+    }
+
+    fn validate_external_funding_commit_diff_for_replay(
+        &self,
+        commit_diff: &CommitDiff,
+    ) -> ProcessingChannelResult {
+        if commit_diff.channel_id != self.get_id() {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "external funding commit diff channel mismatch: expected {}, got {}",
+                self.get_id(),
+                commit_diff.channel_id
+            )));
+        }
+
+        if commit_diff.local_commitment_number_at_send != self.get_local_commitment_number() {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "stale external funding commit diff local commitment number: expected {}, got {}",
+                self.get_local_commitment_number(),
+                commit_diff.local_commitment_number_at_send
+            )));
+        }
+
+        let diff_remote = commit_diff.remote_commitment_number_at_send;
+        let diff_remote_upper = diff_remote.saturating_add(1);
+        let remote_commitment_number = self.get_remote_commitment_number();
+        if remote_commitment_number < diff_remote || remote_commitment_number > diff_remote_upper {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "stale external funding commit diff remote commitment drift: state={}, diff_at_send={}, expected range=[{}, {}]",
+                remote_commitment_number, diff_remote, diff_remote, diff_remote_upper
+            )));
+        }
+
+        Ok(())
+    }
+
     async fn handle_reestablish_channel_message(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -7698,6 +7784,21 @@ impl ChannelActorState {
                         .expect("myself alive")
                 }
                 ChannelState::SigningCommitment(flags)
+                    if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
+                        && !flags
+                            .contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT) =>
+                {
+                    if let Some(ref commit_diff) = pending_commit_diff {
+                        self.validate_external_funding_commit_diff_for_replay(commit_diff)?;
+                        self.resend_commitment_from_diff(commit_diff)?;
+                    } else {
+                        warn!(
+                            "No CommitDiff for external funding channel {}, unable to replay CommitmentSigned during reestablish",
+                            self.get_id()
+                        );
+                    }
+                }
+                ChannelState::SigningCommitment(flags)
                     if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) =>
                 {
                     self.handle_tx_signatures(None)?
@@ -7720,6 +7821,17 @@ impl ChannelActorState {
                     .expect("myself alive");
             }
             ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_) => {
+                if self.should_replay_external_funding_commitment_on_reestablish() {
+                    if let Some(ref commit_diff) = pending_commit_diff {
+                        self.validate_external_funding_commit_diff_for_replay(commit_diff)?;
+                        self.resend_commitment_from_diff(commit_diff)?;
+                    } else {
+                        warn!(
+                            "No CommitDiff for external funding channel {}, unable to replay CommitmentSigned during reestablish",
+                            self.get_id()
+                        );
+                    }
+                }
                 self.on_reestablished_channel_ready(myself);
                 self.resume_funding(myself);
             }
