@@ -120,6 +120,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // triggered 10 times per second, plus we also trigger `apply_retryable_tlc_operations` when
 // receiving ACK from peer, so it's a reason number for 20 TPS
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
+const FUNDING_TIMEOUT_CHECK_DELAY_GRACE: Duration = Duration::from_millis(1);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
 #[cfg(not(any(test, feature = "bench")))]
@@ -128,6 +129,47 @@ pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
+
+fn funding_timeout_check_delay(created_at: SystemTime, timeout_seconds: u64) -> Option<Duration> {
+    funding_timeout_check_delay_from_elapsed(
+        created_at.elapsed().unwrap_or_default(),
+        timeout_seconds,
+    )
+}
+
+fn funding_timeout_check_delay_from_elapsed(
+    elapsed: Duration,
+    timeout_seconds: u64,
+) -> Option<Duration> {
+    Duration::from_secs(timeout_seconds)
+        .checked_sub(elapsed)
+        .map(|delay| delay.saturating_add(FUNDING_TIMEOUT_CHECK_DELAY_GRACE))
+}
+
+#[cfg(test)]
+mod funding_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn test_funding_timeout_check_delay_survives_hydrated_time_truncation() {
+        // Reproduces #1358: after persisting external_funding.started_at as millis,
+        // hydration can leave the timeout check a few hundred microseconds short of
+        // the threshold. Scheduling exactly that remainder may make the check fire
+        // as stale with no follow-up timeout.
+        assert_eq!(
+            funding_timeout_check_delay_from_elapsed(Duration::from_micros(999_500), 1),
+            Some(Duration::from_micros(500) + FUNDING_TIMEOUT_CHECK_DELAY_GRACE)
+        );
+    }
+
+    #[test]
+    fn test_funding_timeout_check_delay_is_immediate_after_timeout() {
+        assert_eq!(
+            funding_timeout_check_delay_from_elapsed(Duration::from_micros(1_000_001), 1),
+            None
+        );
+    }
+}
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -3279,9 +3321,7 @@ where
         timeout_seconds: u64,
     ) {
         let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
-        match Duration::from_secs(timeout_seconds)
-            .checked_sub(created_at.elapsed().unwrap_or_default())
-        {
+        match funding_timeout_check_delay(created_at, timeout_seconds) {
             Some(timeout) => {
                 // timeout in future
                 myself.send_after(timeout, event_factory);
