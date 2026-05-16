@@ -1129,7 +1129,14 @@ where
             // `session.remain_amount()` do not contains this part of amount,
             // so we need to add the receiver amount to it, so we may make fewer
             // attempts to send the payment.
-            let amount = session.remain_amount() + attempt.route.receiver_amount();
+            let amount = session
+                .remain_amount()
+                .checked_add(attempt.route.receiver_amount())
+                .ok_or_else(|| {
+                    Error::SendPaymentError(
+                        "Retry payment amount overflows remaining amount".to_string(),
+                    )
+                })?;
             let max_fee = session.remain_fee_amount();
             let channel_stats = {
                 let graph = self.network_graph.read().await;
@@ -1186,7 +1193,7 @@ where
         let mut attempt_id = session.attempts_count() as u64;
         let mut target_amount = remain_amount;
         let mut single_path_max = None;
-        let mut iteration = 0;
+        let mut iteration = 0_u64;
 
         if session.max_parts() > 1 && !is_self_pay {
             let path_max = {
@@ -1196,15 +1203,29 @@ where
                     channel_stats.clone(),
                 ))?
             };
-            if path_max * (session.max_parts() as u128) < remain_amount {
+            if path_max
+                .checked_mul(session.max_parts() as u128)
+                .ok_or_else(|| {
+                    Error::SendPaymentError("MPP path capacity calculation overflows".to_string())
+                })?
+                < remain_amount
+            {
                 let error = "Failed to build enough routes for MPP payment".to_string();
                 return Err(Error::SendPaymentError(error));
             }
             single_path_max = Some(path_max);
         }
 
-        while (result.len() < session.max_parts() - active_parts) && remain_amount > 0 {
-            iteration += 1;
+        let max_new_parts = session
+            .max_parts()
+            .checked_sub(active_parts)
+            .ok_or_else(|| {
+                Error::SendPaymentError("active payment parts exceed max_parts".to_string())
+            })?;
+        while (result.len() < max_new_parts) && remain_amount > 0 {
+            iteration = iteration.checked_add(1).ok_or_else(|| {
+                Error::SendPaymentError("route build iteration overflows".to_string())
+            })?;
 
             debug!(
                 "build route iteration {}, target_amount: {} amount_low_bound: {:?} remain_amount: {}, max_parts: {}, max_fee: {:?}",
@@ -1257,7 +1278,9 @@ where
                     let new_attempt_id = if session.is_dry_run() {
                         0
                     } else {
-                        attempt_id += 1;
+                        attempt_id = attempt_id.checked_add(1).ok_or_else(|| {
+                            Error::SendPaymentError("attempt id overflows".to_string())
+                        })?;
                         attempt_id
                     };
 
@@ -1315,10 +1338,22 @@ where
                         })?);
                     }
                     result.push(attempt);
-                    if remain_amount > 0
-                        && remain_amount
-                            > current_amount * (session.max_parts() - result.len()) as u128
-                    {
+                    let remaining_slots = session
+                        .max_parts()
+                        .checked_sub(result.len())
+                        .ok_or_else(|| {
+                            Error::SendPaymentError(
+                                "built payment parts exceed max_parts".to_string(),
+                            )
+                        })?;
+                    let max_remaining_amount = current_amount
+                        .checked_mul(remaining_slots as u128)
+                        .ok_or_else(|| {
+                            Error::SendPaymentError(
+                                "MPP remaining amount calculation overflows".to_string(),
+                            )
+                        })?;
+                    if remain_amount > 0 && remain_amount > max_remaining_amount {
                         break;
                     }
                 }
@@ -1385,7 +1420,9 @@ where
                 "Trampoline forwarding fee insufficient".to_string(),
             ));
         }
-        *max_fee = Some(cur_max_fee - local_fee);
+        *max_fee = Some(cur_max_fee.checked_sub(local_fee).ok_or_else(|| {
+            Error::SendPaymentError("Trampoline forwarding fee insufficient".to_string())
+        })?);
         Ok(())
     }
 
@@ -1792,8 +1829,19 @@ where
         // This is a performance tuning result, the basic idea is when there are more pending
         // retrying payment in ractor framework, we will increase the delay time to avoid
         // flooding the network actor with too many retrying payments.
-        state.retry_send_payment_count += 1;
-        let delay = (state.retry_send_payment_count as u64) * 20_u64;
+        let Some(next_retry_count) = state.retry_send_payment_count.checked_add(1) else {
+            error!("retry_send_payment_count overflow");
+            return;
+        };
+        state.retry_send_payment_count = next_retry_count;
+        let Ok(retry_count) = u64::try_from(state.retry_send_payment_count) else {
+            error!("retry_send_payment_count does not fit into u64");
+            return;
+        };
+        let Some(delay) = retry_count.checked_mul(20_u64) else {
+            error!("retry payment delay overflow");
+            return;
+        };
         myself.send_after(Duration::from_millis(delay), move || {
             PaymentActorMessage::RetrySendPayment(attempt_id)
         });
@@ -1871,7 +1919,11 @@ where
         }
 
         let try_limit = if payment_data.allow_mpp() {
-            payment_data.max_parts() as u32 * DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT
+            (payment_data.max_parts() as u32)
+                .checked_mul(DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT)
+                .ok_or_else(|| {
+                    Error::InvalidParameter("MPP payment try limit overflows".to_string())
+                })?
         } else {
             DEFAULT_PAYMENT_TRY_LIMIT
         };

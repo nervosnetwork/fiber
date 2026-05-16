@@ -6065,7 +6065,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     assert!(shutdown_channel_result
         .err()
         .unwrap()
-        .contains("Local balance is not enough to pay the fee"));
+        .contains("overflows shutdown fee"));
 }
 
 #[tokio::test]

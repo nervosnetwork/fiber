@@ -323,75 +323,71 @@ where
         } else {
             self.store.get_active_channel_states(filter_pubkey)
         };
-        let mut channels: Vec<_> = channel_states
-            .into_iter()
-            .filter_map(|(_pubkey, channel_id, _state)| {
-                self.store
-                    .get_channel_actor_state(&channel_id)
-                    .and_then(|state| {
-                        let rpc_state: ChannelState = state.state.into();
-                        // When only_pending is set, skip channels that are not in a pending state
-                        if only_pending && !rpc_state.is_pending() {
-                            return None;
+        let mut channels = Vec::new();
+        for (_pubkey, channel_id, _state) in channel_states {
+            let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
+                continue;
+            };
+            let rpc_state: ChannelState = state.state.into();
+            // When only_pending is set, skip channels that are not in a pending state
+            if only_pending && !rpc_state.is_pending() {
+                continue;
+            }
+            let offered_tlc_balance = state.get_offered_tlc_balance().rpc_err(&params)?;
+            let received_tlc_balance = state.get_received_tlc_balance().rpc_err(&params)?;
+            // Enrich with failure_detail from ChannelOpenRecord when available
+            let failure_detail = self
+                .store
+                .get_channel_open_record(&channel_id)
+                .and_then(|r| r.failure_detail);
+            channels.push(Channel {
+                channel_id: channel_id.into(),
+                is_public: state.is_public(),
+                is_acceptor: state.is_acceptor,
+                is_one_way: state.is_one_way,
+                channel_outpoint: state.get_funding_transaction_outpoint(),
+                pubkey: state.remote_pubkey.into(),
+                funding_udt_type_script: state.funding_udt_type_script.clone().map(Into::into),
+                state: rpc_state,
+                local_balance: state.get_local_balance(),
+                remote_balance: state.get_remote_balance(),
+                offered_tlc_balance,
+                received_tlc_balance,
+                pending_tlcs: state
+                    .tlc_state
+                    .all_tlcs()
+                    .map(|tlc| {
+                        let id = match tlc.tlc_id {
+                            TLCId::Offered(id) => id,
+                            TLCId::Received(id) => id,
+                        };
+                        Htlc {
+                            id,
+                            amount: tlc.amount,
+                            expiry: tlc.expiry,
+                            payment_hash: tlc.payment_hash.into(),
+                            forwarding_channel_id: tlc
+                                .forwarding_tlc
+                                .map(|(channel_id, _)| channel_id.into()),
+                            forwarding_tlc_id: tlc.forwarding_tlc.map(|(_, id)| id),
+                            status: tlc.status.clone().into(),
                         }
-                        // Enrich with failure_detail from ChannelOpenRecord when available
-                        let failure_detail = self
-                            .store
-                            .get_channel_open_record(&channel_id)
-                            .and_then(|r| r.failure_detail);
-                        Some(Channel {
-                            channel_id: channel_id.into(),
-                            is_public: state.is_public(),
-                            is_acceptor: state.is_acceptor,
-                            is_one_way: state.is_one_way,
-                            channel_outpoint: state.get_funding_transaction_outpoint(),
-                            pubkey: state.remote_pubkey.into(),
-                            funding_udt_type_script: state
-                                .funding_udt_type_script
-                                .clone()
-                                .map(Into::into),
-                            state: rpc_state,
-                            local_balance: state.get_local_balance(),
-                            remote_balance: state.get_remote_balance(),
-                            offered_tlc_balance: state.get_offered_tlc_balance(),
-                            received_tlc_balance: state.get_received_tlc_balance(),
-                            pending_tlcs: state
-                                .tlc_state
-                                .all_tlcs()
-                                .map(|tlc| {
-                                    let id = match tlc.tlc_id {
-                                        TLCId::Offered(id) => id,
-                                        TLCId::Received(id) => id,
-                                    };
-                                    Htlc {
-                                        id,
-                                        amount: tlc.amount,
-                                        expiry: tlc.expiry,
-                                        payment_hash: tlc.payment_hash.into(),
-                                        forwarding_channel_id: tlc
-                                            .forwarding_tlc
-                                            .map(|(channel_id, _)| channel_id.into()),
-                                        forwarding_tlc_id: tlc.forwarding_tlc.map(|(_, id)| id),
-                                        status: tlc.status.clone().into(),
-                                    }
-                                })
-                                .collect(),
-                            latest_commitment_transaction_hash: state
-                                .latest_commitment_transaction
-                                .as_ref()
-                                .map(|tx| tx.clone().into_view().hash().unpack()),
-                            created_at: state.get_created_at_in_millis(),
-                            enabled: state.local_tlc_info.enabled,
-                            tlc_expiry_delta: state.local_tlc_info.tlc_expiry_delta,
-                            tlc_fee_proportional_millionths: state
-                                .local_tlc_info
-                                .tlc_fee_proportional_millionths,
-                            shutdown_transaction_hash: state.shutdown_transaction_hash.clone(),
-                            failure_detail,
-                        })
                     })
-            })
-            .collect();
+                    .collect(),
+                latest_commitment_transaction_hash: state
+                    .latest_commitment_transaction
+                    .as_ref()
+                    .map(|tx| tx.clone().into_view().hash().unpack()),
+                created_at: state.get_created_at_in_millis(),
+                enabled: state.local_tlc_info.enabled,
+                tlc_expiry_delta: state.local_tlc_info.tlc_expiry_delta,
+                tlc_fee_proportional_millionths: state
+                    .local_tlc_info
+                    .tlc_fee_proportional_millionths,
+                shutdown_transaction_hash: state.shutdown_transaction_hash.clone(),
+                failure_detail,
+            });
+        }
 
         if only_pending {
             // Also include channel-opening records (outbound) whose ChannelActorState is not yet

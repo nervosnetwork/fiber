@@ -98,7 +98,9 @@ impl LiveCellsExclusionMap {
     pub fn truncate(&mut self, tip_block_number: u64) {
         self.map.retain(|_, exclusion| {
             if let Some(committed_block_number) = exclusion.committed_block_number {
-                committed_block_number + KEEP_BLOCK_PERIOD > tip_block_number
+                tip_block_number
+                    .checked_sub(committed_block_number)
+                    .is_none_or(|age| age < KEEP_BLOCK_PERIOD)
             } else {
                 true
             }
@@ -418,7 +420,9 @@ impl FundingTxBuilder {
                 inputs.push(CellInput::new(cell.out_point.clone(), 0));
 
                 if found_udt_amount >= udt_amount {
-                    let change_amount = found_udt_amount - udt_amount;
+                    let change_amount = found_udt_amount
+                        .checked_sub(udt_amount)
+                        .ok_or_else(|| TxBuilderError::Other(anyhow!("UDT amount underflow")))?;
                     if change_amount > 0 {
                         let change_output_data: Bytes = change_amount.to_le_bytes().pack();
                         let dummy_output = CellOutput::new_builder()
@@ -443,10 +447,10 @@ impl FundingTxBuilder {
 
                     debug!(
                         "Collected sufficient UDT cells: inputs={}, found_udt_amount={}, change_amount={}",
-                        inputs.len(),
-                        found_udt_amount,
-                        found_udt_amount - udt_amount,
-                    );
+                            inputs.len(),
+                            found_udt_amount,
+                            change_amount,
+                        );
                     debug!("find proper UDT owner cells: {:?}", inputs);
                     let udt_cell_deps = get_udt_cell_deps(&udt_type_script)
                         .await

@@ -111,14 +111,20 @@ pub(crate) fn checked_calculate_commitment_tx_fee(
     Ok(fee_rate.fee(tx_size).as_u64())
 }
 
-pub(crate) fn calculate_shutdown_tx_fee(
+pub(crate) fn checked_calculate_shutdown_tx_fee(
     fee_rate: u64,
     udt_type_script: &Option<Script>,
     shutdown_scripts: (Script, Script),
-) -> u64 {
+) -> Result<u64, ProcessingChannelError> {
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
     let tx_size = shutdown_tx_size(udt_type_script, shutdown_scripts) as u64;
-    fee_rate.fee(tx_size).as_u64()
+    fee_rate.as_u64().checked_mul(tx_size).ok_or_else(|| {
+        ProcessingChannelError::InvalidParameter(format!(
+            "Shutdown fee rate {} overflows shutdown fee calculation for transaction size {}",
+            fee_rate, tx_size
+        ))
+    })?;
+    Ok(fee_rate.fee(tx_size).as_u64())
 }
 
 pub(crate) fn calculate_fee_with_base(
@@ -126,6 +132,9 @@ pub(crate) fn calculate_fee_with_base(
     fee_proportational_millionths: u128,
     base: u128,
 ) -> Result<u128, String> {
+    if base == 0 {
+        return Err("fee calculation base must not be 0".to_string());
+    }
     let fee = fee_proportational_millionths
         .checked_mul(amount)
         .ok_or_else(|| {
@@ -137,7 +146,9 @@ pub(crate) fn calculate_fee_with_base(
     let base_fee = fee / base;
     let remainder = fee % base;
     if remainder > 0 {
-        Ok(base_fee + 1)
+        base_fee
+            .checked_add(1)
+            .ok_or_else(|| "fee calculation overflows while rounding up".to_string())
     } else {
         Ok(base_fee)
     }
@@ -214,7 +225,14 @@ pub(crate) fn check_open_channel_parameters(
             DEFAULT_COMMITMENT_FEE_RATE,
         )));
     }
-    let reserved_fee = reserved_ckb_amount - occupied_capacity;
+    let reserved_fee = reserved_ckb_amount
+        .checked_sub(occupied_capacity)
+        .ok_or_else(|| {
+            ProcessingChannelError::InvalidParameter(format!(
+                "Reserved CKB amount {} is less than {}",
+                reserved_ckb_amount, occupied_capacity
+            ))
+        })?;
     check_commitment_reserved_fee(commitment_fee_rate, udt_type_script, reserved_fee)?;
 
     // commitment_delay_epoch
@@ -304,4 +322,3 @@ pub(crate) fn check_tlc_delta_with_epochs(
 
     Ok(())
 }
-

@@ -15,6 +15,9 @@ use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::now_timestamp_as_millis_u64;
+use crate::utils::arithmetic::{
+    checked_add_u128, checked_f64_to_u128, checked_mul_u128, checked_sum_u128, ArithmeticError,
+};
 use ckb_types::packed::{OutPoint, Script};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::ChannelUpdateInfo;
@@ -185,7 +188,9 @@ impl TryFrom<&ChannelActorState> for ChannelInfo {
         };
 
         let timestamp = state.must_get_funding_transaction_timestamp();
-        let capacity = state.get_liquid_capacity();
+        let capacity = state
+            .checked_liquid_capacity()
+            .map_err(|err| err.to_string())?;
         let udt_type_script = state.funding_udt_type_script.clone();
 
         let (node1, node2, update_of_node1, update_of_node2) = if state.local_is_node1() {
@@ -486,6 +491,12 @@ pub enum PathFindError {
     TlcMinValue(u128),
     #[error("Graph other error: {0}")]
     Other(String),
+}
+
+impl From<ArithmeticError> for PathFindError {
+    fn from(error: ArithmeticError) -> Self {
+        Self::Overflow(error.to_string())
+    }
 }
 
 #[derive(Debug)]
@@ -1387,7 +1398,11 @@ where
         let mut route_to_trampoline = self.find_path(
             source,
             first,
-            Some(final_amount + max_fee_amount),
+            Some(checked_add_u128(
+                final_amount,
+                max_fee_amount,
+                "trampoline route amount",
+            )?),
             None,
             payment_data.udt_type_script.clone(),
             self.trampoline_forward_expiry_delta(
@@ -1450,7 +1465,11 @@ where
 
             payloads.push(TrampolineHopPayload::Forward {
                 next_node_id,
-                amount_to_forward: final_amount + (fees[idx + 1..].iter().sum::<u128>()),
+                amount_to_forward: checked_add_u128(
+                    final_amount,
+                    checked_sum_u128(fees[idx + 1..].iter().copied(), "trampoline fees")?,
+                    "trampoline forward amount",
+                )?,
                 build_max_fee_amount: fees[idx],
                 hash_algorithm: payment_data.hash_algorithm(),
                 tlc_expiry_limit: payment_data.tlc_expiry_limit,
@@ -1490,7 +1509,7 @@ where
 
         return Ok(ResolvedRoute {
             hops: route_to_trampoline,
-            amount: final_amount + remaining_fee,
+            amount: checked_add_u128(final_amount, remaining_fee, "trampoline resolved amount")?,
             trampoline_onion: Some(trampoline_onion),
             final_hop_expiry_delta_override: Some(self.trampoline_forward_expiry_delta(
                 payment_data.final_tlc_expiry_delta,
@@ -1515,9 +1534,11 @@ where
             let fee = calculate_tlc_forward_fee(next_amount_to_forward, DEFAULT_FEE_RATE as u128)
                 .map_err(|e| {
                 PathFindError::Other(format!("invalid trampoline_hops fee_rate: {e}"))
-            })? * forward_hops_num as u128;
+            })?;
+            let fee = checked_mul_u128(fee, forward_hops_num as u128, "trampoline forwarding fee")?;
 
-            next_amount_to_forward = next_amount_to_forward.saturating_add(fee);
+            next_amount_to_forward =
+                checked_add_u128(next_amount_to_forward, fee, "trampoline amount to forward")?;
         }
 
         let amount_to_first_trampoline = next_amount_to_forward;
@@ -1897,7 +1918,13 @@ where
                 channel_capacity,
             );
 
-        let pending_count = channel_stats.get_channel_count(channel_outpoint) + cur_pending_count;
+        let Some(pending_count) = channel_stats
+            .get_channel_count(channel_outpoint)
+            .checked_add(cur_pending_count)
+        else {
+            debug!("pending_count overflow while evaluating path edge");
+            return;
+        };
 
         if pending_count > 0 {
             probability *= (0.95f64).powi(pending_count as i32);
@@ -1908,10 +1935,25 @@ where
             return;
         }
 
-        let agg_weight = self.edge_weight(next_hop_received_amount, fee, tlc_expiry_delta);
-        let weight = cur_weight + agg_weight;
+        let agg_weight = match self.edge_weight(next_hop_received_amount, fee, tlc_expiry_delta) {
+            Ok(weight) => weight,
+            Err(err) => {
+                debug!("edge weight overflow while evaluating path edge: {}", err);
+                return;
+            }
+        };
+        let Some(weight) = cur_weight.checked_add(agg_weight) else {
+            debug!("path weight overflow while evaluating path edge");
+            return;
+        };
 
-        let distance = self.calculate_distance_based_probability(probability, weight);
+        let distance = match self.calculate_distance_based_probability(probability, weight) {
+            Ok(distance) => distance,
+            Err(err) => {
+                debug!("distance overflow while evaluating path edge: {}", err);
+                return;
+            }
+        };
 
         if let Some(node) = distances.get(&from) {
             if distance >= node.distance {
@@ -1923,9 +1965,21 @@ where
             node_id: from,
             weight,
             distance,
-            amount_to_send: next_hop_received_amount + fee,
+            amount_to_send: match next_hop_received_amount.checked_add(fee) {
+                Some(amount) => amount,
+                None => {
+                    debug!("amount_to_send overflow while evaluating path edge");
+                    return;
+                }
+            },
             tlc_min_value,
-            incoming_tlc_expiry: incoming_tlc_expiry + tlc_expiry_delta,
+            incoming_tlc_expiry: match incoming_tlc_expiry.checked_add(tlc_expiry_delta) {
+                Some(expiry) => expiry,
+                None => {
+                    debug!("incoming_tlc_expiry overflow while evaluating path edge");
+                    return;
+                }
+            },
             fee_charged: fee,
             probability,
             pending_count,
@@ -2334,11 +2388,17 @@ where
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
                     if let Some(amount) = amount {
-                        if amount_to_send > amount.saturating_add(max_fee_amount) {
+                        let max_amount_with_fee =
+                            amount.checked_add(max_fee_amount).ok_or_else(|| {
+                                PathFindError::Overflow(format!(
+                                    "payment amount with max fee overflows: {} + {}",
+                                    amount, max_fee_amount
+                                ))
+                            })?;
+                        if amount_to_send > max_amount_with_fee {
                             debug!(
                                 "amount_to_send: {:?} is greater than sum_amount sum_amount: {:?}",
-                                amount_to_send,
-                                amount + max_fee_amount
+                                amount_to_send, max_amount_with_fee
                             );
                             continue;
                         }
@@ -2520,25 +2580,42 @@ where
 
     // Larger fee and htlc_expiry_delta makes edge_weight large,
     // which reduce the probability of choosing this edge,
-    fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
+    fn edge_weight(
+        &self,
+        amount: u128,
+        fee: u128,
+        htlc_expiry_delta: u64,
+    ) -> Result<u128, PathFindError> {
         // The factor is currently a fixed value, but might be configurable in the future,
         // lock 1% of amount with default tlc expiry delta.
         let risk_factor: f64 = 0.01;
-        let time_lock_penalty = (amount as f64
-            * (risk_factor * (htlc_expiry_delta as f64 / DEFAULT_TLC_EXPIRY_DELTA as f64)))
-            as u128;
-        fee + time_lock_penalty
+        let time_lock_penalty = checked_f64_to_u128(
+            amount as f64
+                * (risk_factor * (htlc_expiry_delta as f64 / DEFAULT_TLC_EXPIRY_DELTA as f64)),
+            "edge timelock penalty",
+        )?;
+        Ok(checked_add_u128(fee, time_lock_penalty, "edge weight")?)
     }
 
-    fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
+    fn calculate_distance_based_probability(
+        &self,
+        probability: f64,
+        weight: u128,
+    ) -> Result<u128, PathFindError> {
         debug_assert!(probability > 0.0);
+        if !probability.is_finite() || probability <= 0.0 {
+            return Err(PathFindError::Overflow(format!(
+                "path probability is invalid: {}",
+                probability
+            )));
+        }
         // FIXME: set this to configurable parameters
-        let weight = weight as f64;
         let time_pref = 0.9_f64;
         let default_attempt_cost = 100_f64;
         let penalty = default_attempt_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
+        let distance_penalty = checked_f64_to_u128(penalty / probability, "path distance penalty")?;
 
-        weight as u128 + (penalty / probability) as u128
+        Ok(checked_add_u128(weight, distance_penalty, "path distance")?)
     }
 
     // This function is used to build the path from the specified path
@@ -2606,7 +2683,7 @@ where
                             ))
                         })?
                 };
-                amount_to_send += fee;
+                amount_to_send = checked_add_u128(amount_to_send, fee, "path amount to send")?;
                 if amount_to_send > channel_info.capacity() {
                     continue;
                 }
@@ -2646,8 +2723,8 @@ where
                     probability, channel_outpoint, from, to
                 );
 
-                let weight = self.edge_weight(amount_to_send, fee, current_incoming_tlc_expiry);
-                let distance = self.calculate_distance_based_probability(probability, weight);
+                let weight = self.edge_weight(amount_to_send, fee, current_incoming_tlc_expiry)?;
+                let distance = self.calculate_distance_based_probability(probability, weight)?;
 
                 if let Some((old_distance, _fee, _edge)) = &found {
                     if distance >= *old_distance {
