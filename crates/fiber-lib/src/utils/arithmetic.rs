@@ -75,16 +75,6 @@ where
 }
 
 #[cfg(feature = "watchtower")]
-pub(crate) fn checked_add_usize(
-    lhs: usize,
-    rhs: usize,
-    context: &str,
-) -> Result<usize, ArithmeticError> {
-    lhs.checked_add(rhs)
-        .ok_or_else(|| ArithmeticError::new(format!("{} overflows: {} + {}", context, lhs, rhs)))
-}
-
-#[cfg(feature = "watchtower")]
 pub(crate) fn checked_sub_usize(
     lhs: usize,
     rhs: usize,
@@ -92,16 +82,6 @@ pub(crate) fn checked_sub_usize(
 ) -> Result<usize, ArithmeticError> {
     lhs.checked_sub(rhs)
         .ok_or_else(|| ArithmeticError::new(format!("{} underflows: {} - {}", context, lhs, rhs)))
-}
-
-#[cfg(feature = "watchtower")]
-pub(crate) fn checked_mul_usize(
-    lhs: usize,
-    rhs: usize,
-    context: &str,
-) -> Result<usize, ArithmeticError> {
-    lhs.checked_mul(rhs)
-        .ok_or_else(|| ArithmeticError::new(format!("{} overflows: {} * {}", context, lhs, rhs)))
 }
 
 pub(crate) fn checked_f64_to_u128(value: f64, context: &str) -> Result<u128, ArithmeticError> {

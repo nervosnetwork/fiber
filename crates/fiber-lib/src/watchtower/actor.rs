@@ -39,8 +39,7 @@ use crate::{
     utils::{
         actor::ActorHandleLogGuard,
         arithmetic::{
-            checked_add_u64, checked_add_usize, checked_mul_u64, checked_mul_usize,
-            checked_sub_u64, checked_sub_usize, ArithmeticError,
+            checked_add_u64, checked_mul_u64, checked_sub_u64, checked_sub_usize, ArithmeticError,
         },
         tx::compute_tx_message,
     },
@@ -1699,6 +1698,45 @@ struct SettlementWitness {
     unlocks: Vec<Unlock>,
 }
 
+struct WitnessReader<'a> {
+    remaining: &'a [u8],
+}
+
+impl<'a> WitnessReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { remaining: bytes }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    fn remaining(&self) -> &'a [u8] {
+        self.remaining
+    }
+
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        if self.remaining.len() < len {
+            return None;
+        }
+        let (value, remaining) = self.remaining.split_at(len);
+        self.remaining = remaining;
+        Some(value)
+    }
+
+    fn take_u8(&mut self) -> Option<u8> {
+        self.take(1).map(|bytes| bytes[0])
+    }
+
+    fn take_array<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.take(N)?.try_into().ok()
+    }
+
+    fn take_u128_le(&mut self) -> Option<u128> {
+        Some(u128::from_le_bytes(self.take_array()?))
+    }
+}
+
 #[derive(Debug)]
 struct Htlc {
     htlc_type: u8,
@@ -1830,85 +1868,37 @@ impl Unlock {
         }
         vec
     }
+
+    fn witness_len(&self) -> usize {
+        if self.with_preimage {
+            99
+        } else {
+            67
+        }
+    }
 }
 
 impl SettlementWitness {
     pub fn build_from_witness(witness: &[u8]) -> Option<Self> {
-        if witness.len() < 2 {
-            return None;
+        let mut reader = WitnessReader::new(witness);
+        let _unlock_count = reader.take_u8()?;
+        let pending_htlc_count = reader.take_u8()? as usize;
+
+        let mut pending_htlcs = Vec::with_capacity(pending_htlc_count);
+        for _ in 0..pending_htlc_count {
+            pending_htlcs.push(Htlc::build_from_witness(reader.take(85)?));
         }
-        let pending_htlc_count = witness[1] as usize;
-        let pending_htlc_witness_len =
-            checked_mul_usize(85, pending_htlc_count, "pending HTLC witness length").ok()?;
-        let htlc_end = checked_add_usize(2, pending_htlc_witness_len, "HTLC witness end").ok()?;
-        let settlement_remote_pubkey_hash_end =
-            checked_add_usize(htlc_end, 20, "settlement remote pubkey hash end").ok()?;
-        let settlement_remote_amount_end = checked_add_usize(
-            settlement_remote_pubkey_hash_end,
-            16,
-            "settlement remote amount end",
-        )
-        .ok()?;
-        let settlement_local_pubkey_hash_end = checked_add_usize(
-            settlement_remote_amount_end,
-            20,
-            "settlement local pubkey hash end",
-        )
-        .ok()?;
-        let settlement_local_amount_end = checked_add_usize(
-            settlement_local_pubkey_hash_end,
-            16,
-            "settlement local amount end",
-        )
-        .ok()?;
-        // 1 byte for unlock_count, 1 byte for pending_htlc_count, 72 bytes for settlement script
-        if witness.len() < settlement_local_amount_end {
-            return None;
-        }
-        let pending_htlcs = (2..htlc_end)
-            .step_by(85)
-            .map(|index| Htlc::build_from_witness(&witness[index..index + 85]))
-            .collect();
-        let settlement_remote_pubkey_hash = witness[htlc_end..settlement_remote_pubkey_hash_end]
-            .try_into()
-            .unwrap();
-        let settlement_remote_amount = u128::from_le_bytes(
-            witness[settlement_remote_pubkey_hash_end..settlement_remote_amount_end]
-                .try_into()
-                .unwrap(),
-        );
-        let settlement_local_pubkey_hash = witness
-            [settlement_remote_amount_end..settlement_local_pubkey_hash_end]
-            .try_into()
-            .unwrap();
-        let settlement_local_amount = u128::from_le_bytes(
-            witness[settlement_local_pubkey_hash_end..settlement_local_amount_end]
-                .try_into()
-                .unwrap(),
-        );
+
+        let settlement_remote_pubkey_hash = reader.take_array::<20>()?;
+        let settlement_remote_amount = reader.take_u128_le()?;
+        let settlement_local_pubkey_hash = reader.take_array::<20>()?;
+        let settlement_local_amount = reader.take_u128_le()?;
+
         let mut unlocks = Vec::new();
-        let mut unlock_type_index = settlement_local_amount_end;
-        while unlock_type_index < witness.len() {
-            match Unlock::build_from_witness(&witness[unlock_type_index..]) {
-                Some(unlock) => {
-                    if unlock.with_preimage {
-                        unlock_type_index =
-                            checked_add_usize(unlock_type_index, 99, "unlock witness index")
-                                .ok()?;
-                    } else {
-                        unlock_type_index =
-                            checked_add_usize(unlock_type_index, 67, "unlock witness index")
-                                .ok()?;
-                    }
-                    unlocks.push(unlock);
-                    if unlock_type_index == witness.len() {
-                        break;
-                    }
-                }
-                None => {
-                    return None;
-                }
-            }
+        while !reader.is_empty() {
+            let unlock = Unlock::build_from_witness(reader.remaining())?;
+            reader.take(unlock.witness_len())?;
+            unlocks.push(unlock);
         }
 
         Some(Self {
