@@ -18,6 +18,8 @@ use ckb_types::{
 };
 use molecule::prelude::Entity;
 
+const FEE_RATE_WEIGHT_SCALE: u128 = 1000;
+
 fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
     let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 57]);
     let cell_deps_count = get_cell_deps_count(vec![Contract::FundingLock], udt_type_script);
@@ -102,13 +104,7 @@ pub(crate) fn checked_calculate_commitment_tx_fee(
 ) -> Result<u64, ProcessingChannelError> {
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
     let tx_size = commitment_tx_size(udt_type_script) as u64;
-    fee_rate.as_u64().checked_mul(tx_size).ok_or_else(|| {
-        ProcessingChannelError::InvalidParameter(format!(
-            "Commitment fee rate {} overflows commitment fee calculation for transaction size {}",
-            fee_rate, tx_size
-        ))
-    })?;
-    Ok(fee_rate.fee(tx_size).as_u64())
+    checked_fee_from_rate(fee_rate, tx_size, "Commitment")
 }
 
 pub(crate) fn checked_calculate_shutdown_tx_fee(
@@ -118,13 +114,24 @@ pub(crate) fn checked_calculate_shutdown_tx_fee(
 ) -> Result<u64, ProcessingChannelError> {
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
     let tx_size = shutdown_tx_size(udt_type_script, shutdown_scripts) as u64;
-    fee_rate.as_u64().checked_mul(tx_size).ok_or_else(|| {
+    checked_fee_from_rate(fee_rate, tx_size, "Shutdown")
+}
+
+fn checked_fee_from_rate(
+    fee_rate: FeeRate,
+    tx_size: u64,
+    tx_kind: &str,
+) -> Result<u64, ProcessingChannelError> {
+    let fee = u128::from(fee_rate.as_u64()) * u128::from(tx_size) / FEE_RATE_WEIGHT_SCALE;
+    u64::try_from(fee).map_err(|_| {
         ProcessingChannelError::InvalidParameter(format!(
-            "Shutdown fee rate {} overflows shutdown fee calculation for transaction size {}",
-            fee_rate, tx_size
+            "{} fee rate {} overflows {} fee calculation for transaction size {}",
+            tx_kind,
+            fee_rate,
+            tx_kind.to_lowercase(),
+            tx_size
         ))
-    })?;
-    Ok(fee_rate.fee(tx_size).as_u64())
+    })
 }
 
 pub(crate) fn calculate_fee_with_base(

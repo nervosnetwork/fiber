@@ -5877,14 +5877,6 @@ impl ChannelActorState {
         })
     }
 
-    fn checked_capacity_after_fee(
-        capacity: u64,
-        fee: u64,
-        context: &str,
-    ) -> Result<u64, ProcessingChannelError> {
-        Ok(checked_sub_u64(capacity, fee, context)?)
-    }
-
     fn checked_ckb_amount_with_reserved(
         liquid_amount: u128,
         reserved_amount: u64,
@@ -5957,7 +5949,7 @@ impl ChannelActorState {
             let lock_script = self.get_remote_shutdown_script();
             let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
             {
-                let capacity = Self::checked_capacity_after_fee(
+                let capacity = checked_sub_u64(
                     self.get_total_reserved_ckb_amount()?,
                     commitment_tx_fee,
                     "Reserved CKB",
@@ -5971,11 +5963,8 @@ impl ChannelActorState {
                 let output_data = self.checked_liquid_capacity()?.to_le_bytes().pack();
                 (output, output_data)
             } else {
-                let capacity = Self::checked_capacity_after_fee(
-                    self.get_total_ckb_amount()?,
-                    commitment_tx_fee,
-                    "Total CKB",
-                )?;
+                let capacity =
+                    checked_sub_u64(self.get_total_ckb_amount()?, commitment_tx_fee, "Total CKB")?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .capacity(capacity)
@@ -7777,7 +7766,7 @@ impl ChannelActorState {
             let lock_script = self.get_local_shutdown_script();
             let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
             {
-                let capacity = Self::checked_capacity_after_fee(
+                let capacity = checked_sub_u64(
                     self.get_total_reserved_ckb_amount()?,
                     commitment_tx_fee,
                     "Reserved CKB",
@@ -7791,11 +7780,8 @@ impl ChannelActorState {
                 let output_data = self.checked_liquid_capacity()?.to_le_bytes().pack();
                 (output, output_data)
             } else {
-                let capacity = Self::checked_capacity_after_fee(
-                    self.get_total_ckb_amount()?,
-                    commitment_tx_fee,
-                    "Total CKB",
-                )?;
+                let capacity =
+                    checked_sub_u64(self.get_total_ckb_amount()?, commitment_tx_fee, "Total CKB")?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .capacity(capacity)
@@ -8587,7 +8573,7 @@ impl ChannelActorState {
                 self.to_local_amount, self.to_remote_amount
             );
 
-            let local_capacity: u64 = Self::checked_capacity_after_fee(
+            let local_capacity: u64 = checked_sub_u64(
                 self.local_reserved_ckb_amount,
                 local_shutdown_fee,
                 "Local reserved CKB",
@@ -8603,7 +8589,7 @@ impl ChannelActorState {
                 .build();
             let to_local_output_data = self.to_local_amount.to_le_bytes().pack();
 
-            let remote_capacity: u64 = Self::checked_capacity_after_fee(
+            let remote_capacity: u64 = checked_sub_u64(
                 self.remote_reserved_ckb_amount,
                 remote_shutdown_fee,
                 "Remote reserved CKB",
@@ -8633,7 +8619,7 @@ impl ChannelActorState {
                 self.to_local_amount, local_shutdown_fee,
                 self.to_remote_amount, remote_shutdown_fee
             );
-            let local_value = Self::checked_capacity_after_fee(
+            let local_value = checked_sub_u64(
                 Self::checked_ckb_amount_with_reserved(
                     self.to_local_amount,
                     self.local_reserved_ckb_amount,
@@ -8642,7 +8628,7 @@ impl ChannelActorState {
                 local_shutdown_fee,
                 "Local shutdown",
             )?;
-            let remote_value = Self::checked_capacity_after_fee(
+            let remote_value = checked_sub_u64(
                 Self::checked_ckb_amount_with_reserved(
                     self.to_remote_amount,
                     self.remote_reserved_ckb_amount,
@@ -8738,7 +8724,7 @@ impl ChannelActorState {
         )?;
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let capacity = Self::checked_capacity_after_fee(
+            let capacity = checked_sub_u64(
                 self.get_total_reserved_ckb_amount()?,
                 commitment_tx_fee,
                 "Reserved CKB",
@@ -8752,11 +8738,8 @@ impl ChannelActorState {
             let output_data = self.checked_liquid_capacity()?.to_le_bytes().pack();
             Ok((output, output_data, settlement_data))
         } else {
-            let capacity = Self::checked_capacity_after_fee(
-                self.get_total_ckb_amount()?,
-                commitment_tx_fee,
-                "Total CKB",
-            )?;
+            let capacity =
+                checked_sub_u64(self.get_total_ckb_amount()?, commitment_tx_fee, "Total CKB")?;
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
                 .capacity(capacity)
