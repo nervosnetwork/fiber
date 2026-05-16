@@ -8,7 +8,10 @@ use super::{
     types::ForwardTlcResult,
 };
 use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
-use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
+use crate::fiber::fee::{
+    check_commitment_reserved_fee, check_open_channel_parameters, check_tlc_delta_with_epochs,
+    checked_calculate_commitment_tx_fee,
+};
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
@@ -22,10 +25,7 @@ use crate::{
     },
     fiber::{
         config::{DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
-        fee::{
-            calculate_commitment_tx_fee, calculate_shutdown_tx_fee, calculate_tlc_forward_fee,
-            shutdown_tx_size,
-        },
+        fee::{calculate_shutdown_tx_fee, calculate_tlc_forward_fee, shutdown_tx_size},
         network::SendOnionPacketCommand,
         network::{
             get_chain_hash, sign_network_message, FiberMessageWithTarget, CHECK_CHANNELS_INTERVAL,
@@ -3482,6 +3482,17 @@ where
                     )));
                 }
 
+                ChannelActorState::check_accept_channel_parameters_for_values(
+                    local_funding_amount,
+                    *funding_amount,
+                    local_reserved_ckb_amount,
+                    *reserved_ckb_amount,
+                    *commitment_fee_rate,
+                    funding_udt_type_script,
+                    shutdown_script,
+                    *remote_max_tlc_number_in_flight,
+                )?;
+
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     public_channel_info,
@@ -5368,26 +5379,58 @@ impl ChannelActorState {
         state
     }
 
-    fn check_accept_channel_parameters(&self) -> ProcessingChannelResult {
-        if self.remote_constraints.max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
+    fn checked_total_reserved_ckb_amount_from(
+        local_reserved_ckb_amount: u64,
+        remote_reserved_ckb_amount: u64,
+    ) -> Result<u64, ProcessingChannelError> {
+        local_reserved_ckb_amount
+            .checked_add(remote_reserved_ckb_amount)
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "Total reserved CKB amount overflows: local {}, remote {}",
+                    local_reserved_ckb_amount, remote_reserved_ckb_amount
+                ))
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn check_accept_channel_parameters_for_values(
+        local_amount: u128,
+        remote_amount: u128,
+        local_reserved_ckb_amount: u64,
+        remote_reserved_ckb_amount: u64,
+        commitment_fee_rate: u64,
+        udt_type_script: &Option<Script>,
+        remote_shutdown_script: &Script,
+        remote_max_tlc_number_in_flight: u64,
+    ) -> ProcessingChannelResult {
+        if remote_max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Remote max TLC number in flight {} is greater than the system maximal value {}",
-                self.remote_constraints.max_tlc_number_in_flight, MAX_TLC_NUMBER_IN_FLIGHT
+                remote_max_tlc_number_in_flight, MAX_TLC_NUMBER_IN_FLIGHT
             )));
         }
 
-        let udt_type_script = &self.funding_udt_type_script;
+        let total_reserved_ckb_amount = Self::checked_total_reserved_ckb_amount_from(
+            local_reserved_ckb_amount,
+            remote_reserved_ckb_amount,
+        )?;
 
         if udt_type_script.is_some() {
-            if self.to_local_amount > u128::MAX - self.to_remote_amount {
+            if local_amount > u128::MAX - remote_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "The total UDT funding amount should be less than {}",
                     u128::MAX
                 )));
             }
         } else {
-            let total_ckb_amount = self.get_liquid_capacity();
-            let max_ckb_amount = u64::MAX as u128 - self.get_total_reserved_ckb_amount() as u128;
+            let total_ckb_amount = local_amount.checked_add(remote_amount).ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "The total funding amount overflows: local {}, remote {}",
+                    local_amount, remote_amount
+                ))
+            })?;
+            let max_ckb_amount = u64::MAX as u128 - total_reserved_ckb_amount as u128;
             if total_ckb_amount > max_ckb_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "The total funding amount ({}) should be less than {}",
@@ -5398,25 +5441,32 @@ impl ChannelActorState {
 
         // reserved_ckb_amount
         let occupied_capacity =
-            occupied_capacity(&self.get_remote_shutdown_script(), udt_type_script)?.as_u64();
-        if self.remote_reserved_ckb_amount < occupied_capacity {
+            occupied_capacity(remote_shutdown_script, udt_type_script)?.as_u64();
+        if remote_reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Reserved CKB amount {} is less than {}",
-                self.remote_reserved_ckb_amount, occupied_capacity,
+                remote_reserved_ckb_amount, occupied_capacity,
             )));
         }
 
         // commitment_fee_rate
-        let commitment_fee = calculate_commitment_tx_fee(self.commitment_fee_rate, udt_type_script);
-        let reserved_fee = self.remote_reserved_ckb_amount - occupied_capacity;
-        if commitment_fee * 2 > reserved_fee {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
-                commitment_fee, self.commitment_fee_rate, reserved_fee
-            )));
-        }
+        let reserved_fee = remote_reserved_ckb_amount - occupied_capacity;
+        check_commitment_reserved_fee(commitment_fee_rate, udt_type_script, reserved_fee)?;
 
         Ok(())
+    }
+
+    fn check_accept_channel_parameters(&self) -> ProcessingChannelResult {
+        Self::check_accept_channel_parameters_for_values(
+            self.to_local_amount,
+            self.to_remote_amount,
+            self.local_reserved_ckb_amount,
+            self.remote_reserved_ckb_amount,
+            self.commitment_fee_rate,
+            &self.funding_udt_type_script,
+            &self.get_remote_shutdown_script(),
+            self.remote_constraints.max_tlc_number_in_flight,
+        )
     }
 
     fn check_shutdown_fee_rate(
@@ -5717,14 +5767,46 @@ impl ChannelActorState {
         true
     }
 
-    fn get_total_reserved_ckb_amount(&self) -> u64 {
-        self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+    fn get_total_reserved_ckb_amount(&self) -> Result<u64, ProcessingChannelError> {
+        Self::checked_total_reserved_ckb_amount_from(
+            self.local_reserved_ckb_amount,
+            self.remote_reserved_ckb_amount,
+        )
     }
 
-    fn get_total_ckb_amount(&self) -> u64 {
-        self.to_local_amount as u64
-            + self.to_remote_amount as u64
-            + self.get_total_reserved_ckb_amount()
+    fn get_total_ckb_amount(&self) -> Result<u64, ProcessingChannelError> {
+        let total_reserved_ckb_amount = self.get_total_reserved_ckb_amount()?;
+        let total_ckb_amount = self
+            .get_liquid_capacity()
+            .checked_add(total_reserved_ckb_amount as u128)
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "The total CKB amount overflows: liquid {}, reserved {}",
+                    self.get_liquid_capacity(),
+                    total_reserved_ckb_amount
+                ))
+            })?;
+
+        u64::try_from(total_ckb_amount).map_err(|_| {
+            ProcessingChannelError::InvalidParameter(format!(
+                "The total CKB amount ({}) should be less than {}",
+                total_ckb_amount,
+                u64::MAX
+            ))
+        })
+    }
+
+    fn checked_capacity_after_fee(
+        capacity: u64,
+        fee: u64,
+        context: &str,
+    ) -> Result<u64, ProcessingChannelError> {
+        capacity.checked_sub(fee).ok_or_else(|| {
+            ProcessingChannelError::InvalidParameter(format!(
+                "{} capacity {} is not enough to pay fee {}",
+                context, capacity, fee
+            ))
+        })
     }
 
     // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
@@ -5776,14 +5858,18 @@ impl ChannelActorState {
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_partial_signature = {
-            let commitment_tx_fee = calculate_commitment_tx_fee(
+            let commitment_tx_fee = checked_calculate_commitment_tx_fee(
                 self.commitment_fee_rate,
                 &self.funding_udt_type_script,
-            );
+            )?;
             let lock_script = self.get_remote_shutdown_script();
             let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
             {
-                let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
+                let capacity = Self::checked_capacity_after_fee(
+                    self.get_total_reserved_ckb_amount()?,
+                    commitment_tx_fee,
+                    "Reserved CKB",
+                )?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script)
                     .type_(Some(udt_type_script.clone()).pack())
@@ -5793,7 +5879,11 @@ impl ChannelActorState {
                 let output_data = self.get_liquid_capacity().to_le_bytes().pack();
                 (output, output_data)
             } else {
-                let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+                let capacity = Self::checked_capacity_after_fee(
+                    self.get_total_ckb_amount()?,
+                    commitment_tx_fee,
+                    "Total CKB",
+                )?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .capacity(capacity)
@@ -6851,6 +6941,17 @@ impl ChannelActorState {
             )));
         }
 
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            self.to_local_amount,
+            accept_channel.funding_amount,
+            self.local_reserved_ckb_amount,
+            accept_channel.reserved_ckb_amount,
+            self.commitment_fee_rate,
+            &self.funding_udt_type_script,
+            &accept_channel.shutdown_script,
+            accept_channel.max_tlc_number_in_flight,
+        )?;
+
         self.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::INIT_SENT,
         ));
@@ -6875,8 +6976,6 @@ impl ChannelActorState {
             accept_channel.max_tlc_value_in_flight,
             accept_channel.max_tlc_number_in_flight,
         );
-
-        self.check_accept_channel_parameters()?;
 
         match accept_channel.channel_announcement_nonce {
             Some(ref nonce) if self.is_public() => {
@@ -7531,14 +7630,18 @@ impl ChannelActorState {
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_data = {
-            let commitment_tx_fee = calculate_commitment_tx_fee(
+            let commitment_tx_fee = checked_calculate_commitment_tx_fee(
                 self.commitment_fee_rate,
                 &self.funding_udt_type_script,
-            );
+            )?;
             let lock_script = self.get_local_shutdown_script();
             let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
             {
-                let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
+                let capacity = Self::checked_capacity_after_fee(
+                    self.get_total_reserved_ckb_amount()?,
+                    commitment_tx_fee,
+                    "Reserved CKB",
+                )?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .type_(Some(udt_type_script.clone()).pack())
@@ -7548,7 +7651,11 @@ impl ChannelActorState {
                 let output_data = self.get_liquid_capacity().to_le_bytes().pack();
                 (output, output_data)
             } else {
-                let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+                let capacity = Self::checked_capacity_after_fee(
+                    self.get_total_ckb_amount()?,
+                    commitment_tx_fee,
+                    "Total CKB",
+                )?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .capacity(capacity)
@@ -8080,7 +8187,7 @@ impl ChannelActorState {
             let is_udt_amount_ok = udt_amount == self.get_liquid_capacity();
             return Ok(is_udt_amount_ok);
         } else {
-            let is_complete = current_capacity == self.get_total_ckb_amount();
+            let is_complete = current_capacity == self.get_total_ckb_amount()?;
             Ok(is_complete)
         }
     }
@@ -8408,10 +8515,10 @@ impl ChannelActorState {
     fn build_commitment_tx_and_settlement_data(
         &self,
         for_remote: bool,
-    ) -> (TransactionView, SettlementData) {
+    ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
         let funding_out_point = self.must_get_funding_transaction_outpoint();
         let (output, output_data, settlement_data) =
-            self.build_commitment_transaction_output(for_remote);
+            self.build_commitment_transaction_output(for_remote)?;
 
         let commitment_tx = TransactionBuilder::default()
             .input(
@@ -8423,13 +8530,13 @@ impl ChannelActorState {
             .output_data(output_data)
             .build();
 
-        (commitment_tx, settlement_data)
+        Ok((commitment_tx, settlement_data))
     }
 
     fn build_commitment_transaction_output(
         &self,
         for_remote: bool,
-    ) -> (CellOutput, Bytes, SettlementData) {
+    ) -> Result<(CellOutput, Bytes, SettlementData), ProcessingChannelError> {
         let x_only_aggregated_pubkey = self.get_commitment_lock_script_xonly(for_remote);
         let version = self.get_current_commitment_number(for_remote);
         let settlement_data = self.build_settlement_data(for_remote);
@@ -8456,12 +8563,17 @@ impl ChannelActorState {
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &commitment_lock_script_args);
 
-        let commitment_tx_fee =
-            calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+        let commitment_tx_fee = checked_calculate_commitment_tx_fee(
+            self.commitment_fee_rate,
+            &self.funding_udt_type_script,
+        )?;
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
-                - commitment_tx_fee;
+            let capacity = Self::checked_capacity_after_fee(
+                self.get_total_reserved_ckb_amount()?,
+                commitment_tx_fee,
+                "Reserved CKB",
+            )?;
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
@@ -8469,15 +8581,19 @@ impl ChannelActorState {
                 .build();
 
             let output_data = self.get_liquid_capacity().to_le_bytes().pack();
-            (output, output_data, settlement_data)
+            Ok((output, output_data, settlement_data))
         } else {
-            let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+            let capacity = Self::checked_capacity_after_fee(
+                self.get_total_ckb_amount()?,
+                commitment_tx_fee,
+                "Total CKB",
+            )?;
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
                 .capacity(capacity)
                 .build();
             let output_data = Bytes::default();
-            (output, output_data, settlement_data)
+            Ok((output, output_data, settlement_data))
         }
     }
 
@@ -8588,7 +8704,8 @@ impl ChannelActorState {
     fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<(PartialSignature, TransactionView, SettlementData), ProcessingChannelError> {
-        let (commitment_tx, settlement_data) = self.build_commitment_tx_and_settlement_data(true);
+        let (commitment_tx, settlement_data) =
+            self.build_commitment_tx_and_settlement_data(true)?;
         let funding_tx_partial_signature = self
             .get_funding_sign_context()
             .sign(&compute_tx_message(&commitment_tx))?;
@@ -8618,7 +8735,8 @@ impl ChannelActorState {
         &self,
         funding_tx_partial_signature: PartialSignature,
     ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
-        let (commitment_tx, settlement_data) = self.build_commitment_tx_and_settlement_data(false);
+        let (commitment_tx, settlement_data) =
+            self.build_commitment_tx_and_settlement_data(false)?;
 
         let message = compute_tx_message(&commitment_tx);
         self.get_funding_verify_context()
@@ -9050,3 +9168,5 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
         }
     }
 }
+
+

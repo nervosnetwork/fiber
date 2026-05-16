@@ -96,10 +96,19 @@ pub(crate) fn shutdown_tx_size(
     mock_shutdown_tx.data().serialized_size_in_block()
 }
 
-pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Option<Script>) -> u64 {
+pub(crate) fn checked_calculate_commitment_tx_fee(
+    fee_rate: u64,
+    udt_type_script: &Option<Script>,
+) -> Result<u64, ProcessingChannelError> {
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
     let tx_size = commitment_tx_size(udt_type_script) as u64;
-    fee_rate.fee(tx_size).as_u64()
+    fee_rate.as_u64().checked_mul(tx_size).ok_or_else(|| {
+        ProcessingChannelError::InvalidParameter(format!(
+            "Commitment fee rate {} overflows commitment fee calculation for transaction size {}",
+            fee_rate, tx_size
+        ))
+    })?;
+    Ok(fee_rate.fee(tx_size).as_u64())
 }
 
 pub(crate) fn calculate_shutdown_tx_fee(
@@ -139,6 +148,28 @@ pub(crate) fn calculate_tlc_forward_fee(
     fee_proportational_millionths: u128,
 ) -> Result<u128, String> {
     calculate_fee_with_base(amount, fee_proportational_millionths, 1_000_000)
+}
+
+pub(crate) fn check_commitment_reserved_fee(
+    commitment_fee_rate: u64,
+    udt_type_script: &Option<Script>,
+    reserved_fee: u64,
+) -> ProcessingChannelResult {
+    let commitment_fee = checked_calculate_commitment_tx_fee(commitment_fee_rate, udt_type_script)?;
+    let required_reserved_fee = commitment_fee.checked_mul(2).ok_or_else(|| {
+        ProcessingChannelError::InvalidParameter(format!(
+            "Commitment fee {} overflows while checking twice the reserved fee",
+            commitment_fee
+        ))
+    })?;
+    if required_reserved_fee > reserved_fee {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
+                commitment_fee, commitment_fee_rate, reserved_fee
+            )));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn check_open_channel_parameters(
@@ -183,14 +214,8 @@ pub(crate) fn check_open_channel_parameters(
             DEFAULT_COMMITMENT_FEE_RATE,
         )));
     }
-    let commitment_fee = calculate_commitment_tx_fee(commitment_fee_rate, udt_type_script);
     let reserved_fee = reserved_ckb_amount - occupied_capacity;
-    if commitment_fee * 2 > reserved_fee {
-        return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
-                commitment_fee, commitment_fee_rate, reserved_fee
-            )));
-    }
+    check_commitment_reserved_fee(commitment_fee_rate, udt_type_script, reserved_fee)?;
 
     // commitment_delay_epoch
     let epoch = EpochNumberWithFraction::from_full_value_unchecked(commitment_delay_epoch);
@@ -279,3 +304,4 @@ pub(crate) fn check_tlc_delta_with_epochs(
 
     Ok(())
 }
+
