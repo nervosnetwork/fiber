@@ -1628,16 +1628,10 @@ where
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
 
-            if add_tlc.expiry < peeled_payment_expiry {
-                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
-            }
-
-            let Some(min_final_expiry) =
-                now_timestamp_as_millis_u64().checked_add(final_tlc_expiry_delta)
-            else {
-                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
-            };
-            if add_tlc.expiry < min_final_expiry {
+            let required_final_expiry = now_timestamp_as_millis_u64()
+                .checked_add(final_tlc_expiry_delta.max(MIN_TLC_EXPIRY_DELTA))
+                .ok_or(ProcessingChannelError::IncorrectFinalTlcExpiry)?;
+            if add_tlc.expiry < peeled_payment_expiry || add_tlc.expiry < required_final_expiry {
                 return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
             }
 
