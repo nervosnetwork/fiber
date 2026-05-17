@@ -20,8 +20,10 @@ use crate::{
 };
 use fiber_types::Hash256;
 use fiber_types::{
-    AddTlcCommand, CurrentPaymentHopData, HashAlgorithm, PaymentHopData, PeeledPaymentOnionPacket,
-    PrevTlcInfo, TlcErrorCode,
+    AddTlcCommand,
+    AppliedFlags, CommitmentNumbers, CurrentPaymentHopData, HashAlgorithm, InboundTlcStatus,
+    PaymentHopData, PeeledPaymentOnionPacket, PrevTlcInfo, TLCId, TlcErrorCode, TlcInfo,
+    TlcStatus,
 };
 use ractor::{call, RpcReplyPort};
 use rand::Rng;
@@ -2328,6 +2330,123 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
             assert_eq!(tlc_err.error_code, TlcErrorCode::FeeInsufficient);
         }
         Ok(_) => panic!("Should have failed with FeeInsufficient"),
+    }
+}
+
+#[tokio::test]
+async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budget() {
+    init_tracing();
+
+    // A -- B -- C. We test B's trampoline forwarding boundary.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+    )
+    .await;
+    let [_node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let channel_ab = channels[0];
+
+    node_b
+        .with_network_graph_mut(|graph| graph.set_add_rand_expiry_delta(false))
+        .await;
+    wait_until_graph_channel_has_update(&node_b, &node_b, &node_c).await;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let amount_to_forward = 1000;
+    let forwarding_fee = 100;
+    let incoming_amount = amount_to_forward + forwarding_fee;
+    let upstream_expiry =
+        now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA + MIN_TLC_EXPIRY_DELTA;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
+    node_b_state.tlc_state.add_received_tlc(TlcInfo {
+        status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+        tlc_id: TLCId::Received(1),
+        amount: incoming_amount,
+        payment_hash,
+        total_amount: None,
+        payment_secret: None,
+        attempt_id: None,
+        expiry: upstream_expiry,
+        hash_algorithm: HashAlgorithm::Sha256,
+        onion_packet: None,
+        shared_secret: [0u8; 32],
+        is_trampoline_hop: false,
+        created_at: CommitmentNumbers::new(),
+        removed_reason: None,
+        forwarding_tlc: None,
+        removed_confirmed_at: None,
+        applied_flags: AppliedFlags::empty(),
+    });
+    node_b.update_channel_actor_state(node_b_state, None).await;
+
+    let forward_payload = TrampolineHopPayload::Forward {
+        next_node_id: node_c.pubkey,
+        amount_to_forward,
+        build_max_fee_amount: forwarding_fee,
+        tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        max_parts: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+    };
+    let payloads = vec![
+        forward_payload,
+        TrampolineHopPayload::Final {
+            final_amount: amount_to_forward,
+            final_tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let trampoline_onion_bytes = TrampolineOnionPacket::create(
+        Privkey::from_slice(&[2u8; 32]),
+        vec![node_b.pubkey, node_c.pubkey],
+        payloads,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create onion")
+    .into_bytes();
+
+    let mut current_hop_data = CurrentPaymentHopData {
+        amount: incoming_amount,
+        expiry: upstream_expiry,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+    };
+    current_hop_data.set_trampoline_onion(trampoline_onion_bytes);
+
+    let peeled_packet = PeeledPaymentOnionPacket {
+        current: current_hop_data,
+        shared_secret: [0u8; 32],
+        next: None,
+    };
+
+    let (sender, receiver) = oneshot::channel();
+    let command = NetworkActorCommand::SendPaymentOnionPacket(
+        SendOnionPacketCommand {
+            peeled_onion_packet: peeled_packet,
+            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, forwarding_fee)),
+            payment_hash,
+            attempt_id: None,
+        },
+        RpcReplyPort::from(sender),
+    );
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(command))
+        .expect("send command");
+
+    let res = receiver.await.expect("recv result");
+    match res {
+        Err(tlc_err) => assert_eq!(tlc_err.error_code, TlcErrorCode::IncorrectTlcExpiry),
+        Ok(_) => panic!("Should have failed with IncorrectTlcExpiry"),
     }
 }
 

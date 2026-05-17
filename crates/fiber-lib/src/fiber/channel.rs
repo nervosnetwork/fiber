@@ -1780,6 +1780,7 @@ where
         state.check_for_tlc_update(TlcUpdateAction::AddTlcPeer {
             amount: add_tlc.amount,
         })?;
+        state.check_tlc_expiry(add_tlc.expiry)?;
         let tlc_info = state.create_inbounding_tlc(add_tlc.clone())?;
         state.check_insert_tlc(&tlc_info)?;
         state.tlc_state.add_received_tlc(tlc_info);

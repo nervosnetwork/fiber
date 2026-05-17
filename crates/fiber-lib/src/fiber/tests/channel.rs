@@ -7982,6 +7982,41 @@ async fn test_channel_with_malicious_peer_send_channel_msg() {
 }
 
 #[tokio::test]
+async fn test_inbound_add_tlc_rejects_expiry_too_soon() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
+
+    let preimage = [1; 32];
+    let algorithm = HashAlgorithm::Sha256;
+    let payment_hash = algorithm.hash(preimage).into();
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                target: node_b.pubkey,
+                message: FiberMessage::add_tlc(AddTlc {
+                    channel_id,
+                    tlc_id: 0,
+                    amount: 1000,
+                    payment_hash,
+                    expiry: 0,
+                    hash_algorithm: algorithm,
+                    onion_packet: None,
+                }),
+            }),
+        ))
+        .expect("send add tlc message");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let state = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(state.tlc_state.all_tlcs().count(), 0);
+}
+
+#[tokio::test]
 async fn test_funding_timeout() {
     let funding_amount: u128 = 100000000000;
     let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {

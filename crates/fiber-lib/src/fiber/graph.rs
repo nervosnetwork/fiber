@@ -1981,7 +1981,18 @@ where
         let route_len = route.len();
         let now = now_timestamp_as_millis_u64();
         let mut hops_data = Vec::with_capacity(route.len() + 1);
-        let rand_tlc_expiry_delta = self.rand_tlc_expiry_delta(route);
+        let mut rand_tlc_expiry_delta = self.rand_tlc_expiry_delta(route);
+        if let Some(max_expiry) = payment_data
+            .trampoline_context
+            .as_ref()
+            .and_then(|context| context.max_outgoing_tlc_expiry)
+        {
+            if let Some(first_hop) = route.first() {
+                let first_hop_base_expiry = now.saturating_add(first_hop.incoming_tlc_expiry);
+                rand_tlc_expiry_delta =
+                    rand_tlc_expiry_delta.min(max_expiry.saturating_sub(first_hop_base_expiry));
+            }
+        }
 
         for r in route {
             let expiry = checked_add_u64(now, r.incoming_tlc_expiry, "payment hop expiry")?;

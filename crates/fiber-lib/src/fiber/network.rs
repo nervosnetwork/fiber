@@ -3307,6 +3307,33 @@ where
                     ));
                 };
 
+                let Some(prev_tlc_info) = prev_channel_state
+                    .tlc_state
+                    .get(&TLCId::Received(prev_tlc.prev_tlc_id))
+                else {
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::TemporaryNodeFailure,
+                        state.get_public_key(),
+                    ));
+                };
+                if prev_tlc_info.payment_hash != payment_hash {
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::TemporaryNodeFailure,
+                        state.get_public_key(),
+                    ));
+                }
+
+                let max_outgoing_tlc_expiry = prev_tlc_info
+                    .expiry
+                    .checked_sub(prev_channel_state.local_tlc_info.tlc_expiry_delta)
+                    .ok_or_else(|| TlcErr::new(TlcErrorCode::IncorrectTlcExpiry))?;
+                let min_outgoing_tlc_expiry = now_timestamp_as_millis_u64()
+                    .checked_add(tlc_expiry_delta)
+                    .ok_or_else(|| TlcErr::new(TlcErrorCode::IncorrectTlcExpiry))?;
+                if min_outgoing_tlc_expiry > max_outgoing_tlc_expiry {
+                    return Err(TlcErr::new(TlcErrorCode::IncorrectTlcExpiry));
+                }
+
                 let payment_data =
                     SendPaymentDataBuilder::new(next_node_id, amount_to_forward, payment_hash)
                         .final_tlc_expiry_delta(tlc_expiry_delta)
@@ -3320,6 +3347,7 @@ where
                             // maybe we need to support multiple previous tlcs in the future
                             previous_tlcs: vec![prev_tlc],
                             hash_algorithm,
+                            max_outgoing_tlc_expiry: Some(max_outgoing_tlc_expiry),
                         }))
                         .allow_mpp(max_parts.is_some_and(|v| v > 1))
                         .build()

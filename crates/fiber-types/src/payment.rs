@@ -768,6 +768,13 @@ pub struct TrampolineContext {
     pub previous_tlcs: Vec<PrevTlcInfo>,
     /// Hash algorithm used for the payment.
     pub hash_algorithm: HashAlgorithm,
+    /// Maximum absolute expiry allowed for the outgoing first-hop TLC.
+    ///
+    /// Trampoline forwarding derives this from the upstream TLC expiry minus
+    /// the local forwarding delta, so the forwarded payment cannot outlive the
+    /// upstream claim window.
+    #[serde(default)]
+    pub max_outgoing_tlc_expiry: Option<u64>,
 }
 
 // The onion packet is invalid
