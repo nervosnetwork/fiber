@@ -1213,7 +1213,6 @@ where
                 }
             }
             FiberMessage::ChannelNormalOperation(msg) => {
-                state.check_feature_compatibility(&peer_pubkey)?;
                 let channel_id = msg.get_channel_id();
                 let mut found = state
                     .peer_channel_index
