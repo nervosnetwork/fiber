@@ -7689,3 +7689,50 @@ fn test_send_payment_malicious_invoice_does_not_crash_node_entrypoint() {
         other => panic!("unexpected error: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_send_payment_dry_run_with_too_large_hop_hint_expiry_delta() {
+    init_tracing();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 40000000000, MIN_RESERVED_CKB))],
+        3,
+    )
+    .await;
+    let [node1, mut node2, mut node3] = nodes.try_into().expect("3 nodes");
+
+    let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
+        &mut node2,
+        &mut node3,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount: MIN_RESERVED_CKB + 20000000000,
+            node_b_funding_amount: MIN_RESERVED_CKB,
+            ..Default::default()
+        },
+    )
+    .await;
+    let funding_tx = node2
+        .get_transaction_view_from_hash(funding_tx_hash)
+        .await
+        .expect("get funding tx");
+    let outpoint = funding_tx.output_pts_iter().next().unwrap();
+
+    let res = node1
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node3.pubkey),
+            amount: Some(10000000000),
+            keysend: Some(true),
+            dry_run: true,
+            hop_hints: Some(vec![HopHint {
+                pubkey: node2.pubkey,
+                channel_outpoint: outpoint,
+                fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
+                tlc_expiry_delta: u64::MAX,
+            }]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err(), "Expect send payment failed: {:?}", res);
+    assert_eq!(node1.get_inflight_payment_count().await, 0);
+}

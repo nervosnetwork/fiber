@@ -1965,24 +1965,15 @@ where
             node_id: from,
             weight,
             distance,
-            amount_to_send: match next_hop_received_amount.checked_add(fee) {
-                Some(amount) => amount,
-                None => {
-                    debug!("amount_to_send overflow while evaluating path edge");
-                    return;
-                }
-            },
             tlc_min_value,
-            incoming_tlc_expiry: match incoming_tlc_expiry.checked_add(tlc_expiry_delta) {
-                Some(expiry) => expiry,
-                None => {
-                    debug!("incoming_tlc_expiry overflow while evaluating path edge");
-                    return;
-                }
-            },
-            fee_charged: fee,
             probability,
             pending_count,
+            fee_charged: fee,
+            // already checked in caller
+            amount_to_send: next_hop_received_amount + fee,
+
+            // already checked in caller
+            incoming_tlc_expiry: incoming_tlc_expiry + tlc_expiry_delta,
             next_hop: Some(RouterHop {
                 target,
                 channel_outpoint: channel_outpoint.clone(),
@@ -2231,6 +2222,23 @@ where
                         ))
                     },
                 )?;
+                let incoming_tlc_expiry =
+                    expiry
+                        .checked_add(hint.tlc_expiry_delta)
+                        .ok_or_else(|| {
+                            PathFindError::Overflow(format!(
+                                "hop hint tlc_expiry_delta overflow: final_tlc_expiry_delta {} + hop_hint_tlc_expiry_delta {}",
+                                expiry, hint.tlc_expiry_delta
+                            ))
+                        })?;
+                if incoming_tlc_expiry > tlc_expiry_limit {
+                    debug!(
+                        "skip hop hint because incoming tlc expiry {} exceeds limit {}: {:?}",
+                        incoming_tlc_expiry, tlc_expiry_limit, hint
+                    );
+                    continue;
+                }
+
                 // hop hint is only used for private channels, we assume there is no tlc_min_value limit
                 let tlc_min_val = 0;
                 self.eval_and_update(
@@ -2359,14 +2367,31 @@ where
                         }
                     }
                 };
-                let amount_to_send = next_hop_received_amount.saturating_add(fee);
+
+                let amount_to_send =
+                    next_hop_received_amount.checked_add(fee).ok_or_else(|| {
+                        PathFindError::Overflow(format!(
+                            "amount_to_send overflow: next_hop_received_amount {} + fee {}",
+                            next_hop_received_amount, fee
+                        ))
+                    })?;
+
                 let expiry_delta = if is_source {
                     0
                 } else {
                     channel_update.tlc_expiry_delta
                 };
 
-                let incoming_tlc_expiry = cur_hop.incoming_tlc_expiry.saturating_add(expiry_delta);
+                let incoming_tlc_expiry = cur_hop
+                    .incoming_tlc_expiry
+                    .checked_add(expiry_delta)
+                    .ok_or_else(|| {
+                        PathFindError::Overflow(format!(
+                            "incoming_tlc_expiry overflow: {} + {}",
+                            cur_hop.incoming_tlc_expiry, expiry_delta
+                        ))
+                    })?;
+
                 let send_node = channel_info
                     .get_send_node(from)
                     .expect("send_node should exist");
