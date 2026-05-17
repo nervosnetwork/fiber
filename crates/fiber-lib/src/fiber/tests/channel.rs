@@ -6051,7 +6051,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 21].pack()).build()),
+                        close_script: Some(script_with_large_args()),
                         fee_rate: Some(FeeRate::from_u64(u64::MAX)),
                         force: false,
                     },
@@ -9803,6 +9803,10 @@ fn expect_invalid_parameter(result: ProcessingChannelResult, expected: &str) {
     );
 }
 
+fn script_with_large_args() -> Script {
+    Script::new_builder().args([0u8; 2_000].pack()).build()
+}
+
 #[test]
 fn check_accept_channel_parameters_rejects_total_reserved_overflow() {
     expect_invalid_parameter(
@@ -9822,6 +9826,7 @@ fn check_accept_channel_parameters_rejects_total_reserved_overflow() {
 
 #[test]
 fn check_accept_channel_parameters_rejects_commitment_fee_overflow() {
+    let udt_type_script = Some(script_with_large_args());
     expect_invalid_parameter(
         ChannelActorState::check_accept_channel_parameters_for_values(
             0,
@@ -9829,7 +9834,7 @@ fn check_accept_channel_parameters_rejects_commitment_fee_overflow() {
             0,
             u64::MAX,
             u64::MAX,
-            &None,
+            &udt_type_script,
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
         ),
@@ -9856,16 +9861,20 @@ fn check_accept_channel_parameters_rejects_non_udt_total_capacity_overflow() {
 
 #[test]
 fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
+    let udt_type_script = Some(script_with_large_args());
     let err = check_open_channel_parameters(
-        &None,
+        &udt_type_script,
         &Script::default(),
         u64::MAX,
         DEFAULT_FEE_RATE,
         u64::MAX,
-        MIN_COMMITMENT_DELAY_EPOCHS,
+        EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         SYS_MAX_TLC_NUMBER_IN_FLIGHT,
     )
     .expect_err("fee-rate overflow must be rejected");
 
-    assert!(err.to_string().contains("overflows commitment fee"));
+    assert!(
+        err.to_string().contains("overflows commitment fee"),
+        "expected commitment fee overflow, got {err}"
+    );
 }
