@@ -1,7 +1,7 @@
 use crate::migration::{Migration, MigrationStore};
 use tracing::info;
 
-const MIGRATION_DB_VERSION: &str = "20260511120000";
+const MIGRATION_DB_VERSION: &str = "20260518120000";
 
 const CHANNEL_ACTOR_STATE_PREFIX: &[u8] = &[0x00];
 
@@ -104,6 +104,7 @@ fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActo
             .collect::<Result<Vec<_>, _>>()?,
         last_was_revoke: old.last_was_revoke,
         connectivity_state: fiber_types_090::channel::ChannelConnectivityState::Offline,
+        external_funding: None,
     })
 }
 
@@ -128,7 +129,7 @@ impl MigrationObj {
 impl Migration for MigrationObj {
     fn migrate(&self, store: &dyn MigrationStore) -> Result<(), String> {
         info!(
-            "Migrating to {}: adding connectivity_state to ChannelActorData ...",
+            "Migrating to {}: adding connectivity_state and external_funding to ChannelActorData ...",
             MIGRATION_DB_VERSION
         );
 
@@ -222,5 +223,6 @@ mod tests {
             new.connectivity_state,
             fiber_types_090::channel::ChannelConnectivityState::Offline
         );
+        assert_eq!(new.external_funding, None);
     }
 }
