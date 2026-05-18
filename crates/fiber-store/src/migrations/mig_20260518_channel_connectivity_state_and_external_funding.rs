@@ -223,6 +223,6 @@ mod tests {
             new.connectivity_state,
             fiber_types_090::channel::ChannelConnectivityState::Offline
         );
-        assert_eq!(new.external_funding, None);
+        assert!(new.external_funding.is_none());
     }
 }
