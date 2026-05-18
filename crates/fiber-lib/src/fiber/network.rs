@@ -106,7 +106,7 @@ use fiber_types::{
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
     RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos,
+    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -5453,31 +5453,20 @@ where
                     for prev_tlc in &context.previous_tlcs {
                         let (send, _recv) = oneshot::channel();
                         let rpc_reply = RpcReplyPort::from(send);
-                        let Some(shared_secret) = prev_tlc.shared_secret else {
-                            warn!(
-                                "Trampoline payment failed without upstream shared secret for channel {:?} tlc {}",
-                                prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
-                            );
-                            continue;
-                        };
+                        let shared_secret = prev_tlc.shared_secret.unwrap_or(NO_SHARED_SECRET);
                         let inner_error_packet = last_error_packet
                             .as_ref()
                             .map(|packet| packet.onion_packet.clone())
                             .unwrap_or_else(|| {
-                                TlcErrPacket::new(TlcErr::new(error_code), &[0u8; 32]).onion_packet
+                                TlcErrPacket::new(TlcErr::new(error_code), &NO_SHARED_SECRET)
+                                    .onion_packet
                             });
-                        let Some(wrapper_packet) = TlcErrPacket::new_trampoline_failed(
+                        let wrapper_packet = TlcErrPacket::new_trampoline_failed(
                             error_code,
                             self.get_public_key(),
                             inner_error_packet,
                             &shared_secret,
-                        ) else {
-                            warn!(
-                                "Trampoline payment failed with plaintext upstream shared secret for channel {:?} tlc {}",
-                                prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
-                            );
-                            continue;
-                        };
+                        );
                         let command = ChannelCommand::RemoveTlc(
                             RemoveTlcCommand {
                                 id: prev_tlc.prev_tlc_id,

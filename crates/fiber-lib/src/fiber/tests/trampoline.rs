@@ -1952,7 +1952,12 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     let command = NetworkActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
             peeled_onion_packet: peeled_packet,
-            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, 0)),
+            previous_tlc: Some(PrevTlcInfo {
+                prev_channel_id: channel_ab,
+                prev_tlc_id: 1,
+                forwarding_fee: 0,
+                shared_secret: None,
+            }),
             payment_hash,
             attempt_id: None,
         },
@@ -2047,7 +2052,12 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     let command = NetworkActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
             peeled_onion_packet: peeled_packet,
-            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, 0)),
+            previous_tlc: Some(PrevTlcInfo {
+                prev_channel_id: channel_ab,
+                prev_tlc_id: 1,
+                forwarding_fee: 0,
+                shared_secret: None,
+            }),
             payment_hash,
             attempt_id: None,
         },

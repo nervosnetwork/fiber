@@ -151,17 +151,13 @@ impl TlcErrPacket {
         node_id: crate::Pubkey,
         inner_error_packet: Vec<u8>,
         shared_secret: &[u8; 32],
-    ) -> Option<Self> {
-        if shared_secret == &NO_SHARED_SECRET {
-            return None;
-        }
-
+    ) -> Self {
         let mut tlc_err = TlcErr::new(error_code);
         tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
             node_id,
             inner_error_packet,
         });
-        Some(Self::new(tlc_err, shared_secret))
+        Self::new(tlc_err, shared_secret)
     }
 }
 

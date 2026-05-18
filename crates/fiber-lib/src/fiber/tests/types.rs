@@ -760,24 +760,13 @@ fn test_direct_trampoline_failed_wrapper_uses_outer_shared_secret() {
         }),
     };
 
-    assert!(
-        TlcErrPacket::new_trampoline_failed(
-            wrapper_err.error_code,
-            trampoline,
-            inner_error_packet.onion_packet.clone(),
-            &NO_SHARED_SECRET,
-        )
-        .is_none(),
-        "trampoline wrapper must not be created with NO_SHARED_SECRET"
-    );
-
     let wrapper_packet = TlcErrPacket::new_trampoline_failed(
         wrapper_err.error_code,
         trampoline,
         inner_error_packet.onion_packet,
         &hops_ss[0],
-    )
-    .expect("direct trampoline wrapper uses outer shared secret");
+    );
+
     assert!(!wrapper_packet.is_plaintext());
     let decoded = wrapper_packet
         .decode(session_key.as_ref(), hops_path)
