@@ -2746,33 +2746,44 @@ where
         let committed_tlcs: Vec<_> = state
             .tlc_state
             .get_committed_received_tlcs()
-            .map(|tlc| (tlc.tlc_id, tlc.id(), tlc.payment_hash))
+            .cloned()
             .collect();
 
-        for (tlc_id, id, payment_hash) in &committed_tlcs {
-            // skip if tlc amount is not fulfilled invoice
-            // this may happened if payment is mpp
-            if let Some(invoice) = self.store.get_invoice(payment_hash) {
-                // Re-fetch tlc for is_invoice_fulfilled check
-                if let Some(tlc) = state.tlc_state.get(tlc_id) {
-                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
+        for tlc in &committed_tlcs {
+            let tlc_id = tlc.tlc_id;
+            let id = tlc.id();
+            let payment_hash = tlc.payment_hash;
 
-            let Some(payment_preimage) = self.store.get_preimage(payment_hash) else {
+            let Some(payment_preimage) = self.store.get_preimage(&payment_hash) else {
                 continue;
             };
             debug!(
                 "Found payment preimage for channel {:?} tlc {:?}",
                 state.id, id
             );
+
+            if let Some(invoice) = self.store.get_invoice(&payment_hash) {
+                if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                    continue;
+                }
+                // Hold invoices stay pending until the preimage-reveal path settles stored hold TLCs.
+                if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open) {
+                    continue;
+                }
+
+                // Keep invoice settlement serialized in NetworkActor so same-invoice races
+                // cannot be fulfilled directly by multiple channel actors.
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SettleTlcSet(payment_hash, vec![(state.id, id)]),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                continue;
+            }
+
             if self
                 .store
-                .get_invoice_status(payment_hash)
+                .get_invoice_status(&payment_hash)
                 .is_some_and(|status| {
                     !matches!(status, CkbInvoiceStatus::Open | CkbInvoiceStatus::Received)
                 })
@@ -2783,7 +2794,7 @@ where
             self.register_retryable_tlc_remove(
                 myself,
                 state,
-                *tlc_id,
+                tlc_id,
                 RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
             );
         }

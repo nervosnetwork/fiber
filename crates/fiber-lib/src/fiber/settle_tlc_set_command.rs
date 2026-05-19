@@ -9,6 +9,7 @@ use fiber_types::{
 pub struct SettleTlcSetCommand<'s, S> {
     payment_hash: Hash256,
     is_hold_tlc_set: bool,
+    allow_received_invoice: bool,
     tlcs: Vec<TlcSettlementContext>,
     store: &'s S,
 }
@@ -87,10 +88,23 @@ where
             tlcs,
             store,
             is_hold_tlc_set: false,
+            allow_received_invoice: false,
         }
     }
 
     pub fn new_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
+        Self::new_hold_tlc_set_with_received_invoice(payment_hash, store, false)
+    }
+
+    pub fn new_received_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
+        Self::new_hold_tlc_set_with_received_invoice(payment_hash, store, true)
+    }
+
+    fn new_hold_tlc_set_with_received_invoice(
+        payment_hash: Hash256,
+        store: &'s S,
+        allow_received_invoice: bool,
+    ) -> Self {
         let tlcs = store
             .get_payment_hold_tlcs(payment_hash)
             .iter()
@@ -104,6 +118,7 @@ where
             tlcs,
             store,
             is_hold_tlc_set: true,
+            allow_received_invoice,
         }
     }
 
@@ -234,8 +249,9 @@ where
                 }
             }
             CkbInvoiceStatus::Received => {
-                if self.is_hold_tlc_set {
-                    // We allow settle Received TLCs for a hold invoice because we are processing all the TLCs for the invoice and extra paid TLCs will be rejected.
+                if self.is_hold_tlc_set && self.allow_received_invoice {
+                    // Only preimage-reveal/retry paths may settle a Received hold set. Newly
+                    // arrived TLCs for an already Received invoice must be rejected as duplicates.
                     Ok(())
                 } else {
                     Err(TlcErrorCode::HoldTlcTimeout)

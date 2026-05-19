@@ -509,8 +509,10 @@ pub enum NetworkActorCommand {
     TimeoutHoldTlc(Hash256, Hash256, u64),
     // Settle tlc set by given a list of `(channel_id, tlc_id)`
     SettleTlcSet(Hash256, Vec<(Hash256, u64)>),
-    // Settle hold tlc set saved for a payment hash
+    // Settle hold tlc set saved for a payment hash when a new TLC arrives.
     SettleHoldTlcSet(Hash256),
+    // Retry settling a hold tlc set after the invoice has already been marked Received.
+    SettleReceivedHoldTlcSet(Hash256),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(Pubkey, SessionId),
     // For internal use and debugging only. Most of the messages requires some
@@ -2092,7 +2094,6 @@ where
             NetworkActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
-                // peer has active channels but down
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(
                         channel_state,
@@ -2132,25 +2133,19 @@ where
                             ) in expired_tlcs
                             {
                                 if self.store.is_tlc_settled(&channel_id, &payment_hash) {
-                                    let (send, _recv) = oneshot::channel();
-                                    let rpc_reply = RpcReplyPort::from(send);
-                                    if let Err(err) = state
-                                        .send_command_to_channel(
+                                    if let Err(err) = self
+                                        .send_remove_tlc_to_channel(
+                                            state,
                                             forwarding_channel_id,
-                                            ChannelCommand::RemoveTlc(
-                                                RemoveTlcCommand {
-                                                    id: forwarding_tlc_id,
-                                                    reason: RemoveTlcReason::RemoveTlcFail(
-                                                        TlcErrPacket::new(
-                                                            TlcErr::new(
-                                                                TlcErrorCode::ExpiryTooSoon,
-                                                            ),
-                                                            &shared_secret,
-                                                        ),
+                                            RemoveTlcCommand {
+                                                id: forwarding_tlc_id,
+                                                reason: RemoveTlcReason::RemoveTlcFail(
+                                                    TlcErrPacket::new(
+                                                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                                                        &shared_secret,
                                                     ),
-                                                },
-                                                rpc_reply,
-                                            ),
+                                                ),
+                                            },
                                         )
                                         .await
                                     {
@@ -2165,32 +2160,13 @@ where
                     }
                 }
 
-                // Due to channel offline or network issues, remove hold tlc maybe failed,
-                // we retry timeout these tlcs.
-                let current_time = now_timestamp_as_millis_u64();
-                for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
-                    // timeout hold tlc
-                    let already_timeout = hold_tlcs
-                        .iter()
-                        .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
-                    if already_timeout {
-                        debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
-                        for hold_tlc in hold_tlcs {
-                            myself
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::TimeoutHoldTlc(
-                                        payment_hash,
-                                        hold_tlc.channel_id,
-                                        hold_tlc.tlc_id,
-                                    ),
-                                ))
-                                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                        }
-                    }
-                }
+                self.retry_hold_tlc_sets(&myself);
             }
             NetworkActorCommand::SettleHoldTlcSet(payment_hash) => {
                 self.settle_hold_tlc_set(state, payment_hash).await;
+            }
+            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash) => {
+                self.settle_received_hold_tlc_set(state, payment_hash).await;
             }
             NetworkActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
                 self.settle_tlc_set(state, payment_hash, channel_tlc_ids)
@@ -2627,6 +2603,54 @@ where
         Ok(())
     }
 
+    async fn send_remove_tlc_to_channel(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        channel_id: Hash256,
+        remove_tlc_command: RemoveTlcCommand,
+    ) -> crate::Result<()> {
+        let (send, _recv) = oneshot::channel();
+        let rpc_reply = RpcReplyPort::from(send);
+        state
+            .send_command_to_channel(
+                channel_id,
+                ChannelCommand::RemoveTlc(remove_tlc_command, rpc_reply),
+            )
+            .await
+    }
+
+    fn retry_hold_tlc_sets(&self, myself: &ActorRef<NetworkActorMessage>) {
+        let current_time = now_timestamp_as_millis_u64();
+        for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
+            if self.store.get_preimage(&payment_hash).is_some() {
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                continue;
+            }
+
+            let already_timeout = hold_tlcs
+                .iter()
+                .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
+            if already_timeout {
+                debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
+                for hold_tlc in hold_tlcs {
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::TimeoutHoldTlc(
+                                payment_hash,
+                                hold_tlc.channel_id,
+                                hold_tlc.tlc_id,
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                }
+            }
+        }
+    }
+
     async fn timeout_hold_tlc(
         &self,
         state: &mut NetworkActorState<S, C>,
@@ -2661,21 +2685,17 @@ where
             payment_hash, channel_id, tlc_id
         );
 
-        let (send, _recv) = oneshot::channel();
-        let rpc_reply = RpcReplyPort::from(send);
-        match state
-            .send_command_to_channel(
+        match self
+            .send_remove_tlc_to_channel(
+                state,
                 channel_id,
-                ChannelCommand::RemoveTlc(
-                    RemoveTlcCommand {
-                        id: tlc.id(),
-                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            TlcErr::new(TlcErrorCode::HoldTlcTimeout),
-                            &tlc.shared_secret,
-                        )),
-                    },
-                    rpc_reply,
-                ),
+                RemoveTlcCommand {
+                    id: tlc.id(),
+                    reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::HoldTlcTimeout),
+                        &tlc.shared_secret,
+                    )),
+                },
             )
             .await
         {
@@ -2705,7 +2725,29 @@ where
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
     ) {
-        for tlc_settlement in self.settle_tlc_set(state, payment_hash, Vec::new()).await {
+        let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store).run();
+        self.apply_hold_tlc_settlements(state, payment_hash, settlements)
+            .await;
+    }
+
+    async fn settle_received_hold_tlc_set(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        payment_hash: Hash256,
+    ) {
+        let settlements =
+            SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &self.store).run();
+        self.apply_hold_tlc_settlements(state, payment_hash, settlements)
+            .await;
+    }
+
+    async fn apply_hold_tlc_settlements(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        payment_hash: Hash256,
+        settlements: Vec<TlcSettlement>,
+    ) {
+        for tlc_settlement in self.apply_tlc_settlements(state, settlements).await {
             self.store.remove_payment_hold_tlc(
                 &payment_hash,
                 &tlc_settlement.channel_id(),
@@ -2722,17 +2764,22 @@ where
     ) -> Vec<TlcSettlement> {
         let settle_command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &self.store);
 
+        self.apply_tlc_settlements(state, settle_command.run())
+            .await
+    }
+
+    async fn apply_tlc_settlements(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        settlements: Vec<TlcSettlement>,
+    ) -> Vec<TlcSettlement> {
         let mut success_settlements = Vec::new();
-        for tlc_settlement in settle_command.run() {
-            let (send, _recv) = oneshot::channel();
-            let rpc_reply = RpcReplyPort::from(send);
-            match state
-                .send_command_to_channel(
+        for tlc_settlement in settlements {
+            match self
+                .send_remove_tlc_to_channel(
+                    state,
                     tlc_settlement.channel_id(),
-                    ChannelCommand::RemoveTlc(
-                        tlc_settlement.remove_tlc_command().clone(),
-                        rpc_reply,
-                    ),
+                    tlc_settlement.remove_tlc_command().clone(),
                 )
                 .await
             {
@@ -2975,7 +3022,7 @@ where
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ));
 
         Ok(())
@@ -5949,21 +5996,8 @@ where
             NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown)
         });
 
-        // Trigger mmp tlc set fulfill check and hold tlc timeout
-        let now = now_timestamp_as_millis_u64();
-        for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
-            // timeout hold tlc
-            let already_timeout = hold_tlcs
-                .iter()
-                .any(|hold_tlc| now >= hold_tlc.hold_expire_at);
-            if !already_timeout {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SettleHoldTlcSet(payment_hash),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            }
-        }
+        // Trigger hold tlc fulfill retry and timeout checks at startup.
+        self.retry_hold_tlc_sets(&myself);
         debug_event!(myself, "network actor started");
         Ok(())
     }
