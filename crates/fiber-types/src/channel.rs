@@ -487,6 +487,11 @@ pub struct TlcInfo {
     ///
     /// Save it to backward errors. Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
+    /// Compatibility field retained for persisted channel state.
+    ///
+    /// This used to mark a trampoline-boundary TLC for channel-level error wrapping. Trampoline
+    /// payment failures are now resolved at the network/payment layer instead, so this field should
+    /// not be used for new error attribution logic. Removing it requires a storage migration.
     #[serde(default)]
     pub is_trampoline_hop: bool,
     pub created_at: CommitmentNumbers,
@@ -892,7 +897,11 @@ pub struct AddTlcCommand {
     /// Save it for outbound (offered) TLC to backward errors.
     /// Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
-    /// Whether this outbound TLC is the trampoline-boundary hop.
+    /// Compatibility field retained for serialized retryable TLC operations.
+    ///
+    /// This used to mark a trampoline-boundary TLC for channel-level error wrapping. Trampoline
+    /// payment failures are now resolved at the network/payment layer instead, so this field should
+    /// not be used for new error attribution logic. Removing it requires a storage migration.
     pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
 }

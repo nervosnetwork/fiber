@@ -64,8 +64,8 @@ use fiber_types::{
     PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey,
     Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
     RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -1784,25 +1784,7 @@ where
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
-                // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
-                // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
-                // into a new error created with the *outer* shared secret (for this hop).
-                let remove_reason = match remove_reason.clone() {
-                    RemoveTlcReason::RemoveTlcFail(inner_error_packet)
-                        if tlc_info.is_trampoline_hop =>
-                    {
-                        let mut tlc_err = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
-                        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
-                            node_id: self.get_local_pubkey(),
-                            inner_error_packet: inner_error_packet.onion_packet,
-                        });
-                        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            tlc_err,
-                            &tlc_info.shared_secret,
-                        ))
-                    }
-                    other => other.backward(&tlc_info.shared_secret),
-                };
+                let remove_reason = remove_reason.backward(&tlc_info.shared_secret);
 
                 let _ = self.register_retryable_relay_tlc_remove(
                     TLCId::Received(previous_tlc_id),
