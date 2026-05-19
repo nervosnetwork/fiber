@@ -11,6 +11,7 @@ use crate::{
     gen_rand_channel_outpoint, gen_rand_fiber_public_key, init_tracing, now_timestamp_as_millis_u64,
 };
 use ckb_types::packed::OutPoint;
+use fiber_types::{TlcErr, TlcErrData, TlcErrorCode};
 
 trait Round {
     fn round_to_2(self) -> f64;
@@ -277,6 +278,83 @@ fn test_history_internal_result_fail_pair() {
         .unwrap();
     assert_eq!(res.amount, 0);
     assert!(!res.success);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_history_trampoline_failed_uses_error_code() {
+    let source = gen_rand_fiber_public_key();
+    let trampoline = gen_rand_fiber_public_key();
+    let channel_outpoint = gen_rand_channel_outpoint();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: source,
+            amount: 10,
+            channel_outpoint: channel_outpoint.clone(),
+        },
+        SessionRouteNode {
+            pubkey: trampoline,
+            amount: 5,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+    ];
+    let (direction, rev_direction) = output_direction(source, trampoline);
+
+    let mut internal_result = InternalResult::default();
+    let need_retry = internal_result.record_payment_fail(
+        &route,
+        TlcErr {
+            error_code: TlcErrorCode::TemporaryNodeFailure,
+            extra_data: Some(TlcErrData::TrampolineFailed {
+                node_id: trampoline,
+                inner_error_packet: vec![1, 2, 3],
+            }),
+        },
+    );
+
+    assert!(need_retry);
+    assert_eq!(internal_result.fail_node, Some(trampoline));
+    assert_eq!(internal_result.pairs.len(), 2);
+    assert!(
+        !internal_result
+            .pairs
+            .get(&(channel_outpoint.clone(), direction))
+            .expect("forward pair")
+            .success
+    );
+    assert!(
+        !internal_result
+            .pairs
+            .get(&(channel_outpoint.clone(), rev_direction))
+            .expect("reverse pair")
+            .success
+    );
+
+    let mut internal_result = InternalResult::default();
+    let need_retry = internal_result.record_payment_fail(
+        &route,
+        TlcErr {
+            error_code: TlcErrorCode::HoldTlcTimeout,
+            extra_data: Some(TlcErrData::TrampolineFailed {
+                node_id: trampoline,
+                inner_error_packet: vec![1, 2, 3],
+            }),
+        },
+    );
+
+    assert!(!need_retry);
+    assert!(internal_result.fail_node.is_none());
+    assert_eq!(internal_result.pairs.len(), 1);
+    let pair = internal_result
+        .pairs
+        .get(&(channel_outpoint.clone(), direction))
+        .expect("success pair");
+    assert!(pair.success);
+    assert_eq!(pair.amount, 10);
+    assert_ne!(pair.time, 0);
+    assert!(!internal_result
+        .pairs
+        .contains_key(&(channel_outpoint, rev_direction)));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

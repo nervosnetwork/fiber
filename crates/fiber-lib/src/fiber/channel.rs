@@ -64,8 +64,8 @@ use fiber_types::{
     PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey,
     Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
     RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -1784,25 +1784,7 @@ where
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
-                // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
-                // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
-                // into a new error created with the *outer* shared secret (for this hop).
-                let remove_reason = match remove_reason.clone() {
-                    RemoveTlcReason::RemoveTlcFail(inner_error_packet)
-                        if tlc_info.is_trampoline_hop =>
-                    {
-                        let mut tlc_err = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
-                        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
-                            node_id: self.get_local_pubkey(),
-                            inner_error_packet: inner_error_packet.onion_packet,
-                        });
-                        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            tlc_err,
-                            &tlc_info.shared_secret,
-                        ))
-                    }
-                    other => other.backward(&tlc_info.shared_secret),
-                };
+                let remove_reason = remove_reason.backward(&tlc_info.shared_secret);
 
                 let _ = self.register_retryable_relay_tlc_remove(
                     TLCId::Received(previous_tlc_id),
@@ -2746,33 +2728,44 @@ where
         let committed_tlcs: Vec<_> = state
             .tlc_state
             .get_committed_received_tlcs()
-            .map(|tlc| (tlc.tlc_id, tlc.id(), tlc.payment_hash))
+            .cloned()
             .collect();
 
-        for (tlc_id, id, payment_hash) in &committed_tlcs {
-            // skip if tlc amount is not fulfilled invoice
-            // this may happened if payment is mpp
-            if let Some(invoice) = self.store.get_invoice(payment_hash) {
-                // Re-fetch tlc for is_invoice_fulfilled check
-                if let Some(tlc) = state.tlc_state.get(tlc_id) {
-                    if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
+        for tlc in &committed_tlcs {
+            let tlc_id = tlc.tlc_id;
+            let id = tlc.id();
+            let payment_hash = tlc.payment_hash;
 
-            let Some(payment_preimage) = self.store.get_preimage(payment_hash) else {
+            let Some(payment_preimage) = self.store.get_preimage(&payment_hash) else {
                 continue;
             };
             debug!(
                 "Found payment preimage for channel {:?} tlc {:?}",
                 state.id, id
             );
+
+            if let Some(invoice) = self.store.get_invoice(&payment_hash) {
+                if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                    continue;
+                }
+                // Hold invoices stay pending until the preimage-reveal path settles stored hold TLCs.
+                if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open) {
+                    continue;
+                }
+
+                // Keep invoice settlement serialized in NetworkActor so same-invoice races
+                // cannot be fulfilled directly by multiple channel actors.
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SettleTlcSet(payment_hash, vec![(state.id, id)]),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                continue;
+            }
+
             if self
                 .store
-                .get_invoice_status(payment_hash)
+                .get_invoice_status(&payment_hash)
                 .is_some_and(|status| {
                     !matches!(status, CkbInvoiceStatus::Open | CkbInvoiceStatus::Received)
                 })
@@ -2783,7 +2776,7 @@ where
             self.register_retryable_tlc_remove(
                 myself,
                 state,
-                *tlc_id,
+                tlc_id,
                 RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
             );
         }

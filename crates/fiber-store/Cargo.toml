@@ -8,6 +8,7 @@ build = "build.rs"
 [dependencies]
 # Logging
 tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
 
 # Error handling
 thiserror = "1.0.58"
@@ -16,14 +17,13 @@ thiserror = "1.0.58"
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 # Fiber types for migration
-fiber-types-090 = { package = "fiber-types", version = "0.9.0-rc1" }
+fiber-types-090 = { package = "fiber-types", version = "0.9.0-rc2" }
 
 # Old fiber types for deserializing legacy data
 fiber-types-081 = { package = "fiber-types", version = "0.8.1" }
 
 # Serialization for migration data conversion
 bincode = "1.3.3"
-serde_json = "1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
@@ -36,6 +36,10 @@ console_error_panic_hook = "0.1.7"
 fiber-wasm-db-common = { path = "../fiber-wasm-db-common" }
 wasm-bindgen = "0.2.84"
 web-sys = "0.3.72"
+
+[dev-dependencies]
+fiber-types-081 = { package = "fiber-types", version = "0.8.1", features = ["sample"] }
+tempfile = "3.10.1"
 
 [features]
 default = []

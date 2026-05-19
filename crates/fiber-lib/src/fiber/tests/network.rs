@@ -414,6 +414,9 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
         );
     }
 
+    wait_until_async_timeout(|| async { !node1.get_network_graph_channels().await.is_empty() })
+        .await;
+
     node1.connect_to(&mut node2).await;
     assert!(matches!(
         node2.submit_tx(tx.clone()).await,
@@ -487,10 +490,14 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
         );
     }
 
+    wait_until_async_timeout(|| async { !node1.get_network_graph_channels().await.is_empty() })
+        .await;
+
     assert!(matches!(
         node2.submit_tx(tx.clone()).await,
         TxStatus::Committed(..)
     ));
+
     node1.connect_to(&mut node2).await;
 
     wait_until_async_timeout(|| async {
