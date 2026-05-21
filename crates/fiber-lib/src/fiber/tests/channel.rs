@@ -1,9 +1,9 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
-    merge_external_funding_witnesses, AddTlcResponse, ChannelActorState, ChannelActorStateStore,
-    ChannelOpenRecordStore, ReloadParams, ReplayOrderHint, UpdateCommand,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
-    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse,
+    ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, ReloadParams,
+    ReplayOrderHint, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -175,6 +175,26 @@ fn test_channel_state_bincode_compatibility() {
     assert_channel_state_encoding(
         ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING),
         &[0, 0, 0, 0, 4, 0, 0, 0],
+    );
+}
+
+#[test]
+fn test_funding_timeout_check_delay_survives_hydrated_time_truncation() {
+    // Reproduces #1358: after persisting external_funding.started_at as millis,
+    // hydration can leave the timeout check a few hundred microseconds short of
+    // the threshold. Scheduling exactly that remainder may make the check fire
+    // as stale with no follow-up timeout.
+    assert_eq!(
+        funding_timeout_check_delay(Duration::from_micros(999_500), 1),
+        Some(Duration::from_micros(1_500))
+    );
+}
+
+#[test]
+fn test_funding_timeout_check_delay_is_immediate_after_timeout() {
+    assert_eq!(
+        funding_timeout_check_delay(Duration::from_micros(1_000_001), 1),
+        None
     );
 }
 
