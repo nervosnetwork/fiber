@@ -359,12 +359,12 @@ impl CommitmentNumbers {
     }
 }
 
-/// Channel constraints for TLC value and number limits.
+/// Channel constraints for TLC value and number limits accepted by a participant.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct ChannelConstraints {
-    /// The maximum value that can be in pending TLCs.
+    /// The maximum total value of pending TLCs this participant will accept.
     pub max_tlc_value_in_flight: u128,
-    /// The maximum number of TLCs that can be accepted.
+    /// The maximum number of pending TLCs this participant will accept.
     pub max_tlc_number_in_flight: u64,
 }
 
