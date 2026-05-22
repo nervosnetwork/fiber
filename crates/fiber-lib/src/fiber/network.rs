@@ -418,6 +418,16 @@ impl PeerChannelIndex {
             .len()
     }
 
+    pub(crate) fn opening_channel_count_by_peer(&self, pubkey: &Pubkey) -> usize {
+        let state = self.inner.read().expect("peer channel index read lock");
+        state.peer_channels_map.get(pubkey).map_or(0, |channels| {
+            channels
+                .iter()
+                .filter(|channel_id| state.opening_channels.contains(channel_id))
+                .count()
+        })
+    }
+
     pub(crate) fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
         self.inner
             .read()
@@ -4481,14 +4491,28 @@ where
             .is_some_and(|peer| self.peer_session_map.contains_key(&peer))
     }
 
-    fn check_pending_channel_limit(&self) -> ProcessingChannelResult {
-        let limit = self.pending_channels_number_limit;
+    fn check_pending_channel_limit(&self, peer_pubkey: Pubkey) -> ProcessingChannelResult {
+        let global_limit = self.pending_channels_number_limit;
         let total_count = self.peer_channel_index.opening_channel_count()
             + self.to_be_accepted_channels.map.len();
 
-        if total_count.saturating_add(1) > limit {
+        if total_count.saturating_add(1) > global_limit {
             return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
-                format!("Global pending channel count exceeds the limit {limit}"),
+                format!("Global pending channel count exceeds the limit {global_limit}"),
+            ));
+        }
+
+        let peer_limit = self.to_be_accepted_channels.total_number_limit;
+        let peer_count = self
+            .peer_channel_index
+            .opening_channel_count_by_peer(&peer_pubkey)
+            + self
+                .to_be_accepted_channels
+                .pending_accept_count(&peer_pubkey);
+
+        if peer_count.saturating_add(1) > peer_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Peer pending channel count exceeds the limit {peer_limit}"),
             ));
         }
 
@@ -5482,7 +5506,9 @@ where
             open_channel.max_tlc_number_in_flight,
         )
         .and_then(|_| {
-            self.check_pending_channel_limit()?;
+            if !self.to_be_accepted_channels.map.contains_key(&id) {
+                self.check_pending_channel_limit(peer_pubkey)?;
+            }
             self.to_be_accepted_channels
                 .try_insert(id, peer_pubkey, open_channel)
         });
@@ -6516,6 +6542,13 @@ impl ToBeAcceptedChannels {
 
     fn remove(&mut self, id: &Hash256) -> Option<(Pubkey, OpenChannel)> {
         self.map.remove(id)
+    }
+
+    fn pending_accept_count(&self, pubkey: &Pubkey) -> usize {
+        self.map
+            .values()
+            .filter(|(saved_pubkey, _)| saved_pubkey == pubkey)
+            .count()
     }
 
     // insert and apply throttle control

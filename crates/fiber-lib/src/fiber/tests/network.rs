@@ -2146,6 +2146,39 @@ async fn test_auto_accept_pending_channels_global_number_limit() {
 }
 
 #[tokio::test]
+async fn test_auto_accept_pending_channels_peer_number_limit() {
+    let funding_amount = 100_000_000_000u128;
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.to_be_accepted_channels_number_limit = Some(2);
+                config.pending_channels_number_limit = Some(10);
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+    let mut first_peer = NetworkNode::new().await;
+    let mut second_peer = NetworkNode::new().await;
+
+    first_peer.connect_to(&mut node).await;
+    second_peer.connect_to(&mut node).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+
+    open_channel_from_peer(&second_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, second_peer.pubkey).await;
+}
+
+#[tokio::test]
 async fn test_to_be_accepted_channels_bytes_limit() {
     init_tracing();
 

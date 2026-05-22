@@ -363,12 +363,12 @@ pub struct FiberConfig {
     #[arg(skip)]
     pub wasm_key_pair: Option<KeyPair>,
 
-    /// Max allowed number of channels to be accepted from one peer. [default: 20]
+    /// Max allowed number of pending channel openings from one peer. [default: 20]
     #[arg(
         name = "FIBER_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT",
         long = "fiber-to-be-accepted-channels-number-limit",
         env,
-        help = "Max allowed number of channels to be accepted from one peer. [default: 20]"
+        help = "Max allowed number of pending channel openings from one peer. [default: 20]"
     )]
     pub to_be_accepted_channels_number_limit: Option<usize>,
 
