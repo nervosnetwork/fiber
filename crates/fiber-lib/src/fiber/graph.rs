@@ -1497,9 +1497,7 @@ where
                     trampoline_onion = Some(packet.into_bytes());
                     break;
                 }
-                Err(crate::fiber::types::Error::OnionPacket(OnionPacketError::Sphinx(
-                    err @ SphinxError::InvalidBlindingFactor,
-                ))) => {
+                Err(OnionPacketError::Sphinx(err @ SphinxError::InvalidBlindingFactor)) => {
                     last_blinding_err = Some(err);
                     continue;
                 }

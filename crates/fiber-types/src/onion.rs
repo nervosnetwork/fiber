@@ -376,6 +376,15 @@ pub fn create_sphinx_onion<C: secp256k1::Signing, Codec: SphinxOnionCodec>(
     assoc_data: Option<Vec<u8>>,
     secp_ctx: &secp256k1::Secp256k1<C>,
 ) -> Result<Vec<u8>, OnionPacketError> {
+    if hops_path.is_empty() {
+        return Err(OnionPacketError::Sphinx(
+            fiber_sphinx::SphinxError::HopsIsEmpty,
+        ));
+    }
+    if hops_path.len() != payloads.len() {
+        return Err(OnionPacketError::InvalidHopData);
+    }
+
     let hops_path: Vec<secp256k1::PublicKey> = hops_path
         .into_iter()
         .map(|pk| secp256k1::PublicKey::from_slice(&pk.0).expect("valid public key"))
