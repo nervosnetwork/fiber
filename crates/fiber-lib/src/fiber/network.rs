@@ -267,6 +267,8 @@ struct PeerChannelIndexState {
     peer_id_to_pubkey_map: HashMap<PeerId, Pubkey>,
     // Map from channel id to peer pubkey.
     channel_id_to_peer_map: HashMap<Hash256, Pubkey>,
+    // Channel actors that have been accepted/created but have not reached ChannelReady yet.
+    opening_channels: HashSet<Hash256>,
 }
 
 impl PeerChannelIndexState {
@@ -275,11 +277,15 @@ impl PeerChannelIndexState {
         S: ChannelActorStateStore,
     {
         let mut peer_channels_map = HashMap::<Pubkey, HashSet<Hash256>>::new();
-        for (pubkey, channel_id, _channel_state) in store.get_active_channel_states(None) {
+        let mut opening_channels = HashSet::new();
+        for (pubkey, channel_id, channel_state) in store.get_active_channel_states(None) {
             peer_channels_map
                 .entry(pubkey)
                 .or_default()
                 .insert(channel_id);
+            if is_pending_channel_state(&channel_state) {
+                opening_channels.insert(channel_id);
+            }
         }
         let peer_id_to_pubkey_map = peer_channels_map
             .keys()
@@ -300,6 +306,7 @@ impl PeerChannelIndexState {
             peer_channels_map,
             peer_id_to_pubkey_map,
             channel_id_to_peer_map,
+            opening_channels,
         }
     }
 }
@@ -339,6 +346,7 @@ impl PeerChannelIndex {
             }
         }
         state.channel_id_to_peer_map.remove(channel_id);
+        state.opening_channels.remove(channel_id);
         if is_empty {
             let peer_id = pubkey_to_tentacle(*pubkey).peer_id();
             state.peer_channels_map.remove(pubkey);
@@ -380,7 +388,34 @@ impl PeerChannelIndex {
             channels.insert(new);
             state.channel_id_to_peer_map.remove(&old);
             state.channel_id_to_peer_map.insert(new, pubkey);
+            if state.opening_channels.remove(&old) {
+                state.opening_channels.insert(new);
+            }
         }
+    }
+
+    pub(crate) fn mark_channel_opening(&self, channel_id: Hash256) {
+        self.inner
+            .write()
+            .expect("peer channel index write lock")
+            .opening_channels
+            .insert(channel_id);
+    }
+
+    pub(crate) fn mark_channel_ready(&self, channel_id: &Hash256) {
+        self.inner
+            .write()
+            .expect("peer channel index write lock")
+            .opening_channels
+            .remove(channel_id);
+    }
+
+    pub(crate) fn opening_channel_count(&self) -> usize {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .opening_channels
+            .len()
     }
 
     pub(crate) fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
@@ -400,6 +435,17 @@ impl PeerChannelIndex {
             .get(channel_id)
             .cloned()
     }
+}
+
+fn is_pending_channel_state(state: &ChannelState) -> bool {
+    matches!(
+        state,
+        ChannelState::NegotiatingFunding(_)
+            | ChannelState::CollaboratingFundingTx(_)
+            | ChannelState::SigningCommitment(_)
+            | ChannelState::AwaitingTxSignatures(_)
+            | ChannelState::AwaitingChannelReady(_)
+    )
 }
 
 #[derive(Debug)]
@@ -1376,6 +1422,7 @@ where
                     "Channel ({:?}) to peer {:?} is now ready",
                     channel_id, pubkey
                 );
+                state.peer_channel_index.mark_channel_ready(&channel_id);
 
                 // Mark the opening record as ChannelReady (terminal success state).
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
@@ -3795,6 +3842,7 @@ pub struct NetworkActorState<S, C> {
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // The default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
+    pending_channels_number_limit: usize,
     // The default expiry delta to forward tlcs.
     tlc_expiry_delta: u64,
     // The default tlc min and max value of tlcs to be accepted.
@@ -4433,6 +4481,20 @@ where
             .is_some_and(|peer| self.peer_session_map.contains_key(&peer))
     }
 
+    fn check_pending_channel_limit(&self) -> ProcessingChannelResult {
+        let limit = self.pending_channels_number_limit;
+        let total_count = self.peer_channel_index.opening_channel_count()
+            + self.to_be_accepted_channels.map.len();
+
+        if total_count.saturating_add(1) > limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Global pending channel count exceeds the limit {limit}"),
+            ));
+        }
+
+        Ok(())
+    }
+
     fn check_feature_compatibility(&self, pubkey: &Pubkey) -> ProcessingChannelResult {
         if let Some(peer_features) = self
             .peer_session_map
@@ -4988,6 +5050,9 @@ where
         if let Some(outpoint) = channel_actor_state.get_funding_transaction_outpoint() {
             self.outpoint_channel_map.insert(outpoint, channel_id);
         }
+        if is_pending_channel_state(&channel_actor_state.state) {
+            self.peer_channel_index.mark_channel_opening(channel_id);
+        }
         debug!("channel {:x} restored offline successfully", &channel_id);
 
         Ok(channel)
@@ -5200,6 +5265,7 @@ where
         actor: ActorRef<ChannelActorMessage>,
     ) {
         self.register_channel_actor(id, pubkey, actor);
+        self.peer_channel_index.mark_channel_opening(id);
         debug!("Channel {:x} created", &id);
         // Notify outside observers.
         self.network
@@ -5416,6 +5482,7 @@ where
             open_channel.max_tlc_number_in_flight,
         )
         .and_then(|_| {
+            self.check_pending_channel_limit()?;
             self.to_be_accepted_channels
                 .try_insert(id, peer_pubkey, open_channel)
         });
@@ -5994,6 +6061,9 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
+            pending_channels_number_limit: config
+                .pending_channels_number_limit
+                .unwrap_or(DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT),
             tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
@@ -6426,8 +6496,10 @@ impl Default for ToBeAcceptedChannels {
 
 // Remember to sync fiber/config.rs
 const DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT: usize = 20;
+// Remember to sync fiber/config.rs. 50KB.
+const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200;
 // Remember to sync fiber/config.rs
-const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200; // 50KB
+const DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT: usize = 100;
 
 impl ToBeAcceptedChannels {
     fn new_with_config(config: &FiberConfig) -> Self {

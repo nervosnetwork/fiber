@@ -381,6 +381,15 @@ pub struct FiberConfig {
     )]
     pub to_be_accepted_channels_bytes_limit: Option<usize>,
 
+    /// Max allowed number of pending channel openings globally. [default: 100]
+    #[arg(
+        name = "FIBER_PENDING_CHANNELS_NUMBER_LIMIT",
+        long = "fiber-pending-channels-number-limit",
+        env,
+        help = "Max allowed number of pending channel openings globally. [default: 100]"
+    )]
+    pub pending_channels_number_limit: Option<usize>,
+
     /// Default timeout to auto close a funding channel. [default: 1 day]
     #[arg(
         name = "FIBER_FUNDING_TIMEOUT_SECONDS",
