@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
 use super::types::BroadcastMessageWithTimestamp;
+use super::types::ONION_SESSION_KEY_MAX_ATTEMPTS;
 use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
@@ -26,13 +27,14 @@ use crate::Error;
 use crate::{debug_event, now_timestamp_as_millis_u64};
 use ckb_hash::blake2b_256;
 use ckb_types::packed::{OutPoint, Script};
+use fiber_sphinx::SphinxError;
 pub use fiber_types::PaymentSession;
 pub use fiber_types::SendPaymentData;
 use fiber_types::{
-    Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, PaymentCustomRecords,
-    PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey, RemoveTlcReason,
-    RouterHop, TlcErr, TlcErrData, TlcErrorCode, TrampolineContext, DEFAULT_MAX_PARTS,
-    DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
+    Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, OnionPacketError,
+    PaymentCustomRecords, PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey,
+    RemoveTlcReason, RouterHop, TlcErr, TlcErrData, TlcErrorCode, TrampolineContext,
+    DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
@@ -1394,19 +1396,44 @@ where
         session: &mut PaymentSession,
         attempt: &mut Attempt,
     ) -> Result<(), Error> {
-        let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(attempt.route_hops[0].funding_tx_hash, Hash256::default());
 
-        attempt.session_key.copy_from_slice(session_key.as_ref());
-
-        let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
-            session_key,
-            attempt.route_hops.clone(),
-            Some(attempt.hash.as_ref().to_vec()),
-            &Secp256k1::signing_only(),
-        ) {
-            Ok(packet) => packet,
-            Err(e) => {
+        // Retry with a fresh session key on the cryptographically improbable
+        // `InvalidBlindingFactor` event from fiber-sphinx.
+        let mut peeled_onion_packet: Option<PeeledPaymentOnionPacket> = None;
+        let mut last_err: Option<OnionPacketError> = None;
+        let mut chosen_session_key: Option<Privkey> = None;
+        for _ in 0..ONION_SESSION_KEY_MAX_ATTEMPTS {
+            let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
+            match PeeledPaymentOnionPacket::create(
+                session_key.clone(),
+                attempt.route_hops.clone(),
+                Some(attempt.hash.as_ref().to_vec()),
+                &Secp256k1::signing_only(),
+            ) {
+                Ok(packet) => {
+                    chosen_session_key = Some(session_key);
+                    peeled_onion_packet = Some(packet);
+                    break;
+                }
+                Err(OnionPacketError::Sphinx(SphinxError::InvalidBlindingFactor)) => {
+                    // Pick a different session key and retry.
+                    continue;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+        let peeled_onion_packet = match (peeled_onion_packet, chosen_session_key) {
+            (Some(packet), Some(session_key)) => {
+                attempt.session_key.copy_from_slice(session_key.as_ref());
+                packet
+            }
+            _ => {
+                let e = last_err
+                    .unwrap_or(OnionPacketError::Sphinx(SphinxError::InvalidBlindingFactor));
                 let err = format!(
                     "Failed to create onion packet: {:?}, error: {:?}",
                     attempt.hash, e

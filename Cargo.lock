@@ -2332,6 +2332,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-sphinx"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "827476eed3d2915d79c9809e71a7089f44cde5d9a4fa7c7045cd0f2d5e56fb95"
+dependencies = [
+ "chacha20",
+ "hmac 0.12.1",
+ "secp256k1 0.30.0",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "fiber-store"
 version = "0.9.0-rc2"
 dependencies = [
@@ -2367,7 +2380,7 @@ dependencies = [
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-sphinx",
+ "fiber-sphinx 2.3.0",
  "getrandom 0.2.17",
  "hex",
  "molecule",
@@ -2402,7 +2415,7 @@ dependencies = [
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-sphinx",
+ "fiber-sphinx 3.0.0",
  "getrandom 0.2.17",
  "hex",
  "lightning-invoice",
@@ -2439,7 +2452,7 @@ dependencies = [
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-sphinx",
+ "fiber-sphinx 2.3.0",
  "getrandom 0.2.17",
  "hex",
  "molecule",
@@ -2564,7 +2577,7 @@ dependencies = [
  "criterion",
  "either",
  "fiber-json-types",
- "fiber-sphinx",
+ "fiber-sphinx 3.0.0",
  "fiber-store",
  "fiber-types 0.9.0-rc2",
  "futures",

@@ -1859,6 +1859,15 @@ pub struct PeeledTrampolineOnionPacket {
 
 const TRAMPOLINE_PACKET_DATA_LEN: usize = 1300;
 
+/// Maximum number of times to retry generating an onion packet with a fresh
+/// session key when fiber-sphinx returns [`SphinxError::InvalidBlindingFactor`].
+///
+/// This event occurs when the SHA-256 derived blinding factor reduces to zero
+/// modulo the secp256k1 curve order. It is cryptographically improbable
+/// (probability ≈ 2⁻¹²⁸ per attempt), so 7 retries is effectively unreachable
+/// in practice while bounding the loop.
+pub const ONION_SESSION_KEY_MAX_ATTEMPTS: usize = 7;
+
 trait SphinxOnionCodec {
     type Decoded;
     type Current;
@@ -1890,8 +1899,11 @@ fn peel_sphinx_onion<C: Verification, Codec: SphinxOnionCodec>(
     assoc_data: Option<&[u8]>,
     secp_ctx: &Secp256k1<C>,
 ) -> Result<SphinxPeeled<Codec::Current>, Error> {
-    let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(packet_bytes)
-        .map_err(|err| Error::OnionPacket(err.into()))?;
+    let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes_with_packet_data_len(
+        packet_bytes,
+        Codec::PACKET_DATA_LEN,
+    )
+    .map_err(|err| Error::OnionPacket(err.into()))?;
     let version = sphinx_packet.version;
     if !Codec::is_version_allowed(version) {
         return Err(Error::OnionPacket(OnionPacketError::UnknownVersion(
@@ -2012,8 +2024,11 @@ impl TrampolineOnionPacket {
     }
 
     pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
-        fiber_sphinx::OnionPacket::from_bytes(self.data)
-            .map_err(|err| Error::OnionPacket(err.into()))
+        fiber_sphinx::OnionPacket::from_bytes_with_packet_data_len(
+            self.data,
+            TRAMPOLINE_PACKET_DATA_LEN,
+        )
+        .map_err(|err| Error::OnionPacket(err.into()))
     }
 
     pub fn peel<C: Verification>(

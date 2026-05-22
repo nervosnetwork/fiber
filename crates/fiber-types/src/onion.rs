@@ -193,7 +193,11 @@ impl PaymentOnionPacket {
 
     /// Convert into the raw Sphinx onion packet.
     pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, OnionPacketError> {
-        fiber_sphinx::OnionPacket::from_bytes(self.data).map_err(OnionPacketError::Sphinx)
+        fiber_sphinx::OnionPacket::from_bytes_with_packet_data_len(
+            self.data,
+            PaymentSphinxCodec::PACKET_DATA_LEN,
+        )
+        .map_err(OnionPacketError::Sphinx)
     }
 
     /// Peels the next layer of the onion packet using the privkey of the current node.
@@ -330,8 +334,11 @@ pub fn peel_sphinx_onion<C: secp256k1::Verification, Codec: SphinxOnionCodec>(
     assoc_data: Option<&[u8]>,
     secp_ctx: &secp256k1::Secp256k1<C>,
 ) -> Result<SphinxPeeled<Codec::Current>, OnionPacketError> {
-    let sphinx_packet =
-        fiber_sphinx::OnionPacket::from_bytes(packet_bytes).map_err(OnionPacketError::Sphinx)?;
+    let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes_with_packet_data_len(
+        packet_bytes,
+        Codec::PACKET_DATA_LEN,
+    )
+    .map_err(OnionPacketError::Sphinx)?;
     let version = sphinx_packet.version;
     if !Codec::is_version_allowed(version) {
         return Err(OnionPacketError::UnknownVersion(version));

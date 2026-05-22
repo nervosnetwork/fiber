@@ -665,7 +665,9 @@ fn test_tlc_err_packet_encryption() {
         .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
         .collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, SECP256K1).collect();
+        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, SECP256K1)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid blinding factors for hard-coded session key");
 
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     {
@@ -708,7 +710,9 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
     let session_key = SecretKey::from_slice(&[0x42; 32]).expect("32 bytes, within curve order");
     let hops_keys: Vec<PublicKey> = hops_path.iter().map(|k| k.into()).collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1).collect();
+        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid blinding factors for hard-coded session key");
 
     // Pretend the downstream error originated beyond the trampoline boundary.
     let inner_err = TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails);

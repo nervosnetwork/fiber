@@ -13,15 +13,18 @@ use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
-use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
+use crate::fiber::types::{
+    TrampolineHopPayload, TrampolineOnionPacket, ONION_SESSION_KEY_MAX_ATTEMPTS,
+};
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use fiber_sphinx::SphinxError;
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::ChannelUpdateInfo;
 use fiber_types::{
     Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, FeatureVector,
-    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus, Privkey,
-    Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
+    Hash256, HopHint, NodeAnnouncement, OnionPacketError, PaymentHopData, PaymentSession,
+    PaymentStatus, Privkey, Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
 };
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
@@ -1474,19 +1477,45 @@ where
             custom_records: payment_data.custom_records.clone(),
         });
 
-        let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         let mut trampoline_path: Vec<Pubkey> = hops.to_vec();
 
         trampoline_path.push(target);
-        let trampoline_onion = TrampolineOnionPacket::create(
-            session_key,
-            trampoline_path,
-            payloads,
-            Some(payment_data.payment_hash.as_ref().to_vec()),
-            SECP256K1,
-        )
-        .map_err(|_| PathFindError::NoPathFound)?
-        .into_bytes();
+        // Retry with a fresh session key on the cryptographically improbable
+        // `InvalidBlindingFactor` event from fiber-sphinx.
+        let mut trampoline_onion: Option<Vec<u8>> = None;
+        let mut last_blinding_err: Option<SphinxError> = None;
+        for _ in 0..ONION_SESSION_KEY_MAX_ATTEMPTS {
+            let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
+            match TrampolineOnionPacket::create(
+                session_key,
+                trampoline_path.clone(),
+                payloads.clone(),
+                Some(payment_data.payment_hash.as_ref().to_vec()),
+                SECP256K1,
+            ) {
+                Ok(packet) => {
+                    trampoline_onion = Some(packet.into_bytes());
+                    break;
+                }
+                Err(crate::fiber::types::Error::OnionPacket(OnionPacketError::Sphinx(
+                    err @ SphinxError::InvalidBlindingFactor,
+                ))) => {
+                    last_blinding_err = Some(err);
+                    continue;
+                }
+                Err(err) => {
+                    return Err(PathFindError::Other(format!(
+                        "failed to build trampoline onion packet: {err}"
+                    )));
+                }
+            }
+        }
+        let trampoline_onion = trampoline_onion.ok_or_else(|| {
+            PathFindError::Other(format!(
+                "failed to build trampoline onion packet after {ONION_SESSION_KEY_MAX_ATTEMPTS} attempts: {}",
+                last_blinding_err.expect("loop exits via Ok or sets last_blinding_err")
+            ))
+        })?;
 
         return Ok(ResolvedRoute {
             hops: route_to_trampoline,
