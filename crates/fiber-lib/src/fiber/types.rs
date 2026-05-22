@@ -18,7 +18,7 @@ pub use fiber_types::{
     NodeAnnouncement, OnionPacketError, PartialSignatureAsBytes, PaymentCustomRecords,
     PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, PubNonceAsBytes, Pubkey, RemoveTlc,
     RemoveTlcReason, RevokeAndAck, TlcErr, UnknownHashAlgorithmError, CURSOR_SIZE,
-    ONION_PACKET_VERSION_V1,
+    ONION_PACKET_VERSION_V1, ONION_SESSION_KEY_MAX_ATTEMPTS,
 };
 
 use molecule::prelude::{Builder, Byte, Entity};
@@ -1858,15 +1858,6 @@ pub struct PeeledTrampolineOnionPacket {
 
 const TRAMPOLINE_PACKET_DATA_LEN: usize = 1300;
 
-/// Maximum number of times to retry generating an onion packet with a fresh
-/// session key when fiber-sphinx returns [`SphinxError::InvalidBlindingFactor`].
-///
-/// This event occurs when the SHA-256 derived blinding factor reduces to zero
-/// modulo the secp256k1 curve order. It is cryptographically improbable
-/// (probability ≈ 2⁻¹²⁸ per attempt), so 7 retries is effectively unreachable
-/// in practice while bounding the loop.
-pub const ONION_SESSION_KEY_MAX_ATTEMPTS: usize = 7;
-
 struct TrampolineSphinxCodec;
 
 impl fiber_types::onion::SphinxOnionCodec for TrampolineSphinxCodec {
@@ -1965,6 +1956,32 @@ impl TrampolineOnionPacket {
             secp_ctx,
         )?;
         Ok(TrampolineOnionPacket::new(bytes))
+    }
+
+    /// Like [`Self::create`], but obtains the session key from `gen_session_key`.
+    ///
+    /// Retries on the cryptographically improbable
+    /// [`fiber_sphinx::SphinxError::InvalidBlindingFactor`] event up to
+    /// [`ONION_SESSION_KEY_MAX_ATTEMPTS`] times. Returns the chosen session key
+    /// alongside the packet on success.
+    pub fn create_with_session_key_fn<C, F>(
+        gen_session_key: F,
+        hops_path: Vec<Pubkey>,
+        payloads: Vec<TrampolineHopPayload>,
+        assoc_data: Option<Vec<u8>>,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<(Self, Privkey), OnionPacketError>
+    where
+        C: Signing,
+        F: FnMut() -> Privkey,
+    {
+        let (bytes, session_key) =
+            fiber_types::onion::create_sphinx_onion_with_session_key_fn::<
+                C,
+                TrampolineSphinxCodec,
+                _,
+            >(gen_session_key, hops_path, payloads, assoc_data, secp_ctx)?;
+        Ok((TrampolineOnionPacket::new(bytes), session_key))
     }
 }
 
