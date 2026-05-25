@@ -7,7 +7,9 @@ use crate::fiber::channel::{
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
     MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
+use crate::fiber::config::{
+    DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
+};
 use ckb_types::core::{EpochNumberWithFraction, TransactionBuilder};
 use ckb_types::packed::{Bytes, CellDep, Script};
 use ckb_types::prelude::{Builder, PackVec};
@@ -190,6 +192,19 @@ pub(crate) fn check_commitment_reserved_fee(
     Ok(())
 }
 
+fn minimum_acceptor_reserved_ckb_amount(
+    udt_type_script: &Option<Script>,
+) -> Result<u64, ProcessingChannelError> {
+    let occupied_capacity = occupied_capacity(&Script::default(), udt_type_script)?.as_u64();
+    occupied_capacity
+        .checked_add(DEFAULT_MIN_SHUTDOWN_FEE)
+        .ok_or_else(|| {
+            ProcessingChannelError::InvalidParameter(
+                "Minimum acceptor reserved CKB amount overflows".to_string(),
+            )
+        })
+}
+
 pub(crate) fn check_open_channel_parameters(
     udt_type_script: &Option<Script>,
     shutdown_script: &Script,
@@ -214,6 +229,16 @@ pub(crate) fn check_open_channel_parameters(
         return Err(ProcessingChannelError::InvalidParameter(format!(
             "Reserved CKB amount {} is less than {}",
             reserved_ckb_amount, occupied_capacity,
+        )));
+    }
+    let minimum_local_reserved_ckb_amount = minimum_acceptor_reserved_ckb_amount(udt_type_script)?;
+    if reserved_ckb_amount
+        .checked_add(minimum_local_reserved_ckb_amount)
+        .is_none()
+    {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Total reserved CKB amount overflows: remote {}, minimum local {}",
+            reserved_ckb_amount, minimum_local_reserved_ckb_amount
         )));
     }
 

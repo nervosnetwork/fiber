@@ -9865,7 +9865,7 @@ fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
     let err = check_open_channel_parameters(
         &udt_type_script,
         &Script::default(),
-        u64::MAX,
+        u64::MAX - 1_000_000_000_000,
         DEFAULT_FEE_RATE,
         u64::MAX,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
@@ -9876,5 +9876,25 @@ fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
     assert!(
         err.to_string().contains("overflows commitment fee"),
         "expected commitment fee overflow, got {err}"
+    );
+}
+
+#[test]
+fn check_open_channel_parameters_rejects_total_reserved_overflow() {
+    let err = check_open_channel_parameters(
+        &None,
+        &Script::default(),
+        u64::MAX,
+        DEFAULT_FEE_RATE,
+        DEFAULT_COMMITMENT_FEE_RATE,
+        EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+        SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    )
+    .expect_err("reserved amount that no acceptor can add to must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("Total reserved CKB amount overflows"),
+        "expected total reserved overflow, got {err}"
     );
 }

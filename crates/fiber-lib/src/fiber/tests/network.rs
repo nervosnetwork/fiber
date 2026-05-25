@@ -7,6 +7,10 @@ use crate::{
         CkbChainMessage, CkbTxTracingResult,
     },
     fiber::{
+        channel::{
+            DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MIN_COMMITMENT_DELAY_EPOCHS,
+            SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+        },
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
@@ -16,11 +20,11 @@ use crate::{
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
             broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
-            BroadcastMessagesFilterResult, GossipMessage, OpenChannel,
+            BroadcastMessagesFilterResult, FiberMessage, GossipMessage, OpenChannel,
         },
         BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
-        NetworkActorCommand, NetworkActorMessage, NodeAnnouncement, Privkey, Pubkey,
-        SendPaymentData,
+        NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NodeAnnouncement, Privkey,
+        Pubkey, SendPaymentData,
     },
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash,
     invoice::InvoiceBuilder,
@@ -30,7 +34,7 @@ use crate::{gen_rand_fiber_private_key, test_utils::*};
 use anyhow::anyhow;
 use ckb_hash::blake2b_256;
 use ckb_types::{
-    core::{tx_pool::TxStatus, TransactionView},
+    core::{tx_pool::TxStatus, EpochNumberWithFraction, TransactionView},
     packed::{CellOutput, OutPoint, ScriptBuilder},
     prelude::{Builder, Entity, Pack},
 };
@@ -1916,6 +1920,59 @@ async fn test_to_be_accepted_channels_number_limit() {
         .expect("peer alive")
         .expect("open channel");
     node.expect_debug_event("ChannelPendingToBeRejected").await;
+}
+
+#[tokio::test]
+async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_accept() {
+    let mut node = NetworkNode::new().await;
+    let mut peer = NetworkNode::new().await;
+    node.connect_to(&mut peer).await;
+
+    let rand_privkey = gen_rand_fiber_private_key();
+    let rand_nonce = SecNonce::build(rand_privkey.as_ref())
+        .build()
+        .public_nonce();
+    let open_channel = OpenChannel {
+        chain_hash: get_chain_hash(),
+        channel_id: gen_rand_sha256_hash(),
+        funding_udt_type_script: None,
+        funding_amount: 9_900_000_000,
+        shutdown_script: Default::default(),
+        reserved_ckb_amount: u64::MAX,
+        funding_fee_rate: DEFAULT_FEE_RATE,
+        commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
+        commitment_delay_epoch: EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1)
+            .full_value(),
+        max_tlc_value_in_flight: 0,
+        max_tlc_number_in_flight: SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+        channel_flags: ChannelFlags::empty(),
+        first_per_commitment_point: gen_rand_fiber_public_key(),
+        second_per_commitment_point: gen_rand_fiber_public_key(),
+        funding_pubkey: gen_rand_fiber_public_key(),
+        tlc_basepoint: gen_rand_fiber_public_key(),
+        next_commitment_nonce: rand_nonce.clone(),
+        next_revocation_nonce: rand_nonce,
+        channel_announcement_nonce: None,
+    };
+
+    node.network_actor
+        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+            peer.pubkey,
+            FiberMessage::ChannelInitialization(open_channel),
+        )))
+        .expect("network actor alive");
+
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+
+    let pending = call!(node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+    })
+    .expect("network actor alive")
+    .expect("pending channels");
+    assert!(
+        pending.is_empty(),
+        "malicious OpenChannel must not enter pending accept list: {pending:?}"
+    );
 }
 
 #[tokio::test]
