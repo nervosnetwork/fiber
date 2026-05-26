@@ -1,8 +1,6 @@
 #![allow(clippy::needless_range_loop)]
-use crate::fiber::network::PeerDisconnectReason;
 use crate::fiber::CloseFlags;
 use crate::fiber::FeatureVector;
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::rpc::channel::{ChannelState, ShutdownChannelParams};
@@ -19,6 +17,7 @@ use crate::{
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
         peer::{ConnectPeerParams, DisconnectPeerParams, ListPeersResult},
     },
+    NetworkServiceEvent,
 };
 use biscuit_auth::macros::biscuit;
 use biscuit_auth::{KeyPair, PrivateKey};
@@ -878,42 +877,85 @@ async fn test_rpc_shutdown_following_disconnect() {
         Some(gen_rpc_config()),
     )
     .await;
-    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    node_1.stop().await;
 
     node_0
-        .network_actor
-        .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
-                node_1.pubkey,
-                PeerDisconnectReason::Requested,
-                None,
-            ),
-        ))
-        .expect("node_a alive");
+        .expect_event(|event| match event {
+            NetworkServiceEvent::PeerDisConnected(pubkey, _) => {
+                assert_eq!(pubkey, &node_1.pubkey);
+                true
+            }
+            _ => false,
+        })
+        .await;
+    node_0
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_1.pubkey);
+                assert_eq!(channel_id, &channels[0]);
+                true
+            }
+            _ => false,
+        })
+        .await;
 
-    loop {
-        let res: Result<(), String> = node_0
-            .send_rpc_request(
-                "shutdown_channel",
-                ShutdownChannelParams {
-                    close_script: Some(Script::default().into()),
-                    channel_id: channels[0].into(),
-                    fee_rate: Some(1000),
-                    force: Some(false),
-                },
-            )
-            .await;
+    let res: Result<(), String> = node_0
+        .send_rpc_request(
+            "shutdown_channel",
+            ShutdownChannelParams {
+                close_script: Some(Script::default().into()),
+                channel_id: channels[0].into(),
+                fee_rate: Some(1000),
+                force: Some(false),
+            },
+        )
+        .await;
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        if let Err(err) = &res {
-            assert!(
-                err.contains("Channel not found error")
-                    || err.contains("Trying to send shutdown message while in invalid state"),
-                "unexpected shutdown error after disconnect: {err}"
-            );
-            break;
-        }
-    }
+    let err = res.expect_err("normal shutdown should be rejected while peer is offline");
+    assert!(
+        err.contains("peer is offline") && err.contains("force shutdown"),
+        "unexpected shutdown error after disconnect: {err}"
+    );
+
+    let state = node_0.get_channel_actor_state(channels[0]);
+    assert!(
+        matches!(state.state, fiber_types::ChannelState::ChannelReady),
+        "rejected normal shutdown must not move channel to {:?}",
+        state.state
+    );
+    assert_eq!(
+        state.connectivity_state,
+        crate::fiber::ChannelConnectivityState::Offline
+    );
+
+    node_0.restart().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    let state = node_0.get_channel_actor_state(channels[0]);
+    assert!(
+        matches!(state.state, fiber_types::ChannelState::ChannelReady),
+        "restarted channel should not be stuck in {:?}",
+        state.state
+    );
+    assert_eq!(
+        state.connectivity_state,
+        crate::fiber::ChannelConnectivityState::Offline
+    );
+
+    let res: Result<(), String> = node_0
+        .send_rpc_request(
+            "shutdown_channel",
+            ShutdownChannelParams {
+                close_script: None,
+                channel_id: channels[0].into(),
+                fee_rate: None,
+                force: Some(true),
+            },
+        )
+        .await;
+    res.expect("force shutdown should still be accepted while peer is offline");
 }
 
 #[tokio::test]

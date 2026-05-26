@@ -4791,7 +4791,11 @@ where
                             let _ = rpc_reply.send(Ok(()));
                             Ok(())
                         }
-                        None => Err(Error::ChannelNotFound(channel_id)),
+                        None => {
+                            let error = Error::ChannelNotFound(channel_id);
+                            let _ = rpc_reply.send(Err(error.to_string()));
+                            Err(error)
+                        }
                     }
                 }
             }
