@@ -6625,8 +6625,10 @@ impl ChannelActorState {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
+            // The remote peer's constraints are its advertised incoming TLC
+            // limits, so they constrain TLCs we offer to it.
             let active_offered_tls_number = self.get_all_offer_tlcs().count() as u64 + 1;
-            if active_offered_tls_number > self.local_constraints.max_tlc_number_in_flight {
+            if active_offered_tls_number > self.remote_constraints.max_tlc_number_in_flight {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
@@ -6634,7 +6636,7 @@ impl ChannelActorState {
                 .get_all_offer_tlcs()
                 .fold(0_u128, |sum, tlc| sum + tlc.amount)
                 + add_amount;
-            if active_offered_amount > self.local_constraints.max_tlc_value_in_flight {
+            if active_offered_amount > self.remote_constraints.max_tlc_value_in_flight {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         } else {
@@ -6644,8 +6646,10 @@ impl ChannelActorState {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
+            // Our local constraints are our advertised incoming TLC limits,
+            // so they constrain TLCs the remote peer offers to us.
             let active_received_tls_number = self.get_all_received_tlcs().count() as u64 + 1;
-            if active_received_tls_number > self.remote_constraints.max_tlc_number_in_flight {
+            if active_received_tls_number > self.local_constraints.max_tlc_number_in_flight {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
@@ -6653,7 +6657,7 @@ impl ChannelActorState {
                 .get_all_received_tlcs()
                 .fold(0_u128, |sum, tlc| sum + tlc.amount)
                 + add_amount;
-            if active_received_amount > self.remote_constraints.max_tlc_value_in_flight {
+            if active_received_amount > self.local_constraints.max_tlc_value_in_flight {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         }

@@ -230,9 +230,9 @@ Attempts to open a channel with a peer.
  Not that, we use outbound channel to calculate the fee for TLC forwarding. For example,
  if we have a path A -> B -> C, then the fee B requires for TLC forwarding, is calculated
  the channel configuration of B and C, not A and B.
-* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum value in flight for TLCs, an optional parameter.
+* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum total value of in-flight TLCs our side will accept from the peer, an optional parameter.
  This parameter can not be updated after channel is opened.
-* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of in-flight TLCs our side will accept from the peer, an optional parameter, default is 125
  This parameter can not be updated after channel is opened.
 
 ##### Returns
@@ -254,9 +254,9 @@ Accepts a channel opening request from a peer.
 * `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with
 * `shutdown_script` - <em>`Option<Script>`</em>, The script used to receive the channel balance, an optional parameter,
  default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
-* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The max tlc sum value in flight for the channel, default is u128::MAX
+* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum total value of in-flight TLCs our side will accept from the peer, default is u128::MAX
  This parameter can not be updated after channel is opened.
-* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The max tlc number in flight send from our side, default is 125
+* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of in-flight TLCs our side will accept from the peer, default is 125
  This parameter can not be updated after channel is opened.
 * `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can send,
  an optional parameter, default is 0, which means we can send any TLC is larger than 0.
@@ -402,9 +402,9 @@ Opens a channel with external funding. The node will negotiate the channel with 
 * `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
  The unit is millionths of the amount. default is 1000 which means 0.1%.
  This parameter can be updated with rpc `update_channel` later.
-* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum value in flight for TLCs, an optional parameter.
+* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum total value of in-flight TLCs our side will accept from the peer, an optional parameter.
  This parameter can not be updated after channel is opened.
-* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of in-flight TLCs our side will accept from the peer, an optional parameter, default is 125
  This parameter can not be updated after channel is opened.
 
 ##### Returns
