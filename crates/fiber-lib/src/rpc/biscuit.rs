@@ -77,7 +77,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
 
     // Cch
     b.rule("send_btc", r#"allow if write("cch");"#);
-    b.rule("receive_btc", r#"allow if read("cch");"#);
+    b.rule("receive_btc", r#"allow if write("cch");"#);
     b.rule("get_cch_order", r#"allow if read("cch");"#);
     b.rule("subscribe_store_changes", r#"allow if read("cch");"#);
     // channels
@@ -299,6 +299,44 @@ mod tests {
 
         // if not match any rule, it should be denied
         assert!(auth.check_permission("unknown", &token).is_err());
+    }
+
+    #[test]
+    fn test_biscuit_auth_cch_receive_btc_requires_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        let read_token = biscuit!(
+            r#"
+          read("cch");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+        let write_token = biscuit!(
+            r#"
+          write("cch");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+        assert!(auth.check_permission("get_cch_order", &read_token).is_ok());
+        assert!(auth
+            .check_permission("subscribe_store_changes", &read_token)
+            .is_ok());
+        assert!(auth.check_permission("send_btc", &read_token).is_err());
+        assert!(auth.check_permission("receive_btc", &read_token).is_err());
+
+        assert!(auth.check_permission("send_btc", &write_token).is_ok());
+        assert!(auth.check_permission("receive_btc", &write_token).is_ok());
+        assert!(auth
+            .check_permission("get_cch_order", &write_token)
+            .is_err());
     }
 
     #[test]
