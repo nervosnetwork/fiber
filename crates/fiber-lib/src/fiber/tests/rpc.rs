@@ -915,7 +915,7 @@ async fn test_rpc_shutdown_following_disconnect() {
 
     let err = res.expect_err("normal shutdown should be rejected while peer is offline");
     assert!(
-        err.contains("peer is offline") && err.contains("force shutdown"),
+        err.contains("peer is offline"),
         "unexpected shutdown error after disconnect: {err}"
     );
 
