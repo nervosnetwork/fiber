@@ -726,6 +726,7 @@ impl SendPaymentWithRouterCommand {
             amount: Some(amount),
             keysend: self.keysend,
             udt_type_script: self.udt_type_script.clone(),
+            custom_records: self.custom_records.clone(),
             ..Default::default()
         };
 
