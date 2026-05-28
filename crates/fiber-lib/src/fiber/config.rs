@@ -1,3 +1,4 @@
+use crate::fiber::gossip_policy::GossipPolicyConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::fiber::KeyPair;
 #[cfg(not(target_arch = "wasm32"))]
@@ -279,6 +280,13 @@ pub struct FiberConfig {
         help = "Gossip store maintenance interval, in milli-seconds. [default: 20000]"
     )]
     pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
+
+    /// Gossip policy configuration. This is loaded from config files only and is intentionally
+    /// not configurable via command-line flags or environment variables.
+    #[arg(skip)]
+    #[serde(default)]
+    #[default(GossipPolicyConfig::default())]
+    pub(crate) gossip_policy: GossipPolicyConfig,
 
     /// Gossip network num targeted active syncing peers. [default: None]
     /// This is the number of peers to target for active syncing. This is the number of peers that we will
