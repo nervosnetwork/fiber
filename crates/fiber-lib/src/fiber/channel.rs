@@ -2077,6 +2077,13 @@ where
             ));
             return Ok(());
         } else {
+            if state.connectivity_state != ChannelConnectivityState::Online {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Cannot cooperatively shutdown channel {} while peer is offline",
+                    state.get_id()
+                )));
+            }
+
             let flags = match state.state {
                 ChannelState::ChannelReady => {
                     debug!("Handling shutdown command in ChannelReady state");
