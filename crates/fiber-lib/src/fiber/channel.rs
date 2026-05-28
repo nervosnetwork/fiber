@@ -2798,16 +2798,9 @@ where
         // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
         // to previous hop, even if later hop send backup RemoveTlc message to us later,
         // it will be ignored.
-        let Some(expect_expiry) = now_timestamp_as_millis_u64()
-            .checked_add(epoch_delay_milliseconds)
-            .and_then(|expiry| expiry.checked_add(CHECK_CHANNELS_INTERVAL.as_millis() as u64))
-        else {
-            error!(
-                "Failed to calculate received TLC expiry: epoch_delay_milliseconds {}",
-                epoch_delay_milliseconds
-            );
-            return;
-        };
+        let expect_expiry = now_timestamp_as_millis_u64()
+            .saturating_add(epoch_delay_milliseconds)
+            .saturating_add(CHECK_CHANNELS_INTERVAL.as_millis() as u64);
         let expired_tlcs: Vec<_> = state
             .tlc_state
             .get_committed_received_tlcs()
@@ -2838,15 +2831,7 @@ where
             }
         }
 
-        let Some(expect_expiry) =
-            now_timestamp_as_millis_u64().checked_add(epoch_delay_milliseconds)
-        else {
-            error!(
-                "Failed to calculate offered TLC expiry: epoch_delay_milliseconds {}",
-                epoch_delay_milliseconds
-            );
-            return;
-        };
+        let expect_expiry = now_timestamp_as_millis_u64().saturating_add(epoch_delay_milliseconds);
         if state
             .tlc_state
             .get_expired_offered_tlcs(expect_expiry)
