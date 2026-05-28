@@ -4,6 +4,7 @@ mod channel_restart_stress;
 mod features;
 mod fee;
 mod gossip;
+mod gossip_policy;
 mod graph;
 mod hash_algorithm;
 mod history;

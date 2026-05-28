@@ -2712,7 +2712,7 @@ async fn test_trampoline_routing_race_same_invoice() {
 
     let channels_params = vec![
         (
-            (0, 1), // A -> T
+            (0, 1), // A -> T1
             ChannelParameters {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
@@ -2721,7 +2721,7 @@ async fn test_trampoline_routing_race_same_invoice() {
             },
         ),
         (
-            (2, 1), // B -> T
+            (2, 3), // B -> T2
             ChannelParameters {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
@@ -2730,7 +2730,16 @@ async fn test_trampoline_routing_race_same_invoice() {
             },
         ),
         (
-            (1, 3), // T -> C
+            (1, 4), // T1 -> C
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (3, 4), // T2 -> C
             ChannelParameters {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
@@ -2740,12 +2749,12 @@ async fn test_trampoline_routing_race_same_invoice() {
         ),
     ];
 
-    // 4 nodes: A(0), T(1), B(2), C(3)
-    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 4, None).await;
-    let [node_a, node_t, node_b, node_c] = nodes.try_into().expect("4 nodes");
+    // 5 nodes: A(0), T1(1), B(2), T2(3), C(4)
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 5, None).await;
+    let [node_a, node_t1, node_b, node_t2, node_c] = nodes.try_into().expect("5 nodes");
 
-    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
-    wait_until_node_supports_trampoline_routing(&node_b, &node_t).await;
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+    wait_until_node_supports_trampoline_routing(&node_b, &node_t2).await;
 
     // C creates invoice
     let amount = 1000;
@@ -2771,7 +2780,8 @@ async fn test_trampoline_routing_race_same_invoice() {
         }
     }
 
-    let t_pk = node_t.get_public_key();
+    let t1_pk = node_t1.get_public_key();
+    let t2_pk = node_t2.get_public_key();
 
     // A pays
     let invoice_a = invoice_str.clone();
@@ -2780,7 +2790,7 @@ async fn test_trampoline_routing_race_same_invoice() {
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice_a),
                 max_fee_amount: Some(amount),
-                trampoline_hops: Some(vec![t_pk]),
+                trampoline_hops: Some(vec![t1_pk]),
                 ..Default::default()
             })
             .await;
@@ -2798,7 +2808,7 @@ async fn test_trampoline_routing_race_same_invoice() {
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice_b),
                 max_fee_amount: Some(amount),
-                trampoline_hops: Some(vec![t_pk]),
+                trampoline_hops: Some(vec![t2_pk]),
                 ..Default::default()
             })
             .await;
@@ -2822,6 +2832,28 @@ async fn test_trampoline_routing_race_same_invoice() {
 
     assert_eq!(success, 1, "Exactly one should succeed");
     assert_eq!(failure, 1, "Exactly one should fail");
+
+    let (failed_node, failed_trampoline) = if outcome_a == "failure" {
+        (&node_a, t1_pk)
+    } else {
+        (&node_b, t2_pk)
+    };
+    let (fresh_invoice, _) = node_c.gen_basic_invoice(amount);
+    let res = failed_node
+        .send_payment(SendPaymentCommand {
+            invoice: Some(fresh_invoice.to_string()),
+            max_fee_amount: Some(amount),
+            trampoline_hops: Some(vec![failed_trampoline]),
+            ..Default::default()
+        })
+        .await;
+    assert!(
+        res.is_ok(),
+        "duplicate invoice failure must not penalize trampoline route: {res:?}"
+    );
+    failed_node
+        .wait_until_success(res.unwrap().payment_hash)
+        .await;
 }
 
 #[tokio::test]
@@ -3012,7 +3044,7 @@ async fn test_trampoline_node_restart() {
     node_c
         .network_actor
         .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ))
         .expect("Failed to send settle command");
 

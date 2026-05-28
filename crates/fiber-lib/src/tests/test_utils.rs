@@ -273,7 +273,8 @@ pub struct NetworkNode {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub chain_client: MockCkbChainClient,
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
-    pub gossip_actor: Option<ActorRef<GossipActorMessage>>,
+    #[allow(dead_code)]
+    pub(crate) gossip_actor: Option<ActorRef<GossipActorMessage>>,
     pub private_key: Privkey,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
@@ -2029,7 +2030,8 @@ impl NetworkNode {
         .await
     }
 
-    pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
+    #[allow(dead_code)]
+    pub(crate) fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
         self.gossip_actor
             .as_ref()
             .expect("gossip actor should have been started")
@@ -2037,7 +2039,12 @@ impl NetworkNode {
             .expect("send message to gossip actor");
     }
 
-    pub fn mock_received_gossip_message_from_peer(&self, pubkey: Pubkey, message: GossipMessage) {
+    #[allow(dead_code)]
+    pub(crate) fn mock_received_gossip_message_from_peer(
+        &self,
+        pubkey: Pubkey,
+        message: GossipMessage,
+    ) {
         self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
             GossipMessageWithTarget {
                 target: pubkey,

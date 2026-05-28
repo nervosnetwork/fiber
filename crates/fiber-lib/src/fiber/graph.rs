@@ -2243,8 +2243,8 @@ where
                 let tlc_min_val = 0;
                 self.eval_and_update(
                     &hint.channel_outpoint,
-                    tlc_min_val,
                     sufficiently_large_capacity,
+                    tlc_min_val,
                     hint.pubkey,
                     target,
                     search_amount,

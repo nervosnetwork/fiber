@@ -3484,6 +3484,91 @@ async fn do_test_add_tlc_waiting_ack() {
 }
 
 #[tokio::test]
+async fn test_open_channel_constraints_limit_incoming_tlcs() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let node_a_max_accepted_tlc_number = 2;
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_number_in_flight: Some(node_a_max_accepted_tlc_number),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let tlc_amount = 1000000000;
+
+    // A's advertised max is A's incoming/accepted TLC limit, so it should not
+    // limit TLCs A offers to B.
+    for i in 1..=node_a_max_accepted_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+
+        assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+    }
+
+    // B offering TLCs to A consumes A's advertised incoming/accepted TLC limit.
+    for i in 1..=node_a_max_accepted_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+
+        if i == node_a_max_accepted_tlc_number + 1 {
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result.unwrap_err();
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn do_test_add_tlc_with_number_limit() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
@@ -3506,7 +3591,7 @@ async fn do_test_add_tlc_with_number_limit() {
 
     let tlc_amount = 1000000000;
 
-    // A -> B will have tlc number limit 2
+    // A's max applies to incoming TLCs, so it should not limit A -> B.
     for i in 1..=node_a_max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
@@ -3528,18 +3613,12 @@ async fn do_test_add_tlc_with_number_limit() {
             ))
         })
         .expect("source node alive");
-        if i == node_a_max_tlc_number + 1 {
-            assert!(add_tlc_result.is_err());
-            let code = add_tlc_result.unwrap_err();
-            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
-        } else {
-            dbg!(&add_tlc_result);
-            assert!(add_tlc_result.is_ok());
-            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
-        }
+        dbg!(&add_tlc_result);
+        assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
     }
 
-    // B -> A can still add tlc
+    // B -> A consumes A's advertised incoming TLC limit.
     for i in 1..=node_a_max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
@@ -3561,9 +3640,15 @@ async fn do_test_add_tlc_with_number_limit() {
             ))
         })
         .expect("source node alive");
-        dbg!(&add_tlc_result);
-        assert!(add_tlc_result.is_ok());
-        wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
+        if i == node_a_max_tlc_number + 1 {
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result.unwrap_err();
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            dbg!(&add_tlc_result);
+            assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
+        }
     }
 }
 
@@ -3589,7 +3674,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
     .await;
 
     let tlc_amount = 1000000000;
-    // B -> A will have tlc number limit 2
+    // B's max applies to incoming TLCs, so it should not limit B -> A.
     for i in 1..=node_b_max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
@@ -3611,18 +3696,12 @@ async fn do_test_add_tlc_number_limit_reverse() {
             ))
         })
         .expect("source node alive");
-        if i == node_b_max_tlc_number + 1 {
-            assert!(add_tlc_result.is_err());
-            let code = add_tlc_result.unwrap_err();
-            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
-        } else {
-            dbg!(&add_tlc_result);
-            assert!(add_tlc_result.is_ok());
-            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
-        }
+        dbg!(&add_tlc_result);
+        assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
     }
 
-    // A -> B can still add tlc
+    // A -> B consumes B's advertised incoming TLC limit.
     for i in 1..=node_b_max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
@@ -3644,9 +3723,15 @@ async fn do_test_add_tlc_number_limit_reverse() {
             ))
         })
         .expect("source node alive");
-        dbg!(&add_tlc_result);
-        assert!(add_tlc_result.is_ok());
-        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+        if i == node_b_max_tlc_number + 1 {
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result.unwrap_err();
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            dbg!(&add_tlc_result);
+            assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+        }
     }
 }
 
@@ -3673,7 +3758,7 @@ async fn do_test_add_tlc_value_limit() {
 
     let tlc_amount = 1000000000;
 
-    // A -> B have tlc value limit 3_000_000_000
+    // A's max applies to incoming TLCs, so it should not limit A -> B.
     for i in 1..=max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
@@ -3695,6 +3780,32 @@ async fn do_test_add_tlc_value_limit() {
             ))
         })
         .expect("node_b alive");
+        assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+    }
+
+    // B -> A consumes A's advertised incoming TLC value limit.
+    for i in 1..=max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("node_b alive");
         if i == max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result.unwrap_err();
@@ -3702,11 +3813,35 @@ async fn do_test_add_tlc_value_limit() {
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());
-            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
         }
     }
+}
 
-    // B -> A can still add tlc
+#[tokio::test]
+async fn do_test_add_tlc_value_limit_reverse() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let max_tlc_number = 3;
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            b_max_tlc_value_in_flight: Some(3000000000),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let tlc_amount = 1000000000;
+
+    // B's max applies to incoming TLCs, so it should not limit B -> A.
     for i in 1..=max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
@@ -3731,6 +3866,91 @@ async fn do_test_add_tlc_value_limit() {
         assert!(add_tlc_result.is_ok());
         wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
     }
+
+    // A -> B consumes B's advertised incoming TLC value limit.
+    for i in 1..=max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_rand_sha256_hash(),
+            attempt_id: None,
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("node_a alive");
+        if i == max_tlc_number + 1 {
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result.unwrap_err();
+
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_peer_add_tlc_checks_local_incoming_constraints() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_value_in_flight: Some(1000),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::add_tlc(AddTlc {
+                    channel_id: new_channel_id,
+                    tlc_id: 0,
+                    amount: 1001,
+                    payment_hash: gen_rand_sha256_hash(),
+                    expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    onion_packet: None,
+                }),
+            )),
+        ))
+        .expect("send add_tlc peer message");
+
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
+                    if message.contains("TlcValueInflightExceedLimit")
+            )
+        })
+        .await;
+
+    let node_a_state = node_a.get_channel_actor_state(new_channel_id);
+    assert_eq!(node_a_state.tlc_state.received_tlcs.tlcs.len(), 0);
 }
 
 #[tokio::test]

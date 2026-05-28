@@ -2,7 +2,7 @@ use core::panic;
 use secp256k1::SECP256K1;
 use std::{
     cmp::max,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     marker::PhantomData,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -47,7 +47,14 @@ use crate::{
 
 use super::{
     config::DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS,
-    network::{check_chain_hash, get_chain_hash, GossipMessageWithTarget, GOSSIP_PROTOCOL_ID},
+    gossip_policy::{
+        ChannelUpdateLimiter, ChannelUpdateLimiterKey, ChannelUpdateRateLimitConfig,
+        GossipPolicyConfig, GossipPolicyState, GossipViolation,
+    },
+    network::{
+        check_chain_hash, get_chain_hash, GossipMessageWithTarget, NetworkActorCommand,
+        NetworkActorMessage, PeerChannelIndex, PeerDisconnectReason, GOSSIP_PROTOCOL_ID,
+    },
     types::{
         BroadcastMessageQuery, BroadcastMessageQueryFlags, BroadcastMessageWithTimestamp,
         BroadcastMessagesFilter, BroadcastMessagesFilterResult, ChannelOnchainInfo,
@@ -97,6 +104,7 @@ const MAX_NUM_CONCURRENT_QUERY_TASKS: usize = 10;
 
 const QUERY_BROADCAST_MESSAGES_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_PEER_FILTER_RETRY_DELAY: Duration = Duration::from_millis(500);
+const DEFERRED_SYNC_CURSOR_RETRY_DELAY: Duration = Duration::from_millis(500);
 const GOSSIP_INGRESS_PASSIVE: &str = "passive";
 const GOSSIP_INGRESS_ACTIVE_GET: &str = "active_get";
 const GOSSIP_INGRESS_QUERY: &str = "query";
@@ -401,7 +409,7 @@ pub trait SubscribableGossipMessageStore {
 }
 
 #[derive(AsRefStr)]
-pub enum GossipActorMessage {
+pub(crate) enum GossipActorMessage {
     // The control for the service async control is received.
     ReceivedControl(ServiceAsyncControl),
 
@@ -422,8 +430,11 @@ pub enum GossipActorMessage {
     // The active syncing process is finished for a peer.
     ActiveSyncingFinished(Pubkey, Cursor),
 
-    // A malicious peer is found. We should disconnect from the peer.
-    MaliciousPeerFound(Pubkey),
+    // A malicious peer is found during gossip validation or policy checks.
+    MaliciousPeerFound {
+        peer: Pubkey,
+        violation: GossipViolation,
+    },
 
     // Query some broadcast messages from a peer.
     QueryBroadcastMessages(
@@ -439,6 +450,8 @@ pub enum GossipActorMessage {
     TryBroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
     // Send gossip message to a peer.
     SendGossipMessage(GossipMessageWithTarget),
+    // Flush reserved outbound gossip payloads whose rate-limit delay has elapsed.
+    FlushDelayedOutbound,
     // Update peer filter
     UpdatePeerFilter(Pubkey, Cursor),
     // Received GossipMessage from a peer
@@ -457,6 +470,7 @@ pub struct GossipConfig {
     pub(crate) announce_private_addr: bool,
     pub(crate) num_targeted_active_syncing_peers: usize,
     pub(crate) num_targeted_outbound_passive_syncing_peers: usize,
+    pub(crate) policy: GossipPolicyConfig,
 }
 
 impl Default for GossipConfig {
@@ -473,6 +487,7 @@ impl Default for GossipConfig {
             announce_private_addr: true,
             num_targeted_active_syncing_peers: MAX_NUM_OF_ACTIVE_SYNCING_PEERS,
             num_targeted_outbound_passive_syncing_peers: MIN_NUM_OF_PASSIVE_SYNCING_PEERS,
+            policy: GossipPolicyConfig::default(),
         }
     }
 }
@@ -495,6 +510,7 @@ impl From<&FiberConfig> for GossipConfig {
             num_targeted_outbound_passive_syncing_peers: config
                 .gossip_network_num_targeted_outbound_passive_syncing_peers
                 .unwrap_or(MIN_NUM_OF_PASSIVE_SYNCING_PEERS),
+            policy: config.gossip_policy.clone(),
         }
     }
 }
@@ -514,6 +530,8 @@ where
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
         chain_client: C,
+        network_actor: Option<ActorRef<NetworkActorMessage>>,
+        peer_channel_index: PeerChannelIndex,
         supervisor: ActorCell,
     ) -> (Self, GossipProtocolHandle) {
         let GossipConfig {
@@ -524,6 +542,7 @@ where
             announce_private_addr,
             num_targeted_active_syncing_peers,
             num_targeted_outbound_passive_syncing_peers,
+            policy,
         } = gossip_config;
 
         let (network_control_sender, network_control_receiver) = oneshot::channel();
@@ -544,9 +563,12 @@ where
                 announce_private_addr,
                 num_targeted_active_syncing_peers,
                 num_targeted_outbound_passive_syncing_peers,
+                policy,
                 store,
                 chain_actor,
                 chain_client,
+                network_actor,
+                peer_channel_index,
             ),
             supervisor,
         )
@@ -645,6 +667,91 @@ where
 #[derive(Debug, Default)]
 struct SyncingPeerState {
     failed_times: usize,
+}
+
+#[derive(Clone, Debug)]
+struct DelayedGossipMessage {
+    target: Pubkey,
+    message: GossipMessage,
+    reserved_bytes: u64,
+    ready_at_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct DelayedGossipMessageQueue {
+    per_peer_capacity: usize,
+    per_peer_counts: HashMap<Pubkey, usize>,
+    messages: VecDeque<DelayedGossipMessage>,
+}
+
+impl DelayedGossipMessageQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            per_peer_capacity: capacity,
+            per_peer_counts: HashMap::new(),
+            messages: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, message: DelayedGossipMessage) -> bool {
+        if self.is_full_for_peer(&message.target) {
+            return false;
+        }
+        *self.per_peer_counts.entry(message.target).or_default() += 1;
+        self.messages.push_back(message);
+        true
+    }
+
+    fn is_full_for_peer(&self, peer: &Pubkey) -> bool {
+        self.per_peer_counts.get(peer).copied().unwrap_or_default() >= self.per_peer_capacity
+    }
+
+    fn next_ready_at_ms(&self) -> Option<u64> {
+        self.messages
+            .iter()
+            .map(|message| message.ready_at_ms)
+            .min()
+    }
+
+    fn drain_ready(&mut self, now_ms: u64) -> Vec<DelayedGossipMessage> {
+        let mut ready = Vec::new();
+        let mut pending = VecDeque::with_capacity(self.messages.len());
+        while let Some(message) = self.messages.pop_front() {
+            if message.ready_at_ms <= now_ms {
+                self.decrement_peer_count(&message.target);
+                ready.push(message);
+            } else {
+                pending.push_back(message);
+            }
+        }
+        self.messages = pending;
+        ready
+    }
+
+    fn remove_peer(&mut self, peer: &Pubkey) -> Vec<DelayedGossipMessage> {
+        let mut removed = Vec::new();
+        let mut retained = VecDeque::with_capacity(self.messages.len());
+        while let Some(message) = self.messages.pop_front() {
+            if &message.target == peer {
+                removed.push(message);
+            } else {
+                retained.push_back(message);
+            }
+        }
+        self.messages = retained;
+        self.per_peer_counts.remove(peer);
+        removed
+    }
+
+    fn decrement_peer_count(&mut self, peer: &Pubkey) {
+        let Some(count) = self.per_peer_counts.get_mut(peer) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.per_peer_counts.remove(peer);
+        }
+    }
 }
 
 pub struct GossipSyncingActorState<S, C> {
@@ -788,6 +895,7 @@ where
                     // Stop the timeout notification.
                     handle.abort();
                     let messages = result.messages;
+                    let mut retry_cursor_later = false;
                     // If we are receiving an empty response, then the syncing process is finished.
                     match messages.last() {
                         Some(last_message) => {
@@ -803,6 +911,18 @@ where
                                 Ok(cursor) => {
                                     state.cursor = cursor;
                                 }
+                                Err(Error::DeferredChannelAnnouncementVerification(
+                                    outpoint,
+                                    reason,
+                                )) => {
+                                    warn!(
+                                        peer = format!("{:?}", &state.peer_pubkey),
+                                        outpoint = format!("{:?}", outpoint),
+                                        reason,
+                                        "Deferring active sync cursor advancement until channel announcement can be verified locally"
+                                    );
+                                    retry_cursor_later = true;
+                                }
                                 Err(error) => {
                                     warn!(
                                         "Failed to verify the last message in the response: message {:?}, peer {:?}",
@@ -814,9 +934,10 @@ where
                                     ));
                                     state
                                         .gossip_actor
-                                        .send_message(GossipActorMessage::MaliciousPeerFound(
-                                            state.peer_pubkey,
-                                        ))
+                                        .send_message(GossipActorMessage::MaliciousPeerFound {
+                                            peer: state.peer_pubkey,
+                                            violation: GossipViolation::InvalidSyncResponse,
+                                        })
                                         .expect("gossip actor alive");
                                     return Ok(());
                                 }
@@ -847,9 +968,15 @@ where
                         "Sending new GetBroadcastMessages request after receiving response: pubkey {:?}",
                         &state.peer_pubkey
                     );
-                    myself
-                        .send_message(GossipSyncingActorMessage::NewGetRequest())
-                        .expect("gossip syncing actor alive");
+                    if retry_cursor_later {
+                        std::mem::drop(myself.send_after(DEFERRED_SYNC_CURSOR_RETRY_DELAY, || {
+                            GossipSyncingActorMessage::NewGetRequest()
+                        }));
+                    } else {
+                        myself
+                            .send_message(GossipSyncingActorMessage::NewGetRequest())
+                            .expect("gossip syncing actor alive");
+                    }
                 } else {
                     warn!(
                         "Received GetBroadcastMessages response from peer {:?} with unknown request id: {:?}",
@@ -1147,6 +1274,7 @@ where
     async fn new<C: CkbChainClient + Clone + Send + Sync + 'static>(
         maintenance_interval: Duration,
         announce_private_addr: bool,
+        inbound_channel_update: ChannelUpdateRateLimitConfig,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
         latest_remote_broadcast_timestamp: Arc<AtomicU64>,
@@ -1163,6 +1291,7 @@ where
             (
                 maintenance_interval,
                 announce_private_addr,
+                inbound_channel_update,
                 store.clone(),
                 gossip_actor,
                 latest_remote_broadcast_timestamp.clone(),
@@ -1281,6 +1410,16 @@ pub enum GossipMessageProcessingError {
 }
 
 impl GossipMessageProcessingError {
+    fn violation(&self) -> Option<GossipViolation> {
+        match self {
+            GossipMessageProcessingError::MessageTooNew(_, _)
+            | GossipMessageProcessingError::ProcessingError(_) => {
+                Some(GossipViolation::PolicyRejectedMessage)
+            }
+            GossipMessageProcessingError::NewerMessageSaved(_) => None,
+        }
+    }
+
     fn rejected_broadcast_metrics_reason(&self) -> &'static str {
         match self {
             GossipMessageProcessingError::MessageTooNew(_, _) => "message_too_new",
@@ -1294,15 +1433,17 @@ impl GossipMessageProcessingError {
 enum VerifyBroadcastMessageError {
     #[error("InvalidParameter: {0}")]
     InvalidParameter(String),
-    #[error("Internal error: {0}")]
-    InternalError(anyhow::Error),
+    #[error("Deferred channel announcement verification for {0:?}: {1}")]
+    DeferredChannelAnnouncementVerification(OutPoint, String),
 }
 
 impl VerifyBroadcastMessageError {
     fn rejected_broadcast_metrics_reason(&self) -> &'static str {
         match self {
             VerifyBroadcastMessageError::InvalidParameter(_) => "verify_invalid",
-            VerifyBroadcastMessageError::InternalError(_) => "verify_internal_error",
+            VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(_, _) => {
+                "verify_deferred_channel_announcement"
+            }
         }
     }
 }
@@ -1313,7 +1454,10 @@ impl From<VerifyBroadcastMessageError> for Error {
             VerifyBroadcastMessageError::InvalidParameter(message) => {
                 Error::InvalidParameter(message)
             }
-            VerifyBroadcastMessageError::InternalError(error) => Error::InternalError(error),
+            VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
+                outpoint,
+                message,
+            ) => Error::DeferredChannelAnnouncementVerification(outpoint, message),
         }
     }
 }
@@ -1329,6 +1473,7 @@ pub struct ExtendedGossipMessageStoreState<S, C> {
     announce_private_addr: bool,
     store: S,
     gossip_actor: ActorRef<GossipActorMessage>,
+    channel_update_limiter: ChannelUpdateLimiter,
     latest_remote_broadcast_timestamp: Arc<AtomicU64>,
     chain_actor: ActorRef<CkbChainMessage>,
     chain_client: C,
@@ -1343,6 +1488,7 @@ pub struct ExtendedGossipMessageStoreState<S, C> {
 impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S, C> {
     fn new(
         announce_private_addr: bool,
+        inbound_channel_update: ChannelUpdateRateLimitConfig,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
         latest_remote_broadcast_timestamp: Arc<AtomicU64>,
@@ -1353,6 +1499,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             announce_private_addr,
             store,
             gossip_actor,
+            channel_update_limiter: inbound_channel_update.build_limiter(),
             latest_remote_broadcast_timestamp,
             chain_actor,
             chain_client,
@@ -1367,30 +1514,34 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
     // check their validity and then save valid messages to store and
     // return the list of saved messages that can be sent to the subscribers.
     async fn prune_messages_to_be_saved(&mut self) -> Vec<BroadcastMessageWithTimestamp> {
-        let mut complete_messages = HashSet::new();
-        for messages in self.messages_to_be_saved.values() {
+        let mut complete_messages = HashMap::<BroadcastMessage, Vec<Pubkey>>::new();
+        for (peer, messages) in &self.messages_to_be_saved {
             for message in messages {
                 if self.has_dependencies_available(message) {
-                    complete_messages.insert(message.clone());
+                    complete_messages
+                        .entry(message.clone())
+                        .or_default()
+                        .push(*peer);
                 }
             }
         }
-        self.messages_to_be_saved.retain(|_, messages| {
-            // Remove completed messages
-            messages.retain(|message| !complete_messages.contains(message));
-            // If messages are empty now, delete the kv pair.
-            !messages.is_empty()
-        });
 
-        let mut sorted_messages = complete_messages.into_iter().collect::<Vec<_>>();
-        sorted_messages.sort_unstable();
+        let mut complete_messages = complete_messages.into_iter().collect::<Vec<_>>();
+        complete_messages.sort_unstable_by(|(lhs, _), (rhs, _)| lhs.cmp(rhs));
         trace!(
             "Saving complete messages to the store: {:?}",
-            &sorted_messages
+            &complete_messages
         );
 
-        let mut verified_sorted_messages = Vec::with_capacity(sorted_messages.len());
-        for message in sorted_messages {
+        let mut verified_sorted_messages = Vec::with_capacity(complete_messages.len());
+        for (message, peers) in complete_messages {
+            if self.should_defer_message_verification(&message) {
+                trace!(
+                    "Keeping message pending until dependencies are persisted: {:?}",
+                    &message
+                );
+                continue;
+            }
             match verify_and_save_broadcast_message(
                 &message,
                 &self.store,
@@ -1399,29 +1550,67 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             )
             .await
             {
-                Ok((message, is_newly_applied)) => {
+                Ok((verified_message, is_newly_applied)) => {
+                    self.remove_pending_message(&message, &peers);
                     if is_newly_applied {
                         self.latest_remote_broadcast_timestamp
-                            .fetch_max(message.cursor().timestamp, Ordering::AcqRel);
+                            .fetch_max(verified_message.cursor().timestamp, Ordering::AcqRel);
                         observe_applied_broadcast_message();
-                        observe_applied_propagation_latency(&message);
+                        observe_applied_propagation_latency(&verified_message);
                     } else {
                         observe_duplicate_broadcast_message();
                     }
-                    verified_sorted_messages.push(message);
+                    verified_sorted_messages.push(verified_message);
                 }
-                Err(error) => {
-                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
+                Err(
+                    error @ VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
+                        _,
+                        _,
+                    ),
+                ) => {
                     trace!(
-                        "Failed to verify and save message {:?}: {:?}",
+                        "Deferring retry for message {:?} from peers {:?}: {:?}",
                         message,
+                        peers,
                         error
                     );
                 }
+                Err(error) => {
+                    self.remove_pending_message(&message, &peers);
+                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
+                    trace!(
+                        "Failed to verify and save message {:?} from peers {:?}: {:?}",
+                        message,
+                        peers,
+                        error
+                    );
+                    if let Some(violation) =
+                        classify_verify_and_save_broadcast_message_error(&message, &error)
+                    {
+                        for peer in peers {
+                            self.gossip_actor
+                                .send_message(GossipActorMessage::MaliciousPeerFound {
+                                    peer,
+                                    violation,
+                                })
+                                .expect("gossip actor alive");
+                        }
+                    }
+                }
             }
         }
+        self.messages_to_be_saved
+            .retain(|_, messages| !messages.is_empty());
 
         verified_sorted_messages
+    }
+
+    fn remove_pending_message(&mut self, message: &BroadcastMessage, peers: &[Pubkey]) {
+        for peer in peers {
+            if let Some(messages) = self.messages_to_be_saved.get_mut(peer) {
+                messages.remove(message);
+            }
+        }
     }
 
     fn store_messages(&self, messages: &[BroadcastMessageWithTimestamp]) {
@@ -1480,6 +1669,11 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         let peers_to_query = self
             .messages_to_be_saved
             .keys()
+            .filter(|peer| {
+                self.messages_to_be_saved
+                    .get(peer)
+                    .is_some_and(|messages| messages.iter().any(Self::message_requires_query))
+            })
             .take(MAX_NUM_CONCURRENT_QUERY_TASKS - self.num_query_tasks_running)
             .cloned()
             .collect::<Vec<_>>();
@@ -1492,9 +1686,17 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                 .messages_to_be_saved
                 .remove(&peer)
                 .expect("peer is a key of hashmap");
+            let (messages_requiring_query, retained_messages): (Vec<_>, Vec<_>) =
+                incomplete_messages
+                    .into_iter()
+                    .partition(Self::message_requires_query);
+            if !retained_messages.is_empty() {
+                self.messages_to_be_saved
+                    .insert(peer, retained_messages.into_iter().collect());
+            }
             let gossip_actor = self.gossip_actor.clone();
             let myself = myself.clone();
-            let incomplete_messages = incomplete_messages.into_iter().collect::<Vec<_>>();
+            let incomplete_messages = messages_requiring_query;
 
             ractor::concurrency::spawn(async move {
                 let mut is_success = true;
@@ -1656,6 +1858,68 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             _ => true,
         }
     }
+
+    fn should_defer_message_verification(&self, message: &BroadcastMessage) -> bool {
+        match message {
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                self.store
+                    .get_latest_channel_announcement(&channel_update.channel_outpoint)
+                    .is_none()
+                    && self
+                        .get_channel_announcement_in_memory(&channel_update.channel_outpoint)
+                        .is_some()
+            }
+            _ => false,
+        }
+    }
+
+    fn message_requires_query(message: &BroadcastMessage) -> bool {
+        matches!(message, BroadcastMessage::ChannelUpdate(_))
+    }
+
+    fn is_known_remote_message_replay(&self, peer: &Pubkey, message: &BroadcastMessage) -> bool {
+        if self
+            .messages_to_be_saved
+            .get(peer)
+            .is_some_and(|messages| messages.contains(message))
+        {
+            return true;
+        }
+        get_existing_broadcast_message(message, &self.store)
+            .map(BroadcastMessage::from)
+            .is_some_and(|existing| &existing == message)
+    }
+
+    fn allow_inbound_remote_broadcast_message(
+        &mut self,
+        peer: &Pubkey,
+        message: &BroadcastMessage,
+        now_ms: u64,
+    ) -> bool {
+        if self.is_known_remote_message_replay(peer, message) {
+            return true;
+        }
+
+        let BroadcastMessage::ChannelUpdate(channel_update) = message else {
+            return true;
+        };
+
+        let key = ChannelUpdateLimiterKey::new(
+            *peer,
+            channel_update.channel_outpoint.clone(),
+            channel_update.is_update_of_node_1(),
+        );
+        let allowed = self.channel_update_limiter.try_acquire(&key, now_ms);
+        if !allowed {
+            debug!(
+                peer = format!("{peer:?}"),
+                outpoint = ?channel_update.channel_outpoint,
+                is_node1 = channel_update.is_update_of_node_1(),
+                "Dropping remote channel update due to gossip rate limiter"
+            );
+        }
+        allowed
+    }
 }
 
 // An extended gossip message store actor that can handle more complex operations than a normal gossip message store.
@@ -1687,6 +1951,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
     type Arguments = (
         Duration,
         bool,
+        ChannelUpdateRateLimitConfig,
         S,
         ActorRef<GossipActorMessage>,
         Arc<AtomicU64>,
@@ -1700,6 +1965,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
         (
             gossip_store_maintenance_interval,
             announce_private_addr,
+            inbound_channel_update,
             store,
             gossip_actor,
             latest_remote_broadcast_timestamp,
@@ -1712,6 +1978,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
         });
         Ok(ExtendedGossipMessageStoreState::new(
             announce_private_addr,
+            inbound_channel_update,
             store,
             gossip_actor,
             latest_remote_broadcast_timestamp,
@@ -1828,7 +2095,11 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
             }
 
             ExtendedGossipMessageStoreMessage::SaveMessages(peer, messages) => {
+                let now_ms = now_timestamp_as_millis_u64();
                 for message in messages {
+                    if !state.allow_inbound_remote_broadcast_message(&peer, &message, now_ms) {
+                        continue;
+                    }
                     match state.insert_message_to_be_saved_list(&peer, &message).await {
                         Ok(InsertMessageStatus::Inserted) => {
                             if !state.has_dependencies_available(&message) {
@@ -1848,6 +2119,15 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
                                 error.rejected_broadcast_metrics_reason(),
                             );
                             trace!("Failed to save message: {:?}, error: {:?}", message, error);
+                            if let Some(violation) = error.violation() {
+                                state
+                                    .gossip_actor
+                                    .send_message(GossipActorMessage::MaliciousPeerFound {
+                                        peer,
+                                        violation,
+                                    })
+                                    .expect("gossip actor alive");
+                            }
                         }
                     }
                 }
@@ -1929,6 +2209,9 @@ pub enum ExtendedGossipMessageStoreMessage {
 pub(crate) struct GossipActorState<S, C> {
     store: ExtendedGossipMessageStore<S>,
     control: Option<ServiceAsyncControl>,
+    network_actor: Option<ActorRef<NetworkActorMessage>>,
+    peer_channel_index: PeerChannelIndex,
+    policy: GossipPolicyState,
     // The number of active syncing peers that we have finished syncing with.
     // Together with the number of current active syncing peers, this is
     // used to determine if we should start a new active syncing peer.
@@ -1945,6 +2228,8 @@ pub(crate) struct GossipActorState<S, C> {
     myself: ActorRef<GossipActorMessage>,
     chain_actor: ActorRef<CkbChainMessage>,
     chain_client: C,
+    delayed_outbound_messages: DelayedGossipMessageQueue,
+    next_delayed_flush_at_ms: Option<u64>,
     query_reply_ports:
         HashMap<(Pubkey, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
     peer_states: HashMap<Pubkey, PeerState>,
@@ -2111,7 +2396,7 @@ where
     }
 
     async fn send_broadcast_message_filter(
-        &self,
+        &mut self,
         pubkey: &Pubkey,
         filter: BroadcastMessagesFilter,
     ) -> crate::Result<()> {
@@ -2148,19 +2433,6 @@ where
         Cursor::new(timestamp, BroadcastMessageID::default())
     }
 
-    async fn try_to_verify_and_save_broadcast_messages(
-        &mut self,
-        originator: Pubkey,
-        messages: Vec<BroadcastMessage>,
-    ) {
-        self.store
-            .actor
-            .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
-                originator, messages,
-            ))
-            .expect("store actor alive");
-    }
-
     fn get_control(&self) -> &ServiceAsyncControl {
         self.control.as_ref().expect("control exists")
     }
@@ -2174,7 +2446,26 @@ where
         Ok(())
     }
 
-    async fn send_message_to_peer(
+    fn maybe_reserve_or_delay_outbound_message(
+        &mut self,
+        pubkey: &Pubkey,
+        message: GossipMessage,
+    ) -> crate::Result<Option<GossipMessage>> {
+        let now_ms = now_timestamp_as_millis_u64();
+        let decision = reserve_or_delay_outbound_message(
+            &mut self.policy,
+            &mut self.delayed_outbound_messages,
+            pubkey,
+            message,
+            now_ms,
+        )?;
+        if decision.is_none() {
+            self.schedule_next_delayed_flush();
+        }
+        Ok(decision)
+    }
+
+    async fn send_message_to_peer_without_budget(
         &self,
         pubkey: &Pubkey,
         message: GossipMessage,
@@ -2185,10 +2476,231 @@ where
         }
     }
 
+    async fn send_message_to_peer(
+        &mut self,
+        pubkey: &Pubkey,
+        message: GossipMessage,
+    ) -> crate::Result<()> {
+        let Some(message) = self.maybe_reserve_or_delay_outbound_message(pubkey, message)? else {
+            return Ok(());
+        };
+        self.send_message_to_peer_without_budget(pubkey, message)
+            .await
+    }
+
+    fn schedule_next_delayed_flush(&mut self) {
+        let Some(ready_at_ms) = self.delayed_outbound_messages.next_ready_at_ms() else {
+            self.next_delayed_flush_at_ms = None;
+            return;
+        };
+        if self
+            .next_delayed_flush_at_ms
+            .is_some_and(|scheduled_ms| scheduled_ms <= ready_at_ms)
+        {
+            return;
+        }
+
+        self.next_delayed_flush_at_ms = Some(ready_at_ms);
+        let delay_ms = ready_at_ms.saturating_sub(now_timestamp_as_millis_u64());
+        self.myself.send_after(Duration::from_millis(delay_ms), || {
+            GossipActorMessage::FlushDelayedOutbound
+        });
+    }
+
+    async fn flush_delayed_outbound_messages(&mut self) {
+        self.next_delayed_flush_at_ms = None;
+        let now_ms = now_timestamp_as_millis_u64();
+        for delayed_message in self.delayed_outbound_messages.drain_ready(now_ms) {
+            if let Err(error) = self
+                .send_message_to_peer_without_budget(
+                    &delayed_message.target,
+                    delayed_message.message,
+                )
+                .await
+            {
+                self.policy.refund_outbound_message(
+                    &delayed_message.target,
+                    delayed_message.reserved_bytes,
+                    now_ms,
+                );
+                match error {
+                    Error::PeerNotFound(_) => {
+                        trace!(
+                            peer = format!("{:?}", delayed_message.target),
+                            "Dropping delayed outbound gossip payload for disconnected peer"
+                        );
+                    }
+                    other => {
+                        error!(
+                            "Failed to flush delayed gossip message to peer {:?}: {:?}",
+                            delayed_message.target, other
+                        );
+                    }
+                }
+            }
+        }
+        self.schedule_next_delayed_flush();
+    }
+
+    fn should_disconnect_for_ban(&self, peer: &Pubkey) -> bool {
+        self.is_peer_connected(peer) && !self.peer_channel_index.has_channels(peer)
+    }
+
+    async fn disconnect_banned_peer_if_needed(&self, peer: &Pubkey) {
+        if !self.should_disconnect_for_ban(peer) {
+            return;
+        }
+        let Some(network_actor) = self.network_actor.as_ref() else {
+            return;
+        };
+        if let Err(error) = network_actor.send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(*peer, PeerDisconnectReason::Banned, None),
+        )) {
+            error!(
+                "Failed to request disconnect for gossip-banned peer {:?}: {:?}",
+                peer, error
+            );
+        }
+    }
+
+    async fn handle_malicious_peer_found(&mut self, peer: &Pubkey, violation: GossipViolation) {
+        let now_ms = now_timestamp_as_millis_u64();
+        let banned = self.policy.record_violation(peer, violation, now_ms);
+        if banned || self.policy.is_banned(peer, now_ms) {
+            self.disconnect_banned_peer_if_needed(peer).await;
+        }
+    }
+
     fn get_and_increment_request_id(&mut self) -> u64 {
         let id = self.next_request_id;
         self.next_request_id += 1;
         id
+    }
+
+    fn drop_delayed_outbound_messages_for_peer(&mut self, peer: &Pubkey, now_ms: u64) {
+        for delayed_message in self.delayed_outbound_messages.remove_peer(peer) {
+            self.policy.refund_outbound_message(
+                &delayed_message.target,
+                delayed_message.reserved_bytes,
+                now_ms,
+            );
+        }
+    }
+}
+
+fn outbound_gossip_message_cost(message: &GossipMessage) -> Option<u64> {
+    match message {
+        GossipMessage::BroadcastMessagesFilter(_)
+        | GossipMessage::GetBroadcastMessages(_)
+        | GossipMessage::QueryBroadcastMessages(_) => None,
+        GossipMessage::BroadcastMessagesFilterResult(_)
+        | GossipMessage::GetBroadcastMessagesResult(_)
+        | GossipMessage::QueryBroadcastMessagesResult(_) => {
+            Some(message.clone().to_molecule_bytes().len() as u64)
+        }
+    }
+}
+
+fn should_bypass_outbound_rate_limit_for_message(
+    policy: &GossipPolicyState,
+    pubkey: &Pubkey,
+    message: &GossipMessage,
+    now_ms: u64,
+) -> bool {
+    let Some(bytes) = outbound_gossip_message_cost(message) else {
+        return false;
+    };
+    policy.should_bypass_oversized_outbound_message(pubkey, bytes, now_ms)
+}
+
+fn reserve_immediate_outbound_message_budget(
+    policy: &mut GossipPolicyState,
+    pubkey: &Pubkey,
+    message: &GossipMessage,
+    now_ms: u64,
+) -> Option<u64> {
+    let bytes = outbound_gossip_message_cost(message)?;
+    Some(policy.reserve_outbound_message(pubkey, bytes, now_ms))
+}
+
+fn reserve_or_delay_outbound_message(
+    policy: &mut GossipPolicyState,
+    delayed_outbound_messages: &mut DelayedGossipMessageQueue,
+    pubkey: &Pubkey,
+    message: GossipMessage,
+    now_ms: u64,
+) -> crate::Result<Option<GossipMessage>> {
+    let Some(bytes) = outbound_gossip_message_cost(&message) else {
+        return Ok(Some(message));
+    };
+
+    if should_bypass_outbound_rate_limit_for_message(policy, pubkey, &message, now_ms) {
+        // Preserve protocol progress for the first oversized payload after buckets refill. Once
+        // debt exists, later oversized pages must respect the queued delay path.
+        let reserved_delay_ms =
+            reserve_immediate_outbound_message_budget(policy, pubkey, &message, now_ms)
+                .expect("chargeable outbound message");
+        trace!(
+            peer = format!("{pubkey:?}"),
+            bytes,
+            delay_ms = reserved_delay_ms,
+            "Bypassing outbound gossip rate limiter for single oversized payload"
+        );
+        return Ok(Some(message));
+    }
+
+    let delay_ms = policy.estimate_outbound_message_delay(pubkey, bytes, now_ms);
+    if delay_ms == 0 {
+        let reserved_delay_ms = policy.reserve_outbound_message(pubkey, bytes, now_ms);
+        debug_assert_eq!(reserved_delay_ms, 0);
+        return Ok(Some(message));
+    }
+
+    if delayed_outbound_messages.is_full_for_peer(pubkey) {
+        trace!(
+            peer = format!("{pubkey:?}"),
+            bytes,
+            delay_ms,
+            "Rejecting delayed outbound gossip payload due to full per-peer queue"
+        );
+        return Err(Error::InternalError(anyhow::anyhow!(
+            "delayed outbound gossip queue is full for peer"
+        )));
+    }
+
+    let reserved_delay_ms = policy.reserve_outbound_message(pubkey, bytes, now_ms);
+    debug_assert!(reserved_delay_ms >= delay_ms);
+    let queued = delayed_outbound_messages.push(DelayedGossipMessage {
+        target: *pubkey,
+        message,
+        reserved_bytes: bytes,
+        ready_at_ms: now_ms.saturating_add(reserved_delay_ms),
+    });
+    debug_assert!(queued);
+
+    trace!(
+        peer = format!("{pubkey:?}"),
+        bytes,
+        delay_ms = reserved_delay_ms,
+        "Delaying outbound gossip payload due to rate limiter"
+    );
+    Ok(None)
+}
+
+fn classify_verify_and_save_broadcast_message_error(
+    message: &BroadcastMessage,
+    error: &VerifyBroadcastMessageError,
+) -> Option<GossipViolation> {
+    match message {
+        BroadcastMessage::ChannelAnnouncement(_)
+            if matches!(
+                error,
+                VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(_, _)
+            ) =>
+        {
+            None
+        }
+        _ => Some(GossipViolation::InvalidBroadcastMessage),
     }
 }
 
@@ -2349,17 +2861,22 @@ async fn get_channel_tx(
     match client.get_transaction(outpoint.tx_hash().unpack()).await {
         Ok(GetTxResponse {
             transaction: Some(tx),
-            tx_status: TxStatus::Committed(_, block_hash, _)
+            tx_status: TxStatus::Committed(_, block_hash, _),
         }) => Ok((tx, block_hash.into())),
-        Err(err) => Err(VerifyBroadcastMessageError::InvalidParameter(format!(
-            "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
+        Ok(response) => Err(VerifyBroadcastMessageError::InvalidParameter(format!(
+            "Channel announcement transaction {:?} not committed: {:?}",
             &outpoint.tx_hash(),
-            err
+            response.tx_status
         ))),
-        _ => Err(VerifyBroadcastMessageError::InvalidParameter(format!(
-            "Channel announcement transaction {:?} not found or not confirmed, the reason is unknown",
-            &outpoint.tx_hash(),
-        ))),
+        Err(err) => Err(
+            VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
+                outpoint.clone(),
+                format!(
+                    "funding transaction not found or not confirmed, result is: {:?}",
+                    err
+                ),
+            ),
+        ),
     }
 }
 
@@ -2399,19 +2916,23 @@ async fn get_channel_on_chain_info(
     let timestamp: u64 = match client.get_block_timestamp(block_hash).await {
         Ok(Some(timestamp)) => timestamp,
         Ok(None) => {
-            return Err(VerifyBroadcastMessageError::InternalError(anyhow::anyhow!(
-                "Unable to find block {:?} for channel outpoint {:?}",
-                &block_hash,
-                &outpoint
-            )));
+            return Err(
+                VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
+                    outpoint.clone(),
+                    format!("unable to find block timestamp for block {:?}", &block_hash),
+                ),
+            );
         }
         Err(err) => {
-            return Err(VerifyBroadcastMessageError::InternalError(err.context(
-                format!(
-                    "Error while trying to obtain block {:?} for channel outpoint {:?}",
-                    block_hash, &outpoint
+            return Err(
+                VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
+                    outpoint.clone(),
+                    format!(
+                        "error while trying to obtain block {:?} timestamp: {:?}",
+                        block_hash, err
+                    ),
                 ),
-            )));
+            );
         }
     };
 
@@ -2666,9 +3187,12 @@ where
         bool,
         usize,
         usize,
+        GossipPolicyConfig,
         S,
         ActorRef<CkbChainMessage>,
         C,
+        Option<ActorRef<NetworkActorMessage>>,
+        PeerChannelIndex,
     );
 
     async fn pre_start(
@@ -2684,9 +3208,12 @@ where
             announce_private_addr,
             num_targeted_active_syncing_peers,
             num_targeted_outbound_passive_syncing_peers,
+            policy,
             store,
             chain_actor,
             chain_client,
+            network_actor,
+            peer_channel_index,
         ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let latest_remote_broadcast_timestamp = Arc::new(AtomicU64::new(
@@ -2695,6 +3222,7 @@ where
         let store = ExtendedGossipMessageStore::new(
             store_maintenance_interval,
             announce_private_addr,
+            policy.inbound_channel_update.clone(),
             store,
             myself.clone(),
             latest_remote_broadcast_timestamp.clone(),
@@ -2736,15 +3264,22 @@ where
                 .unwrap_or_default();
             GossipActorMessage::PruneStaleGossipMessages(stale_timestamp)
         });
+        let delayed_outbound_messages =
+            DelayedGossipMessageQueue::new(policy.outbound_delay_queue_capacity);
         let state = Self::State {
             store,
             control: Default::default(),
+            network_actor,
+            peer_channel_index,
+            policy: GossipPolicyState::new(policy),
             num_targeted_active_syncing_peers,
             num_targeted_outbound_passive_syncing_peers,
             myself,
             chain_actor,
             chain_client,
             next_request_id: Default::default(),
+            delayed_outbound_messages,
+            next_delayed_flush_at_ms: Default::default(),
             query_reply_ports: Default::default(),
             num_finished_active_syncing_peers: Default::default(),
             peer_states: Default::default(),
@@ -2802,22 +3337,32 @@ where
                 state
                     .peer_states
                     .insert(pubkey, PeerState::new(session.id, session.ty));
-                // Immediately trigger network maintenance to start syncing with
-                // the new peer, rather than waiting for the next periodic
-                // TickNetworkMaintenance (up to 60s in production).
-                // This eliminates the initial gossip sync delay after connecting
-                // to a bootnode, which is critical for WASM nodes that need
-                // peer addresses from gossip data quickly.
-                // Only send the tick if control is already available; otherwise
-                // the tick will be sent from the ReceivedControl handler once
-                // control arrives (to avoid a panic in send_message_to_peer).
-                if state.control.is_some() {
+                if state
+                    .policy
+                    .is_banned(&pubkey, now_timestamp_as_millis_u64())
+                {
+                    state.disconnect_banned_peer_if_needed(&pubkey).await;
+                } else if state.control.is_some() {
+                    // Immediately trigger network maintenance to start syncing with
+                    // the new peer, rather than waiting for the next periodic
+                    // TickNetworkMaintenance (up to 60s in production).
+                    // This eliminates the initial gossip sync delay after connecting
+                    // to a bootnode, which is critical for WASM nodes that need
+                    // peer addresses from gossip data quickly.
+                    // Only send the tick if control is already available; otherwise
+                    // the tick will be sent from the ReceivedControl handler once
+                    // control arrives (to avoid a panic in send_message_to_peer).
                     myself.send_message(GossipActorMessage::TickNetworkMaintenance)?;
                 }
             }
-            GossipActorMessage::PeerDisconnected(peer_id, _session) => {
-                state.peer_states.remove(&peer_id);
-                state.active_sync_started_at.remove(&peer_id);
+            GossipActorMessage::PeerDisconnected(pubkey, _session) => {
+                state.peer_states.remove(&pubkey);
+                state.active_sync_started_at.remove(&pubkey);
+                state.drop_delayed_outbound_messages_for_peer(
+                    &pubkey,
+                    now_timestamp_as_millis_u64(),
+                );
+                state.schedule_next_delayed_flush();
             }
             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
                 if let Some(reply) = state.query_reply_ports.remove(&(peer, request_id)) {
@@ -2864,6 +3409,7 @@ where
             }
 
             GossipActorMessage::TickNetworkMaintenance => {
+                state.policy.prune_bans(now_timestamp_as_millis_u64());
                 trace!(
                     "Gossip network maintenance ticked, current state: num of peers: {}, num of finished syncing peers: {}, num of active syncing peers: {}, num of passive syncing peers: {}",
                     state.peer_states.len(),
@@ -2878,6 +3424,10 @@ where
                 for peer in state.peers_to_start_passive_syncing() {
                     state.start_passive_syncer(&peer).await;
                 }
+            }
+
+            GossipActorMessage::FlushDelayedOutbound => {
+                state.flush_delayed_outbound_messages().await;
             }
 
             GossipActorMessage::PruneStaleGossipMessages(stale_timestamp) => {
@@ -2920,8 +3470,9 @@ where
                 }
             }
 
-            GossipActorMessage::MaliciousPeerFound(pubkey) => {
-                warn!("Malicious peer found: {:?}", &pubkey);
+            GossipActorMessage::MaliciousPeerFound { peer, violation } => {
+                warn!("Malicious gossip peer found {:?}: {:?}", &peer, violation);
+                state.handle_malicious_peer_found(&peer, violation).await;
             }
 
             GossipActorMessage::SendGossipMessage(GossipMessageWithTarget { target, message }) => {
@@ -2962,8 +3513,12 @@ where
                     observe_received_broadcast_messages(messages.len());
                     observe_received_propagation_latencies(&messages, GOSSIP_INGRESS_PASSIVE);
                     state
-                        .try_to_verify_and_save_broadcast_messages(pubkey, messages)
-                        .await;
+                        .store
+                        .actor
+                        .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
+                            pubkey, messages,
+                        ))
+                        .expect("store actor alive");
                 }
                 GossipMessage::GetBroadcastMessages(get_broadcast_messages) => {
                     if let Err(e) = check_chain_hash(&get_broadcast_messages.chain_hash) {

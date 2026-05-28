@@ -3221,7 +3221,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
                 node_b_funding_amount: HUGE_CKB_AMOUNT,
-                a_max_tlc_value_in_flight: Some(100000000),
+                b_max_tlc_value_in_flight: Some(100000000),
                 ..Default::default()
             },
         )
@@ -3256,7 +3256,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
                 node_b_funding_amount: HUGE_CKB_AMOUNT,
-                a_max_tlc_value_in_flight: Some(100000000 + 2),
+                b_max_tlc_value_in_flight: Some(100000000 + 2),
                 ..Default::default()
             },
         )
