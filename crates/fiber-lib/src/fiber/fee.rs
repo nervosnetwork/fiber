@@ -5,7 +5,7 @@ use crate::ckb::contracts::{
 use crate::fiber::channel::{
     occupied_capacity, tlc_expiry_delay, ProcessingChannelError, ProcessingChannelResult,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
-    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
 };
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
 use ckb_types::core::{EpochNumberWithFraction, TransactionBuilder};
@@ -218,10 +218,10 @@ pub(crate) fn check_open_channel_parameters(
     }
 
     // max_tlc_number_in_flight
-    if max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
+    if max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
         return Err(ProcessingChannelError::InvalidParameter(format!(
             "Max TLC number in flight {} is greater than the system maximal value {}",
-            max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
+            max_tlc_number_in_flight, MAX_TLC_NUMBER_IN_FLIGHT
         )));
     }
 

@@ -294,7 +294,6 @@ pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
-pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
 pub const MAX_TLC_NUMBER_IN_FLIGHT: u64 = 125;
 
 #[derive(Debug)]
@@ -4165,7 +4164,9 @@ pub fn settlement_data_to_witness(
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
     let mut vec = Vec::new();
-    vec.push(data.tlcs.len() as u8);
+    let len =
+        u8::try_from(data.tlcs.len()).expect("TLC count exceeds witness encoding limit (max 255)");
+    vec.push(len);
     for tlc in &data.tlcs {
         vec.extend_from_slice(&settlement_tlc_to_witness(tlc, for_remote));
     }
