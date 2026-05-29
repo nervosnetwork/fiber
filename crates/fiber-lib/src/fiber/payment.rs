@@ -1394,18 +1394,18 @@ where
         session: &mut PaymentSession,
         attempt: &mut Attempt,
     ) -> Result<(), Error> {
-        let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(attempt.route_hops[0].funding_tx_hash, Hash256::default());
 
-        attempt.session_key.copy_from_slice(session_key.as_ref());
-
-        let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
-            session_key,
+        let peeled_onion_packet = match PeeledPaymentOnionPacket::create_with_session_key_fn(
+            || Privkey::from_slice(KeyPair::generate_random_key().as_ref()),
             attempt.route_hops.clone(),
             Some(attempt.hash.as_ref().to_vec()),
             &Secp256k1::signing_only(),
         ) {
-            Ok(packet) => packet,
+            Ok((packet, session_key)) => {
+                attempt.session_key.copy_from_slice(session_key.as_ref());
+                packet
+            }
             Err(e) => {
                 let err = format!(
                     "Failed to create onion packet: {:?}, error: {:?}",

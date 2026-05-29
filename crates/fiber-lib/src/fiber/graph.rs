@@ -1474,19 +1474,20 @@ where
             custom_records: payment_data.custom_records.clone(),
         });
 
-        let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         let mut trampoline_path: Vec<Pubkey> = hops.to_vec();
 
         trampoline_path.push(target);
-        let trampoline_onion = TrampolineOnionPacket::create(
-            session_key,
+        let (trampoline_packet, _session_key) = TrampolineOnionPacket::create_with_session_key_fn(
+            || Privkey::from_slice(KeyPair::generate_random_key().as_ref()),
             trampoline_path,
             payloads,
             Some(payment_data.payment_hash.as_ref().to_vec()),
             SECP256K1,
         )
-        .map_err(|_| PathFindError::NoPathFound)?
-        .into_bytes();
+        .map_err(|err| {
+            PathFindError::Other(format!("failed to build trampoline onion packet: {err}"))
+        })?;
+        let trampoline_onion = trampoline_packet.into_bytes();
 
         return Ok(ResolvedRoute {
             hops: route_to_trampoline,
