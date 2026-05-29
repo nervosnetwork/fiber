@@ -106,7 +106,7 @@ use fiber_types::{
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
     RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos,
+    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -928,7 +928,7 @@ pub enum NetworkActorEvent {
     ChannelActorStopped(Hash256, StopReason),
 
     // A payment actor stopped event.
-    PaymentActorStopped(Hash256),
+    PaymentActorStopped(Hash256, Option<TlcErrPacket>),
 
     // Channel settlement check completed - channel is fully settled on-chain.
     ChannelSettlementCompleted(Hash256),
@@ -1552,9 +1552,10 @@ where
                 // If the channel failed before reaching ChannelReady, mark the opening record as Failed.
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
                     if record.status != ChannelOpeningStatus::ChannelReady {
-                        let failure_detail = match reason {
+                        let failure_detail = match &reason {
                             StopReason::Abandon => "Channel was abandoned".to_string(),
                             StopReason::AbortFunding => "Funding transaction aborted".to_string(),
+                            StopReason::AbortFundingWithDetail(detail) => detail.clone(),
                             StopReason::PeerDisConnected => {
                                 "Peer disconnected during channel opening".to_string()
                             }
@@ -1562,14 +1563,20 @@ where
                                 "Channel closed before becoming ready".to_string()
                             }
                         };
-                        record.fail(failure_detail);
+                        if record.failure_detail.is_none() {
+                            record.fail(failure_detail);
+                        } else {
+                            record.update_status(ChannelOpeningStatus::Failed);
+                        }
                         state.store.insert_channel_open_record(record);
                     }
                 }
                 state.on_channel_actor_stopped(channel_id, reason).await;
             }
-            NetworkActorEvent::PaymentActorStopped(payment_hash) => {
-                state.on_payment_actor_stopped(payment_hash).await;
+            NetworkActorEvent::PaymentActorStopped(payment_hash, last_error_packet) => {
+                state
+                    .on_payment_actor_stopped(payment_hash, last_error_packet)
+                    .await;
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
                 if let Some(channel_actor) = state.channels.get(&channel_id) {
@@ -3176,10 +3183,17 @@ where
                 state.get_public_key(),
             ));
         }
+        let Some(prev_tlc) = previous_tlc else {
+            error!("Trampoline forwarding rejected: missing previous TLC");
+            return Err(TlcErr::new_node_fail(
+                TlcErrorCode::InvalidOnionPayload,
+                state.get_public_key(),
+            ));
+        };
         let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
         let prev_channel_state = self
             .store
-            .get_channel_actor_state(&previous_tlc.expect("got previous tlc").prev_channel_id)
+            .get_channel_actor_state(&prev_tlc.prev_channel_id)
             .ok_or_else(|| {
                 TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
             })?;
@@ -3221,8 +3235,8 @@ where
                     ));
                 }
 
-                let (Some(remaining_trampoline_onion), Some(prev_tlc)) =
-                    (peeled_trampoline.next.map(|p| p.into_bytes()), previous_tlc)
+                let Some(remaining_trampoline_onion) =
+                    peeled_trampoline.next.map(|p| p.into_bytes())
                 else {
                     return Err(TlcErr::new_node_fail(
                         TlcErrorCode::InvalidOnionPayload,
@@ -5299,7 +5313,7 @@ where
             let _ = reply.send(Err(err));
         }
 
-        if reason == StopReason::Abandon || reason == StopReason::AbortFunding {
+        if reason == StopReason::Abandon || reason.is_abort_funding() {
             if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
                 // remove from transaction track actor
                 if let Some(funding_tx) = channel_actor_state.funding_tx.as_ref() {
@@ -5490,7 +5504,11 @@ where
         .await;
     }
 
-    async fn on_payment_actor_stopped(&mut self, payment_hash: Hash256) {
+    async fn on_payment_actor_stopped(
+        &mut self,
+        payment_hash: Hash256,
+        last_error_packet: Option<TlcErrPacket>,
+    ) {
         debug!("Payment actor stopped {payment_hash}");
         if self.inflight_payments.remove(&payment_hash).is_none() {
             error!("Can't find inflight payment actor");
@@ -5544,14 +5562,24 @@ where
                     for prev_tlc in &context.previous_tlcs {
                         let (send, _recv) = oneshot::channel();
                         let rpc_reply = RpcReplyPort::from(send);
-                        let shared_secret = prev_tlc.shared_secret.unwrap_or([0u8; 32]);
+                        let shared_secret = prev_tlc.shared_secret.unwrap_or(NO_SHARED_SECRET);
+                        let inner_error_packet = last_error_packet
+                            .as_ref()
+                            .map(|packet| packet.onion_packet.clone())
+                            .unwrap_or_else(|| {
+                                TlcErrPacket::new(TlcErr::new(error_code), &NO_SHARED_SECRET)
+                                    .onion_packet
+                            });
+                        let wrapper_packet = TlcErrPacket::new_trampoline_failed(
+                            error_code,
+                            self.get_public_key(),
+                            inner_error_packet,
+                            &shared_secret,
+                        );
                         let command = ChannelCommand::RemoveTlc(
                             RemoveTlcCommand {
                                 id: prev_tlc.prev_tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    TlcErr::new(error_code),
-                                    &shared_secret,
-                                )),
+                                reason: RemoveTlcReason::RemoveTlcFail(wrapper_packet),
                             },
                             rpc_reply,
                         );

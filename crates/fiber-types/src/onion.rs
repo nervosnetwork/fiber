@@ -6,7 +6,7 @@
 use crate::gen::fiber as molecule_fiber;
 use crate::payment::{
     BasicMppPaymentData, CurrentPaymentHopData, PaymentCustomRecords, PaymentHopData, TlcErr,
-    USER_CUSTOM_RECORDS_MAX_INDEX,
+    TlcErrData, TlcErrorCode, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ckb_types::prelude::{Pack, Unpack};
 use fiber_sphinx::OnionErrorPacket;
@@ -35,6 +35,15 @@ pub struct TlcErrPacket {
 /// Shared secret indicating no encryption (for origin node).
 pub const NO_SHARED_SECRET: [u8; 32] = [0u8; 32];
 const NO_ERROR_PACKET_HMAC: [u8; 32] = [0u8; 32];
+
+/// Maximum number of times to retry generating an onion packet with a fresh
+/// session key when fiber-sphinx returns [`fiber_sphinx::SphinxError::InvalidBlindingFactor`].
+///
+/// This event occurs when the SHA-256 derived blinding factor reduces to zero
+/// modulo the secp256k1 curve order. It is cryptographically improbable
+/// (probability ≈ 2⁻¹²⁸ per attempt), so 7 retries is effectively unreachable
+/// in practice while bounding the loop.
+pub const ONION_SESSION_KEY_MAX_ATTEMPTS: usize = 7;
 
 impl TlcErrPacket {
     /// Create a new TlcErrPacket from raw payload bytes.
@@ -143,6 +152,22 @@ impl TlcErrPacket {
                 error
             })
     }
+
+    /// Create a trampoline failure wrapper encrypted with the upstream outer shared secret.
+    /// Returning `None` means the caller would have produced a plaintext trampoline wrapper.
+    pub fn new_trampoline_failed(
+        error_code: TlcErrorCode,
+        node_id: crate::Pubkey,
+        inner_error_packet: Vec<u8>,
+        shared_secret: &[u8; 32],
+    ) -> Self {
+        let mut tlc_err = TlcErr::new(error_code);
+        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
+            node_id,
+            inner_error_packet,
+        });
+        Self::new(tlc_err, shared_secret)
+    }
 }
 
 /// Errors that can occur when processing an onion packet.
@@ -193,7 +218,11 @@ impl PaymentOnionPacket {
 
     /// Convert into the raw Sphinx onion packet.
     pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, OnionPacketError> {
-        fiber_sphinx::OnionPacket::from_bytes(self.data).map_err(OnionPacketError::Sphinx)
+        fiber_sphinx::OnionPacket::from_bytes_with_packet_data_len(
+            self.data,
+            PaymentSphinxCodec::PACKET_DATA_LEN,
+        )
+        .map_err(OnionPacketError::Sphinx)
     }
 
     /// Peels the next layer of the onion packet using the privkey of the current node.
@@ -244,28 +273,19 @@ impl PeeledPaymentOnionPacket {
             ));
         }
 
-        let hops_path: Vec<crate::Pubkey> = hops_infos
-            .iter()
-            .map(|h| h.next_hop())
-            .take_while(Option::is_some)
-            .map(|opt| opt.expect("must be some"))
-            .collect();
-
-        // Keep the original hop ordering for payloads.
+        let hops_path = peeled_payment_hops_path(&hops_infos);
         let current = hops_infos.remove(0);
         let payloads = hops_infos;
 
         let next = if !hops_path.is_empty() {
-            Some(PaymentOnionPacket::new(create_sphinx_onion::<
-                C,
-                PaymentSphinxCodec,
-            >(
+            let bytes = create_sphinx_onion::<C, PaymentSphinxCodec>(
                 session_key,
                 hops_path,
                 payloads,
                 assoc_data,
                 secp_ctx,
-            )?))
+            )?;
+            Some(PaymentOnionPacket::new(bytes))
         } else {
             None
         };
@@ -276,6 +296,61 @@ impl PeeledPaymentOnionPacket {
             // Use all zeros for the sender
             shared_secret: NO_SHARED_SECRET,
         })
+    }
+
+    /// Like [`Self::create`], but obtains the session key from `gen_session_key`.
+    ///
+    /// Retries with a fresh session key from `gen_session_key` on the
+    /// cryptographically improbable
+    /// [`fiber_sphinx::SphinxError::InvalidBlindingFactor`] event, up to
+    /// [`ONION_SESSION_KEY_MAX_ATTEMPTS`] times. Returns the chosen session key
+    /// alongside the packet on success so the caller can record which key was
+    /// used.
+    ///
+    /// Requires `hops_infos` to describe at least one downstream hop (so that
+    /// a sphinx onion is actually generated and a session key can be returned).
+    pub fn create_with_session_key_fn<C, F>(
+        gen_session_key: F,
+        mut hops_infos: Vec<PaymentHopData>,
+        assoc_data: Option<Vec<u8>>,
+        secp_ctx: &secp256k1::Secp256k1<C>,
+    ) -> Result<(Self, crate::Privkey), OnionPacketError>
+    where
+        C: secp256k1::Signing,
+        F: FnMut() -> crate::Privkey,
+    {
+        if hops_infos.is_empty() {
+            return Err(OnionPacketError::Sphinx(
+                fiber_sphinx::SphinxError::HopsIsEmpty,
+            ));
+        }
+
+        let hops_path = peeled_payment_hops_path(&hops_infos);
+        if hops_path.is_empty() {
+            return Err(OnionPacketError::Sphinx(
+                fiber_sphinx::SphinxError::HopsIsEmpty,
+            ));
+        }
+        let current = hops_infos.remove(0);
+        let payloads = hops_infos;
+
+        let (bytes, session_key) = create_sphinx_onion_with_session_key_fn::<
+            C,
+            PaymentSphinxCodec,
+            _,
+        >(
+            gen_session_key, hops_path, payloads, assoc_data, secp_ctx
+        )?;
+
+        Ok((
+            PeeledPaymentOnionPacket {
+                current: current.into(),
+                next: Some(PaymentOnionPacket::new(bytes)),
+                // Use all zeros for the sender
+                shared_secret: NO_SHARED_SECRET,
+            },
+            session_key,
+        ))
     }
 
     /// Returns true if this is the peeled packet for the last destination.
@@ -290,6 +365,15 @@ impl PeeledPaymentOnionPacket {
             .as_ref()
             .and_then(BasicMppPaymentData::read)
     }
+}
+
+fn peeled_payment_hops_path(hops_infos: &[PaymentHopData]) -> Vec<crate::Pubkey> {
+    hops_infos
+        .iter()
+        .map(|h| h.next_hop())
+        .take_while(Option::is_some)
+        .map(|opt| opt.expect("must be some"))
+        .collect()
 }
 
 /// Trait for encoding/decoding Sphinx onion packet hop data.
@@ -330,8 +414,11 @@ pub fn peel_sphinx_onion<C: secp256k1::Verification, Codec: SphinxOnionCodec>(
     assoc_data: Option<&[u8]>,
     secp_ctx: &secp256k1::Secp256k1<C>,
 ) -> Result<SphinxPeeled<Codec::Current>, OnionPacketError> {
-    let sphinx_packet =
-        fiber_sphinx::OnionPacket::from_bytes(packet_bytes).map_err(OnionPacketError::Sphinx)?;
+    let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes_with_packet_data_len(
+        packet_bytes,
+        Codec::PACKET_DATA_LEN,
+    )
+    .map_err(OnionPacketError::Sphinx)?;
     let version = sphinx_packet.version;
     if !Codec::is_version_allowed(version) {
         return Err(OnionPacketError::UnknownVersion(version));
@@ -369,6 +456,15 @@ pub fn create_sphinx_onion<C: secp256k1::Signing, Codec: SphinxOnionCodec>(
     assoc_data: Option<Vec<u8>>,
     secp_ctx: &secp256k1::Secp256k1<C>,
 ) -> Result<Vec<u8>, OnionPacketError> {
+    if hops_path.is_empty() {
+        return Err(OnionPacketError::Sphinx(
+            fiber_sphinx::SphinxError::HopsIsEmpty,
+        ));
+    }
+    if hops_path.len() != payloads.len() {
+        return Err(OnionPacketError::InvalidHopData);
+    }
+
     let hops_path: Vec<secp256k1::PublicKey> = hops_path
         .into_iter()
         .map(|pk| secp256k1::PublicKey::from_slice(&pk.0).expect("valid public key"))
@@ -386,6 +482,52 @@ pub fn create_sphinx_onion<C: secp256k1::Signing, Codec: SphinxOnionCodec>(
     // Set the version to indicate which hop data format is used
     packet.version = Codec::CURRENT_VERSION;
     Ok(packet.into_bytes())
+}
+
+/// Creates a Sphinx onion packet, retrying with fresh session keys on
+/// [`fiber_sphinx::SphinxError::InvalidBlindingFactor`].
+///
+/// Calls `gen_session_key` to obtain each candidate session key. Retries are
+/// bounded by [`ONION_SESSION_KEY_MAX_ATTEMPTS`]; on exhaustion the last
+/// `InvalidBlindingFactor` error is returned. Any other error short-circuits.
+/// On success returns the encoded packet bytes together with the session key
+/// that produced it.
+pub fn create_sphinx_onion_with_session_key_fn<C, Codec, F>(
+    mut gen_session_key: F,
+    hops_path: Vec<crate::Pubkey>,
+    payloads: Vec<Codec::Decoded>,
+    assoc_data: Option<Vec<u8>>,
+    secp_ctx: &secp256k1::Secp256k1<C>,
+) -> Result<(Vec<u8>, crate::Privkey), OnionPacketError>
+where
+    C: secp256k1::Signing,
+    Codec: SphinxOnionCodec,
+    Codec::Decoded: Clone,
+    F: FnMut() -> crate::Privkey,
+{
+    let mut last_err: Option<fiber_sphinx::SphinxError> = None;
+    for _ in 0..ONION_SESSION_KEY_MAX_ATTEMPTS {
+        let session_key = gen_session_key();
+        match create_sphinx_onion::<C, Codec>(
+            session_key.clone(),
+            hops_path.clone(),
+            payloads.clone(),
+            assoc_data.clone(),
+            secp_ctx,
+        ) {
+            Ok(bytes) => return Ok((bytes, session_key)),
+            Err(OnionPacketError::Sphinx(
+                err @ fiber_sphinx::SphinxError::InvalidBlindingFactor,
+            )) => {
+                last_err = Some(err);
+                continue;
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Err(OnionPacketError::Sphinx(last_err.expect(
+        "ONION_SESSION_KEY_MAX_ATTEMPTS is non-zero, so at least one attempt ran",
+    )))
 }
 
 /// Codec for payment onion packets (used by the outer payment onion layer).

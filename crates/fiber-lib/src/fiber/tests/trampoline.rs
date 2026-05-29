@@ -1877,6 +1877,87 @@ async fn test_trampoline_multi_hops_fee_insufficient_then_success() {
 }
 
 #[tokio::test]
+async fn test_trampoline_forwarding_rejects_missing_previous_tlc() {
+    init_tracing();
+
+    // A -- B. We send the internal forwarding command to B without previous_tlc.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+    let node_b = &nodes[1];
+    let payment_hash = gen_rand_sha256_hash();
+
+    let (_sk, pk) = SECP256K1.generate_keypair(&mut rand::thread_rng());
+    let final_target: Pubkey = pk.into();
+    let payloads = vec![
+        TrampolineHopPayload::Forward {
+            next_node_id: final_target,
+            amount_to_forward: 1000,
+            build_max_fee_amount: 1000,
+            tlc_expiry_delta: 144,
+            tlc_expiry_limit: 5000,
+            max_parts: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+        },
+        TrampolineHopPayload::Final {
+            final_amount: 1000,
+            final_tlc_expiry_delta: 144,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let path = vec![node_b.pubkey, final_target];
+    let trampoline_onion_bytes = TrampolineOnionPacket::create(
+        Privkey::from_slice(&[3u8; 32]),
+        path,
+        payloads,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create onion")
+    .into_bytes();
+
+    let mut current_hop = CurrentPaymentHopData {
+        amount: 2000,
+        expiry: 5000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+    };
+    current_hop.set_trampoline_onion(trampoline_onion_bytes);
+
+    let command = SendOnionPacketCommand {
+        peeled_onion_packet: PeeledPaymentOnionPacket {
+            current: current_hop,
+            next: None,
+            shared_secret: [0u8; 32],
+        },
+        previous_tlc: None,
+        payment_hash,
+        attempt_id: Some(1),
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let msg = NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(
+        command,
+        RpcReplyPort::from(tx),
+    ));
+    node_b
+        .network_actor
+        .send_message(msg)
+        .expect("send message");
+
+    let err = rx
+        .await
+        .expect("network actor should reject without closing the reply channel")
+        .expect_err("missing previous_tlc should be rejected");
+    assert_eq!(err.error_code(), TlcErrorCode::InvalidOnionPayload);
+}
+
+#[tokio::test]
 async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     init_tracing();
     // A -- B. We test B.
@@ -1952,7 +2033,12 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     let command = NetworkActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
             peeled_onion_packet: peeled_packet,
-            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, 0)),
+            previous_tlc: Some(PrevTlcInfo {
+                prev_channel_id: channel_ab,
+                prev_tlc_id: 1,
+                forwarding_fee: 0,
+                shared_secret: None,
+            }),
             payment_hash,
             attempt_id: None,
         },
@@ -2047,7 +2133,12 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     let command = NetworkActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
             peeled_onion_packet: peeled_packet,
-            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, 0)),
+            previous_tlc: Some(PrevTlcInfo {
+                prev_channel_id: channel_ab,
+                prev_tlc_id: 1,
+                forwarding_fee: 0,
+                shared_secret: None,
+            }),
             payment_hash,
             attempt_id: None,
         },

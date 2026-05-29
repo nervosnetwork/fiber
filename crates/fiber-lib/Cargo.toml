@@ -22,7 +22,7 @@ ckb-types = "1"
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
 either = "1.15.0"
-fiber-sphinx = "2.3"
+fiber-sphinx = "3"
 fiber-json-types = { path = "../fiber-json-types", features = ["all"] }
 fiber-store = { path = "../fiber-store", default-features = false }
 fiber-types = { path = "../fiber-types", features = ["cch", "watchtower"] }
@@ -158,15 +158,19 @@ ignored = ["getrandom"]
 [[bench]]
 harness = false
 name = "payment_benchmarks"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "biscuit_benchmarks"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "gossip_propagation"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "gossip_sync_recovery"
+required-features = ["bench"]

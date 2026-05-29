@@ -81,6 +81,51 @@ fn test_history_demo() {
     );
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_trampoline_failure_does_not_mark_outer_route_history() {
+    let source = gen_rand_fiber_public_key();
+    let trampoline = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let nodes = vec![
+        SessionRouteNode {
+            pubkey: source,
+            amount: 1100,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: trampoline,
+            amount: 1000,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: target,
+            amount: 1000,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+    ];
+    for (error_code, expected_retry) in [
+        (TlcErrorCode::FeeInsufficient, false),
+        (TlcErrorCode::IncorrectOrUnknownPaymentDetails, false),
+    ] {
+        let tlc_err = TlcErr {
+            error_code,
+            extra_data: Some(TlcErrData::TrampolineFailed {
+                node_id: trampoline,
+                inner_error_packet: vec![1, 2, 3],
+            }),
+        };
+
+        let mut result = InternalResult::default();
+        let need_retry = result.record_payment_fail(&nodes, tlc_err);
+
+        assert_eq!(need_retry, expected_retry);
+        assert!(result.pairs.is_empty());
+        assert!(result.nodes_to_channel_map.is_empty());
+        assert!(result.fail_node.is_none());
+    }
+}
+
 #[test]
 // Not supported on wasm: using std::thread::sleep
 fn test_history_with_time_pass() {
