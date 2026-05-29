@@ -136,6 +136,10 @@ where
             return self.reject_all(error_code);
         }
 
+        if self.should_skip_received_hold_set(&invoice_status) {
+            return self.skip_all();
+        }
+
         let mut rejected = self.leave_just_fulfilled_tlcs(&invoice);
         if self.tlcs.is_empty() {
             return rejected;
@@ -249,9 +253,7 @@ where
                 }
             }
             CkbInvoiceStatus::Received => {
-                if self.is_hold_tlc_set && self.allow_received_invoice {
-                    // Only preimage-reveal/retry paths may settle a Received hold set. Newly
-                    // arrived TLCs for an already Received invoice must be rejected as duplicates.
+                if self.is_hold_tlc_set {
                     Ok(())
                 } else {
                     Err(TlcErrorCode::HoldTlcTimeout)
@@ -261,6 +263,15 @@ where
             CkbInvoiceStatus::Cancelled => Err(TlcErrorCode::InvoiceCancelled),
             CkbInvoiceStatus::Paid => Err(TlcErrorCode::HoldTlcTimeout),
         }
+    }
+
+    fn should_skip_received_hold_set(&self, invoice_status: &CkbInvoiceStatus) -> bool {
+        // Multiple channel actors can enqueue SettleHoldTlcSet for the same MPP hold invoice.
+        // Once one command marks the invoice Received, later stale commands must not reject the
+        // already-held TLCs. Preimage reveal uses the explicit received-hold path below.
+        *invoice_status == CkbInvoiceStatus::Received
+            && self.is_hold_tlc_set
+            && !self.allow_received_invoice
     }
 
     fn verify_mpp_tlcs_have_consistent_total_amount(

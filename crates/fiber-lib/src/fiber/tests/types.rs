@@ -751,7 +751,9 @@ fn test_direct_trampoline_failed_wrapper_uses_outer_shared_secret() {
     let session_key = SecretKey::from_slice(&[0x43; 32]).expect("32 bytes, within curve order");
     let hops_keys: Vec<PublicKey> = hops_path.iter().map(|k| k.into()).collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1).collect();
+        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid blinding factors for hard-coded session key");
     let inner_error_packet = TlcErrPacket::new(
         TlcErr::new(TlcErrorCode::TemporaryNodeFailure),
         &NO_SHARED_SECRET,
@@ -1239,12 +1241,7 @@ fn test_trampoline_peel_rejects_unknown_forward_hash_algorithm() {
     let result =
         TrampolineOnionPacket::new(sphinx_packet.into_bytes()).peel(&hop_key, None, SECP256K1);
 
-    assert!(matches!(
-        result,
-        Err(crate::fiber::types::Error::OnionPacket(
-            OnionPacketError::InvalidHopData
-        ))
-    ));
+    assert!(matches!(result, Err(OnionPacketError::InvalidHopData)));
 }
 
 fn trampoline_forward_payload_with_hash_algorithm_byte(
