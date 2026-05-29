@@ -452,7 +452,15 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
 async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce_disabled() {
     init_tracing();
 
-    let mut node1 = NetworkNode::new_with_node_name("node1").await;
+    let mut node1 = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node1".to_string()))
+            .fiber_config_updater(|config| {
+                config.auto_announce_node = Some(false);
+            })
+            .build(),
+    )
+    .await;
     let mut node2 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some("node2".to_string()))
@@ -502,14 +510,17 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
     wait_until_async_timeout(|| async { !node1.get_network_graph_channels().await.is_empty() })
         .await;
 
-    node1.connect_to(&mut node2).await;
     assert!(matches!(
         node2.submit_tx(tx.clone()).await,
         TxStatus::Committed(..)
     ));
 
-    wait_until_async_timeout(|| async { !node2.get_network_graph_channels().await.is_empty() })
-        .await;
+    node1.connect_to(&mut node2).await;
+
+    wait_until_async_timeout(|| async {
+        node2.get_network_graph_channel(&outpoint).await.is_some()
+    })
+    .await;
 
     let channels = node2.get_network_graph_channels().await;
     assert_eq!(channels.len(), 1);
