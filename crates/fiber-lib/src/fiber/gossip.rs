@@ -2913,6 +2913,16 @@ async fn get_channel_on_chain_info(
         Some(output) => output.clone().into(),
     };
 
+    let first_output_data = match tx.outputs_data().get(0) {
+        None => {
+            return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
+                "On-chain transaction found but no output data: {:?}",
+                &outpoint
+            )));
+        }
+        Some(data) => data,
+    };
+
     let timestamp: u64 = match client.get_block_timestamp(block_hash).await {
         Ok(Some(timestamp)) => timestamp,
         Ok(None) => {
@@ -2939,6 +2949,7 @@ async fn get_channel_on_chain_info(
     Ok(ChannelOnchainInfo {
         timestamp,
         first_output,
+        first_output_data,
     })
 }
 
@@ -3019,16 +3030,46 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
                 )));
     }
     let capacity: u128 = u64::from(output.capacity).into();
-    match channel_announcement.udt_type_script {
-        Some(_) => {
-            // TODO: verify the capacity of the UDT
+    match &channel_announcement.udt_type_script {
+        Some(announced_udt_script) => {
+            match &output.type_ {
+                Some(on_chain_script) => {
+                    let on_chain_packed: ckb_types::packed::Script = on_chain_script.clone().into();
+                    if &on_chain_packed != announced_udt_script {
+                        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
+                            "UDT type script mismatch: announced {:?}, on-chain {:?}",
+                            announced_udt_script, on_chain_packed
+                        )));
+                    }
+                }
+                None => {
+                    return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
+                        "UDT channel announcement but output has no type script: {:?}",
+                        &channel_announcement.channel_outpoint
+                    )));
+                }
+            }
+            let data = on_chain_info.first_output_data.raw_data();
+            if data.len() < 16 {
+                return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
+                    "UDT output data too short for amount: {} bytes, expected at least 16",
+                    data.len()
+                )));
+            }
+            let udt_amount = u128::from_le_bytes(data[..16].try_into().expect("infallible"));
+            if channel_announcement.capacity != udt_amount {
+                return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
+                    "Announced UDT capacity {} does not match on-chain UDT amount {}",
+                    channel_announcement.capacity, udt_amount
+                )));
+            }
         }
         None => {
             if channel_announcement.capacity > capacity {
                 return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
-                            "On-chain transaction found but capacity mismatched: on chain capacity {:?} smaller than annoucned channel capacity {:?}",
-                            &output.capacity, &channel_announcement.capacity
-                        )));
+                    "On-chain transaction found but capacity mismatched: on chain capacity {:?} smaller than annoucned channel capacity {:?}",
+                    &output.capacity, &channel_announcement.capacity
+                )));
             }
         }
     }

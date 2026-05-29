@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::{
     core::FeeRate,
-    packed::{Byte32 as MByte32, BytesVec, OutPoint, Script, Transaction},
+    packed::{Byte32 as MByte32, Bytes, BytesVec, OutPoint, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use core::fmt::{self, Formatter};
@@ -1037,6 +1037,7 @@ pub fn broadcast_message_to_gossip(msg: &BroadcastMessage) -> GossipMessage {
 pub struct ChannelOnchainInfo {
     pub timestamp: u64,
     pub first_output: CellOutput,
+    pub first_output_data: Bytes,
 }
 
 // Augment the broadcast message with timestamp so that we can easily obtain the cursor of the message.
