@@ -17,8 +17,8 @@ use crate::fiber::network::{
 };
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, ReestablishChannel,
-    TlcErr,
+    AddTlc, CommitmentSigned, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey,
+    ReestablishChannel, TlcErr,
 };
 use crate::fiber::ChannelConnectivityState;
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
@@ -9738,6 +9738,62 @@ fn test_external_funding_hydrate_restores_early_peer_commitment_signed_state() {
     );
 }
 
+#[test]
+fn test_external_funding_duplicate_commitment_signed_detection_requires_matching_nonce() {
+    let mut persisted_state = ChannelActorState::samples(42)
+        .into_iter()
+        .next()
+        .expect("sample channel state should exist");
+    let duplicate_nonce = musig2::SecNonceBuilder::new([1u8; 32])
+        .build()
+        .public_nonce();
+    let different_nonce = musig2::SecNonceBuilder::new([2u8; 32])
+        .build()
+        .public_nonce();
+    persisted_state.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+    persisted_state.last_committed_remote_nonce = Some(duplicate_nonce.clone());
+    persisted_state.external_funding = Some(fiber_types::ExternalFundingPersistState {
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: vec![],
+        unsigned_funding_tx: Transaction::default(),
+        started_at_ms: now_timestamp_as_millis_u64(),
+        signed_submitted: true,
+        peer_commitment_signed_received: true,
+    });
+    persisted_state.hydrate_external_funding_runtime();
+
+    let duplicate_commitment_signed = CommitmentSigned {
+        channel_id: persisted_state.get_id(),
+        funding_tx_partial_signature: musig2::PartialSignature::from_slice(&[1u8; 32])
+            .expect("valid partial signature bytes"),
+        next_commitment_nonce: duplicate_nonce,
+    };
+    assert!(
+        persisted_state
+            .is_duplicate_external_funding_commitment_signed_for_test(&duplicate_commitment_signed),
+        "matching committed remote nonce in external funding AwaitingTxSignatures should be duplicate"
+    );
+
+    let different_commitment_signed = CommitmentSigned {
+        channel_id: persisted_state.get_id(),
+        funding_tx_partial_signature: musig2::PartialSignature::from_slice(&[1u8; 32])
+            .expect("valid partial signature bytes"),
+        next_commitment_nonce: different_nonce,
+    };
+    assert!(
+        !persisted_state
+            .is_duplicate_external_funding_commitment_signed_for_test(&different_commitment_signed),
+        "different next commitment nonce should not be treated as duplicate"
+    );
+
+    persisted_state.clear_external_funding_runtime();
+    assert!(
+        !persisted_state
+            .is_duplicate_external_funding_commitment_signed_for_test(&duplicate_commitment_signed),
+        "non-external-funding state should not use external funding duplicate handling"
+    );
+}
+
 #[tokio::test]
 async fn test_external_funding_initiator_restart_after_signed_submit_resumes_handshake() {
     init_tracing();
@@ -9939,6 +9995,64 @@ async fn test_external_funding_acceptor_restart_after_signed_submit_resumes_hand
             TxStatus::Committed(..)
         ),
         "funding tx should be committed after acceptor restart"
+    );
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+}
+
+/// Covers acceptor restart after it has sent its external-funding
+/// CommitmentSigned. Depending on scheduler timing, the initiator's
+/// CommitmentSigned may or may not have reached the acceptor before restart.
+#[tokio::test]
+async fn test_reproduce_acceptor_restart_race_in_external_funding() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::LocalCommitmentSigned(id, _) if *id == channel_id
+            )
+        })
+        .await;
+
+    node_b.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+
+    let _state = wait_for_external_funding_post_submit_progress(&node_b, channel_id).await;
+
+    assert!(
+        matches!(
+            node_a.submit_tx(signed_tx.clone().into_view()).await,
+            TxStatus::Committed(..)
+        ),
+        "funding tx should be committed after acceptor restarts after local commitment signing"
     );
 
     node_a
