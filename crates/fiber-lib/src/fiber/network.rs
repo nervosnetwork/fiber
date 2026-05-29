@@ -3183,10 +3183,17 @@ where
                 state.get_public_key(),
             ));
         }
+        let Some(prev_tlc) = previous_tlc else {
+            error!("Trampoline forwarding rejected: missing previous TLC");
+            return Err(TlcErr::new_node_fail(
+                TlcErrorCode::InvalidOnionPayload,
+                state.get_public_key(),
+            ));
+        };
         let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
         let prev_channel_state = self
             .store
-            .get_channel_actor_state(&previous_tlc.expect("got previous tlc").prev_channel_id)
+            .get_channel_actor_state(&prev_tlc.prev_channel_id)
             .ok_or_else(|| {
                 TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
             })?;
@@ -3228,8 +3235,8 @@ where
                     ));
                 }
 
-                let (Some(remaining_trampoline_onion), Some(prev_tlc)) =
-                    (peeled_trampoline.next.map(|p| p.into_bytes()), previous_tlc)
+                let Some(remaining_trampoline_onion) =
+                    peeled_trampoline.next.map(|p| p.into_bytes())
                 else {
                     return Err(TlcErr::new_node_fail(
                         TlcErrorCode::InvalidOnionPayload,
