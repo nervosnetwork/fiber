@@ -24,6 +24,11 @@ pub enum FundingError {
     #[error("Peer sent us an invalid funding tx")]
     InvalidPeerFundingTx,
 
+    #[error(
+        "Funding tx rejected: peer-added input #{input_index} has the local funding source lock args"
+    )]
+    PeerInputUsesOurFundingLock { input_index: usize },
+
     #[error("Insufficient cells available for funding: {0}")]
     InsufficientCells(String),
 
@@ -99,6 +104,7 @@ impl FundingError {
             | FromUtf8Error(_) => true,
             CkbTxBuilderError(e) => error_chain_has_transient(e),
             CkbTxUnlockError(e) => error_chain_has_transient(e),
+            PeerInputUsesOurFundingLock { .. } => false,
             _ => false,
         }
     }

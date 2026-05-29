@@ -1552,9 +1552,10 @@ where
                 // If the channel failed before reaching ChannelReady, mark the opening record as Failed.
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
                     if record.status != ChannelOpeningStatus::ChannelReady {
-                        let failure_detail = match reason {
+                        let failure_detail = match &reason {
                             StopReason::Abandon => "Channel was abandoned".to_string(),
                             StopReason::AbortFunding => "Funding transaction aborted".to_string(),
+                            StopReason::AbortFundingWithDetail(detail) => detail.clone(),
                             StopReason::PeerDisConnected => {
                                 "Peer disconnected during channel opening".to_string()
                             }
@@ -1562,7 +1563,11 @@ where
                                 "Channel closed before becoming ready".to_string()
                             }
                         };
-                        record.fail(failure_detail);
+                        if record.failure_detail.is_none() {
+                            record.fail(failure_detail);
+                        } else {
+                            record.update_status(ChannelOpeningStatus::Failed);
+                        }
                         state.store.insert_channel_open_record(record);
                     }
                 }
@@ -5299,7 +5304,7 @@ where
             let _ = reply.send(Err(err));
         }
 
-        if reason == StopReason::Abandon || reason == StopReason::AbortFunding {
+        if reason == StopReason::Abandon || reason.is_abort_funding() {
             if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
                 // remove from transaction track actor
                 if let Some(funding_tx) = channel_actor_state.funding_tx.as_ref() {
