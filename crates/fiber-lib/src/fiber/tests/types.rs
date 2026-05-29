@@ -1193,6 +1193,88 @@ fn test_convert_payment_hop_data() {
     assert_eq!(None, payment_hop_data_modified.next_hop);
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_forward_payload_rejects_unknown_hash_algorithm() {
+    let modified_payload = trampoline_forward_payload_with_hash_algorithm_byte(3);
+    let modified_payload_bytes = modified_payload.as_bytes();
+
+    assert!(TrampolineHopPayload::deserialize(&modified_payload_bytes).is_none());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_peel_rejects_unknown_forward_hash_algorithm() {
+    let modified_payload = trampoline_forward_payload_with_hash_algorithm_byte(3);
+    let hop_key = gen_rand_fiber_private_key();
+    let session_key = gen_rand_fiber_private_key();
+    let packet_len = TrampolineOnionPacket::create(
+        session_key.clone(),
+        vec![hop_key.pubkey()],
+        vec![TrampolineHopPayload::Final {
+            final_amount: 1000,
+            final_tlc_expiry_delta: 40,
+            payment_preimage: None,
+            custom_records: None,
+        }],
+        None,
+        SECP256K1,
+    )
+    .expect("create trampoline onion")
+    .as_bytes()
+    .len();
+    let packet_data_len = packet_len - 1 - 33 - 32;
+
+    let mut sphinx_packet = fiber_sphinx::OnionPacket::create(
+        session_key.into(),
+        vec![hop_key.pubkey().into()],
+        vec![modified_payload.as_bytes().to_vec()],
+        None,
+        packet_data_len,
+        SECP256K1,
+    )
+    .expect("create raw sphinx onion");
+    sphinx_packet.version = ONION_PACKET_VERSION_V1;
+
+    let result =
+        TrampolineOnionPacket::new(sphinx_packet.into_bytes()).peel(&hop_key, None, SECP256K1);
+
+    assert!(matches!(
+        result,
+        Err(crate::fiber::types::Error::OnionPacket(
+            OnionPacketError::InvalidHopData
+        ))
+    ));
+}
+
+fn trampoline_forward_payload_with_hash_algorithm_byte(
+    hash_algorithm: u8,
+) -> molecule_fiber::TrampolineHopPayload {
+    let forward_payload = TrampolineHopPayload::Forward {
+        next_node_id: gen_rand_fiber_public_key(),
+        amount_to_forward: 1000,
+        hash_algorithm: HashAlgorithm::Sha256,
+        build_max_fee_amount: 100,
+        tlc_expiry_delta: 40,
+        tlc_expiry_limit: 80,
+        max_parts: Some(1),
+    };
+    let payload = molecule_fiber::TrampolineHopPayload::from(forward_payload);
+    let molecule_fiber::TrampolineHopPayloadUnion::TrampolineForwardPayload(forward) =
+        payload.to_enum()
+    else {
+        panic!("expected forward payload");
+    };
+
+    let modified_forward = forward
+        .as_builder()
+        .hash_algorithm(Byte::new(hash_algorithm))
+        .build();
+    molecule_fiber::TrampolineHopPayload::new_builder()
+        .set(modified_forward)
+        .build()
+}
+
 #[test]
 fn test_serde_node_id() {
     let peer_id = PeerId::random();

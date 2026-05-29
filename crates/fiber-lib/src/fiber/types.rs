@@ -1821,7 +1821,10 @@ impl TryFrom<molecule_fiber::TrampolineHopPayload> for TrampolineHopPayload {
                 Ok(TrampolineHopPayload::Forward {
                     next_node_id: forward.next_node_id().try_into()?,
                     amount_to_forward: forward.amount_to_forward().unpack(),
-                    hash_algorithm: forward.hash_algorithm().try_into().unwrap_or_default(),
+                    hash_algorithm: forward
+                        .hash_algorithm()
+                        .try_into()
+                        .map_err(|_| Error::OnionPacket(OnionPacketError::InvalidHopData))?,
                     build_max_fee_amount: forward.build_max_fee_amount().unpack(),
                     tlc_expiry_delta: forward.tlc_expiry_delta().unpack(),
                     tlc_expiry_limit: forward.tlc_expiry_limit().unpack(),
