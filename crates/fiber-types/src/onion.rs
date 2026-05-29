@@ -6,7 +6,7 @@
 use crate::gen::fiber as molecule_fiber;
 use crate::payment::{
     BasicMppPaymentData, CurrentPaymentHopData, PaymentCustomRecords, PaymentHopData, TlcErr,
-    USER_CUSTOM_RECORDS_MAX_INDEX,
+    TlcErrData, TlcErrorCode, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ckb_types::prelude::{Pack, Unpack};
 use fiber_sphinx::OnionErrorPacket;
@@ -151,6 +151,22 @@ impl TlcErrPacket {
                 }
                 error
             })
+    }
+
+    /// Create a trampoline failure wrapper encrypted with the upstream outer shared secret.
+    /// Returning `None` means the caller would have produced a plaintext trampoline wrapper.
+    pub fn new_trampoline_failed(
+        error_code: TlcErrorCode,
+        node_id: crate::Pubkey,
+        inner_error_packet: Vec<u8>,
+        shared_secret: &[u8; 32],
+    ) -> Self {
+        let mut tlc_err = TlcErr::new(error_code);
+        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
+            node_id,
+            inner_error_packet,
+        });
+        Self::new(tlc_err, shared_secret)
     }
 }
 

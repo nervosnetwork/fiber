@@ -106,7 +106,7 @@ use fiber_types::{
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
     RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos,
+    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -928,7 +928,7 @@ pub enum NetworkActorEvent {
     ChannelActorStopped(Hash256, StopReason),
 
     // A payment actor stopped event.
-    PaymentActorStopped(Hash256),
+    PaymentActorStopped(Hash256, Option<TlcErrPacket>),
 
     // Channel settlement check completed - channel is fully settled on-chain.
     ChannelSettlementCompleted(Hash256),
@@ -1573,8 +1573,10 @@ where
                 }
                 state.on_channel_actor_stopped(channel_id, reason).await;
             }
-            NetworkActorEvent::PaymentActorStopped(payment_hash) => {
-                state.on_payment_actor_stopped(payment_hash).await;
+            NetworkActorEvent::PaymentActorStopped(payment_hash, last_error_packet) => {
+                state
+                    .on_payment_actor_stopped(payment_hash, last_error_packet)
+                    .await;
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
                 if let Some(channel_actor) = state.channels.get(&channel_id) {
@@ -5495,7 +5497,11 @@ where
         .await;
     }
 
-    async fn on_payment_actor_stopped(&mut self, payment_hash: Hash256) {
+    async fn on_payment_actor_stopped(
+        &mut self,
+        payment_hash: Hash256,
+        last_error_packet: Option<TlcErrPacket>,
+    ) {
         debug!("Payment actor stopped {payment_hash}");
         if self.inflight_payments.remove(&payment_hash).is_none() {
             error!("Can't find inflight payment actor");
@@ -5549,14 +5555,24 @@ where
                     for prev_tlc in &context.previous_tlcs {
                         let (send, _recv) = oneshot::channel();
                         let rpc_reply = RpcReplyPort::from(send);
-                        let shared_secret = prev_tlc.shared_secret.unwrap_or([0u8; 32]);
+                        let shared_secret = prev_tlc.shared_secret.unwrap_or(NO_SHARED_SECRET);
+                        let inner_error_packet = last_error_packet
+                            .as_ref()
+                            .map(|packet| packet.onion_packet.clone())
+                            .unwrap_or_else(|| {
+                                TlcErrPacket::new(TlcErr::new(error_code), &NO_SHARED_SECRET)
+                                    .onion_packet
+                            });
+                        let wrapper_packet = TlcErrPacket::new_trampoline_failed(
+                            error_code,
+                            self.get_public_key(),
+                            inner_error_packet,
+                            &shared_secret,
+                        );
                         let command = ChannelCommand::RemoveTlc(
                             RemoveTlcCommand {
                                 id: prev_tlc.prev_tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    TlcErr::new(error_code),
-                                    &shared_secret,
-                                )),
+                                reason: RemoveTlcReason::RemoveTlcFail(wrapper_packet),
                             },
                             rpc_reply,
                         );

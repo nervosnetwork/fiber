@@ -442,15 +442,6 @@ pub struct PrevTlcInfo {
 }
 
 impl PrevTlcInfo {
-    pub fn new(prev_channel_id: Hash256, prev_tlc_id: u64, forwarding_fee: u128) -> Self {
-        Self {
-            prev_channel_id,
-            prev_tlc_id,
-            forwarding_fee,
-            shared_secret: None,
-        }
-    }
-
     pub fn new_with_shared_secret(
         prev_channel_id: Hash256,
         prev_tlc_id: u64,
