@@ -165,15 +165,15 @@ fn test_channel_state_bincode_compatibility() {
         &[4, 0, 0, 0, 0, 0, 0, 0],
     );
     assert_channel_state_encoding(ChannelState::ChannelReady, &[5, 0, 0, 0]);
-    assert_channel_state_encoding(ChannelState::Stale, &[6, 0, 0, 0]);
     assert_channel_state_encoding(
         ChannelState::ShuttingDown(ShuttingDownFlags::empty()),
-        &[7, 0, 0, 0, 0, 0, 0, 0],
+        &[6, 0, 0, 0, 0, 0, 0, 0],
     );
     assert_channel_state_encoding(
         ChannelState::Closed(CloseFlags::empty()),
-        &[8, 0, 0, 0, 0, 0, 0, 0],
+        &[7, 0, 0, 0, 0, 0, 0, 0],
     );
+    assert_channel_state_encoding(ChannelState::Stale, &[8, 0, 0, 0]);
     assert_channel_state_encoding(
         ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING),
         &[0, 0, 0, 0, 4, 0, 0, 0],

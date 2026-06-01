@@ -5,6 +5,7 @@ fn main() {
         .unwrap()
         .join("../crates/fiber-lib/src/rpc");
     let rpc_files = vec![
+        ["admin.rs", "AdminRpc"],
         ["cch.rs", "CchRpc"],
         ["channel.rs", "ChannelRpc"],
         ["dev.rs", "DevRpc"],

@@ -14,6 +14,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
 * [RPC Methods](#rpc-methods)
 
 
+    * [Module Admin](#module-admin)
+        * [Method `backup`](#admin-backup)
     * [Module Cch](#module-cch)
         * [Method `send_btc`](#cch-send_btc)
         * [Method `receive_btc`](#cch-receive_btc)
@@ -39,7 +41,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `graph_channels`](#graph-graph_channels)
     * [Module Info](#module-info)
         * [Method `node_info`](#info-node_info)
-        * [Method `backup_now`](#info-backup_now)
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#invoice-new_invoice)
         * [Method `parse_invoice`](#invoice-parse_invoice)
@@ -110,6 +111,27 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `UdtScript`](#type-udtscript)
 
 ## RPC Modules
+
+<a id="admin"></a>
+### Module `Admin`
+The RPC module for node administration.
+
+
+<a id="admin-backup"></a>
+#### Method `backup`
+
+Backup the node information.
+
+##### Params
+* None
+
+##### Returns
+
+* None
+
+---
+
+
 
 <a id="cch"></a>
 ### Module `Cch`
@@ -641,22 +663,6 @@ Get the node information.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, Configuration information for User-Defined Tokens (UDT) associated with the node.
-
----
-
-
-
-<a id="info-backup_now"></a>
-#### Method `backup_now`
-
-Backup the node information.
-
-##### Params
-* None
-
-##### Returns
-
-* None
 
 ---
 
@@ -1360,10 +1366,10 @@ The state of a channel.
  funding transaction to confirm.
 * `ChannelReady` - Both we and our counterparty consider the funding transaction confirmed and the channel is
  now operational.
-* `Stale` - The channel state is potentially outdated (e.g., after a database restore).
- We must perform a passive audit with the peer before resuming operations.
 * `ShuttingDown` - <em>`ShuttingDownFlags`</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
 * `Closed` - <em>`CloseFlags`</em>, This channel is closed.
+* `Stale` - The channel state is potentially outdated (e.g., after a database restore).
+ We must perform a passive audit with the peer before resuming operations.
 ---
 
 <a id="#type-channelupdateinfo"></a>
