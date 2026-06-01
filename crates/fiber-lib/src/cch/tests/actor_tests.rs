@@ -928,6 +928,31 @@ async fn test_receive_btc_rejects_currency_mismatch() {
     }
 }
 
+/// Tests that receive_btc rejects unsigned Fiber invoices before creating orders.
+#[tokio::test]
+async fn test_receive_btc_rejects_unsigned_fiber_invoice() {
+    let harness = setup_test_harness().await;
+    let (_, payment_hash) = create_valid_preimage_pair(101);
+    let mut invoice = create_test_fiber_invoice(payment_hash);
+    invoice.signature = None;
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    let err = result.expect_err("unsigned Fiber invoice should be rejected");
+    assert!(
+        matches!(err, CchError::CKBInvoiceMissingSignature),
+        "expected CKBInvoiceMissingSignature, got: {:?}",
+        err
+    );
+}
+
 /// Tests that receive_btc rejects a plain CKB invoice without UDT type script.
 /// Issue #983: receive_btc should fail when invoice has no wrapped BTC UDT type script
 #[tokio::test]

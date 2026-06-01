@@ -34,6 +34,8 @@ pub enum CchError {
     CKBInvoiceExpired,
     #[error("CKB invoice missing amount")]
     CKBInvoiceMissingAmount,
+    #[error("CKB invoice is not signed")]
+    CKBInvoiceMissingSignature,
     #[error("CKB invoice final TLC expiry delta exceeds safe limit for cross-chain swap")]
     CKBInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("CKB invoice hash algorithm is not SHA256, which is required for LND compatibility")]
