@@ -1,15 +1,17 @@
 use crate::ckb::tests::test_utils::complete_commitment_tx;
 use crate::fiber::channel::{
     funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse,
-    ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, ReloadParams,
-    ReplayOrderHint, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, ProcessingChannelResult,
+    ReloadParams, ReplayOrderHint, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
+    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
     MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
 
+use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{
     DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerConnectSource,
@@ -6289,7 +6291,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 21].pack()).build()),
+                        close_script: Some(script_with_large_args()),
                         fee_rate: Some(FeeRate::from_u64(u64::MAX)),
                         force: false,
                     },
@@ -6303,7 +6305,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     assert!(shutdown_channel_result
         .err()
         .unwrap()
-        .contains("Local balance is not enough to pay the fee"));
+        .contains("overflows shutdown fee"));
 }
 
 #[tokio::test]
@@ -10101,5 +10103,112 @@ async fn test_external_funding_state_cleared_after_terminal_path() {
     assert!(
         state.external_funding.is_none(),
         "persisted external funding state should be cleared after channel ready"
+    );
+}
+
+fn expect_invalid_parameter(result: ProcessingChannelResult, expected: &str) {
+    let err = result.expect_err("parameters must be rejected");
+    assert!(
+        err.to_string().contains(expected),
+        "expected error containing {expected:?}, got {err}"
+    );
+}
+
+fn script_with_large_args() -> Script {
+    Script::new_builder().args([0u8; 2_000].pack()).build()
+}
+
+#[test]
+fn check_accept_channel_parameters_rejects_total_reserved_overflow() {
+    expect_invalid_parameter(
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            0,
+            0,
+            u64::MAX,
+            1,
+            DEFAULT_COMMITMENT_FEE_RATE,
+            &None,
+            &Script::default(),
+            MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
+        ),
+        "Total reserved CKB amount overflows",
+    );
+}
+
+#[test]
+fn check_accept_channel_parameters_rejects_commitment_fee_overflow() {
+    let udt_type_script = Some(script_with_large_args());
+    expect_invalid_parameter(
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            0,
+            0,
+            0,
+            u64::MAX,
+            u64::MAX,
+            &udt_type_script,
+            &Script::default(),
+            MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
+        ),
+        "overflows commitment fee",
+    );
+}
+
+#[test]
+fn check_accept_channel_parameters_rejects_non_udt_total_capacity_overflow() {
+    expect_invalid_parameter(
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            u64::MAX as u128,
+            1,
+            0,
+            0,
+            DEFAULT_COMMITMENT_FEE_RATE,
+            &None,
+            &Script::default(),
+            MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
+        ),
+        "The total funding amount",
+    );
+}
+
+#[test]
+fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
+    let udt_type_script = Some(script_with_large_args());
+    let err = check_open_channel_parameters(
+        &udt_type_script,
+        &Script::default(),
+        u64::MAX - 1_000_000_000_000,
+        DEFAULT_FEE_RATE,
+        u64::MAX,
+        EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+        MAX_TLC_NUMBER_IN_FLIGHT,
+    )
+    .expect_err("fee-rate overflow must be rejected");
+
+    assert!(
+        err.to_string().contains("overflows commitment fee"),
+        "expected commitment fee overflow, got {err}"
+    );
+}
+
+#[test]
+fn check_open_channel_parameters_rejects_total_reserved_overflow() {
+    let err = check_open_channel_parameters(
+        &None,
+        &Script::default(),
+        u64::MAX,
+        DEFAULT_FEE_RATE,
+        DEFAULT_COMMITMENT_FEE_RATE,
+        EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+        MAX_TLC_NUMBER_IN_FLIGHT,
+    )
+    .expect_err("reserved amount that no acceptor can add to must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("Total reserved CKB amount overflows"),
+        "expected total reserved overflow, got {err}"
     );
 }

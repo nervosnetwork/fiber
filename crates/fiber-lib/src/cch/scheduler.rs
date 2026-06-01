@@ -252,6 +252,8 @@ impl<S: CchOrderStore> SchedulerState<S> {
             return;
         }
 
+        // already checked that next_job_time > current_time
+        // so this subtraction won't underflow
         let delay_secs = next_job_time - current_time;
         let delay = Duration::from_secs(delay_secs.min(3600));
         let handle = mailbox.send_after(delay, move || SchedulerMessage::ProcessJobs);

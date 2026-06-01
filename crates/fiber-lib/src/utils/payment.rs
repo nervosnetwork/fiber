@@ -30,7 +30,11 @@ where
 
     let mut total_tlc_amount = first_tlc.amount;
     for tlc in it {
-        total_tlc_amount += tlc.amount;
+        let Some(amount) = total_tlc_amount.checked_add(tlc.amount) else {
+            debug!("total TLC amount overflows while checking invoice fulfillment");
+            return false;
+        };
+        total_tlc_amount = amount;
     }
 
     debug!(

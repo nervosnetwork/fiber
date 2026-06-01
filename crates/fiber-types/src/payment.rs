@@ -701,6 +701,7 @@ impl Attempt {
             self.status = AttemptStatus::Failed;
         } else {
             self.status = AttemptStatus::Retrying;
+            // already checked tried_times < try_limit
             self.tried_times += 1;
         }
     }

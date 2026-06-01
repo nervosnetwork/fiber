@@ -123,11 +123,24 @@ pub struct OpenChannel {
 }
 
 impl OpenChannel {
-    pub fn all_ckb_amount(&self) -> u64 {
+    pub fn all_ckb_amount(&self) -> Result<u64, ProcessingChannelError> {
         if self.funding_udt_type_script.is_none() {
-            self.funding_amount as u64 + self.reserved_ckb_amount
+            let funding_amount = u64::try_from(self.funding_amount).map_err(|_| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "funding amount {} does not fit into u64",
+                    self.funding_amount
+                ))
+            })?;
+            funding_amount
+                .checked_add(self.reserved_ckb_amount)
+                .ok_or_else(|| {
+                    ProcessingChannelError::InvalidParameter(format!(
+                        "total CKB amount overflows: funding {}, reserved {}",
+                        funding_amount, self.reserved_ckb_amount
+                    ))
+                })
         } else {
-            self.reserved_ckb_amount
+            Ok(self.reserved_ckb_amount)
         }
     }
 

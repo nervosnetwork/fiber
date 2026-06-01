@@ -158,15 +158,19 @@ ignored = ["getrandom"]
 [[bench]]
 harness = false
 name = "payment_benchmarks"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "biscuit_benchmarks"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "gossip_propagation"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "gossip_sync_recovery"
+required-features = ["bench"]

@@ -2510,3 +2510,37 @@ fn test_graph_find_path_max_capacity_with_fee_rate() {
     assert_eq!(route[0].amount_received, 500);
     assert_eq!(route[1].amount_received, 500);
 }
+
+#[test]
+fn test_graph_find_path_rejects_hop_hint_expiry_delta_overflow() {
+    init_tracing();
+
+    let network = MockNetworkGraph::new(3);
+    let node1 = network.keys[1];
+    let node2 = network.keys[2];
+    let node3 = network.keys[3];
+    let hinted_channel = OutPoint::from_slice(&[42; 36]).unwrap();
+    let hop_hints = vec![HopHint {
+        pubkey: node2.into(),
+        channel_outpoint: hinted_channel,
+        fee_rate: 0,
+        tlc_expiry_delta: u64::MAX,
+    }];
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node3.into(),
+        Some(100),
+        Some(1000),
+        None,
+        FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+        &hop_hints,
+        &Default::default(),
+        true,
+    );
+
+    eprintln!("debug router: {:?}", route);
+    assert!(matches!(route, Err(PathFindError::Overflow(_))));
+}
