@@ -16,7 +16,9 @@ use crate::fiber::{
     PeeledPaymentOnionPacket, SendPaymentData, ShuttingDownFlags, TLCId, TlcErrorCode,
     NO_SHARED_SECRET,
 };
+use crate::gen_rand_channel_outpoint;
 use crate::gen_rand_fiber_public_key;
+use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
 use crate::invoice::CkbInvoiceStatus;
@@ -45,6 +47,7 @@ use fiber_types::Hash256 as InternalHash256;
 use fiber_types::HashAlgorithm;
 use fiber_types::HopHint;
 use fiber_types::RemoveTlcFulfill;
+use fiber_types::RouterHop;
 use fiber_types::SessionRoute;
 use fiber_types::SIGNATURE_U5_SIZE;
 use ractor::call;
@@ -911,14 +914,14 @@ async fn test_send_payment_with_private_channel_hints() {
 
 #[test]
 fn test_send_payment_rejects_hop_hints_when_invoice_disallows() {
-    let payee_pubkey = gen_rand_fiber_public_key();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(1000))
         .payment_preimage(preimage)
-        .payee_pub_key(payee_pubkey.into())
+        .payee_pub_key(public_key)
         .allow_trampoline_routing(false)
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &private_key))
         .expect("build invoice");
 
     let hop_hint = HopHint {
@@ -939,6 +942,93 @@ fn test_send_payment_rejects_hop_hints_when_invoice_disallows() {
         err.contains("invoice does not support hop hints"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn test_send_payment_rejects_unsigned_invoice_by_default() {
+    let payee_pubkey = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pubkey.into())
+        .build()
+        .expect("build unsigned invoice");
+
+    let err = SendPaymentData::new(SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        ..Default::default()
+    })
+    .unwrap_err();
+
+    assert!(
+        err.contains("invoice is not signed"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_send_payment_allows_unsigned_invoice_with_module_opt_out() {
+    let payee_pubkey = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pubkey.into())
+        .build()
+        .expect("build unsigned invoice");
+
+    let payment_data = SendPaymentData::new(SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        allow_unsigned_invoice: true,
+        ..Default::default()
+    })
+    .expect("unsigned invoice opt-out should build payment data");
+
+    assert_eq!(payment_data.target_pubkey, payee_pubkey);
+    assert_eq!(payment_data.amount, 1000);
+}
+
+#[test]
+fn test_send_payment_with_router_rejects_unsigned_invoice_by_default() {
+    let payee_pubkey = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pubkey.into())
+        .build()
+        .expect("build unsigned invoice");
+    let router = vec![RouterHop {
+        target: payee_pubkey,
+        channel_outpoint: gen_rand_channel_outpoint(),
+        amount_received: 1000,
+        incoming_tlc_expiry: DEFAULT_TLC_EXPIRY_DELTA,
+    }];
+
+    let err = SendPaymentWithRouterCommand {
+        invoice: Some(invoice.to_string()),
+        router: router.clone(),
+        ..Default::default()
+    }
+    .build_send_payment_data(gen_rand_fiber_public_key())
+    .unwrap_err();
+
+    let crate::Error::InvalidParameter(message) = err else {
+        panic!("unexpected error: {err}");
+    };
+    assert!(
+        message.contains("invoice is not signed"),
+        "unexpected error: {message}"
+    );
+
+    let payment_data = SendPaymentWithRouterCommand {
+        invoice: Some(invoice.to_string()),
+        router,
+        allow_unsigned_invoice: true,
+        ..Default::default()
+    }
+    .build_send_payment_data(gen_rand_fiber_public_key())
+    .expect("unsigned invoice opt-out should build payment data");
+
+    assert_eq!(payment_data.target_pubkey, payee_pubkey);
 }
 
 #[tokio::test]
@@ -5962,7 +6052,7 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
             .amount(Some(100))
             .payment_preimage(preimage)
             .payee_pub_key(target_pubkey.into())
-            .build()
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_0.private_key.0))
             .expect("build invoice success");
 
         node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -6023,7 +6113,7 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
             .amount(Some(100))
             .payment_preimage(preimage)
             .payee_pub_key(target_pubkey.into())
-            .build()
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
             .expect("build invoice success");
 
         invoices.push(ckb_invoice);

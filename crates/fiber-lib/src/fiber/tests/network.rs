@@ -207,6 +207,7 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
         hop_hints: None,
         custom_records: None,
         max_fee_rate: None,
+        allow_unsigned_invoice: false,
     };
 
     // Provided but empty.

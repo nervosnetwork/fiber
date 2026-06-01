@@ -361,6 +361,9 @@ impl SendPaymentDataExt for SendPaymentData {
             .map_err(|_| "invoice is invalid".to_string())?;
 
         if let Some(invoice) = invoice.clone() {
+            if !command.allow_unsigned_invoice && !invoice.is_signed() {
+                return Err("invoice is not signed".to_string());
+            }
             if invoice.is_expired() {
                 return Err("invoice is expired".to_string());
             }
@@ -625,6 +628,9 @@ pub struct SendPaymentCommand {
     pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
+    /// Allows module callers to accept an invoice without a signature.
+    /// RPC send-payment calls never set this flag.
+    pub allow_unsigned_invoice: bool,
     // the TLC expiry delta that should be used to set the timelock for the final hop
     pub final_tlc_expiry_delta: Option<u64>,
     // the TLC expiry for whole payment, in milliseconds
@@ -677,6 +683,9 @@ pub struct SendPaymentWithRouterCommand {
 
     /// the encoded invoice to send to the recipient
     pub invoice: Option<String>,
+    /// Allows module callers to accept an invoice without a signature.
+    /// RPC send-payment-with-router calls never set this flag.
+    pub allow_unsigned_invoice: bool,
 
     /// Some custom records for the payment which contains a map of u32 to Vec<u8>
     /// The key is the record type, and the value is the serialized data
@@ -721,6 +730,7 @@ impl SendPaymentWithRouterCommand {
             target_pubkey: Some(target),
             payment_hash: self.payment_hash,
             invoice: self.invoice,
+            allow_unsigned_invoice: self.allow_unsigned_invoice,
             allow_self_payment: target == source,
             dry_run: self.dry_run,
             amount: Some(amount),
