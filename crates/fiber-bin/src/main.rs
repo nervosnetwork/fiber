@@ -127,9 +127,16 @@ pub async fn main() -> Result<(), ExitMessage> {
             .parsed_fiber()
             .ok_or(ExitMessage("fiber config must be set".to_string()))?;
 
+        let ckb_config = config
+            .ckb
+            .clone()
+            .ok_or_else(|| ExitMessage("ckb config must be set for restore process".to_string()))?;
+
+        let ckb_key_path = ckb_config.base_dir().join("key");
+        let fiber_key_path = parsed_fiber_config.base_dir().join("sk");
         let store_path = parsed_fiber_config.store_path();
 
-        restore(source_path, &store_path)
+        restore(source_path, &store_path, &fiber_key_path, &ckb_key_path)
             .map_err(|err| ExitMessage(format!("Failed to restore database: {}", err)))?;
 
         info!("Successfully restored database to {:?}.", store_path);
