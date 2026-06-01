@@ -185,6 +185,7 @@ pub struct FundingContext {
     pub funding_source_lock_script: packed::Script,
     pub funding_source_lock_script_cell_deps: Vec<packed::CellDep>,
     pub funding_cell_lock_script: packed::Script,
+    pub funding_udt_type_script: Option<packed::Script>,
 }
 
 struct ExternalFundingCellDepResolver {
@@ -903,8 +904,21 @@ impl FundingTx {
                 debug!("invalid funding tx (outputs[0]): not a funding cell",);
                 return Err(FundingError::InvalidPeerFundingTx);
             }
+            let output_type_opt: Option<packed::Script> = output.type_().to_opt();
+            if let Some(ref expected_udt_script) = context.funding_udt_type_script {
+                if output_type_opt.as_ref() != Some(expected_udt_script) {
+                    debug!(
+                        "invalid funding tx (outputs[0]): UDT type script mismatch, expected {:?}",
+                        expected_udt_script
+                    );
+                    return Err(FundingError::InvalidPeerFundingTx);
+                }
+            } else if output_type_opt.is_some() {
+                debug!("invalid funding tx (outputs[0]): unexpected type script for CKB channel");
+                return Err(FundingError::InvalidPeerFundingTx);
+            }
             if let Some(data) = remote_tx.outputs_data().get(0) {
-                if output.type_().is_none() && !data.is_empty() {
+                if output_type_opt.is_none() && !data.is_empty() {
                     debug!(
                         "invalid funding tx (outputs_data[0]): data is not allowed for CKB channel",
                     );
@@ -971,6 +985,7 @@ mod tests {
             funding_source_lock_script: script.clone(),
             funding_source_lock_script_cell_deps: Vec::new(),
             funding_cell_lock_script: script,
+            funding_udt_type_script: None,
         }
     }
 

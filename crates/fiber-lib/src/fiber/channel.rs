@@ -7110,6 +7110,7 @@ impl ChannelActorState {
                         local_tx: self.funding_tx.clone().unwrap_or_default(),
                         remote_tx: msg.tx.clone(),
                         funding_cell_lock_script: self.get_funding_lock_script(),
+                        funding_udt_type_script: self.funding_udt_type_script.clone(),
                         reply: tx
                     }
                 ))
@@ -8269,6 +8270,19 @@ impl ChannelActorState {
         if first_output.lock() != self.get_funding_lock_script() {
             return Err(ProcessingChannelError::InvalidState(
                 "Invalid funding transaction lock script".to_string(),
+            ));
+        }
+
+        let output_type_opt: Option<packed::Script> = first_output.type_().to_opt();
+        if let Some(ref expected_udt) = self.funding_udt_type_script {
+            if output_type_opt.as_ref() != Some(expected_udt) {
+                return Err(ProcessingChannelError::InvalidState(
+                    "Funding output UDT type script does not match expected".to_string(),
+                ));
+            }
+        } else if output_type_opt.is_some() {
+            return Err(ProcessingChannelError::InvalidState(
+                "Funding output has unexpected type script for CKB-only channel".to_string(),
             ));
         }
 

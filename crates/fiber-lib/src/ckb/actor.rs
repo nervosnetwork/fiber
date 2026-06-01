@@ -60,6 +60,7 @@ pub enum CkbChainMessage {
         local_tx: packed::Transaction,
         remote_tx: packed::Transaction,
         funding_cell_lock_script: packed::Script,
+        funding_udt_type_script: Option<packed::Script>,
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     /// Add funding tx. This is used to reestablish a channel that is not ready yet.
@@ -186,6 +187,7 @@ impl Actor for CkbChainActor {
                     funding_source_lock_script,
                     funding_source_lock_script_cell_deps,
                     funding_cell_lock_script,
+                    funding_udt_type_script: request.udt_type_script.clone(),
                 };
                 let result = funding_tx
                     .build_unsigned_for_external_funding(
@@ -207,6 +209,7 @@ impl Actor for CkbChainActor {
                 local_tx,
                 remote_tx,
                 funding_cell_lock_script,
+                funding_udt_type_script,
                 reply,
             } => {
                 let local_tx_hash = local_tx.calc_tx_hash();
@@ -218,7 +221,11 @@ impl Actor for CkbChainActor {
                     remote_tx_hash,
                 );
                 let mut funding_tx: FundingTx = local_tx.into();
-                let context = state.build_funding_context(funding_cell_lock_script);
+                let context = {
+                    let mut ctx = state.build_funding_context(funding_cell_lock_script);
+                    ctx.funding_udt_type_script = funding_udt_type_script;
+                    ctx
+                };
                 let result = funding_tx
                     .update_for_peer(remote_tx.into_view(), context)
                     .await;
@@ -357,6 +364,7 @@ impl CkbChainState {
             funding_source_lock_script: self.funding_source_lock_script.clone(),
             funding_source_lock_script_cell_deps: Vec::new(),
             funding_cell_lock_script,
+            funding_udt_type_script: None,
         }
     }
 }
