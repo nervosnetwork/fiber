@@ -40,6 +40,8 @@ use ckb_types::H256;
 use core::cmp::Ordering;
 use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::CloseFlags;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::{SettlementTlc, TLCId};
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
@@ -500,6 +502,62 @@ fn test_store_watchtower_preimage() {
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
+    let path = TempDir::new("test-watchtower-preimage-gc-waits");
+    let store = open_store(path).expect("created store failed");
+
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = blake2b_256(preimage).into();
+    let local_settlement_key = Privkey::from(&[1; 32]);
+    let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
+    let local_funding_pubkey = Privkey::from(&[3; 32]).pubkey();
+    let remote_funding_pubkey = Privkey::from(&[4; 32]).pubkey();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(0),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 42,
+            payment_hash,
+            expiry: now_timestamp_as_millis_u64() + 60_000,
+            local_key: Privkey::from(&[5; 32]),
+            remote_key: Privkey::from(&[6; 32]).pubkey(),
+        }],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        local_settlement_key,
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
+        settlement_data,
+    );
+    store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
+
+    store.remove_watch_preimage(node_id.clone(), payment_hash);
+    assert_eq!(
+        store.get_watch_preimage(&payment_hash),
+        Some(preimage),
+        "preimage is retained while a watched TLC still references it"
+    );
+
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[..20].try_into().unwrap();
+    store.update_tlc_settled(&channel_id, payment_hash_prefix);
+    assert!(
+        store.get_watch_preimage(&payment_hash).is_none(),
+        "watchtower GC removes the preimage after the watched TLC is settled"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_watchtower_with_wrong_node_id() {
     let path = TempDir::new("test-watchtower-store");
     let store = open_store(path).expect("created store failed");
@@ -688,6 +746,7 @@ fn test_channel_actor_state_store() {
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
+        funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
     };
@@ -827,6 +886,7 @@ fn sample_channel_actor_state(
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
+        funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
     }

@@ -7,6 +7,7 @@ use crate::{
         CkbChainMessage, CkbTxTracingResult,
     },
     fiber::{
+        config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
@@ -26,7 +27,10 @@ use crate::{
     invoice::InvoiceBuilder,
     now_timestamp_as_millis_u64, ChannelTestContext, NetworkServiceEvent,
 };
-use crate::{gen_rand_fiber_private_key, test_utils::*};
+use crate::{
+    create_invalid_ecdsa_signature, gen_rand_fiber_private_key, gen_rand_node_announcement,
+    test_utils::*,
+};
 use anyhow::anyhow;
 use ckb_hash::blake2b_256;
 use ckb_types::{
@@ -65,6 +69,20 @@ fn get_fake_peer_id_and_address() -> (PeerId, MultiAddr) {
     .expect("valid multiaddr");
     address.push(Protocol::P2P(Cow::Owned(peer_id.clone().into_bytes())));
     (peer_id, address)
+}
+
+fn create_invalid_node_announcement_message() -> BroadcastMessage {
+    let (_, mut announcement) = gen_rand_node_announcement();
+    announcement.signature = Some(create_invalid_ecdsa_signature());
+    BroadcastMessage::NodeAnnouncement(announcement)
+}
+
+async fn list_connected_peers(node: &NetworkNode) -> Vec<crate::fiber::network::PeerInfo> {
+    call!(node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+    })
+    .expect("node alive")
+    .expect("list peers")
 }
 
 fn create_fake_channel_announcement_message(
@@ -435,7 +453,15 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
 async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce_disabled() {
     init_tracing();
 
-    let mut node1 = NetworkNode::new_with_node_name("node1").await;
+    let mut node1 = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node1".to_string()))
+            .fiber_config_updater(|config| {
+                config.auto_announce_node = Some(false);
+            })
+            .build(),
+    )
+    .await;
     let mut node2 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some("node2".to_string()))
@@ -485,14 +511,17 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
     wait_until_async_timeout(|| async { !node1.get_network_graph_channels().await.is_empty() })
         .await;
 
-    node1.connect_to(&mut node2).await;
     assert!(matches!(
         node2.submit_tx(tx.clone()).await,
         TxStatus::Committed(..)
     ));
 
-    wait_until_async_timeout(|| async { !node2.get_network_graph_channels().await.is_empty() })
-        .await;
+    node1.connect_to(&mut node2).await;
+
+    wait_until_async_timeout(|| async {
+        node2.get_network_graph_channel(&outpoint).await.is_some()
+    })
+    .await;
 
     let channels = node2.get_network_graph_channels().await;
     assert_eq!(channels.len(), 1);
@@ -1275,6 +1304,119 @@ async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channe
 }
 
 #[tokio::test]
+async fn test_invalid_gossip_from_no_channel_peer_triggers_disconnect_and_temp_ban() {
+    init_tracing();
+
+    let mut target = NetworkNode::new().await;
+    let mut peer = NetworkNode::new().await;
+
+    peer.connect_to(&mut target).await;
+    target.mock_received_gossip_message_from_peer(
+        peer.pubkey,
+        GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
+            messages: vec![create_invalid_node_announcement_message()],
+        }),
+    );
+
+    peer.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(list_connected_peers(&target).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_invalid_gossip_from_channel_peer_is_scored_but_not_disconnected() {
+    init_tracing();
+
+    let mut target = NetworkNode::new().await;
+    let mut peer = NetworkNode::new().await;
+
+    peer.connect_to(&mut target).await;
+    establish_channel_between_nodes(
+        &mut target,
+        &mut peer,
+        ChannelParameters::new(100_000_000_000, 11_800_000_000),
+    )
+    .await;
+
+    target.mock_received_gossip_message_from_peer(
+        peer.pubkey,
+        GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
+            messages: vec![create_invalid_node_announcement_message()],
+        }),
+    );
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let peers = list_connected_peers(&target).await;
+    assert!(
+        peers
+            .iter()
+            .any(|connected_peer| connected_peer.pubkey == peer.pubkey),
+        "peer with an active channel should stay connected even after invalid gossip"
+    );
+}
+
+#[tokio::test]
+async fn test_banned_no_channel_peer_is_disconnected_on_reconnect() {
+    init_tracing();
+
+    let mut target = NetworkNode::new().await;
+    let mut peer = NetworkNode::new().await;
+
+    peer.connect_to(&mut target).await;
+    target.mock_received_gossip_message_from_peer(
+        peer.pubkey,
+        GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
+            messages: vec![create_invalid_node_announcement_message()],
+        }),
+    );
+    peer.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+    )
+    .await;
+
+    peer.connect_to_nonblocking(&target).await;
+    peer.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(list_connected_peers(&target).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_unconfirmed_channel_announcement_does_not_ban_sender() {
+    init_tracing();
+
+    let mut target = NetworkNode::new().await;
+    let mut peer = NetworkNode::new().await;
+    let channel_context = ChannelTestContext::gen().await;
+
+    peer.connect_to(&mut target).await;
+    target.mock_received_gossip_message_from_peer(
+        peer.pubkey,
+        GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
+            messages: vec![BroadcastMessage::ChannelAnnouncement(
+                channel_context.channel_announcement,
+            )],
+        }),
+    );
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let peers = list_connected_peers(&target).await;
+    assert!(
+        peers
+            .iter()
+            .any(|connected_peer| connected_peer.pubkey == peer.pubkey),
+        "sender should not be banned when channel announcement cannot be verified yet due to local chain lag"
+    );
+}
+
+#[tokio::test]
 async fn test_persisting_announced_nodes() {
     init_tracing();
 
@@ -1922,6 +2064,118 @@ async fn test_to_be_accepted_channels_number_limit() {
         .expect("peer alive")
         .expect("open channel");
     node.expect_debug_event("ChannelPendingToBeRejected").await;
+
+    let mut another_peer = NetworkNode::new().await;
+    node.connect_to(&mut another_peer).await;
+    open_channel_from_peer(&another_peer, node.pubkey, funding_amount).await;
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &another_peer.pubkey);
+            true
+        }
+        _ => false,
+    })
+    .await;
+}
+
+async fn open_channel_from_peer(peer: &NetworkNode, target_pubkey: Pubkey, funding_amount: u128) {
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: target_pubkey,
+                public: true,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+}
+
+async fn expect_channel_created(node: &mut NetworkNode, pubkey: Pubkey) {
+    node.expect_event(|event| {
+        matches!(
+            event,
+            NetworkServiceEvent::ChannelCreated(event_pubkey, _) if event_pubkey == &pubkey
+        )
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_auto_accept_pending_channels_global_number_limit() {
+    let funding_amount = 100_000_000_000u128;
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.pending_channels_number_limit = Some(2);
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+    let mut first_peer = NetworkNode::new().await;
+    let mut second_peer = NetworkNode::new().await;
+
+    first_peer.connect_to(&mut node).await;
+    second_peer.connect_to(&mut node).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&second_peer, node.pubkey, funding_amount).await;
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+}
+
+#[tokio::test]
+async fn test_auto_accept_pending_channels_peer_number_limit() {
+    let funding_amount = 100_000_000_000u128;
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.to_be_accepted_channels_number_limit = Some(2);
+                config.pending_channels_number_limit = Some(10);
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+    let mut first_peer = NetworkNode::new().await;
+    let mut second_peer = NetworkNode::new().await;
+
+    first_peer.connect_to(&mut node).await;
+    second_peer.connect_to(&mut node).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+
+    open_channel_from_peer(&second_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, second_peer.pubkey).await;
 }
 
 #[tokio::test]

@@ -8,10 +8,10 @@ threads-required = 2
 
 # channel tests
 [[profile.default.overrides]]
-filter = 'test(/^tests::channel::/)'
+filter = 'test(/^(fiber::)?tests::channel::/)'
 threads-required = 2
 
 # payment tests
 [[profile.default.overrides]]
-filter = 'test(/^tests::payment::/)'
+filter = 'test(/^(fiber::)?tests::payment::/)'
 threads-required = 2

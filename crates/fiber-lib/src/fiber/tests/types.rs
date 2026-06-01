@@ -665,7 +665,9 @@ fn test_tlc_err_packet_encryption() {
         .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
         .collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, SECP256K1).collect();
+        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, SECP256K1)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid blinding factors for hard-coded session key");
 
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     {
@@ -708,7 +710,9 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
     let session_key = SecretKey::from_slice(&[0x42; 32]).expect("32 bytes, within curve order");
     let hops_keys: Vec<PublicKey> = hops_path.iter().map(|k| k.into()).collect();
     let hops_ss: Vec<[u8; 32]> =
-        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1).collect();
+        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid blinding factors for hard-coded session key");
 
     // Pretend the downstream error originated beyond the trampoline boundary.
     let inner_err = TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
@@ -729,6 +733,50 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
         .decode(session_key.as_ref(), hops_path.clone())
         .expect("payer decodes wrapper");
 
+    assert_eq!(decoded, wrapper_err);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_direct_trampoline_failed_wrapper_uses_outer_shared_secret() {
+    // Payer -> trampoline is a direct hop. There is no intermediate node before the trampoline
+    // that could re-encrypt or otherwise hide a plaintext failure packet, so the trampoline wrapper
+    // must be created with the outer hop shared secret.
+    let trampoline = Pubkey(
+        PublicKey::from_str("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619")
+            .expect("valid public key")
+            .serialize(),
+    );
+    let hops_path = vec![trampoline];
+    let session_key = SecretKey::from_slice(&[0x43; 32]).expect("32 bytes, within curve order");
+    let hops_keys: Vec<PublicKey> = hops_path.iter().map(|k| k.into()).collect();
+    let hops_ss: Vec<[u8; 32]> =
+        OnionSharedSecretIter::new(hops_keys.iter(), session_key, SECP256K1)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid blinding factors for hard-coded session key");
+    let inner_error_packet = TlcErrPacket::new(
+        TlcErr::new(TlcErrorCode::TemporaryNodeFailure),
+        &NO_SHARED_SECRET,
+    );
+    let wrapper_err = TlcErr {
+        error_code: TlcErrorCode::TemporaryNodeFailure,
+        extra_data: Some(TlcErrData::TrampolineFailed {
+            node_id: trampoline,
+            inner_error_packet: inner_error_packet.onion_packet.clone(),
+        }),
+    };
+
+    let wrapper_packet = TlcErrPacket::new_trampoline_failed(
+        wrapper_err.error_code,
+        trampoline,
+        inner_error_packet.onion_packet,
+        &hops_ss[0],
+    );
+
+    assert!(!wrapper_packet.is_plaintext());
+    let decoded = wrapper_packet
+        .decode(session_key.as_ref(), hops_path)
+        .expect("payer decodes direct trampoline wrapper");
     assert_eq!(decoded, wrapper_err);
 }
 
@@ -1145,6 +1193,83 @@ fn test_convert_payment_hop_data() {
         .build()
         .into();
     assert_eq!(None, payment_hop_data_modified.next_hop);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_forward_payload_rejects_unknown_hash_algorithm() {
+    let modified_payload = trampoline_forward_payload_with_hash_algorithm_byte(3);
+    let modified_payload_bytes = modified_payload.as_bytes();
+
+    assert!(TrampolineHopPayload::deserialize(&modified_payload_bytes).is_none());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_peel_rejects_unknown_forward_hash_algorithm() {
+    let modified_payload = trampoline_forward_payload_with_hash_algorithm_byte(3);
+    let hop_key = gen_rand_fiber_private_key();
+    let session_key = gen_rand_fiber_private_key();
+    let packet_len = TrampolineOnionPacket::create(
+        session_key.clone(),
+        vec![hop_key.pubkey()],
+        vec![TrampolineHopPayload::Final {
+            final_amount: 1000,
+            final_tlc_expiry_delta: 40,
+            payment_preimage: None,
+            custom_records: None,
+        }],
+        None,
+        SECP256K1,
+    )
+    .expect("create trampoline onion")
+    .as_bytes()
+    .len();
+    let packet_data_len = packet_len - 1 - 33 - 32;
+
+    let mut sphinx_packet = fiber_sphinx::OnionPacket::create(
+        session_key.into(),
+        vec![hop_key.pubkey().into()],
+        vec![modified_payload.as_bytes().to_vec()],
+        None,
+        packet_data_len,
+        SECP256K1,
+    )
+    .expect("create raw sphinx onion");
+    sphinx_packet.version = ONION_PACKET_VERSION_V1;
+
+    let result =
+        TrampolineOnionPacket::new(sphinx_packet.into_bytes()).peel(&hop_key, None, SECP256K1);
+
+    assert!(matches!(result, Err(OnionPacketError::InvalidHopData)));
+}
+
+fn trampoline_forward_payload_with_hash_algorithm_byte(
+    hash_algorithm: u8,
+) -> molecule_fiber::TrampolineHopPayload {
+    let forward_payload = TrampolineHopPayload::Forward {
+        next_node_id: gen_rand_fiber_public_key(),
+        amount_to_forward: 1000,
+        hash_algorithm: HashAlgorithm::Sha256,
+        build_max_fee_amount: 100,
+        tlc_expiry_delta: 40,
+        tlc_expiry_limit: 80,
+        max_parts: Some(1),
+    };
+    let payload = molecule_fiber::TrampolineHopPayload::from(forward_payload);
+    let molecule_fiber::TrampolineHopPayloadUnion::TrampolineForwardPayload(forward) =
+        payload.to_enum()
+    else {
+        panic!("expected forward payload");
+    };
+
+    let modified_forward = forward
+        .as_builder()
+        .hash_algorithm(Byte::new(hash_algorithm))
+        .build();
+    molecule_fiber::TrampolineHopPayload::new_builder()
+        .set(modified_forward)
+        .build()
 }
 
 #[test]

@@ -114,5 +114,6 @@ The tool opens the RocksDB store at `<dir>/store` automatically.
 
 * [Public Nodes User Manual](docs/public-nodes.md)
 * [Fiber Network Nodes](docs/network-nodes.md)
+* [Fiber WSS Configuration Manual](docs/fiber-node-wss.md)
 
 [fiber-scripts]: https://github.com/nervosnetwork/fiber-scripts

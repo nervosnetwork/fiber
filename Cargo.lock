@@ -2332,6 +2332,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-sphinx"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "827476eed3d2915d79c9809e71a7089f44cde5d9a4fa7c7045cd0f2d5e56fb95"
+dependencies = [
+ "chacha20",
+ "hmac 0.12.1",
+ "secp256k1 0.30.0",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "fiber-store"
 version = "0.9.0-rc2"
 dependencies = [
@@ -2367,7 +2380,7 @@ dependencies = [
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-sphinx",
+ "fiber-sphinx 2.3.0",
  "getrandom 0.2.17",
  "hex",
  "molecule",
@@ -2402,7 +2415,7 @@ dependencies = [
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-sphinx",
+ "fiber-sphinx 3.0.0",
  "getrandom 0.2.17",
  "hex",
  "lightning-invoice",
@@ -2439,7 +2452,7 @@ dependencies = [
  "ckb-hash",
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-sphinx",
+ "fiber-sphinx 2.3.0",
  "getrandom 0.2.17",
  "hex",
  "molecule",
@@ -2564,7 +2577,7 @@ dependencies = [
  "criterion",
  "either",
  "fiber-json-types",
- "fiber-sphinx",
+ "fiber-sphinx 3.0.0",
  "fiber-store",
  "fiber-types 0.9.0-rc2",
  "futures",
@@ -2603,7 +2616,7 @@ dependencies = [
  "tonic 0.11.0",
  "torut",
  "tower 0.5.3",
- "tower-http 0.6.10",
+ "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -5444,7 +5457,7 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tower 0.5.3",
- "tower-http 0.6.10",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -5949,9 +5962,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "itoa",
  "memchr",
@@ -7020,9 +7033,9 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.6.10"
+version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68d6fdd9f81c2819c9a8b0e0cd91660e7746a8e6ea2ba7c6b2b057985f6bcb51"
+checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
  "bitflags 2.11.1",
  "bytes",

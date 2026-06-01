@@ -865,15 +865,20 @@ impl FundingTx {
         }
         // Peer SHOULD NOT add inputs locked by our lock scripts
         let ckb_client = new_ckb_rpc_async_client(&context.rpc_url);
-        for input in remote_tx.input_pts_iter().skip(local_tx.inputs().len()) {
+        for (input_index, input) in remote_tx
+            .input_pts_iter()
+            .enumerate()
+            .skip(local_tx.inputs().len())
+        {
             match ckb_client.get_live_cell(input.into(), false).await?.cell {
                 Some(cell) => {
                     let cell_output_lock: packed::Script = cell.output.lock.into();
                     if cell_output_lock == context.funding_source_lock_script {
                         debug!(
-                            "invalid funding tx (inputs): peer uses inputs with our lock script"
+                            "invalid funding tx (inputs): peer uses input #{} with our lock script",
+                            input_index
                         );
-                        return Err(FundingError::InvalidPeerFundingTx);
+                        return Err(FundingError::PeerInputUsesOurFundingLock { input_index });
                     }
                 }
                 None => {

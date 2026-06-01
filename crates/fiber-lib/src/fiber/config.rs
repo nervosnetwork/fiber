@@ -1,3 +1,4 @@
+use crate::fiber::gossip_policy::GossipPolicyConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::fiber::KeyPair;
 #[cfg(not(target_arch = "wasm32"))]
@@ -280,6 +281,13 @@ pub struct FiberConfig {
     )]
     pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
 
+    /// Gossip policy configuration. This is loaded from config files only and is intentionally
+    /// not configurable via command-line flags or environment variables.
+    #[arg(skip)]
+    #[serde(default)]
+    #[default(GossipPolicyConfig::default())]
+    pub(crate) gossip_policy: GossipPolicyConfig,
+
     /// Gossip network num targeted active syncing peers. [default: None]
     /// This is the number of peers to target for active syncing. This is the number of peers that we will
     /// send GetBroadcastMessages message to obtain the gossip messages that we missed during the time we
@@ -355,12 +363,12 @@ pub struct FiberConfig {
     #[arg(skip)]
     pub wasm_key_pair: Option<KeyPair>,
 
-    /// Max allowed number of channels to be accepted from one peer. [default: 20]
+    /// Max allowed number of pending channel openings from one peer. [default: 20]
     #[arg(
         name = "FIBER_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT",
         long = "fiber-to-be-accepted-channels-number-limit",
         env,
-        help = "Max allowed number of channels to be accepted from one peer. [default: 20]"
+        help = "Max allowed number of pending channel openings from one peer. [default: 20]"
     )]
     pub to_be_accepted_channels_number_limit: Option<usize>,
 
@@ -372,6 +380,15 @@ pub struct FiberConfig {
         help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
     )]
     pub to_be_accepted_channels_bytes_limit: Option<usize>,
+
+    /// Max allowed number of pending channel openings globally. [default: 100]
+    #[arg(
+        name = "FIBER_PENDING_CHANNELS_NUMBER_LIMIT",
+        long = "fiber-pending-channels-number-limit",
+        env,
+        help = "Max allowed number of pending channel openings globally. [default: 100]"
+    )]
+    pub pending_channels_number_limit: Option<usize>,
 
     /// Default timeout to auto close a funding channel. [default: 1 day]
     #[arg(

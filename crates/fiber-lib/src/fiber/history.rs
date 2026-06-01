@@ -7,7 +7,7 @@ use super::graph::NetworkGraphStateStore;
 use crate::mock_timestamp_as_millis_u64;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::OutPoint;
-use fiber_types::{ChannelUpdate, Pubkey, SessionRouteNode, TlcErr, TlcErrorCode};
+use fiber_types::{ChannelUpdate, Pubkey, SessionRouteNode, TlcErr, TlcErrData, TlcErrorCode};
 pub use fiber_types::{Direction, TimedResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -165,8 +165,19 @@ impl InternalResult {
     }
 
     pub fn record_payment_fail(&mut self, nodes: &[SessionRouteNode], tlc_err: TlcErr) -> bool {
-        let mut need_retry = true;
+        if let Some(TlcErrData::TrampolineFailed { node_id, .. }) = &tlc_err.extra_data {
+            error!(
+                "Payment failed beyond trampoline node: error_code={:?} trampoline_node={:?} route={:?}",
+                tlc_err.error_code, node_id, nodes
+            );
+            // The payer can decode the trampoline failure wrapper, but the inner route was chosen
+            // by the trampoline node and is not represented in this payment route. Do not penalize
+            // the visible route. Use the wrapped error code only to decide whether the payer may
+            // try another trampoline route.
+            return false;
+        }
 
+        let mut need_retry = true;
         let error_index = nodes
             .iter()
             .position(|s| Some(s.pubkey) == tlc_err.error_node_id());

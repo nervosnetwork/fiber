@@ -10,7 +10,7 @@ use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::TrampolineOnionPacket;
 use crate::fiber::{
     ChannelAnnouncement, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, FeatureVector,
-    Hash256, NodeAnnouncement, Privkey, Pubkey, RouterHop, SendPaymentData, SessionRoute,
+    Hash256, HopHint, NodeAnnouncement, Privkey, Pubkey, RouterHop, SendPaymentData, SessionRoute,
 };
 use crate::store::Store;
 use ckb_types::{
@@ -408,6 +408,47 @@ fn test_graph_find_path_three_nodes() {
     // Test route from node 3 to node 1 (should fail)
     let route = network.find_path(3, 1, 100, 1000);
     assert!(route.is_err());
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_find_path_with_private_hop_hint() {
+    let mut network = MockNetworkGraph::new(3);
+    network.add_edge(1, 2, Some(500), Some(0));
+
+    let source = network.keys[1];
+    let hint_node = network.keys[2];
+    let target = network.keys[3];
+    let private_channel_outpoint = OutPoint::from_slice(&[0x42; 36]).unwrap();
+    let hop_hints = vec![HopHint {
+        pubkey: hint_node.into(),
+        channel_outpoint: private_channel_outpoint.clone(),
+        fee_rate: 0,
+        tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+    }];
+
+    let route = network
+        .graph
+        .find_path(
+            source.into(),
+            target.into(),
+            Some(100),
+            Some(1000),
+            None,
+            FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+            false,
+            &hop_hints,
+            &Default::default(),
+            true,
+        )
+        .expect("private hop hint should be routable");
+
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].target, hint_node.into());
+    assert_eq!(route[0].channel_outpoint, network.edges[0].2);
+    assert_eq!(route[1].target, target.into());
+    assert_eq!(route[1].channel_outpoint, private_channel_outpoint);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

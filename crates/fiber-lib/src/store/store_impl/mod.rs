@@ -59,6 +59,27 @@ pub struct Store {
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
 }
 
+#[cfg(feature = "watchtower")]
+#[derive(Clone, Copy)]
+enum WatchtowerPreimageCleanupTarget<'a> {
+    Exact(&'a Hash256),
+    ExactSet(&'a HashSet<Hash256>),
+    TlcPaymentHash(&'a [u8; 20]),
+}
+
+#[cfg(feature = "watchtower")]
+impl WatchtowerPreimageCleanupTarget<'_> {
+    fn matches(self, payment_hash: &Hash256) -> bool {
+        match self {
+            WatchtowerPreimageCleanupTarget::Exact(target) => payment_hash == target,
+            WatchtowerPreimageCleanupTarget::ExactSet(targets) => targets.contains(payment_hash),
+            WatchtowerPreimageCleanupTarget::TlcPaymentHash(target) => {
+                payment_hash.as_ref()[..20] == target[..]
+            }
+        }
+    }
+}
+
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
@@ -544,6 +565,143 @@ impl StoreKeyValue for KeyValue {
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchOrder(_, cch_order) => serialize_to_vec(cch_order, "CchOrder"),
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
+        }
+    }
+}
+
+#[cfg(feature = "watchtower")]
+impl Store {
+    fn watchtower_preimage_key(node_id: &NodeId, payment_hash: &Hash256) -> Vec<u8> {
+        [
+            &[WATCHTOWER_PREIMAGE_PREFIX],
+            payment_hash.as_ref(),
+            node_id.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn watchtower_node_payment_hash_key(node_id: &NodeId, payment_hash: &Hash256) -> Vec<u8> {
+        [
+            &[WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
+            node_id.as_ref(),
+            payment_hash.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn parse_watchtower_scoped_payment_hash_key(key: &[u8]) -> Option<(NodeId, Hash256)> {
+        if key.len() < 1 + 32 {
+            return None;
+        }
+        let payment_hash_offset = key.len() - 32;
+        let payment_hash: [u8; 32] = key[payment_hash_offset..].try_into().ok()?;
+        Some((
+            NodeId::from_bytes(key[1..payment_hash_offset].to_vec()),
+            payment_hash.into(),
+        ))
+    }
+
+    fn parse_watchtower_channel_key(key: &[u8]) -> Option<(NodeId, Hash256)> {
+        if key.len() < 1 + 32 {
+            return None;
+        }
+        let channel_id_offset = key.len() - 32;
+        let channel_id: [u8; 32] = key[channel_id_offset..].try_into().ok()?;
+        Some((
+            NodeId::from_bytes(key[1..channel_id_offset].to_vec()),
+            channel_id.into(),
+        ))
+    }
+
+    fn watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
+        self.collect_by_prefix(&[WATCHTOWER_CHANNEL_PREFIX])
+            .into_iter()
+            .filter_map(|kv| {
+                let (channel_node_id, _) = Self::parse_watchtower_channel_key(&kv.key)?;
+                (channel_node_id == *node_id)
+                    .then(|| deserialize_from(kv.value.as_ref(), "ChannelData"))
+            })
+            .collect()
+    }
+
+    fn watch_channel_needs_preimage(
+        &self,
+        channel_data: &ChannelData,
+        payment_hash: &Hash256,
+    ) -> bool {
+        if self.is_tlc_settled(&channel_data.channel_id, payment_hash) {
+            return false;
+        }
+
+        [
+            &channel_data.remote_settlement_data,
+            &channel_data.pending_remote_settlement_data,
+            &channel_data.local_settlement_data,
+        ]
+        .into_iter()
+        .any(|settlement_data| {
+            settlement_data
+                .tlcs
+                .iter()
+                .any(|tlc| &tlc.payment_hash == payment_hash)
+        })
+    }
+
+    fn watch_channel_payment_hashes(channel_data: &ChannelData) -> HashSet<Hash256> {
+        [
+            &channel_data.remote_settlement_data,
+            &channel_data.pending_remote_settlement_data,
+            &channel_data.local_settlement_data,
+        ]
+        .into_iter()
+        .flat_map(|settlement_data| settlement_data.tlcs.iter().map(|tlc| tlc.payment_hash))
+        .collect()
+    }
+
+    fn watch_preimage_in_use(&self, node_id: &NodeId, payment_hash: &Hash256) -> bool {
+        self.watch_channels_for_node(node_id)
+            .iter()
+            .any(|channel_data| self.watch_channel_needs_preimage(channel_data, payment_hash))
+    }
+
+    fn watch_preimage_entries(&self, node_id: Option<&NodeId>) -> Vec<(NodeId, Hash256)> {
+        self.collect_by_prefix(&[WATCHTOWER_NODE_PAYMENTHASH_PREFIX])
+            .into_iter()
+            .filter_map(|kv| Self::parse_watchtower_scoped_payment_hash_key(&kv.key))
+            .filter(|(preimage_node_id, _)| {
+                node_id.is_none_or(|node_id| preimage_node_id == node_id)
+            })
+            .collect()
+    }
+
+    fn cleanup_unused_watch_preimages(
+        &self,
+        node_id: Option<&NodeId>,
+        target: WatchtowerPreimageCleanupTarget<'_>,
+    ) {
+        let preimages = self.watch_preimage_entries(node_id);
+        if preimages.is_empty() {
+            return;
+        }
+
+        let mut batch = self.batch();
+        let mut has_change = false;
+        for (node_id, payment_hash) in preimages {
+            if !target.matches(&payment_hash) {
+                continue;
+            }
+
+            if !self.watch_preimage_in_use(&node_id, &payment_hash) {
+                batch.delete(Self::watchtower_preimage_key(&node_id, &payment_hash));
+                batch.delete(Self::watchtower_node_payment_hash_key(
+                    &node_id,
+                    &payment_hash,
+                ));
+                has_change = true;
+            }
+        }
+        if has_change {
+            batch.commit();
         }
     }
 }
@@ -1238,7 +1396,16 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        let payment_hashes = self
+            .get(key.clone())
+            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+            .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
+            .unwrap_or_default();
         self.delete(key);
+        self.cleanup_unused_watch_preimages(
+            Some(&node_id),
+            WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
+        );
     }
 
     fn update_revocation(
@@ -1325,24 +1492,10 @@ impl WatchtowerStore for Store {
     }
 
     fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256) {
-        let mut batch = self.batch();
-        batch.delete(
-            [
-                &[WATCHTOWER_PREIMAGE_PREFIX],
-                payment_hash.as_ref(),
-                node_id.as_ref(),
-            ]
-            .concat(),
+        self.cleanup_unused_watch_preimages(
+            Some(&node_id),
+            WatchtowerPreimageCleanupTarget::Exact(&payment_hash),
         );
-        batch.delete(
-            [
-                &[WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
-                node_id.as_ref(),
-                payment_hash.as_ref(),
-            ]
-            .concat(),
-        );
-        batch.commit();
     }
 
     fn get_watch_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
@@ -1372,6 +1525,10 @@ impl WatchtowerStore for Store {
         .concat();
         batch.put(key, []);
         batch.commit();
+        self.cleanup_unused_watch_preimages(
+            None,
+            WatchtowerPreimageCleanupTarget::TlcPaymentHash(&payment_hash),
+        );
     }
 }
 

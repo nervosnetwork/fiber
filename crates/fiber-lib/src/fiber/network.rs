@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
@@ -107,7 +107,7 @@ use fiber_types::{
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
     RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos,
+    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -255,26 +255,38 @@ fn compute_peer_reconnect_delay(attempt: u32) -> Duration {
 
 /// The index of active channels for each peer.
 /// Note we maintain peer to channel index no matter the peer is connected or not.
+#[derive(Clone, Default)]
 pub struct PeerChannelIndex {
+    inner: Arc<StdRwLock<PeerChannelIndexState>>,
+}
+
+#[derive(Default)]
+struct PeerChannelIndexState {
     // Map from peer pubkey to the set of active channel ids
     peer_channels_map: HashMap<Pubkey, HashSet<Hash256>>,
     // Map from peer id to pubkey, used for dialing with peer id and maintaining peer reconnect backoff.
     peer_id_to_pubkey_map: HashMap<PeerId, Pubkey>,
     // Map from channel id to peer pubkey.
     channel_id_to_peer_map: HashMap<Hash256, Pubkey>,
+    // Channel actors that have been accepted/created but have not reached ChannelReady yet.
+    opening_channels: HashSet<Hash256>,
 }
 
-impl PeerChannelIndex {
+impl PeerChannelIndexState {
     fn build<S>(store: &S) -> Self
     where
         S: ChannelActorStateStore,
     {
         let mut peer_channels_map = HashMap::<Pubkey, HashSet<Hash256>>::new();
-        for (pubkey, channel_id, _channel_state) in store.get_active_channel_states(None) {
+        let mut opening_channels = HashSet::new();
+        for (pubkey, channel_id, channel_state) in store.get_active_channel_states(None) {
             peer_channels_map
                 .entry(pubkey)
                 .or_default()
                 .insert(channel_id);
+            if is_pending_channel_state(&channel_state) {
+                opening_channels.insert(channel_id);
+            }
         }
         let peer_id_to_pubkey_map = peer_channels_map
             .keys()
@@ -295,68 +307,156 @@ impl PeerChannelIndex {
             peer_channels_map,
             peer_id_to_pubkey_map,
             channel_id_to_peer_map,
+            opening_channels,
+        }
+    }
+}
+
+impl PeerChannelIndex {
+    pub(crate) fn build<S>(store: &S) -> Self
+    where
+        S: ChannelActorStateStore,
+    {
+        Self {
+            inner: Arc::new(StdRwLock::new(PeerChannelIndexState::build(store))),
         }
     }
 
-    fn add_channel(&mut self, pubkey: Pubkey, channel_id: Hash256) {
-        self.peer_channels_map
+    pub(crate) fn add_channel(&self, pubkey: Pubkey, channel_id: Hash256) {
+        let mut state = self.inner.write().expect("peer channel index write lock");
+        state
+            .peer_channels_map
             .entry(pubkey)
             .or_default()
             .insert(channel_id);
         let peer_id = pubkey_to_tentacle(pubkey).peer_id();
-        self.peer_id_to_pubkey_map.entry(peer_id).or_insert(pubkey);
-        self.channel_id_to_peer_map
+        state.peer_id_to_pubkey_map.entry(peer_id).or_insert(pubkey);
+        state
+            .channel_id_to_peer_map
             .entry(channel_id)
             .or_insert(pubkey);
     }
 
-    fn remove_channel(&mut self, pubkey: &Pubkey, channel_id: &Hash256) {
+    pub(crate) fn remove_channel(&self, pubkey: &Pubkey, channel_id: &Hash256) {
+        let mut state = self.inner.write().expect("peer channel index write lock");
         let mut is_empty = false;
-        if let Some(channels) = self.peer_channels_map.get_mut(pubkey) {
+        if let Some(channels) = state.peer_channels_map.get_mut(pubkey) {
             channels.remove(channel_id);
             if channels.is_empty() {
                 is_empty = true;
             }
         }
-        self.channel_id_to_peer_map.remove(channel_id);
+        state.channel_id_to_peer_map.remove(channel_id);
+        state.opening_channels.remove(channel_id);
         if is_empty {
             let peer_id = pubkey_to_tentacle(*pubkey).peer_id();
-            self.peer_channels_map.remove(pubkey);
-            self.peer_id_to_pubkey_map.remove(&peer_id);
+            state.peer_channels_map.remove(pubkey);
+            state.peer_id_to_pubkey_map.remove(&peer_id);
         }
     }
 
-    fn has_channels(&self, pubkey: &Pubkey) -> bool {
-        self.peer_channels_map.contains_key(pubkey)
+    pub(crate) fn has_channels(&self, pubkey: &Pubkey) -> bool {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .peer_channels_map
+            .contains_key(pubkey)
     }
 
-    fn has_channel(&self, pubkey: &Pubkey, channel_id: &Hash256) -> bool {
-        self.peer_channels_map
+    pub(crate) fn has_channel(&self, pubkey: &Pubkey, channel_id: &Hash256) -> bool {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .peer_channels_map
             .get(pubkey)
             .map(|channels| channels.contains(channel_id))
             .unwrap_or(false)
     }
 
-    fn get_channels(&self, pubkey: &Pubkey) -> Option<&HashSet<Hash256>> {
-        self.peer_channels_map.get(pubkey)
+    pub(crate) fn get_channels(&self, pubkey: &Pubkey) -> Option<HashSet<Hash256>> {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .peer_channels_map
+            .get(pubkey)
+            .cloned()
     }
 
-    fn replace_channel(&mut self, pubkey: Pubkey, old: Hash256, new: Hash256) {
-        if let Some(channels) = self.peer_channels_map.get_mut(&pubkey) {
+    pub(crate) fn replace_channel(&self, pubkey: Pubkey, old: Hash256, new: Hash256) {
+        let mut state = self.inner.write().expect("peer channel index write lock");
+        if let Some(channels) = state.peer_channels_map.get_mut(&pubkey) {
             channels.remove(&old);
             channels.insert(new);
-            self.channel_id_to_peer_map.remove(&old);
-            self.channel_id_to_peer_map.insert(new, pubkey);
+            state.channel_id_to_peer_map.remove(&old);
+            state.channel_id_to_peer_map.insert(new, pubkey);
+            if state.opening_channels.remove(&old) {
+                state.opening_channels.insert(new);
+            }
         }
     }
 
-    fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
-        self.peer_id_to_pubkey_map.get(peer_id).cloned()
+    pub(crate) fn mark_channel_opening(&self, channel_id: Hash256) {
+        self.inner
+            .write()
+            .expect("peer channel index write lock")
+            .opening_channels
+            .insert(channel_id);
     }
 
-    fn get_peer_by_channel_id(&self, channel_id: &Hash256) -> Option<Pubkey> {
-        self.channel_id_to_peer_map.get(channel_id).cloned()
+    pub(crate) fn mark_channel_ready(&self, channel_id: &Hash256) {
+        self.inner
+            .write()
+            .expect("peer channel index write lock")
+            .opening_channels
+            .remove(channel_id);
     }
+
+    pub(crate) fn opening_channel_count(&self) -> usize {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .opening_channels
+            .len()
+    }
+
+    pub(crate) fn opening_channel_count_by_peer(&self, pubkey: &Pubkey) -> usize {
+        let state = self.inner.read().expect("peer channel index read lock");
+        state.peer_channels_map.get(pubkey).map_or(0, |channels| {
+            channels
+                .iter()
+                .filter(|channel_id| state.opening_channels.contains(channel_id))
+                .count()
+        })
+    }
+
+    pub(crate) fn get_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .peer_id_to_pubkey_map
+            .get(peer_id)
+            .cloned()
+    }
+
+    pub(crate) fn get_peer_by_channel_id(&self, channel_id: &Hash256) -> Option<Pubkey> {
+        self.inner
+            .read()
+            .expect("peer channel index read lock")
+            .channel_id_to_peer_map
+            .get(channel_id)
+            .cloned()
+    }
+}
+
+fn is_pending_channel_state(state: &ChannelState) -> bool {
+    matches!(
+        state,
+        ChannelState::NegotiatingFunding(_)
+            | ChannelState::CollaboratingFundingTx(_)
+            | ChannelState::SigningCommitment(_)
+            | ChannelState::AwaitingTxSignatures(_)
+            | ChannelState::AwaitingChannelReady(_)
+    )
 }
 
 #[derive(Debug)]
@@ -367,6 +467,8 @@ pub enum PeerDisconnectReason {
     InitMessageTimeout,
     /// Chain hash mismatch.
     ChainHashMismatch,
+    /// Gossip peer temporarily banned.
+    Banned,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -883,7 +985,7 @@ pub enum NetworkActorEvent {
     ChannelActorStopped(Hash256, StopReason),
 
     // A payment actor stopped event.
-    PaymentActorStopped(Hash256),
+    PaymentActorStopped(Hash256, Option<TlcErrPacket>),
 
     // Channel settlement check completed - channel is fully settled on-chain.
     ChannelSettlementCompleted(Hash256),
@@ -1334,6 +1436,7 @@ where
                     "Channel ({:?}) to peer {:?} is now ready",
                     channel_id, pubkey
                 );
+                state.peer_channel_index.mark_channel_ready(&channel_id);
 
                 // Mark the opening record as ChannelReady (terminal success state).
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
@@ -1510,9 +1613,10 @@ where
                 // If the channel failed before reaching ChannelReady, mark the opening record as Failed.
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
                     if record.status != ChannelOpeningStatus::ChannelReady {
-                        let failure_detail = match reason {
+                        let failure_detail = match &reason {
                             StopReason::Abandon => "Channel was abandoned".to_string(),
                             StopReason::AbortFunding => "Funding transaction aborted".to_string(),
+                            StopReason::AbortFundingWithDetail(detail) => detail.clone(),
                             StopReason::PeerDisConnected => {
                                 "Peer disconnected during channel opening".to_string()
                             }
@@ -1520,14 +1624,20 @@ where
                                 "Channel closed before becoming ready".to_string()
                             }
                         };
-                        record.fail(failure_detail);
+                        if record.failure_detail.is_none() {
+                            record.fail(failure_detail);
+                        } else {
+                            record.update_status(ChannelOpeningStatus::Failed);
+                        }
                         state.store.insert_channel_open_record(record);
                     }
                 }
                 state.on_channel_actor_stopped(channel_id, reason).await;
             }
-            NetworkActorEvent::PaymentActorStopped(payment_hash) => {
-                state.on_payment_actor_stopped(payment_hash).await;
+            NetworkActorEvent::PaymentActorStopped(payment_hash, last_error_packet) => {
+                state
+                    .on_payment_actor_stopped(payment_hash, last_error_packet)
+                    .await;
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
                 if let Some(channel_actor) = state.channels.get(&channel_id) {
@@ -3139,10 +3249,17 @@ where
                 state.get_public_key(),
             ));
         }
+        let Some(prev_tlc) = previous_tlc else {
+            error!("Trampoline forwarding rejected: missing previous TLC");
+            return Err(TlcErr::new_node_fail(
+                TlcErrorCode::InvalidOnionPayload,
+                state.get_public_key(),
+            ));
+        };
         let trampoline_packet = TrampolineOnionPacket::new(trampoline_bytes.to_vec());
         let prev_channel_state = self
             .store
-            .get_channel_actor_state(&previous_tlc.expect("got previous tlc").prev_channel_id)
+            .get_channel_actor_state(&prev_tlc.prev_channel_id)
             .ok_or_else(|| {
                 TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
             })?;
@@ -3184,8 +3301,8 @@ where
                     ));
                 }
 
-                let (Some(remaining_trampoline_onion), Some(prev_tlc)) =
-                    (peeled_trampoline.next.map(|p| p.into_bytes()), previous_tlc)
+                let Some(remaining_trampoline_onion) =
+                    peeled_trampoline.next.map(|p| p.into_bytes())
                 else {
                     return Err(TlcErr::new_node_fail(
                         TlcErrorCode::InvalidOnionPayload,
@@ -3745,6 +3862,7 @@ pub struct NetworkActorState<S, C> {
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // The default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
+    pending_channels_number_limit: usize,
     // The default expiry delta to forward tlcs.
     tlc_expiry_delta: u64,
     // The default tlc min and max value of tlcs to be accepted.
@@ -4401,6 +4519,34 @@ where
             .is_some_and(|peer| self.peer_session_map.contains_key(&peer))
     }
 
+    fn check_pending_channel_limit(&self, peer_pubkey: Pubkey) -> ProcessingChannelResult {
+        let global_limit = self.pending_channels_number_limit;
+        let total_count = self.peer_channel_index.opening_channel_count()
+            + self.to_be_accepted_channels.map.len();
+
+        if total_count.saturating_add(1) > global_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Global pending channel count exceeds the limit {global_limit}"),
+            ));
+        }
+
+        let peer_limit = self.to_be_accepted_channels.total_number_limit;
+        let peer_count = self
+            .peer_channel_index
+            .opening_channel_count_by_peer(&peer_pubkey)
+            + self
+                .to_be_accepted_channels
+                .pending_accept_count(&peer_pubkey);
+
+        if peer_count.saturating_add(1) > peer_limit {
+            return Err(ProcessingChannelError::ToBeAcceptedChannelsExceedLimit(
+                format!("Peer pending channel count exceeds the limit {peer_limit}"),
+            ));
+        }
+
+        Ok(())
+    }
+
     fn check_feature_compatibility(&self, pubkey: &Pubkey) -> ProcessingChannelResult {
         if let Some(peer_features) = self
             .peer_session_map
@@ -4824,7 +4970,11 @@ where
                             let _ = rpc_reply.send(Ok(()));
                             Ok(())
                         }
-                        None => Err(Error::ChannelNotFound(channel_id)),
+                        None => {
+                            let error = Error::ChannelNotFound(channel_id);
+                            let _ = rpc_reply.send(Err(error.to_string()));
+                            Err(error)
+                        }
                     }
                 }
             }
@@ -4958,6 +5108,9 @@ where
         if let Some(outpoint) = channel_actor_state.get_funding_transaction_outpoint() {
             self.outpoint_channel_map.insert(outpoint, channel_id);
         }
+        if is_pending_channel_state(&channel_actor_state.state) {
+            self.peer_channel_index.mark_channel_opening(channel_id);
+        }
         debug!("channel {:x} restored offline successfully", &channel_id);
 
         Ok(channel)
@@ -5076,7 +5229,7 @@ where
         self.peer_session_map.remove(&pubkey);
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
             for channel_id in channel_ids {
-                if let Some(channel) = self.channels.get(channel_id) {
+                if let Some(channel) = self.channels.get(&channel_id) {
                     if let Err(err) = channel
                         .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected))
                     {
@@ -5170,6 +5323,7 @@ where
         actor: ActorRef<ChannelActorMessage>,
     ) {
         self.register_channel_actor(id, pubkey, actor);
+        self.peer_channel_index.mark_channel_opening(id);
         debug!("Channel {:x} created", &id);
         // Notify outside observers.
         self.network
@@ -5283,7 +5437,7 @@ where
             let _ = reply.send(Err(err));
         }
 
-        if reason == StopReason::Abandon || reason == StopReason::AbortFunding {
+        if reason == StopReason::Abandon || reason.is_abort_funding() {
             if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
                 // remove from transaction track actor
                 if let Some(funding_tx) = channel_actor_state.funding_tx.as_ref() {
@@ -5358,7 +5512,7 @@ where
             )));
         }
         debug_event!(_myself, "PeerInit");
-        if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey).cloned() {
+        if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey) {
             for channel_id in channels {
                 if let Err(e) = self.reestablish_channel(channel_id).await {
                     error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
@@ -5386,6 +5540,9 @@ where
             open_channel.max_tlc_number_in_flight,
         )
         .and_then(|_| {
+            if !self.to_be_accepted_channels.map.contains_key(&id) {
+                self.check_pending_channel_limit(peer_pubkey)?;
+            }
             self.to_be_accepted_channels
                 .try_insert(id, peer_pubkey, open_channel)
         });
@@ -5474,7 +5631,11 @@ where
         .await;
     }
 
-    async fn on_payment_actor_stopped(&mut self, payment_hash: Hash256) {
+    async fn on_payment_actor_stopped(
+        &mut self,
+        payment_hash: Hash256,
+        last_error_packet: Option<TlcErrPacket>,
+    ) {
         debug!("Payment actor stopped {payment_hash}");
         if self.inflight_payments.remove(&payment_hash).is_none() {
             error!("Can't find inflight payment actor");
@@ -5528,14 +5689,24 @@ where
                     for prev_tlc in &context.previous_tlcs {
                         let (send, _recv) = oneshot::channel();
                         let rpc_reply = RpcReplyPort::from(send);
-                        let shared_secret = prev_tlc.shared_secret.unwrap_or([0u8; 32]);
+                        let shared_secret = prev_tlc.shared_secret.unwrap_or(NO_SHARED_SECRET);
+                        let inner_error_packet = last_error_packet
+                            .as_ref()
+                            .map(|packet| packet.onion_packet.clone())
+                            .unwrap_or_else(|| {
+                                TlcErrPacket::new(TlcErr::new(error_code), &NO_SHARED_SECRET)
+                                    .onion_packet
+                            });
+                        let wrapper_packet = TlcErrPacket::new_trampoline_failed(
+                            error_code,
+                            self.get_public_key(),
+                            inner_error_packet,
+                            &shared_secret,
+                        );
                         let command = ChannelCommand::RemoveTlc(
                             RemoveTlcCommand {
                                 id: prev_tlc.prev_tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    TlcErr::new(error_code),
-                                    &shared_secret,
-                                )),
+                                reason: RemoveTlcReason::RemoveTlcFail(wrapper_packet),
                             },
                             rpc_reply,
                         );
@@ -5682,6 +5853,7 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = NetworkServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
+        let peer_channel_index = PeerChannelIndex::build(&self.store);
 
         // Conditionally start GossipService based on sync_network_graph config
         let (gossip_actor, gossip_handle_opt) = if config.sync_network_graph() {
@@ -5692,6 +5864,8 @@ where
                 self.store.clone(),
                 self.chain_actor.clone(),
                 self.chain_client.clone(),
+                Some(myself.clone()),
+                peer_channel_index.clone(),
                 myself.get_cell(),
             )
             .await;
@@ -5919,7 +6093,6 @@ where
 
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
-        let peer_channel_index = PeerChannelIndex::build(&self.store);
 
         let mut state = NetworkActorState {
             store: self.store.clone(),
@@ -5949,6 +6122,9 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
+            pending_channels_number_limit: config
+                .pending_channels_number_limit
+                .unwrap_or(DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT),
             tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
@@ -6383,8 +6559,10 @@ impl Default for ToBeAcceptedChannels {
 
 // Remember to sync fiber/config.rs
 const DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT: usize = 20;
+// Remember to sync fiber/config.rs. 50KB.
+const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200;
 // Remember to sync fiber/config.rs
-const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200; // 50KB
+const DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT: usize = 100;
 
 impl ToBeAcceptedChannels {
     fn new_with_config(config: &FiberConfig) -> Self {
@@ -6401,6 +6579,13 @@ impl ToBeAcceptedChannels {
 
     fn remove(&mut self, id: &Hash256) -> Option<(Pubkey, OpenChannel)> {
         self.map.remove(id)
+    }
+
+    fn pending_accept_count(&self, pubkey: &Pubkey) -> usize {
+        self.map
+            .values()
+            .filter(|(saved_pubkey, _)| saved_pubkey == pubkey)
+            .count()
     }
 
     // insert and apply throttle control

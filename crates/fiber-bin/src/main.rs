@@ -611,7 +611,6 @@ fn forward_event_to_actor(
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
         NetworkServiceEvent::PreimageRemoved(payment_hash) => {
-            // ignore, the store of channel actor already has removed the preimage
             watchtower_actor
                 .send_message(WatchtowerMessage::RemovePreimage(payment_hash))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);

@@ -31,8 +31,8 @@ pub use fiber_types::SendPaymentData;
 use fiber_types::{
     Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, PaymentCustomRecords,
     PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey, RemoveTlcReason,
-    RouterHop, TlcErr, TlcErrData, TlcErrorCode, TrampolineContext, DEFAULT_MAX_PARTS,
-    DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
+    RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineContext,
+    DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
@@ -766,6 +766,7 @@ pub enum PaymentActorMessage {
 pub struct PaymentActorState {
     payment_hash: Hash256,
     init_command: Option<PaymentActorMessage>,
+    last_error_packet: Option<TlcErrPacket>,
 
     // the number of pending retrying send payments, we track it for
     // set retry delay dynamically, pending too many payments may have a negative impact
@@ -783,6 +784,7 @@ impl PaymentActorState {
         Self {
             payment_hash,
             init_command: Some(init_command),
+            last_error_packet: None,
             retry_send_payment_count: 0,
         }
     }
@@ -852,7 +854,10 @@ where
         debug!("Payment actor is stopped {:?}", myself.get_name());
         self.network
             .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::PaymentActorStopped(state.payment_hash),
+                NetworkActorEvent::PaymentActorStopped(
+                    state.payment_hash,
+                    state.last_error_packet.clone(),
+                ),
             ))
             .map_err(Into::into)
     }
@@ -1236,7 +1241,14 @@ where
             match build_route_result {
                 Err(e) => {
                     error!("build_payment_routes failed to build route: {}", e);
-                    let error = format!("Failed to build route, {}", e);
+                    let error = if session.request.trampoline_context.is_some() {
+                        session
+                            .last_error_code
+                            .get_or_insert(TlcErrorCode::TemporaryNodeFailure);
+                        TlcErrorCode::TemporaryNodeFailure.as_ref().to_string()
+                    } else {
+                        format!("Failed to build route, {}", e)
+                    };
                     return Err(Error::SendPaymentError(error));
                 }
                 Ok(mut hops) => {
@@ -1382,7 +1394,7 @@ where
                 cur_max_fee, local_fee
             );
             return Err(Error::SendPaymentError(
-                "Trampoline forwarding fee insufficient".to_string(),
+                TlcErrorCode::FeeInsufficient.as_ref().to_string(),
             ));
         }
         *max_fee = Some(cur_max_fee - local_fee);
@@ -1394,18 +1406,18 @@ where
         session: &mut PaymentSession,
         attempt: &mut Attempt,
     ) -> Result<(), Error> {
-        let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
         assert_ne!(attempt.route_hops[0].funding_tx_hash, Hash256::default());
 
-        attempt.session_key.copy_from_slice(session_key.as_ref());
-
-        let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
-            session_key,
+        let peeled_onion_packet = match PeeledPaymentOnionPacket::create_with_session_key_fn(
+            || Privkey::from_slice(KeyPair::generate_random_key().as_ref()),
             attempt.route_hops.clone(),
             Some(attempt.hash.as_ref().to_vec()),
             &Secp256k1::signing_only(),
         ) {
-            Ok(packet) => packet,
+            Ok((packet, session_key)) => {
+                attempt.session_key.copy_from_slice(session_key.as_ref());
+                packet
+            }
             Err(e) => {
                 let err = format!(
                     "Failed to create onion packet: {:?}, error: {:?}",
@@ -1743,12 +1755,13 @@ where
                     tlc_error.error_code.as_ref(),
                     need_to_retry
                 );
+                state.last_error_packet = Some(reason.clone());
 
                 self.set_attempt_fail_with_error(
                     &mut session,
                     &mut attempt,
                     Some(tlc_error.error_code),
-                    tlc_error.error_code.as_ref(),
+                    &tlc_error.to_string(),
                     need_to_retry,
                 );
 
