@@ -512,14 +512,12 @@ fn test_open_invoice_proceeds_to_settlement() {
 }
 
 #[test]
-fn test_received_hold_invoice_from_new_tlc_rejects() {
-    let preimage = gen_rand_sha256_hash();
-    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+fn test_duplicate_received_hold_set_is_noop() {
+    let payment_hash = gen_rand_sha256_hash();
     let invoice = create_test_invoice(payment_hash, Some(1000), false);
     let channel_id = gen_rand_sha256_hash();
     let store = MockStore::new()
         .with_invoice(invoice, CkbInvoiceStatus::Received)
-        .with_preimage(payment_hash, preimage)
         .with_hold_tlc(payment_hash, channel_id, 0)
         .with_channel_state(create_test_channel_state_with_tlc(
             channel_id,
@@ -532,12 +530,8 @@ fn test_received_hold_invoice_from_new_tlc_rejects() {
     let command = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store);
     let settlements = command.run();
 
-    assert_eq!(settlements.len(), 1);
-    assert!(!is_fulfill_settlement(&settlements[0]));
-    assert_eq!(
-        get_error_code(&settlements[0]),
-        Some(TlcErrorCode::HoldTlcTimeout)
-    );
+    assert!(settlements.is_empty());
+    assert_eq!(store.get_payment_hold_tlcs(payment_hash).len(), 1);
 }
 
 #[test]

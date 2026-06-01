@@ -1,3 +1,7 @@
+use crate::fiber::channel::{
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_TLC_NUMBER_IN_FLIGHT,
+    MIN_COMMITMENT_DELAY_EPOCHS,
+};
 use crate::fiber::network::get_chain_hash;
 use crate::{
     ckb::{
@@ -7,10 +11,7 @@ use crate::{
         CkbChainMessage, CkbTxTracingResult,
     },
     fiber::{
-        channel::{
-            DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MIN_COMMITMENT_DELAY_EPOCHS,
-            SYS_MAX_TLC_NUMBER_IN_FLIGHT,
-        },
+        config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
@@ -456,7 +457,15 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
 async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce_disabled() {
     init_tracing();
 
-    let mut node1 = NetworkNode::new_with_node_name("node1").await;
+    let mut node1 = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("node1".to_string()))
+            .fiber_config_updater(|config| {
+                config.auto_announce_node = Some(false);
+            })
+            .build(),
+    )
+    .await;
     let mut node2 = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some("node2".to_string()))
@@ -506,14 +515,17 @@ async fn test_sync_historical_channel_announcement_on_startup_with_auto_announce
     wait_until_async_timeout(|| async { !node1.get_network_graph_channels().await.is_empty() })
         .await;
 
-    node1.connect_to(&mut node2).await;
     assert!(matches!(
         node2.submit_tx(tx.clone()).await,
         TxStatus::Committed(..)
     ));
 
-    wait_until_async_timeout(|| async { !node2.get_network_graph_channels().await.is_empty() })
-        .await;
+    node1.connect_to(&mut node2).await;
+
+    wait_until_async_timeout(|| async {
+        node2.get_network_graph_channel(&outpoint).await.is_some()
+    })
+    .await;
 
     let channels = node2.get_network_graph_channels().await;
     assert_eq!(channels.len(), 1);
@@ -2056,6 +2068,118 @@ async fn test_to_be_accepted_channels_number_limit() {
         .expect("peer alive")
         .expect("open channel");
     node.expect_debug_event("ChannelPendingToBeRejected").await;
+
+    let mut another_peer = NetworkNode::new().await;
+    node.connect_to(&mut another_peer).await;
+    open_channel_from_peer(&another_peer, node.pubkey, funding_amount).await;
+    node.expect_event(|event| match event {
+        NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _channel_id) => {
+            assert_eq!(pubkey, &another_peer.pubkey);
+            true
+        }
+        _ => false,
+    })
+    .await;
+}
+
+async fn open_channel_from_peer(peer: &NetworkNode, target_pubkey: Pubkey, funding_amount: u128) {
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: target_pubkey,
+                public: true,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    call!(peer.network_actor, message)
+        .expect("peer alive")
+        .expect("open channel");
+}
+
+async fn expect_channel_created(node: &mut NetworkNode, pubkey: Pubkey) {
+    node.expect_event(|event| {
+        matches!(
+            event,
+            NetworkServiceEvent::ChannelCreated(event_pubkey, _) if event_pubkey == &pubkey
+        )
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_auto_accept_pending_channels_global_number_limit() {
+    let funding_amount = 100_000_000_000u128;
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.pending_channels_number_limit = Some(2);
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+    let mut first_peer = NetworkNode::new().await;
+    let mut second_peer = NetworkNode::new().await;
+
+    first_peer.connect_to(&mut node).await;
+    second_peer.connect_to(&mut node).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&second_peer, node.pubkey, funding_amount).await;
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+}
+
+#[tokio::test]
+async fn test_auto_accept_pending_channels_peer_number_limit() {
+    let funding_amount = 100_000_000_000u128;
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.to_be_accepted_channels_number_limit = Some(2);
+                config.pending_channels_number_limit = Some(10);
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+    let mut first_peer = NetworkNode::new().await;
+    let mut second_peer = NetworkNode::new().await;
+
+    first_peer.connect_to(&mut node).await;
+    second_peer.connect_to(&mut node).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, first_peer.pubkey).await;
+
+    open_channel_from_peer(&first_peer, node.pubkey, funding_amount).await;
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+
+    open_channel_from_peer(&second_peer, node.pubkey, funding_amount).await;
+    expect_channel_created(&mut node, second_peer.pubkey).await;
 }
 
 #[tokio::test]
@@ -2080,7 +2204,7 @@ async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_a
         commitment_delay_epoch: EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1)
             .full_value(),
         max_tlc_value_in_flight: 0,
-        max_tlc_number_in_flight: SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+        max_tlc_number_in_flight: MAX_TLC_NUMBER_IN_FLIGHT,
         channel_flags: ChannelFlags::empty(),
         first_per_commitment_point: gen_rand_fiber_public_key(),
         second_per_commitment_point: gen_rand_fiber_public_key(),

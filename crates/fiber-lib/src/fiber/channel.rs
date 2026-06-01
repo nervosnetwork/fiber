@@ -297,7 +297,6 @@ pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
-pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
 pub const MAX_TLC_NUMBER_IN_FLIGHT: u64 = 125;
 
 #[derive(Debug)]
@@ -3575,6 +3574,7 @@ where
                     *commitment_fee_rate,
                     funding_udt_type_script,
                     shutdown_script,
+                    max_tlc_number_in_flight,
                     *remote_max_tlc_number_in_flight,
                 )?;
 
@@ -4189,7 +4189,9 @@ pub fn settlement_data_to_witness(
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
     let mut vec = Vec::new();
-    vec.push(data.tlcs.len() as u8);
+    let len =
+        u8::try_from(data.tlcs.len()).expect("TLC count exceeds witness encoding limit (max 255)");
+    vec.push(len);
     for tlc in &data.tlcs {
         vec.extend_from_slice(&settlement_tlc_to_witness(tlc, for_remote));
     }
@@ -5536,8 +5538,16 @@ impl ChannelActorState {
         commitment_fee_rate: u64,
         udt_type_script: &Option<Script>,
         remote_shutdown_script: &Script,
+        local_max_tlc_number_in_flight: u64,
         remote_max_tlc_number_in_flight: u64,
     ) -> ProcessingChannelResult {
+        if local_max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Local max TLC number in flight {} is greater than the system maximal value {}",
+                local_max_tlc_number_in_flight, MAX_TLC_NUMBER_IN_FLIGHT
+            )));
+        }
+
         if remote_max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Remote max TLC number in flight {} is greater than the system maximal value {}",
@@ -5614,6 +5624,7 @@ impl ChannelActorState {
             self.commitment_fee_rate,
             &self.funding_udt_type_script,
             &self.get_remote_shutdown_script(),
+            self.local_constraints.max_tlc_number_in_flight,
             self.remote_constraints.max_tlc_number_in_flight,
         )
     }
@@ -6922,12 +6933,14 @@ impl ChannelActorState {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
-            let active_offered_tls_number = (self.get_all_offer_tlcs().count() as u64)
-                .checked_add(1)
-                .ok_or(ProcessingChannelError::TlcNumberExceedLimit)?;
             // The remote peer's constraints are its advertised incoming TLC
             // limits, so they constrain TLCs we offer to it.
-            if active_offered_tls_number > self.remote_constraints.max_tlc_number_in_flight {
+            let active_offered_tls_number = self.get_all_offer_tlcs().count() as u64 + 1;
+            let max_offered_tlcs = self
+                .remote_constraints
+                .max_tlc_number_in_flight
+                .min(MAX_TLC_NUMBER_IN_FLIGHT);
+            if active_offered_tls_number > max_offered_tlcs {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
@@ -6957,7 +6970,11 @@ impl ChannelActorState {
                 .ok_or(ProcessingChannelError::TlcNumberExceedLimit)?;
             // Our local constraints are our advertised incoming TLC limits,
             // so they constrain TLCs the remote peer offers to us.
-            if active_received_tls_number > self.local_constraints.max_tlc_number_in_flight {
+            let max_received_tlcs = self
+                .local_constraints
+                .max_tlc_number_in_flight
+                .min(MAX_TLC_NUMBER_IN_FLIGHT);
+            if active_received_tls_number > max_received_tlcs {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
@@ -7166,6 +7183,7 @@ impl ChannelActorState {
             self.commitment_fee_rate,
             &self.funding_udt_type_script,
             &accept_channel.shutdown_script,
+            self.local_constraints.max_tlc_number_in_flight,
             accept_channel.max_tlc_number_in_flight,
         )?;
 

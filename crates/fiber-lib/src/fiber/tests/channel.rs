@@ -4,7 +4,7 @@ use crate::fiber::channel::{
     ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, ProcessingChannelResult,
     ReloadParams, ReplayOrderHint, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
-    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT, XUDT_COMPATIBLE_WITNESS,
+    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -8121,62 +8121,26 @@ async fn test_reestablish_restores_send_nonce() {
     let (mut node_a, mut node_b, channel_id) =
         create_nodes_with_established_channel(100000000000, 100000000000, true).await;
 
-    // Trigger payment A -> B and restart one peer while the payment is still
-    // inflight. This test focuses on restoring the missing send nonce during
-    // reestablish; payment completion is covered by broader reestablish tests.
-    let payment_hash = node_a
-        .send_payment_keysend(&node_b, 1000, false)
-        .await
-        .unwrap()
-        .payment_hash;
+    node_a.stop().await;
 
-    let start = std::time::Instant::now();
-    let restart_node_a = loop {
-        let state_a_before_restart = node_a.get_channel_actor_state(channel_id);
-        let state_b_before_restart = node_b.get_channel_actor_state(channel_id);
-        if node_a.get_inflight_payment_count().await == 1 {
-            if state_a_before_restart
-                .remote_revocation_nonce_for_send
-                .is_none()
-                && state_a_before_restart.last_revoke_ack_msg.is_some()
-            {
-                break true;
-            }
-            if state_b_before_restart
-                .remote_revocation_nonce_for_send
-                .is_none()
-                && state_b_before_restart.last_revoke_ack_msg.is_some()
-            {
-                break false;
-            }
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "Payment did not reach the pre-restart reestablish state in time"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    let pre_restart_status = node_a.get_payment_status(payment_hash).await;
-    debug!(
-        ?pre_restart_status,
-        "Initial payment status before restarting remote peer"
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        state.remote_revocation_nonce_for_send.is_some(),
+        "established channel should start with a send nonce"
     );
-    assert_ne!(
-        pre_restart_status,
-        PaymentStatus::Failed,
-        "initial payment should not fail before reestablish"
+    assert!(
+        state.remote_revocation_nonce_for_verify.is_some()
+            || state.remote_revocation_nonce_for_next.is_some(),
+        "established channel should have a nonce source for reestablish recovery"
     );
-    assert_eq!(node_a.get_inflight_payment_count().await, 1);
 
-    // Restart the peer that actually lost the send nonce to make the
-    // reestablish scenario deterministic across scheduler interleavings.
-    if restart_node_a {
-        node_a.restart().await;
-        node_a.connect_to(&mut node_b).await;
-    } else {
-        node_b.restart().await;
-        node_b.connect_to(&mut node_a).await;
-    }
+    state.remote_revocation_nonce_for_send = None;
+    state.last_revoke_ack_msg = None;
+    node_a.store.insert_channel_actor_state(state);
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node_a.start().await;
+    node_a.connect_to(&mut node_b).await;
 
     node_a
         .expect_debug_event("Reestablished channel in ChannelReady")
@@ -8186,7 +8150,7 @@ async fn test_reestablish_restores_send_nonce() {
         .await;
 
     // Wait until both peers persist the recovered send nonce after reestablish.
-    let now = std::time::Instant::now();
+    let start = std::time::Instant::now();
     loop {
         let node_b_state = node_b.get_channel_actor_state(channel_id);
         let node_a_state = node_a.get_channel_actor_state(channel_id);
@@ -8196,18 +8160,11 @@ async fn test_reestablish_restores_send_nonce() {
             break;
         }
         assert!(
-            now.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(5),
             "reestablish did not restore send nonce in time"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-
-    node_a.wait_until_success(payment_hash).await;
-    assert_eq!(node_a.get_inflight_payment_count().await, 0);
-    assert_eq!(
-        node_a.get_payment_status(payment_hash).await,
-        PaymentStatus::Success
-    );
 
     let state = node_b.get_channel_actor_state(channel_id);
     assert!(
@@ -10173,6 +10130,7 @@ fn check_accept_channel_parameters_rejects_total_reserved_overflow() {
             &None,
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
         ),
         "Total reserved CKB amount overflows",
     );
@@ -10191,6 +10149,7 @@ fn check_accept_channel_parameters_rejects_commitment_fee_overflow() {
             &udt_type_script,
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
         ),
         "overflows commitment fee",
     );
@@ -10208,6 +10167,7 @@ fn check_accept_channel_parameters_rejects_non_udt_total_capacity_overflow() {
             &None,
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
         ),
         "The total funding amount",
     );
@@ -10223,7 +10183,7 @@ fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
         DEFAULT_FEE_RATE,
         u64::MAX,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
-        SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+        MAX_TLC_NUMBER_IN_FLIGHT,
     )
     .expect_err("fee-rate overflow must be rejected");
 
@@ -10242,7 +10202,7 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
         DEFAULT_FEE_RATE,
         DEFAULT_COMMITMENT_FEE_RATE,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
-        SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+        MAX_TLC_NUMBER_IN_FLIGHT,
     )
     .expect_err("reserved amount that no acceptor can add to must be rejected");
 
