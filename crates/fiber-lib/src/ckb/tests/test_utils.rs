@@ -408,7 +408,7 @@ impl Actor for MockChainActor {
                     return Ok(());
                 }
 
-                let outputs = match outputs.get(0) {
+                let (outputs, outputs_data): (packed::CellOutputVec, packed::BytesVec) = match outputs.get(0) {
                     Some(output) => {
                         if output.lock() != request.script {
                             error!(
@@ -424,11 +424,19 @@ impl Actor for MockChainActor {
                             let udt_output = packed::CellOutput::new_builder()
                                 .capacity(Capacity::shannons(ckb_amount).pack())
                                 .type_(Some(udt_script.clone()).pack())
+                                .lock(request.script.clone())
                                 .build();
 
                             let mut outputs_builder = outputs.as_builder();
                             outputs_builder.replace(0, udt_output);
-                            outputs_builder.build()
+                            let outputs: packed::CellOutputVec = outputs_builder.build();
+
+                            let udt_amount = request.local_amount + request.remote_amount;
+                            let mut data = BytesMut::with_capacity(16);
+                            data.put(&udt_amount.to_le_bytes()[..]);
+                            let outputs_data: packed::BytesVec = vec![data.freeze().pack()].pack();
+
+                            (outputs, outputs_data)
                         } else {
                             let current_capacity: u64 = output.capacity().unpack();
                             capacity += current_capacity as u128;
@@ -442,30 +450,52 @@ impl Actor for MockChainActor {
                             let mut outputs_builder = outputs.as_builder();
                             outputs_builder
                                 .replace(0, output.as_builder().capacity(capacity as u64).build());
-                            outputs_builder.build()
+                            let outputs: packed::CellOutputVec = outputs_builder.build();
+
+                            let outputs_data = fulfilled_tx
+                                .as_ref()
+                                .map(|x| x.outputs_data())
+                                .unwrap_or_default();
+                            let outputs_data: packed::BytesVec = if outputs_data.is_empty() {
+                                [Default::default()].pack()
+                            } else {
+                                outputs_data
+                            };
+
+                            (outputs, outputs_data)
                         }
                     }
-                    None => [CellOutput::new_builder()
-                        .capacity(request.local_amount as u64 + request.local_reserved_ckb_amount)
-                        .lock(request.script.clone())
-                        .build()]
-                    .pack(),
-                };
+                    None => {
+                        if let Some(ref udt_script) = request.udt_type_script {
+                            let outputs: packed::CellOutputVec = [CellOutput::new_builder()
+                                .capacity(
+                                    Capacity::shannons(request.local_reserved_ckb_amount).pack(),
+                                )
+                                .lock(request.script.clone())
+                                .type_(Some(udt_script.clone()).pack())
+                                .build()]
+                            .pack();
 
-                let outputs_data = if let Some(ref _udt_script) = request.udt_type_script {
-                    let udt_amount = request.local_amount + request.remote_amount;
-                    let mut data = BytesMut::with_capacity(16);
-                    data.put(&udt_amount.to_le_bytes()[..]);
-                    vec![data.freeze().pack()].pack()
-                } else {
-                    let outputs_data = fulfilled_tx
-                        .as_ref()
-                        .map(|x| x.outputs_data())
-                        .unwrap_or_default();
-                    if outputs_data.is_empty() {
-                        [Default::default()].pack()
-                    } else {
-                        outputs_data
+                            let udt_amount = request.local_amount;
+                            let mut data = BytesMut::with_capacity(16);
+                            data.put(&udt_amount.to_le_bytes()[..]);
+                            let outputs_data: packed::BytesVec = vec![data.freeze().pack()].pack();
+
+                            (outputs, outputs_data)
+                        } else {
+                            let outputs: packed::CellOutputVec = [CellOutput::new_builder()
+                                .capacity(
+                                    request.local_amount as u64
+                                        + request.local_reserved_ckb_amount,
+                                )
+                                .lock(request.script.clone())
+                                .build()]
+                            .pack();
+
+                            let outputs_data: packed::BytesVec = [Default::default()].pack();
+
+                            (outputs, outputs_data)
+                        }
                     }
                 };
 
@@ -545,10 +575,26 @@ impl Actor for MockChainActor {
                         }
                     }
 
+                    // If the transaction has no inputs, it's a funding transaction.
+                    // Skip script verification since the type script on the output
+                    // will be verified when it is consumed later.
+                    let has_inputs = !tx.inputs().is_empty();
                     let context = &mut MOCK_CONTEXT.write().unwrap().context;
-                    match context.verify_tx(&tx, MAX_CYCLES) {
-                        Ok(c) => {
-                            debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
+                    let verify_result = if has_inputs {
+                        context.verify_tx(&tx, MAX_CYCLES).map(|c| Some(c))
+                    } else {
+                        Ok(None)
+                    };
+                    match verify_result {
+                        Ok(cycles) => {
+                            if let Some(c) = cycles {
+                                debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
+                            } else {
+                                debug!(
+                                    "Funding transaction {:?} committed without script verification",
+                                    tx
+                                );
+                            }
                             // Also save the outputs to the context, so that we can refer to
                             // these out points later.
                             for outpoint in tx.output_pts().into_iter() {
