@@ -79,7 +79,10 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("send_btc", r#"allow if write("cch");"#);
     b.rule("receive_btc", r#"allow if write("cch");"#);
     b.rule("get_cch_order", r#"allow if read("cch");"#);
-    b.rule("subscribe_store_changes", r#"allow if read("cch");"#);
+    b.rule(
+        "subscribe_store_changes",
+        r#"allow if internal("store_changes");"#,
+    );
     // channels
     b.rule("open_channel", r#"allow if write("channels");"#);
     b.rule("accept_channel", r#"allow if write("channels");"#);
@@ -324,19 +327,34 @@ mod tests {
         .unwrap()
         .to_base64()
         .unwrap();
+        let internal_token = biscuit!(
+            r#"
+          internal("store_changes");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
 
         assert!(auth.check_permission("get_cch_order", &read_token).is_ok());
         assert!(auth
             .check_permission("subscribe_store_changes", &read_token)
-            .is_ok());
+            .is_err());
         assert!(auth.check_permission("send_btc", &read_token).is_err());
         assert!(auth.check_permission("receive_btc", &read_token).is_err());
 
         assert!(auth.check_permission("send_btc", &write_token).is_ok());
         assert!(auth.check_permission("receive_btc", &write_token).is_ok());
         assert!(auth
+            .check_permission("subscribe_store_changes", &write_token)
+            .is_err());
+        assert!(auth
             .check_permission("get_cch_order", &write_token)
             .is_err());
+        assert!(auth
+            .check_permission("subscribe_store_changes", &internal_token)
+            .is_ok());
     }
 
     #[test]
