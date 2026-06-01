@@ -5476,6 +5476,13 @@ impl ChannelActorState {
             )));
         }
 
+        if self.local_constraints.max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Local max TLC number in flight {} is greater than the system maximal value {}",
+                self.local_constraints.max_tlc_number_in_flight, MAX_TLC_NUMBER_IN_FLIGHT
+            )));
+        }
+
         let udt_type_script = &self.funding_udt_type_script;
 
         if udt_type_script.is_some() {
@@ -6735,7 +6742,11 @@ impl ChannelActorState {
             // The remote peer's constraints are its advertised incoming TLC
             // limits, so they constrain TLCs we offer to it.
             let active_offered_tls_number = self.get_all_offer_tlcs().count() as u64 + 1;
-            if active_offered_tls_number > self.remote_constraints.max_tlc_number_in_flight {
+            let max_offered_tlcs = self
+                .remote_constraints
+                .max_tlc_number_in_flight
+                .min(MAX_TLC_NUMBER_IN_FLIGHT);
+            if active_offered_tls_number > max_offered_tlcs {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
@@ -6756,7 +6767,11 @@ impl ChannelActorState {
             // Our local constraints are our advertised incoming TLC limits,
             // so they constrain TLCs the remote peer offers to us.
             let active_received_tls_number = self.get_all_received_tlcs().count() as u64 + 1;
-            if active_received_tls_number > self.local_constraints.max_tlc_number_in_flight {
+            let max_received_tlcs = self
+                .local_constraints
+                .max_tlc_number_in_flight
+                .min(MAX_TLC_NUMBER_IN_FLIGHT);
+            if active_received_tls_number > max_received_tlcs {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
