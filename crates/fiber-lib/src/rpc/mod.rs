@@ -1,4 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
+pub mod admin;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod biscuit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cch;
@@ -25,14 +27,14 @@ pub mod server {
     use crate::fiber::gossip::GossipMessageStore;
     #[cfg(feature = "watchtower")]
     use crate::invoice::PreimageStore;
+    use crate::rpc::admin::{AdminRpcServer, AdminRpcServerImpl};
     use crate::rpc::cch::{CchRpcServer, CchRpcServerImpl};
     use crate::rpc::channel::{ChannelRpcServer, ChannelRpcServerImpl};
     pub use crate::rpc::config::RpcConfig;
     #[cfg(debug_assertions)]
     use crate::rpc::dev::{DevRpcServer, DevRpcServerImpl};
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
-    use crate::rpc::info::InfoRpcServer;
-    use crate::rpc::info::InfoRpcServerImpl;
+    use crate::rpc::info::{InfoRpcServer, InfoRpcServerImpl};
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
     use crate::rpc::middleware::BiscuitAuthMiddleware;
     use crate::rpc::payment::PaymentRpcServer;
@@ -323,7 +325,6 @@ pub mod server {
                     .merge(
                         InfoRpcServerImpl::new(
                             network_actor.clone(),
-                            store_actor,
                             ckb_config.clone().expect("ckb config should be set"),
                         )
                         .into_rpc(),
@@ -376,6 +377,12 @@ pub mod server {
                         )
                         .into_rpc(),
                     )
+                    .unwrap();
+            }
+
+            if config.is_module_enabled("admin") {
+                modules
+                    .merge(AdminRpcServerImpl::new(store_actor).into_rpc())
                     .unwrap();
             }
 

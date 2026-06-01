@@ -302,11 +302,7 @@ pub async fn fiber(
         .set(WrappedFiberWasm {
             channel: ChannelRpcServerImpl::new(network_actor.clone(), store.clone()),
             graph: GraphRpcServerImpl::new(network_graph.clone(), store.clone()),
-            info: InfoRpcServerImpl::new(
-                network_actor.clone(),
-                None,
-                config.ckb.unwrap_or_default(),
-            ),
+            info: InfoRpcServerImpl::new(network_actor.clone(), config.ckb.unwrap_or_default()),
             invoice: InvoiceRpcServerImpl::new(
                 store.clone(),
                 Some(network_actor.clone()),

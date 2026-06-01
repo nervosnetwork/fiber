@@ -6,25 +6,18 @@ use ckb_jsonrpc_types::Script;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
-pub use fiber_json_types::NodeInfoResult;
 use ractor::{call, ActorRef};
 
-use crate::store::actor::StoreActorMessage;
+pub use fiber_json_types::NodeInfoResult;
 
 pub struct InfoRpcServerImpl {
     actor: ActorRef<NetworkActorMessage>,
-    #[allow(unused)]
-    store_actor: Option<ActorRef<StoreActorMessage>>,
     default_funding_lock_script: Script,
 }
 
 impl InfoRpcServerImpl {
     #[allow(unused_variables)]
-    pub fn new(
-        actor: ActorRef<NetworkActorMessage>,
-        store_actor: Option<ActorRef<StoreActorMessage>>,
-        config: CkbConfig,
-    ) -> Self {
+    pub fn new(actor: ActorRef<NetworkActorMessage>, config: CkbConfig) -> Self {
         #[cfg(not(test))]
         let default_funding_lock_script = config
             .get_default_funding_lock_script()
@@ -38,7 +31,6 @@ impl InfoRpcServerImpl {
 
         InfoRpcServerImpl {
             actor,
-            store_actor,
             default_funding_lock_script,
         }
     }
@@ -51,10 +43,6 @@ trait InfoRpc {
     /// Get the node information.
     #[method(name = "node_info")]
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned>;
-
-    /// Backup the node information.
-    #[method(name = "backup_now")]
-    async fn backup_now(&self) -> Result<(), ErrorObjectOwned>;
 }
 
 #[async_trait::async_trait]
@@ -62,10 +50,6 @@ trait InfoRpc {
 impl InfoRpcServer for InfoRpcServerImpl {
     async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         self.node_info().await
-    }
-
-    async fn backup_now(&self) -> Result<(), ErrorObjectOwned> {
-        self.backup_now().await
     }
 }
 impl InfoRpcServerImpl {
@@ -96,14 +80,5 @@ impl InfoRpcServerImpl {
             peers_count: response.peers_count,
             udt_cfg_infos: response.udt_cfg_infos.into(),
         })
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub async fn backup_now(&self) -> Result<(), ErrorObjectOwned> {
-        if let Some(ref store_actor) = self.store_actor {
-            handle_actor_call!(store_actor, StoreActorMessage::ForceBackup, None::<()>)
-        } else {
-            log_and_error!(None::<()>, format!("Backup service is not initialized"))
-        }
     }
 }
