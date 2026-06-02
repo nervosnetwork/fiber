@@ -581,7 +581,7 @@ impl Actor for MockChainActor {
                         }
                     }
 
-                    // The inputs will always not empty for production enviornment, but it may empty for test enviornment,
+                    // The inputs will always not empty for production environment, but it may empty for test environment,
                     // `MockChainActor` only used in testing, so we skip VM verification for these synthetic transactions
                     let has_inputs = !tx.inputs().is_empty();
                     let context = &mut MOCK_CONTEXT.write().unwrap().context;
