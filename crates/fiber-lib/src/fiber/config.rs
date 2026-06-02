@@ -462,10 +462,14 @@ impl FiberConfig {
 
     pub fn create_base_dir(&self) -> Result<()> {
         if !self.base_dir().exists() {
-            fs::create_dir_all(self.base_dir()).map_err(Into::into)
-        } else {
-            Ok(())
+            fs::create_dir_all(self.base_dir())?;
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(self.base_dir(), fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -499,8 +503,16 @@ impl FiberConfig {
     pub fn store_path(&self) -> PathBuf {
         let path = self.base_dir().join("store");
         #[cfg(not(target_arch = "wasm32"))]
-        if !path.exists() {
-            fs::create_dir_all(&path).expect("create store directory");
+        {
+            if !path.exists() {
+                fs::create_dir_all(&path).expect("create store directory");
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
+            }
         }
         path
     }

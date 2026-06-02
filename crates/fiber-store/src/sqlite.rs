@@ -21,8 +21,20 @@ impl Store {
         // Ensure the directory exists
         std::fs::create_dir_all(path)
             .map_err(|e| format!("failed to create database directory: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        }
         let db_file = path.join("data.sqlite");
         let conn = Connection::open(&db_file).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&db_file, std::fs::Permissions::from_mode(0o600));
+        }
 
         // Configure SQLite for performance
         conn.execute_batch(
