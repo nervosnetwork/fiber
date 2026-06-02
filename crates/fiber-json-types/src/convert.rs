@@ -304,13 +304,29 @@ mod cch_conversions {
             crate::cch::CchOrderResponse {
                 timestamp: order.created_at,
                 expiry_delta_seconds: order.expiry_delta_seconds,
-                wrapped_btc_type_script: order.wrapped_btc_type_script,
-                incoming_invoice: JsonCchInvoice::from(order.incoming_invoice),
+                fiber_type_script: order.fiber_type_script,
+                incoming_invoice: order.incoming_invoice.into(),
                 outgoing_pay_req: order.outgoing_pay_req,
                 payment_hash: order.payment_hash.into(),
-                amount_sats: order.amount_sats,
-                fee_sats: order.fee_sats,
+                lightning_invoice_amount: order.lightning_invoice_amount,
+                btc_fee_msat: order.btc_fee_msat,
+                fiber_invoice_amount: order.fiber_invoice_amount,
                 status: order.status.into(),
+            }
+        }
+    }
+
+    // ─── NewOrderResult → CchNewOrderResponse Conversion ───────────────────
+
+    impl From<fiber_types::NewOrderResult> for crate::cch::CchNewOrderResponse {
+        fn from(result: fiber_types::NewOrderResult) -> Self {
+            match result {
+                fiber_types::NewOrderResult::Order(order) => {
+                    crate::cch::CchNewOrderResponse::Order(order.into())
+                }
+                fiber_types::NewOrderResult::PendingProposal(proposal) => {
+                    crate::cch::CchNewOrderResponse::PendingProposal(proposal.into())
+                }
             }
         }
     }
@@ -322,6 +338,62 @@ mod cch_conversions {
                 fiber_types::CchInvoice::Lightning(inv) => {
                     JsonCchInvoice::Lightning(inv.to_string())
                 }
+            }
+        }
+    }
+
+    // ─── SwapDirection / SwapProposal / SwapProposalResponse Conversions ────
+
+    use crate::cch::{
+        SubmitSwapProposalResponseParams as JsonSubmitSwapProposalResponseParams,
+        SwapDirection as JsonSwapDirection, SwapProposal as JsonSwapProposal,
+    };
+
+    impl From<fiber_types::SwapDirection> for JsonSwapDirection {
+        fn from(direction: fiber_types::SwapDirection) -> Self {
+            match direction {
+                fiber_types::SwapDirection::SendBTC => JsonSwapDirection::SendBTC,
+                fiber_types::SwapDirection::ReceiveBTC => JsonSwapDirection::ReceiveBTC,
+            }
+        }
+    }
+
+    impl From<JsonSwapDirection> for fiber_types::SwapDirection {
+        fn from(direction: JsonSwapDirection) -> Self {
+            match direction {
+                JsonSwapDirection::SendBTC => fiber_types::SwapDirection::SendBTC,
+                JsonSwapDirection::ReceiveBTC => fiber_types::SwapDirection::ReceiveBTC,
+            }
+        }
+    }
+
+    impl From<fiber_types::SwapProposal> for JsonSwapProposal {
+        fn from(proposal: fiber_types::SwapProposal) -> Self {
+            JsonSwapProposal {
+                proposal_id: proposal.proposal_id.into(),
+                order_id: proposal.order_id.into(),
+                direction: proposal.direction.into(),
+                payment_hash: proposal.payment_hash.into(),
+                fiber_asset: proposal.fiber_asset,
+                fiber_invoice_amount: proposal.fiber_invoice_amount,
+                lightning_invoice_amount: proposal.lightning_invoice_amount,
+                configured_fee_rate_per_million_sats: proposal.configured_fee_rate_per_million_sats,
+                configured_base_fee_sats: proposal.configured_base_fee_sats,
+                fee_on_btc_side_msat: proposal.fee_on_btc_side_msat,
+                submitted_invoice: proposal.submitted_invoice,
+                expires_at: proposal.expires_at,
+                created_at: proposal.created_at,
+            }
+        }
+    }
+
+    impl From<JsonSubmitSwapProposalResponseParams> for fiber_types::SwapProposalResponse {
+        fn from(response: JsonSubmitSwapProposalResponseParams) -> Self {
+            fiber_types::SwapProposalResponse {
+                proposal_id: response.proposal_id.into(),
+                accept: response.accept,
+                counterparty_leg_amount: response.counterparty_leg_amount,
+                reject_reason: response.reject_reason,
             }
         }
     }

@@ -31,12 +31,12 @@ body:json {
 assert {
   res.status: eq 200
   res.body.error: isUndefined
-  res.body.result.incoming_invoice.Lightning: isDefined
+  res.body.result.Order.incoming_invoice.Lightning: isDefined
 }
 
 script:post-response {
-  bru.setVar("BTC_PAY_REQ", res.body.result.incoming_invoice.Lightning);
-  console.log(res.body.result.incoming_invoice.Lightning);
+  bru.setVar("BTC_PAY_REQ", res.body.result.Order.incoming_invoice.Lightning);
+  console.log(res.body.result.Order.incoming_invoice.Lightning);
 }
 
 docs {

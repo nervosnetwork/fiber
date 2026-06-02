@@ -1,6 +1,38 @@
 use std::path::PathBuf;
 
 use clap_serde_derive::ClapSerde;
+use serde::{Deserialize, Serialize};
+
+/// Identity of a Fiber-side asset accepted by the CCH.
+///
+/// `None` denotes the native CKB asset; `Some(script)` denotes a UDT identified
+/// by its full type script. This mirrors how Fiber invoices encode the asset
+/// (no `udt_script` attribute = native CKB, otherwise the UDT type script).
+pub type CchAsset = Option<ckb_jsonrpc_types::Script>;
+
+/// A Fiber asset for which the hub publishes a fixed exchange rate against
+/// satoshis, allowing the fast-path swap flow to mint the counterparty
+/// invoice immediately without operator intervention.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixedRateAsset {
+    /// The Fiber asset this rate applies to. `None` = native CKB.
+    #[serde(default)]
+    pub fiber_asset: CchAsset,
+    /// Exchange rate expressed as the number of Fiber-asset smallest units
+    /// (shannon for native CKB, or the UDT's smallest denomination) that one
+    /// satoshi buys. Must be > 0.
+    ///
+    /// Conversion formulas (Fiber-leg amount denominated in smallest units,
+    /// BTC-leg amount denominated in millisatoshi):
+    ///
+    /// * SendBTC fast path:    `fiber = btc_msat * rate / 1000`
+    /// * ReceiveBTC fast path: `btc_msat = fiber * 1000 / rate`
+    ///
+    /// A wrapped-BTC-style 1:1 mapping uses `rate = 1` (1 sat = 1 smallest
+    /// unit). Higher `rate` means MORE smallest units per sat, i.e. the
+    /// Fiber asset is LESS valuable per unit than BTC.
+    pub smallest_units_per_sat: u128,
+}
 
 /// Default cross-chain order relative expiry time in seconds.
 pub const DEFAULT_ORDER_EXPIRY_DELTA_SECONDS: u64 = 36 * 60 * 60; // 36 hours
@@ -50,14 +82,37 @@ pub struct CchConfig {
     )]
     pub lnd_macaroon_path: Option<String>,
 
-    // TODO: use hex type
+    /// Fiber assets the hub is willing to swap against BTC. Each entry is an
+    /// optional CKB type script: `null`/absent denotes native CKB, otherwise
+    /// the full UDT type script identifies the asset.
+    /// Only assets present in this list are accepted by `send_btc` and
+    /// `receive_btc`.
+    #[arg(skip)]
+    #[serde(default)]
+    pub fiber_asset_allowlist: Vec<CchAsset>,
+
+    /// Subset of allowlisted Fiber assets for which the hub publishes a fixed
+    /// satoshi-per-smallest-unit exchange rate. Orders involving these assets
+    /// take the fast path: the hub computes the counterparty leg amount from
+    /// the configured rate plus fees and accepts the order without any
+    /// out-of-band proposal step.
+    #[arg(skip)]
+    #[serde(default)]
+    pub fixed_rate_assets: Vec<FixedRateAsset>,
+
+    /// Timeout, in seconds, that the hub waits for an operator response to a
+    /// `SwapProposal` (proposal-path swaps only — see the swap acceptor
+    /// protocol). When the timeout elapses without a response, the proposal
+    /// is treated as rejected and the originating `send_btc` / `receive_btc`
+    /// call returns an error.
+    #[default(30)]
     #[arg(
-        name = "CCH_WRAPPED_BTC_TYPE_SCRIPT_ARGS",
-        long = "cch-wrapped-btc-type-script-args",
+        name = "CCH_SWAP_PROPOSAL_TIMEOUT_SECONDS",
+        long = "cch-swap-proposal-timeout-seconds",
         env,
-        help = "Wrapped BTC type script args. It must be a UDT with 8 decimal places."
+        help = "Seconds to wait for an operator SwapProposalResponse before auto-rejecting (default: 30)."
     )]
-    pub wrapped_btc_type_script_args: String,
+    pub swap_proposal_timeout_seconds: u64,
 
     /// Cross-chain order expiry time in seconds.
     #[default(DEFAULT_ORDER_EXPIRY_DELTA_SECONDS)]
@@ -152,54 +207,46 @@ pub struct CchConfig {
         help = "fiber endpoint, default is None. May be used to connect to an external fiber node with websocket and normal http jsonrpc support."
     )]
     pub fiber_rpc_url: Option<String>,
-
-    /// Full wrapped BTC type script as a JSON object, e.g.
-    /// `{"code_hash":"0x...", "hash_type":"type", "args":"0x..."}`.
-    /// Required when running CCH in standalone mode (without the Fiber/CKB services)
-    /// because the contracts context is not initialized.
-    /// When set, this takes precedence over constructing the script from the
-    /// contracts context with `wrapped_btc_type_script_args`.
-    #[default(None)]
-    #[arg(
-        name = "CCH_WRAPPED_BTC_TYPE_SCRIPT",
-        long = "cch-wrapped-btc-type-script",
-        env,
-        help = "Full wrapped BTC type script as JSON. Required in standalone mode where the contracts context is unavailable."
-    )]
-    pub wrapped_btc_type_script: Option<String>,
 }
 
 impl CchConfig {
     /// Validate that the config is usable for standalone mode (no Fiber/CKB services).
     ///
-    /// In standalone mode the contracts context is never initialized, so the
-    /// full wrapped BTC type script must be provided explicitly.
+    /// In standalone mode the contracts context is never initialized, so every
+    /// allowlisted UDT must already be specified via its full type script
+    /// (which is the only way to declare assets in the new config schema).
+    /// We therefore only need to check that at least one asset is allowlisted.
     /// Returns `Ok(())` on success, or an error string describing the problem.
     pub fn validate_standalone(&self) -> Result<(), String> {
-        match &self.wrapped_btc_type_script {
-            None => Err(
-                "CCH standalone mode requires `wrapped_btc_type_script` to be set \
-                 because the contracts context is not available"
+        if self.fiber_asset_allowlist.is_empty() {
+            return Err(
+                "CCH standalone mode requires `fiber_asset_allowlist` to contain \
+                 at least one asset (native CKB as `null`, or a UDT type script)"
                     .to_string(),
-            ),
-            Some(json_str) => {
-                serde_json::from_str::<ckb_jsonrpc_types::Script>(json_str).map_err(|e| {
-                    format!(
-                        "failed to parse `wrapped_btc_type_script` config as Script JSON: {}",
-                        e
-                    )
-                })?;
-                Ok(())
-            }
+            );
         }
+        Ok(())
     }
 
     /// Validate config values that must hold regardless of run mode.
     ///
-    /// Currently checks that `max_outgoing_fee_percentage` is within the valid
-    /// `1..=100` range so the outgoing payment fee budget is always a sane fraction
-    /// of the collected CCH fee.
+    /// Checks that:
+    /// - `fixed_rate_assets` do not have `smallest_units_per_sat = 0`, because
+    ///   the fast-path conversion formulas use it as a divisor and multiplier
+    ///   (see [`FixedRateAsset`]).
+    /// - `max_outgoing_fee_percentage` is within the valid `1..=100` range so
+    ///   the outgoing payment fee budget is always a sane fraction of the
+    ///   collected CCH fee.
     pub fn validate(&self) -> Result<(), String> {
+        for entry in &self.fixed_rate_assets {
+            if entry.smallest_units_per_sat == 0 {
+                return Err(format!(
+                    "fixed-rate asset {:?} has smallest_units_per_sat = 0; \
+                     must be a positive integer (see FixedRateAsset docs)",
+                    entry.fiber_asset
+                ));
+            }
+        }
         if !(1..=100).contains(&self.max_outgoing_fee_percentage) {
             return Err(format!(
                 "`max_outgoing_fee_percentage` must be between 1 and 100, got {}",

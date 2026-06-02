@@ -250,6 +250,17 @@ fn create_node_config(
     config["rpc"]["listening_addr"] = serde_yaml::Value::String(format!("127.0.0.1:{}", rpc_port));
     config["ckb"]["udt_whitelist"] = serde_yaml::to_value(udt_infos).unwrap();
 
+    // Patch placeholder `code_hash` values inside the cch section's
+    // `fiber_asset_allowlist` and `fixed_rate_assets` with the deployed
+    // SIMPLE_UDT data hash. The deployer yaml uses an all-zero code_hash as a
+    // sentinel because the real hash is only known after contract deployment.
+    if let Some(cch) = config.get_mut("cch") {
+        let (simple_udt_code_hash, _, _) = get_udt_info("SIMPLE_UDT");
+        let real_code_hash = format!("0x{:x}", simple_udt_code_hash);
+        let placeholder = "0x0000000000000000000000000000000000000000000000000000000000000000";
+        patch_cch_code_hashes(cch, placeholder, &real_code_hash);
+    }
+
     // Node 3 acts as a CCH node (in-process mode)
     if node_index == 3 {
         config["services"]
@@ -273,19 +284,6 @@ fn create_node_config(
             let target_rpc_port = node3_rpc_port.unwrap_or(21713 + 3);
             cch["fiber_rpc_url"] =
                 serde_yaml::Value::String(format!("http://127.0.0.1:{}", target_rpc_port));
-
-            // Standalone CCH needs the full wrapped BTC type script because
-            // the contracts context is not available without fiber/ckb services.
-            let wrapped_btc_args = cch["wrapped_btc_type_script_args"]
-                .as_str()
-                .expect("wrapped_btc_type_script_args must be set")
-                .to_string();
-            let (code_hash, _, _) = get_udt_info("SIMPLE_UDT");
-            let script_json = format!(
-                r#"{{"code_hash":"0x{:x}","hash_type":"data2","args":"{}"}}"#,
-                code_hash, wrapped_btc_args
-            );
-            cch["wrapped_btc_type_script"] = serde_yaml::Value::String(script_json);
         }
 
         // Only enable cch module in RPC
@@ -300,6 +298,29 @@ fn create_node_config(
     }
 
     config
+}
+
+/// Recursively walk a yaml subtree and replace any string value matching
+/// `placeholder` with `replacement`. Used by [`create_node_config`] to patch
+/// the sentinel `code_hash` values in the cch asset configuration with the
+/// real deployed contract hash.
+fn patch_cch_code_hashes(value: &mut serde_yaml::Value, placeholder: &str, replacement: &str) {
+    match value {
+        serde_yaml::Value::String(s) if s == placeholder => {
+            *s = replacement.to_string();
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq.iter_mut() {
+                patch_cch_code_hashes(item, placeholder, replacement);
+            }
+        }
+        serde_yaml::Value::Mapping(map) => {
+            for (_, v) in map.iter_mut() {
+                patch_cch_code_hashes(v, placeholder, replacement);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn write_node_config(

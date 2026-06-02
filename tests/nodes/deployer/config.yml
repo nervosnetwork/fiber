@@ -26,7 +26,25 @@ rpc:
 
 cch:
   ignore_startup_failure: true
-  wrapped_btc_type_script_args: "0x32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947"
+  # Disable hub fees so the cross-chain-hub e2e tests can assert exact
+  # post-swap channel balances. The default `fee_rate_per_million_sats: 1`
+  # combined with the SendBTC fast path's ceiling rounding adds 1 fiber
+  # unit per send_btc, which would skew the balance assertions.
+  base_fee_sats: 0
+  fee_rate_per_million_sats: 0
+  # `code_hash` placeholders below are replaced with the deployed SIMPLE_UDT
+  # data hash by `tests/deploy/udt-init`. Edit args/smallest_units_per_sat
+  # here if the test setup needs to change.
+  fiber_asset_allowlist:
+    - code_hash: "0x0000000000000000000000000000000000000000000000000000000000000000"
+      hash_type: data2
+      args: "0x32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947"
+  fixed_rate_assets:
+    - fiber_asset:
+        code_hash: "0x0000000000000000000000000000000000000000000000000000000000000000"
+        hash_type: data2
+        args: "0x32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947"
+      smallest_units_per_sat: 1
   lnd_cert_path: ../../../deploy/lnd-init/lnd-ingrid/tls.cert
 
 ckb:
