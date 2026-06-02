@@ -408,96 +408,102 @@ impl Actor for MockChainActor {
                     return Ok(());
                 }
 
-                let (outputs, outputs_data): (packed::CellOutputVec, packed::BytesVec) = match outputs.get(0) {
-                    Some(output) => {
-                        if output.lock() != request.script {
-                            error!(
+                let (outputs, outputs_data): (packed::CellOutputVec, packed::BytesVec) =
+                    match outputs.get(0) {
+                        Some(output) => {
+                            if output.lock() != request.script {
+                                error!(
                                     "funding request script ({:?}) does not match the first output lock script ({:?})", request.script, output.lock()
                                 );
-                            return Ok(());
-                        }
-                        ckb_amount = ckb_amount
-                            .checked_add(request.remote_reserved_ckb_amount)
-                            .expect("valid ckb amount");
-
-                        if let Some(ref udt_script) = request.udt_type_script {
-                            let udt_output = packed::CellOutput::new_builder()
-                                .capacity(Capacity::shannons(ckb_amount).pack())
-                                .type_(Some(udt_script.clone()).pack())
-                                .lock(request.script.clone())
-                                .build();
-
-                            let mut outputs_builder = outputs.as_builder();
-                            outputs_builder.replace(0, udt_output);
-                            let outputs: packed::CellOutputVec = outputs_builder.build();
-
-                            let udt_amount = request.local_amount + request.remote_amount;
-                            let mut data = BytesMut::with_capacity(16);
-                            data.put(&udt_amount.to_le_bytes()[..]);
-                            let outputs_data: packed::BytesVec = vec![data.freeze().pack()].pack();
-
-                            (outputs, outputs_data)
-                        } else {
-                            let current_capacity: u64 = output.capacity().unpack();
-                            capacity += current_capacity as u128;
-                            if capacity > u64::MAX as u128 {
-                                let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
-                                    TxBuilderError::Other(anyhow!("capacity overflow")),
-                                )));
                                 return Ok(());
                             }
+                            ckb_amount = ckb_amount
+                                .checked_add(request.remote_reserved_ckb_amount)
+                                .expect("valid ckb amount");
 
-                            let mut outputs_builder = outputs.as_builder();
-                            outputs_builder
-                                .replace(0, output.as_builder().capacity(capacity as u64).build());
-                            let outputs: packed::CellOutputVec = outputs_builder.build();
+                            if let Some(ref udt_script) = request.udt_type_script {
+                                let udt_output = packed::CellOutput::new_builder()
+                                    .capacity(Capacity::shannons(ckb_amount).pack())
+                                    .type_(Some(udt_script.clone()).pack())
+                                    .lock(request.script.clone())
+                                    .build();
 
-                            let outputs_data = fulfilled_tx
-                                .as_ref()
-                                .map(|x| x.outputs_data())
-                                .unwrap_or_default();
-                            let outputs_data: packed::BytesVec = if outputs_data.is_empty() {
-                                [Default::default()].pack()
+                                let mut outputs_builder = outputs.as_builder();
+                                outputs_builder.replace(0, udt_output);
+                                let outputs: packed::CellOutputVec = outputs_builder.build();
+
+                                let udt_amount = request.local_amount + request.remote_amount;
+                                let mut data = BytesMut::with_capacity(16);
+                                data.put(&udt_amount.to_le_bytes()[..]);
+                                let outputs_data: packed::BytesVec =
+                                    vec![data.freeze().pack()].pack();
+
+                                (outputs, outputs_data)
                             } else {
-                                outputs_data
-                            };
+                                let current_capacity: u64 = output.capacity().unpack();
+                                capacity += current_capacity as u128;
+                                if capacity > u64::MAX as u128 {
+                                    let _ = reply_port.send(Err(FundingError::CkbTxBuilderError(
+                                        TxBuilderError::Other(anyhow!("capacity overflow")),
+                                    )));
+                                    return Ok(());
+                                }
 
-                            (outputs, outputs_data)
+                                let mut outputs_builder = outputs.as_builder();
+                                outputs_builder.replace(
+                                    0,
+                                    output.as_builder().capacity(capacity as u64).build(),
+                                );
+                                let outputs: packed::CellOutputVec = outputs_builder.build();
+
+                                let outputs_data = fulfilled_tx
+                                    .as_ref()
+                                    .map(|x| x.outputs_data())
+                                    .unwrap_or_default();
+                                let outputs_data: packed::BytesVec = if outputs_data.is_empty() {
+                                    [Default::default()].pack()
+                                } else {
+                                    outputs_data
+                                };
+
+                                (outputs, outputs_data)
+                            }
                         }
-                    }
-                    None => {
-                        if let Some(ref udt_script) = request.udt_type_script {
-                            let outputs: packed::CellOutputVec = [CellOutput::new_builder()
-                                .capacity(
-                                    Capacity::shannons(request.local_reserved_ckb_amount).pack(),
-                                )
-                                .lock(request.script.clone())
-                                .type_(Some(udt_script.clone()).pack())
-                                .build()]
-                            .pack();
+                        None => {
+                            if let Some(ref udt_script) = request.udt_type_script {
+                                let outputs: packed::CellOutputVec = [CellOutput::new_builder()
+                                    .capacity(
+                                        Capacity::shannons(request.local_reserved_ckb_amount)
+                                            .pack(),
+                                    )
+                                    .lock(request.script.clone())
+                                    .type_(Some(udt_script.clone()).pack())
+                                    .build()]
+                                .pack();
 
-                            let udt_amount = request.local_amount;
-                            let mut data = BytesMut::with_capacity(16);
-                            data.put(&udt_amount.to_le_bytes()[..]);
-                            let outputs_data: packed::BytesVec = vec![data.freeze().pack()].pack();
+                                let udt_amount = request.local_amount;
+                                let mut data = BytesMut::with_capacity(16);
+                                data.put(&udt_amount.to_le_bytes()[..]);
+                                let outputs_data: packed::BytesVec =
+                                    vec![data.freeze().pack()].pack();
 
-                            (outputs, outputs_data)
-                        } else {
-                            let outputs: packed::CellOutputVec = [CellOutput::new_builder()
-                                .capacity(
-                                    request.local_amount as u64
-                                        + request.local_reserved_ckb_amount,
-                                )
-                                .lock(request.script.clone())
-                                .build()]
-                            .pack();
+                                (outputs, outputs_data)
+                            } else {
+                                let outputs: packed::CellOutputVec = [CellOutput::new_builder()
+                                    .capacity(
+                                        request.local_amount as u64
+                                            + request.local_reserved_ckb_amount,
+                                    )
+                                    .lock(request.script.clone())
+                                    .build()]
+                                .pack();
 
-                            let outputs_data: packed::BytesVec = [Default::default()].pack();
+                                let outputs_data: packed::BytesVec = [Default::default()].pack();
 
-                            (outputs, outputs_data)
+                                (outputs, outputs_data)
+                            }
                         }
-                    }
-                };
+                    };
 
                 let tx_builder = fulfilled_tx
                     .take()
@@ -581,7 +587,7 @@ impl Actor for MockChainActor {
                     let has_inputs = !tx.inputs().is_empty();
                     let context = &mut MOCK_CONTEXT.write().unwrap().context;
                     let verify_result = if has_inputs {
-                        context.verify_tx(&tx, MAX_CYCLES).map(|c| Some(c))
+                        context.verify_tx(&tx, MAX_CYCLES).map(Some)
                     } else {
                         Ok(None)
                     };

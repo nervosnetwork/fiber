@@ -143,10 +143,8 @@ impl Actor for CkbChainActor {
                     request.udt_type_script.is_some(),
                     tx.as_ref().is_some(),
                 );
-                let context = state.build_funding_context(
-                    request.script.clone(),
-                    request.udt_type_script.clone(),
-                );
+                let context = state
+                    .build_funding_context(request.script.clone(), request.udt_type_script.clone());
                 let result = match state.config.funding_tx_shell_builder_as_deref() {
                     None => {
                         tx.fulfill(request, context, &mut state.live_cells_exclusion_map)
@@ -224,10 +222,8 @@ impl Actor for CkbChainActor {
                     remote_tx_hash,
                 );
                 let mut funding_tx: FundingTx = local_tx.into();
-                let context = state.build_funding_context(
-                    funding_cell_lock_script,
-                    funding_udt_type_script,
-                );
+                let context =
+                    state.build_funding_context(funding_cell_lock_script, funding_udt_type_script);
                 let result = funding_tx
                     .update_for_peer(remote_tx.into_view(), context)
                     .await;
