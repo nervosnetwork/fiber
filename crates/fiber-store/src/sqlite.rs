@@ -24,16 +24,14 @@ impl Store {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
         }
         let db_file = path.join("data.sqlite");
         let conn = Connection::open(&db_file).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&db_file, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&db_file, std::fs::Permissions::from_mode(0o600));
         }
 
         // Configure SQLite for performance

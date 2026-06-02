@@ -510,8 +510,7 @@ impl FiberConfig {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
             }
         }
         path
