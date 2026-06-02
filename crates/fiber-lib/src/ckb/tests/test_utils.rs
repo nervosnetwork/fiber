@@ -581,9 +581,8 @@ impl Actor for MockChainActor {
                         }
                     }
 
-                    // If the transaction has no inputs, it's a funding transaction.
-                    // Skip script verification since the type script on the output
-                    // will be verified when it is consumed later.
+                    // The inputs will always not empty for production environment, but it may empty for test environment,
+                    // `MockChainActor` only used in testing, so we skip VM verification for these synthetic transactions
                     let has_inputs = !tx.inputs().is_empty();
                     let context = &mut MOCK_CONTEXT.write().unwrap().context;
                     let verify_result = if has_inputs {
