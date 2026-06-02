@@ -132,6 +132,23 @@ impl LiveCellsExclusionMap {
         self.map.remove(tx_hash);
     }
 
+    /// Move the exclusion entry for a funding tx that a peer replaced via `TxUpdate`.
+    ///
+    /// When the local node builds a funding tx, its inputs are reserved under that local tx
+    /// hash. A peer can answer with a verified `TxUpdate` that keeps those inputs but produces a
+    /// different tx hash, after which the channel persists only the new hash. Without moving the
+    /// entry here, the old hash lingers with `committed_block_number == None`, so `truncate`
+    /// keeps it forever and abort/timeout cleanup (which only removes the latest persisted hash)
+    /// never releases the reserved cells.
+    ///
+    /// The entry is only moved when one exists for `old_tx_hash`, preserving the previous
+    /// behavior for sides that never reserved local cells under `old_tx_hash`.
+    pub fn migrate_funding_tx(&mut self, old_tx_hash: &packed::Byte32, new_tx: &FundingTx) {
+        if self.map.remove(old_tx_hash).is_some() {
+            self.add_funding_tx(new_tx);
+        }
+    }
+
     pub fn apply(
         &self,
         collector: &mut dyn CellCollector,
@@ -1003,6 +1020,89 @@ mod tests {
             request,
             context,
         }
+    }
+
+    fn out_point(seed: u8, index: u32) -> packed::OutPoint {
+        packed::OutPoint::new(packed::Byte32::from_slice(&[seed; 32]).unwrap(), index)
+    }
+
+    fn funding_tx_with_inputs(out_points: &[packed::OutPoint]) -> FundingTx {
+        let inputs: Vec<CellInput> = out_points
+            .iter()
+            .map(|out_point| CellInput::new(out_point.clone(), 0))
+            .collect();
+        packed::Transaction::default()
+            .as_advanced_builder()
+            .set_inputs(inputs)
+            .build()
+            .into()
+    }
+
+    fn funding_tx_hash(funding_tx: &FundingTx) -> packed::Byte32 {
+        funding_tx.as_ref().expect("funding tx present").hash()
+    }
+
+    fn excluded_out_points(map: &LiveCellsExclusionMap) -> HashSet<packed::OutPoint> {
+        map.map
+            .values()
+            .flat_map(|exclusion| exclusion.input_out_points.iter().cloned())
+            .collect()
+    }
+
+    #[test]
+    fn test_exclusion_map_migrate_funding_tx_releases_stale_inputs() {
+        let mut map = LiveCellsExclusionMap::new();
+
+        // Local node builds tx0 and reserves its inputs.
+        let local_in_a = out_point(1, 0);
+        let local_in_b = out_point(2, 0);
+        let tx0 = funding_tx_with_inputs(&[local_in_a.clone(), local_in_b.clone()]);
+        map.add_funding_tx(&tx0);
+        let tx0_hash = funding_tx_hash(&tx0);
+        assert!(map.map.contains_key(&tx0_hash));
+
+        // Peer replies with a verified TxUpdate (tx1) that keeps the local inputs and adds a
+        // peer-side input. The verified tx hash differs from tx0.
+        let peer_in = out_point(3, 0);
+        let tx1 =
+            funding_tx_with_inputs(&[local_in_a.clone(), local_in_b.clone(), peer_in.clone()]);
+        let tx1_hash = funding_tx_hash(&tx1);
+        assert_ne!(tx0_hash, tx1_hash);
+
+        map.migrate_funding_tx(&tx0_hash, &tx1);
+
+        // The stale tx0 entry is gone and the reservation now follows the new tx1 hash.
+        assert!(!map.map.contains_key(&tx0_hash));
+        assert!(map.map.contains_key(&tx1_hash));
+        let excluded = excluded_out_points(&map);
+        assert!(excluded.contains(&local_in_a));
+        assert!(excluded.contains(&local_in_b));
+        assert!(excluded.contains(&peer_in));
+
+        // Peer aborts: cleanup removes only the persisted (tx1) hash.
+        map.remove(&tx1_hash);
+
+        // With migration the map is fully drained, so the previously reserved local inputs are
+        // released for future funding builds. Truncating at a high tip must not resurrect them.
+        map.truncate(u64::MAX);
+        assert!(map.map.is_empty());
+        let excluded = excluded_out_points(&map);
+        assert!(!excluded.contains(&local_in_a));
+        assert!(!excluded.contains(&local_in_b));
+    }
+
+    #[test]
+    fn test_exclusion_map_migrate_funding_tx_is_noop_when_absent() {
+        let mut map = LiveCellsExclusionMap::new();
+
+        // No prior local reservation (e.g. the side that never built a funding tx for these
+        // inputs). Migration must not introduce a new entry, preserving existing behavior.
+        let tx1 = funding_tx_with_inputs(&[out_point(7, 0)]);
+        let absent_hash = funding_tx_hash(&funding_tx_with_inputs(&[out_point(9, 0)]));
+
+        map.migrate_funding_tx(&absent_hash, &tx1);
+
+        assert!(map.map.is_empty());
     }
 
     #[test]
