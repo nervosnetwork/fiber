@@ -4,5 +4,7 @@ mod actor;
 mod config;
 #[cfg(test)]
 mod error;
+#[cfg(test)]
+mod fuding_tests;
 
 pub mod test_utils;
