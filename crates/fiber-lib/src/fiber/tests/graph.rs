@@ -857,6 +857,59 @@ fn test_graph_trampoline_routing_no_sender_precheck_to_final() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_routing_outer_route_fee_is_deducted_from_budget() {
+    init_tracing();
+
+    // Topology:
+    //   sender(A)=node1 --(public)--> relay(B)=node2 --(public)--> trampoline(C)=node3
+    //   final(D)=node4 is intentionally disconnected from the graph.
+    //
+    // The B->C forwarding fee must consume part of max_fee_amount before the remaining
+    // budget is allocated to the inner trampoline payload.
+    let mut network = MockNetworkGraph::new(4);
+    network.graph.set_add_rand_expiry_delta(false);
+
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let relay = network.keys[2];
+    let trampoline = network.keys[3];
+    let final_recipient = network.keys[4];
+
+    network.add_edge(1, 2, Some(10_000), Some(0));
+    network.add_edge(2, 3, Some(10_000), Some(10_000));
+
+    let final_amount: u128 = 1000;
+    let max_fee_amount: u128 = 20;
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(final_recipient.into(), final_amount, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .max_fee_amount(Some(max_fee_amount))
+            .trampoline_hops(Some(vec![trampoline.into()]))
+            .build()
+            .expect("valid payment_data")
+            .into();
+
+    let route = network
+        .graph
+        .build_route(payment_state.amount, None, None, &payment_state)
+        .expect("trampoline route should be built");
+
+    assert_eq!(route.len(), 3);
+    assert_eq!(route[0].next_hop, Some(relay.into()));
+    assert_eq!(route[1].next_hop, Some(trampoline.into()));
+    assert!(route.last().unwrap().trampoline_onion().is_some());
+
+    let amounts = route.iter().map(|hop| hop.amount).collect::<Vec<_>>();
+    assert_eq!(amounts, vec![1020, 1009, 1009]);
+
+    assert_eq!(route.first().unwrap().amount - final_amount, max_fee_amount);
+    assert_eq!(route[0].amount - route[1].amount, 11);
+    assert_eq!(route[1].amount - final_amount, 9);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_graph_build_router_fee_rate_optimize() {
     let mut network = MockNetworkGraph::new(10);
 

@@ -1403,7 +1403,7 @@ where
                 max_fee_amount,
                 "trampoline route amount",
             )?),
-            None,
+            Some(max_fee_amount),
             payment_data.udt_type_script.clone(),
             self.trampoline_forward_expiry_delta(
                 payment_data.final_tlc_expiry_delta,
@@ -1417,22 +1417,41 @@ where
             false,
         )?;
 
-        let first_hop_fee = final_amount
-            .saturating_sub(route_to_trampoline.last().map_or(0, |h| h.amount_received));
+        if route_to_trampoline.is_empty() {
+            return Err(PathFindError::NoPathFound);
+        }
 
-        if first_hop_fee >= max_fee_amount {
+        let source_side_amount = route_to_trampoline[0].amount_received;
+        let first_trampoline_amount = route_to_trampoline
+            .last()
+            .expect("already checked")
+            .amount_received;
+        let first_hop_fee =
+            source_side_amount
+                .checked_sub(first_trampoline_amount)
+                .ok_or_else(|| {
+                    PathFindError::Other(format!(
+                        "invalid trampoline route amounts: source_side_amount={} first_trampoline_amount={}",
+                        source_side_amount, first_trampoline_amount
+                    ))
+                })?;
+
+        if first_hop_fee > max_fee_amount {
             return Err(PathFindError::Other(format!(
                 "max_fee_amount is too low for trampoline routing: first_hop_fee={} current_fee={}",
                 first_hop_fee, max_fee_amount
             )));
-        } else {
-            // adjust the amount_received by removing the first hop fee
-            for r in route_to_trampoline.iter_mut() {
-                r.amount_received = r.amount_received.saturating_sub(first_hop_fee);
-            }
+        }
+
+        // The outer route was found with the full fee budget delivered to the first trampoline.
+        // Deduct the outer route fee from every visible hop so the source-side amount remains
+        // final_amount + max_fee_amount while the first trampoline only receives the inner budget.
+        for r in route_to_trampoline.iter_mut() {
+            r.amount_received = r.amount_received.saturating_sub(first_hop_fee);
         }
 
         let remaining_fee = max_fee_amount.saturating_sub(first_hop_fee);
+
         let slots = fees.len() as u128;
         let base = remaining_fee / slots;
         let remainder = (remaining_fee % slots) as usize;
