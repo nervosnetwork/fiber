@@ -586,7 +586,6 @@ where
             }
             FiberChannelMessage::TxUpdate(tx) => {
                 if state.ephemeral_config.external_funding.enabled
-                    && state.ephemeral_config.external_funding.signed_submitted
                     && state.state.is_awaiting_external_funding()
                 {
                     self.handle_external_funding_tx_sync(myself, state, tx.tx)
@@ -618,6 +617,22 @@ where
                     .await
             }
             FiberChannelMessage::TxComplete(tx) => {
+                if state.ephemeral_config.external_funding.enabled
+                    && state.ephemeral_config.external_funding.signed_submitted
+                    && matches!(
+                        state.state,
+                        ChannelState::SigningCommitment(_)
+                            | ChannelState::AwaitingTxSignatures(_)
+                            | ChannelState::AwaitingChannelReady(_)
+                            | ChannelState::ChannelReady
+                    )
+                {
+                    debug!(
+                        "Ignoring duplicate external funding TxComplete for channel {:?} after signed tx submission",
+                        state.get_id()
+                    );
+                    return Ok(());
+                }
                 state
                     .handle_tx_collaboration_msg(myself, TxCollaborationMsg::TxComplete(tx))
                     .await?;
@@ -7273,6 +7288,17 @@ impl ChannelActorState {
             }
             ChannelState::CollaboratingFundingTx(flags) => {
                 if flags.contains(CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT) {
+                    if self.ephemeral_config.external_funding.enabled
+                        && self.ephemeral_config.external_funding.signed_submitted
+                        && is_complete_message
+                    {
+                        debug!(
+                            "Ignoring duplicate external funding TxComplete for channel {:?} in state {:?}",
+                            self.get_id(),
+                            self.state
+                        );
+                        return Ok(());
+                    }
                     return Err(ProcessingChannelError::InvalidState(format!(
                         "Received a tx collaboration message {:?}, but we are already in the state {:?} where the remote has sent a complete message",
                         &msg, &self.state
