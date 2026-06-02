@@ -9113,6 +9113,69 @@ async fn test_submit_signed_funding_tx_unblocks_acceptor_commitment_handshake() 
 }
 
 #[tokio::test]
+async fn test_external_funding_duplicate_tx_complete_after_signed_submit_is_ignored() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let progressed = wait_for_external_funding_post_submit_progress(&node_a, channel_id).await;
+    assert!(
+        matches!(
+            progressed.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "channel should progress beyond tx collaboration after signed submit, got {:?}",
+        progressed.state
+    );
+
+    let duplicate_tx_complete = FiberMessage::tx_complete(crate::fiber::types::TxComplete {
+        channel_id,
+        next_commitment_nonce: musig2::SecNonceBuilder::new([3u8; 32])
+            .build()
+            .public_nonce(),
+    });
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                duplicate_tx_complete,
+            )),
+        ))
+        .expect("send duplicate tx_complete");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state_after_duplicate = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(
+            state_after_duplicate.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "duplicate tx_complete should be ignored after signed submit, got {:?}",
+        state_after_duplicate.state
+    );
+}
+
+#[tokio::test]
 async fn test_submit_signed_funding_tx_wrong_state() {
     init_tracing();
 
