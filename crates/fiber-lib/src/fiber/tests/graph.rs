@@ -910,6 +910,43 @@ fn test_graph_trampoline_routing_outer_route_fee_is_deducted_from_budget() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_routing_outer_route_fee_can_exhaust_inner_budget() {
+    init_tracing();
+
+    let mut network = MockNetworkGraph::new(4);
+    network.graph.set_add_rand_expiry_delta(false);
+
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let trampoline = network.keys[3];
+    let final_recipient = network.keys[4];
+
+    network.add_edge(1, 2, Some(10_000), Some(0));
+    network.add_edge(2, 3, Some(10_000), Some(10_000));
+
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(final_recipient.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .max_fee_amount(Some(11))
+            .trampoline_hops(Some(vec![trampoline.into()]))
+            .build()
+            .expect("valid payment_data")
+            .into();
+
+    let err = network
+        .graph
+        .build_route(payment_state.amount, None, None, &payment_state)
+        .expect_err("outer route fee should leave insufficient inner trampoline budget");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("recommend_minimal_fee=12") && msg.contains("current_fee=11"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_graph_build_router_fee_rate_optimize() {
     let mut network = MockNetworkGraph::new(10);
 

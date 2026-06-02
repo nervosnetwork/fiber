@@ -1452,6 +1452,24 @@ where
 
         let remaining_fee = max_fee_amount.saturating_sub(first_hop_fee);
 
+        if remaining_fee < low_total_trampoline_fee {
+            let high_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 10, hops)?;
+            let recommend_minimal_fee = checked_add_u128(
+                first_hop_fee,
+                low_total_trampoline_fee,
+                "trampoline minimal fee",
+            )?;
+            let maximal_fee = checked_add_u128(
+                first_hop_fee,
+                high_total_trampoline_fee,
+                "trampoline maximal fee",
+            )?;
+            return Err(PathFindError::Other(format!(
+                "max_fee_amount is too low for trampoline routing: recommend_minimal_fee={}, maximal_fee={} current_fee={}",
+                recommend_minimal_fee, maximal_fee, max_fee_amount
+            )));
+        }
+
         let slots = fees.len() as u128;
         let base = remaining_fee / slots;
         let remainder = (remaining_fee % slots) as usize;
