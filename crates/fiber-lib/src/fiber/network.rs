@@ -3586,6 +3586,17 @@ where
             request.funding_fee_rate,
             request.udt_type_script.is_some(),
         );
+        let prev_funding_tx_hash = state
+            .store
+            .get_channel_actor_state(&channel_id)
+            .and_then(|s| {
+                s.funding_tx
+                    .as_ref()
+                    .map(|tx| {
+                        let hash: Hash256 = tx.calc_tx_hash().into();
+                        hash
+                    })
+            });
         let tx_for_retry = transaction.clone();
         let request_for_retry = request.clone();
         let old_tx = transaction.into_view();
@@ -3596,7 +3607,14 @@ where
             .await
             .and_then(|tx| tx.into_inner().ok_or(FundingError::AbsentTx))
         {
-            Ok(tx) => tx,
+            Ok(tx) => {
+                if let Some(prev_hash) = prev_funding_tx_hash {
+                    let _ = self
+                        .chain_actor
+                        .send_message(CkbChainMessage::RemoveFundingTx(prev_hash));
+                }
+                tx
+            }
             Err(err) => {
                 let should_abort = schedule_funding_retry(
                     myself,
