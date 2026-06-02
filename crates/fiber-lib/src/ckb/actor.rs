@@ -227,13 +227,23 @@ impl Actor for CkbChainActor {
                 let result = funding_tx
                     .update_for_peer(remote_tx.into_view(), context)
                     .await;
-                if let Err(ref err) = result {
-                    debug!(
-                        "[{}] VerifyFundingTx failed for remote_tx_hash={}: {}",
-                        myself.get_name().unwrap_or_default(),
-                        remote_tx_hash,
-                        err,
-                    );
+                match &result {
+                    Ok(()) => {
+                        // The channel will replace its funding tx with the verified peer tx, so the
+                        // reserved inputs must follow the new hash. Otherwise the old local hash
+                        // leaks in the exclusion map and keeps wallet cells locked forever.
+                        state
+                            .live_cells_exclusion_map
+                            .migrate_funding_tx(&local_tx_hash, &funding_tx);
+                    }
+                    Err(err) => {
+                        debug!(
+                            "[{}] VerifyFundingTx failed for remote_tx_hash={}: {}",
+                            myself.get_name().unwrap_or_default(),
+                            remote_tx_hash,
+                            err,
+                        );
+                    }
                 }
                 let _ = reply.send(result);
             }
