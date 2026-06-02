@@ -246,7 +246,7 @@ impl SendOutgoingPaymentDispatcher {
                 // Outgoing is BTC Lightning: parse the BTC invoice's min_final_cltv_expiry_delta
                 Bolt11Invoice::from_str(&order.outgoing_pay_req)
                     .ok()
-                    .map(|inv| inv.min_final_cltv_expiry_delta() * 600)
+                    .and_then(|inv| inv.min_final_cltv_expiry_delta().checked_mul(600))
                     .unwrap_or(0)
             }
             CchInvoice::Lightning(_) => {

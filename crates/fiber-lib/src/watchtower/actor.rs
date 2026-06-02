@@ -15,7 +15,7 @@ use ckb_sdk::{
 };
 use ckb_types::{
     self,
-    core::{Capacity, EpochNumberWithFraction, HeaderView, TransactionView},
+    core::{Capacity, EpochNumberWithFraction, HeaderView, TransactionBuilder, TransactionView},
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction, WitnessArgs},
     prelude::*,
 };
@@ -36,7 +36,13 @@ use crate::{
         settlement_data_to_witness, settlement_tlc_local_pubkey_hash, XUDT_COMPATIBLE_WITNESS,
     },
     now_timestamp_as_millis_u64,
-    utils::{actor::ActorHandleLogGuard, tx::compute_tx_message},
+    utils::{
+        actor::ActorHandleLogGuard,
+        arithmetic::{
+            checked_add_u64, checked_mul_u64, checked_sub_u64, checked_sub_usize, ArithmeticError,
+        },
+        tx::compute_tx_message,
+    },
     watchtower::{
         channel_data_funding_tx_lock, channel_data_local_settlement_pubkey_hash,
         channel_data_x_only_aggregated_pubkey,
@@ -57,6 +63,21 @@ pub struct WatchtowerActor<S> {
 }
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
+
+fn tx_size_with_extra_inputs(
+    tx_builder: &TransactionBuilder,
+    extra_inputs: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let tx_size = u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+        .map_err(|_| ArithmeticError::new("transaction size does not fit into u64"))?;
+    let extra_size = checked_mul_u64(
+        CellInput::TOTAL_SIZE as u64,
+        extra_inputs,
+        "extra input size",
+    )?;
+    checked_add_u64(tx_size, extra_size, "transaction size")
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+}
 
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
@@ -443,11 +464,12 @@ fn build_revocation_tx(
     // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
     let fee_calculator = FeeCalculator::new(1000);
     // use two inputs as the maximum fee provider cell inputs
-    let fee = fee_calculator.fee(
-        tx_builder.clone().build().data().serialized_size_in_block() as u64
-            + CellInput::TOTAL_SIZE as u64 * 2,
-    );
-    let min_total_capacity = change_output_occupied_capacity + fee;
+    let fee = fee_calculator.fee(tx_size_with_extra_inputs(&tx_builder, 2)?);
+    let min_total_capacity = checked_add_u64(
+        change_output_occupied_capacity,
+        fee,
+        "revocation min capacity",
+    )?;
     let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
     query.script_search_mode = Some(SearchMode::Exact);
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
@@ -457,18 +479,34 @@ fn build_revocation_tx(
     let mut inputs_capacity = 0u64;
     for cell in cells {
         let input_capacity: u64 = cell.output.capacity().unpack();
-        inputs_capacity += input_capacity;
+        inputs_capacity = checked_add_u64(
+            inputs_capacity,
+            input_capacity,
+            "revocation inputs capacity",
+        )?;
         tx_builder = tx_builder.input(
             CellInput::new_builder()
                 .previous_output(cell.out_point)
                 .build(),
         );
-        let fee =
-            fee_calculator.fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-        if inputs_capacity >= change_output_occupied_capacity + fee {
+        let tx_size = u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+            .map_err(|_| {
+            ArithmeticError::new("transaction size does not fit into u64".to_string())
+        })?;
+        let fee = fee_calculator.fee(tx_size);
+        let required_capacity = checked_add_u64(
+            change_output_occupied_capacity,
+            fee,
+            "revocation required capacity",
+        )?;
+        if inputs_capacity >= required_capacity {
             let new_change_output = change_output
                 .as_builder()
-                .capacity(inputs_capacity - fee)
+                .capacity(checked_sub_u64(
+                    inputs_capacity,
+                    fee,
+                    "revocation change capacity",
+                )?)
                 .build();
             let tx = tx_builder
                 .set_outputs(vec![revocation_data.output, new_change_output])
@@ -925,7 +963,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                         ));
                                         break;
                                     } else if current_time > expiry {
-                                        pending_tlcs_count -= 1;
+                                        pending_tlcs_count = checked_sub_usize(
+                                            pending_tlcs_count,
+                                            1,
+                                            "pending TLC count",
+                                        )?;
                                     }
                                 } else {
                                     warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
@@ -1016,7 +1058,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     ));
                                     break;
                                 } else if current_time > expiry {
-                                    pending_tlcs_count -= 1;
+                                    pending_tlcs_count = checked_sub_usize(
+                                        pending_tlcs_count,
+                                        1,
+                                        "pending TLC count",
+                                    )?;
                                 }
                             } else {
                                 warn!(
@@ -1063,7 +1109,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
             for (i, tlc) in settlement_data.tlcs.iter().enumerate() {
                 match (tlc.tlc_id.is_offered(), for_remote) {
                     (true, true) | (false, false) => {
-                        let delay = mul(delay_epoch, 2, 3);
+                        let delay = mul(delay_epoch, 2, 3).ok_or_else(|| {
+                            ArithmeticError::new("delay epoch calculation overflows".to_string())
+                        })?;
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                             && current_time > tlc.expiry
@@ -1083,7 +1131,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         }
                     }
                     _ => {
-                        let delay = mul(delay_epoch, 1, 3);
+                        let delay = mul(delay_epoch, 1, 3).ok_or_else(|| {
+                            ArithmeticError::new("delay epoch calculation overflows".to_string())
+                        })?;
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                         {
@@ -1104,7 +1154,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 <= current_epoch.to_rational()
                                 && current_time > tlc.expiry
                             {
-                                pending_tlcs_count -= 1;
+                                pending_tlcs_count =
+                                    checked_sub_usize(pending_tlcs_count, 1, "pending TLC count")?;
                             }
                         }
                     }
@@ -1238,16 +1289,31 @@ fn build_settlement_tx<S: WatchtowerStore>(
         // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
         let fee_calculator = FeeCalculator::new(1000);
         // use two inputs as the maximum fee provider cell inputs
-        let fee = fee_calculator.fee(
-            tx_builder.clone().build().data().serialized_size_in_block() as u64
-                + CellInput::TOTAL_SIZE as u64 * 2,
-        );
+        let fee = fee_calculator.fee(tx_size_with_extra_inputs(&tx_builder, 2)?);
         let settlement_output_occupied_capacity = settlement_output
             .occupied_capacity(Capacity::shannons(0))
-            .expect("capacity does not overflow")
+            .map_err(|err| {
+                ArithmeticError::new(format!(
+                    "settlement output occupied capacity calculation failed: {}",
+                    err
+                ))
+            })?
             .as_u64();
-        let min_total_capacity =
-            capacity.saturating_sub(new_capacity + settlement_output_occupied_capacity + fee);
+        let required_capacity = checked_add_u64(
+            new_capacity,
+            settlement_output_occupied_capacity,
+            "settlement required capacity",
+        )
+        .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
+        let min_total_capacity = if capacity > required_capacity {
+            checked_sub_u64(
+                capacity,
+                required_capacity,
+                "settlement fee provider capacity",
+            )?
+        } else {
+            0
+        };
         let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
         query.script_search_mode = Some(SearchMode::Exact);
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
@@ -1264,19 +1330,42 @@ fn build_settlement_tx<S: WatchtowerStore>(
         };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
-            inputs_capacity += input_capacity;
+            inputs_capacity = checked_add_u64(
+                inputs_capacity,
+                input_capacity,
+                "settlement inputs capacity",
+            )?;
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
                     .since(since)
                     .build(),
             );
-            let fee = fee_calculator
-                .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-            if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
+            let tx_size =
+                u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+                    .map_err(|_| {
+                        ArithmeticError::new("transaction size does not fit into u64".to_string())
+                    })?;
+            let fee = fee_calculator.fee(tx_size);
+            let required_capacity = checked_add_u64(
+                new_capacity,
+                settlement_output_occupied_capacity,
+                "settlement required capacity",
+            )
+            .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
+            if inputs_capacity >= required_capacity {
                 let adjusted_settlement_output = change_output
                     .as_builder()
-                    .capacity(inputs_capacity - new_capacity - fee)
+                    .capacity(
+                        checked_sub_u64(
+                            inputs_capacity,
+                            new_capacity,
+                            "settlement output capacity",
+                        )
+                        .and_then(|amount| {
+                            checked_sub_u64(amount, fee, "settlement output capacity")
+                        })?,
+                    )
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![adjusted_settlement_output]
@@ -1374,7 +1463,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
             } else {
                 let new_commitment_output_capacity = new_commitment_output
                     .occupied_capacity(Capacity::bytes(16).unwrap())
-                    .expect("capacity does not overflow")
+                    .map_err(|err| {
+                        ArithmeticError::new(format!(
+                            "commitment output occupied capacity calculation failed: {}",
+                            err
+                        ))
+                    })?
                     .as_u64();
                 new_commitment_output = new_commitment_output
                     .as_builder()
@@ -1382,18 +1476,35 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .build();
 
                 let settlement_output_capacity: u64 = settlement_output.capacity().unpack();
-                let new_settlement_output_capacity = settlement_output_capacity
-                    + commitment_cell.output.capacity.value()
-                    - new_commitment_output_capacity;
+                let new_settlement_output_capacity = checked_add_u64(
+                    settlement_output_capacity,
+                    commitment_cell.output.capacity.value(),
+                    "settlement output capacity",
+                )
+                .and_then(|amount| {
+                    checked_sub_u64(
+                        amount,
+                        new_commitment_output_capacity,
+                        "settlement output capacity",
+                    )
+                })?;
                 settlement_output = settlement_output
                     .as_builder()
                     .capacity(new_settlement_output_capacity)
                     .build();
 
-                new_settlement_output_capacity + new_commitment_output_capacity
+                checked_add_u64(
+                    new_settlement_output_capacity,
+                    new_commitment_output_capacity,
+                    "outputs capacity",
+                )?
             }
         } else {
-            settlement_output_occupied_capacity + commitment_cell.output.capacity.value()
+            checked_add_u64(
+                settlement_output_occupied_capacity,
+                commitment_cell.output.capacity.value(),
+                "outputs capacity",
+            )?
         };
 
         if !two_parties_all_settled {
@@ -1413,16 +1524,23 @@ fn build_settlement_tx<S: WatchtowerStore>(
         // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
         let fee_calculator = FeeCalculator::new(1000);
         // use two inputs as the maximum fee provider cell inputs
-        let fee = fee_calculator.fee(
-            tx_builder.clone().build().data().serialized_size_in_block() as u64
-                + CellInput::TOTAL_SIZE as u64 * 2,
-        );
+        let fee = fee_calculator.fee(tx_size_with_extra_inputs(&tx_builder, 2)?);
 
         let change_output_occupied_capacity = change_output
             .occupied_capacity(Capacity::shannons(0))
-            .expect("capacity does not overflow")
+            .map_err(|err| {
+                ArithmeticError::new(format!(
+                    "change output occupied capacity calculation failed: {}",
+                    err
+                ))
+            })?
             .as_u64();
-        let min_total_capacity = change_output_occupied_capacity + outputs_capacity + fee;
+        let min_total_capacity = checked_add_u64(
+            change_output_occupied_capacity,
+            outputs_capacity,
+            "settlement min capacity",
+        )
+        .and_then(|amount| checked_add_u64(amount, fee, "settlement min capacity"))?;
         let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
         query.script_search_mode = Some(SearchMode::Exact);
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
@@ -1437,19 +1555,36 @@ fn build_settlement_tx<S: WatchtowerStore>(
         };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
-            inputs_capacity += input_capacity;
+            inputs_capacity = checked_add_u64(
+                inputs_capacity,
+                input_capacity,
+                "settlement inputs capacity",
+            )?;
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
                     .since(since)
                     .build(),
             );
-            let fee = fee_calculator
-                .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-            if inputs_capacity >= change_output_occupied_capacity + outputs_capacity + fee {
+            let tx_size =
+                u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+                    .map_err(|_| {
+                        ArithmeticError::new("transaction size does not fit into u64".to_string())
+                    })?;
+            let fee = fee_calculator.fee(tx_size);
+            let required_capacity = checked_add_u64(
+                change_output_occupied_capacity,
+                outputs_capacity,
+                "settlement required capacity",
+            )
+            .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
+            if inputs_capacity >= required_capacity {
                 let new_change_output = change_output
                     .as_builder()
-                    .capacity(inputs_capacity - outputs_capacity - fee)
+                    .capacity(
+                        checked_sub_u64(inputs_capacity, outputs_capacity, "change capacity")
+                            .and_then(|amount| checked_sub_u64(amount, fee, "change capacity"))?,
+                    )
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![settlement_output, new_change_output]
@@ -1526,12 +1661,12 @@ fn sign_tx_with_settlement(
         .raw_data()
         .to_vec();
     if with_preimage {
-        settlement_witness.splice(
-            settlement_witness.len() - 97..settlement_witness.len() - 32,
-            signature_bytes,
-        );
+        let start = checked_sub_usize(settlement_witness.len(), 97, "settlement witness length")?;
+        let end = checked_sub_usize(settlement_witness.len(), 32, "settlement witness length")?;
+        settlement_witness.splice(start..end, signature_bytes);
     } else {
-        settlement_witness.splice(settlement_witness.len() - 65.., signature_bytes);
+        let start = checked_sub_usize(settlement_witness.len(), 65, "settlement witness length")?;
+        settlement_witness.splice(start.., signature_bytes);
     }
 
     let witness = tx.witnesses().get(1).expect("get witness at index 1");
@@ -1561,6 +1696,45 @@ struct SettlementWitness {
     settlement_local_pubkey_hash: [u8; 20],
     settlement_local_amount: u128,
     unlocks: Vec<Unlock>,
+}
+
+struct WitnessReader<'a> {
+    remaining: &'a [u8],
+}
+
+impl<'a> WitnessReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { remaining: bytes }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    fn remaining(&self) -> &'a [u8] {
+        self.remaining
+    }
+
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        if self.remaining.len() < len {
+            return None;
+        }
+        let (value, remaining) = self.remaining.split_at(len);
+        self.remaining = remaining;
+        Some(value)
+    }
+
+    fn take_u8(&mut self) -> Option<u8> {
+        self.take(1).map(|bytes| bytes[0])
+    }
+
+    fn take_array<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.take(N)?.try_into().ok()
+    }
+
+    fn take_u128_le(&mut self) -> Option<u128> {
+        Some(u128::from_le_bytes(self.take_array()?))
+    }
 }
 
 #[derive(Debug)]
@@ -1618,7 +1792,9 @@ impl Htlc {
         let since = Since::from_raw_value(self.htlc_expiry);
         if since.is_absolute() {
             match since.extract_metric() {
-                Some((SinceType::Timestamp, expiry)) => Some(expiry * 1000),
+                Some((SinceType::Timestamp, expiry)) => {
+                    checked_mul_u64(expiry, 1000, "HTLC timestamp expiry").ok()
+                }
                 _ => None,
             }
         } else {
@@ -1692,57 +1868,37 @@ impl Unlock {
         }
         vec
     }
+
+    fn witness_len(&self) -> usize {
+        if self.with_preimage {
+            99
+        } else {
+            67
+        }
+    }
 }
 
 impl SettlementWitness {
     pub fn build_from_witness(witness: &[u8]) -> Option<Self> {
-        let pending_htlc_count = witness[1] as usize;
-        let pending_htlc_witness_len = 85 * pending_htlc_count;
-        // 1 byte for unlock_count, 1 byte for pending_htlc_count, 72 bytes for settlement script
-        if witness.len() < 1 + 1 + pending_htlc_witness_len + 72 {
-            return None;
+        let mut reader = WitnessReader::new(witness);
+        let _unlock_count = reader.take_u8()?;
+        let pending_htlc_count = reader.take_u8()? as usize;
+
+        let mut pending_htlcs = Vec::with_capacity(pending_htlc_count);
+        for _ in 0..pending_htlc_count {
+            pending_htlcs.push(Htlc::build_from_witness(reader.take(85)?));
         }
-        let pending_htlcs = (2..2 + pending_htlc_witness_len)
-            .step_by(85)
-            .map(|index| Htlc::build_from_witness(&witness[index..index + 85]))
-            .collect();
-        let settlement_remote_pubkey_hash = witness
-            [2 + pending_htlc_witness_len..22 + pending_htlc_witness_len]
-            .try_into()
-            .unwrap();
-        let settlement_remote_amount = u128::from_le_bytes(
-            witness[22 + pending_htlc_witness_len..38 + pending_htlc_witness_len]
-                .try_into()
-                .unwrap(),
-        );
-        let settlement_local_pubkey_hash = witness
-            [38 + pending_htlc_witness_len..58 + pending_htlc_witness_len]
-            .try_into()
-            .unwrap();
-        let settlement_local_amount = u128::from_le_bytes(
-            witness[58 + pending_htlc_witness_len..74 + pending_htlc_witness_len]
-                .try_into()
-                .unwrap(),
-        );
+
+        let settlement_remote_pubkey_hash = reader.take_array::<20>()?;
+        let settlement_remote_amount = reader.take_u128_le()?;
+        let settlement_local_pubkey_hash = reader.take_array::<20>()?;
+        let settlement_local_amount = reader.take_u128_le()?;
+
         let mut unlocks = Vec::new();
-        let mut unlock_type_index = 74 + pending_htlc_witness_len;
-        while unlock_type_index < witness.len() {
-            match Unlock::build_from_witness(&witness[unlock_type_index..]) {
-                Some(unlock) => {
-                    if unlock.with_preimage {
-                        unlock_type_index += 99;
-                    } else {
-                        unlock_type_index += 67;
-                    }
-                    unlocks.push(unlock);
-                    if unlock_type_index == witness.len() {
-                        break;
-                    }
-                }
-                None => {
-                    return None;
-                }
-            }
+        while !reader.is_empty() {
+            let unlock = Unlock::build_from_witness(reader.remaining())?;
+            reader.take(unlock.witness_len())?;
+            unlocks.push(unlock);
         }
 
         Some(Self {
@@ -1806,22 +1962,29 @@ fn mul(
     delay: EpochNumberWithFraction,
     numerator: u64,
     denominator: u64,
-) -> EpochNumberWithFraction {
-    let full_numerator = numerator * (delay.number() * delay.length() + delay.index());
-    let new_denominator = denominator * delay.length();
+) -> Option<EpochNumberWithFraction> {
+    let delay_units = checked_mul_u64(delay.number(), delay.length(), "delay epoch units")
+        .and_then(|amount| checked_add_u64(amount, delay.index(), "delay epoch units"))
+        .ok()?;
+    let full_numerator = checked_mul_u64(numerator, delay_units, "delay epoch numerator").ok()?;
+    let new_denominator =
+        checked_mul_u64(denominator, delay.length(), "delay epoch denominator").ok()?;
+    if new_denominator == 0 {
+        return None;
+    }
     let new_integer = full_numerator / new_denominator;
     let new_numerator = full_numerator % new_denominator;
 
     // normalize the fraction (max epoch length is 1800)
     let scale_factor = if new_denominator > 1800 {
-        new_denominator / 1800 + 1
+        checked_add_u64(new_denominator / 1800, 1, "delay epoch scale factor").ok()?
     } else {
         1
     };
 
-    EpochNumberWithFraction::new(
+    Some(EpochNumberWithFraction::new(
         new_integer,
         new_numerator / scale_factor,
         new_denominator / scale_factor,
-    )
+    ))
 }

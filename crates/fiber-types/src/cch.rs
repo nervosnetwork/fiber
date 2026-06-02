@@ -103,7 +103,11 @@ impl CchOrder {
     /// Returns `true` if the order was expired (and has been marked as Failed).
     /// Updates `status` to `Failed` and sets `failure_reason` when expired.
     pub fn update_if_expired(&mut self, current_time: u64) -> bool {
-        let expiry_time = self.created_at + self.expiry_delta_seconds;
+        let Some(expiry_time) = self.created_at.checked_add(self.expiry_delta_seconds) else {
+            self.status = CchOrderStatus::Failed;
+            self.failure_reason = Some("Order expiry time overflows".to_string());
+            return true;
+        };
         if expiry_time < current_time {
             self.status = CchOrderStatus::Failed;
             self.failure_reason = Some("Order expired on startup".to_string());

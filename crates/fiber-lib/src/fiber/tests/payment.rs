@@ -26,6 +26,8 @@ use crate::invoice::PreimageStore;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::invoice::NewInvoiceParams;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::payment::{GetPaymentCommandResult, SendPaymentWithRouterParams};
 use crate::tasks::cancel_tasks_and_wait_for_completion;
 use crate::test_utils::init_tracing;
 use crate::tests::test_utils::*;
@@ -35,6 +37,8 @@ use crate::NetworkServiceEvent;
 use bech32::{encode, u5, Variant};
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_json_types::RouterHop as JsonRouterHop;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::Hash256 as InternalHash256;
 use fiber_types::HashAlgorithm;
@@ -1947,6 +1951,107 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_send_payment_with_router_rpc_rejects_overflowing_onion_expiry() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters::new(
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                ChannelParameters::new(
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, mut node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    node_0
+        .with_network_graph_mut(|graph| graph.set_add_rand_expiry_delta(false))
+        .await;
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap()
+        .router_hops;
+
+    let overflow_margin = DEFAULT_TLC_EXPIRY_DELTA / 2;
+    let overflowing_incoming_expiry = u64::MAX
+        .checked_sub(now_timestamp_as_millis_u64())
+        .and_then(|expiry| expiry.checked_sub(overflow_margin))
+        .expect("current timestamp leaves room below u64::MAX");
+    let mut router = router;
+    router
+        .get_mut(1)
+        .expect("A -> B -> C route has a forwarding hop")
+        .incoming_tlc_expiry = overflowing_incoming_expiry;
+    let router = router.into_iter().map(JsonRouterHop::from).collect();
+
+    let payment: GetPaymentCommandResult = node_0
+        .send_rpc_request(
+            "send_payment_with_router",
+            SendPaymentWithRouterParams {
+                payment_hash: None,
+                router,
+                invoice: None,
+                custom_records: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                dry_run: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let payment_hash: Hash256 = payment.payment_hash.into();
+    let node_1_pubkey = node_1.pubkey;
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
+                pubkey,
+                failed_payment_hash,
+                err,
+            )) => {
+                assert_eq!(pubkey, &node_1_pubkey);
+                assert_eq!(failed_payment_hash, &payment_hash);
+                assert_eq!(err.error_code, TlcErrorCode::IncorrectTlcExpiry);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_0.wait_until_failed(payment_hash).await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+}
+
 #[tokio::test]
 async fn test_send_payment_with_route_will_not_consider_prob() {
     init_tracing();
@@ -3446,7 +3551,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 
     assert_eq!(succ_count, tx_count);
     let channel_state = nodes[0].get_channel_actor_state(channels[0]);
-    assert_eq!(channel_state.get_offered_tlc_balance(), 0);
+    assert_eq!(channel_state.get_offered_tlc_balance().unwrap(), 0);
 }
 
 async fn run_complex_network_with_params(
@@ -7688,4 +7793,51 @@ fn test_send_payment_malicious_invoice_does_not_crash_node_entrypoint() {
         }
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_send_payment_dry_run_with_too_large_hop_hint_expiry_delta() {
+    init_tracing();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 40000000000, MIN_RESERVED_CKB))],
+        3,
+    )
+    .await;
+    let [node1, mut node2, mut node3] = nodes.try_into().expect("3 nodes");
+
+    let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
+        &mut node2,
+        &mut node3,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount: MIN_RESERVED_CKB + 20000000000,
+            node_b_funding_amount: MIN_RESERVED_CKB,
+            ..Default::default()
+        },
+    )
+    .await;
+    let funding_tx = node2
+        .get_transaction_view_from_hash(funding_tx_hash)
+        .await
+        .expect("get funding tx");
+    let outpoint = funding_tx.output_pts_iter().next().unwrap();
+
+    let res = node1
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node3.pubkey),
+            amount: Some(10000000000),
+            keysend: Some(true),
+            dry_run: true,
+            hop_hints: Some(vec![HopHint {
+                pubkey: node2.pubkey,
+                channel_outpoint: outpoint,
+                fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
+                tlc_expiry_delta: u64::MAX,
+            }]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err(), "Expect send payment failed: {:?}", res);
+    assert_eq!(node1.get_inflight_payment_count().await, 0);
 }
