@@ -7352,6 +7352,11 @@ impl ChannelActorState {
                         remote_tx: msg.tx.clone(),
                         funding_cell_lock_script: self.get_funding_lock_script(),
                         funding_udt_type_script: self.funding_udt_type_script.clone(),
+                        funding_source_lock_script: self
+                            .ephemeral_config
+                            .external_funding
+                            .funding_lock_script
+                            .clone(),
                         reply: tx
                     }
                 ))
