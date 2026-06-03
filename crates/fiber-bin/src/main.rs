@@ -340,7 +340,15 @@ async fn run_node(
                                         }
                                     }
                                     if let Some(watchtower_client) = watchtower_client.as_ref() {
-                                        forward_event_to_client(event.clone(), watchtower_client).await;
+                                        if let Err(err) =
+                                            forward_event_to_client(event.clone(), watchtower_client)
+                                                .await
+                                        {
+                                            error!(
+                                                "Failed to forward event to standalone watchtower: {}",
+                                                err
+                                            );
+                                        }
                                     }
                                     if let Some(watchtower_actor) = watchtower_actor.as_ref() {
                                         forward_event_to_actor(event, watchtower_actor);
