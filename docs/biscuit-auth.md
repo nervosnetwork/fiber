@@ -36,7 +36,7 @@ The current rules for each RPC methods:
 ``` rust
 // Cch 
 rule("send_btc", r#"allow if write("cch");"#); 
-rule("receive_btc", r#"allow if read("cch");"#); 
+rule("receive_btc", r#"allow if write("cch");"#);
 rule("get_cch_order", r#"allow if read("cch");"#); 
 // channels 
 rule("open_channel", r#"allow if write("channels");"#); 
