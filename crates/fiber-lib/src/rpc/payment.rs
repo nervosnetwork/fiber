@@ -316,8 +316,12 @@ where
         &self,
         params: ListPaymentsParams,
     ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
+        const MAX_LIST_PAYMENTS_LIMIT: u64 = 500;
         let default_limit: u64 = 15;
-        let limit = params.limit.unwrap_or(default_limit) as usize;
+        let limit = std::cmp::min(
+            params.limit.unwrap_or(default_limit),
+            MAX_LIST_PAYMENTS_LIMIT,
+        ) as usize;
 
         let after = params.after.map(fiber_types::Hash256::from);
         let status = params.status.map(fiber_types::PaymentStatus::from);
