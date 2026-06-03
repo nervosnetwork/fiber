@@ -162,7 +162,6 @@ impl CkbChainClient for CkbRpcClient {
         funding_lock_script: Script,
     ) -> Result<Option<GetShutdownTxResponse>, anyhow::Error> {
         let client = self.config.ckb_rpc_client();
-        // query transaction spent the funding cell
         let search_key = SearchKey {
             script: funding_lock_script.into(),
             script_type: ScriptType::Lock,
@@ -171,18 +170,37 @@ impl CkbChainClient for CkbRpcClient {
             filter: None,
             group_by_transaction: None,
         };
-        let txs = client
-            .get_transactions(search_key, Order::Desc, 1u32.into(), None)
-            .await?;
 
-        let Some(Tx::Ungrouped(tx)) = txs.objects.first() else {
-            return Ok(None);
+        // Paginate to find the first Input (funding cell spend). A
+        // single-page query with limit=1 can be blinded by a newer
+        // output created with the same lock.
+        const PAGE_SIZE: u32 = 200;
+        let mut after_cursor: Option<JsonBytes> = None;
+        let shutdown_tx_hash: Hash256 = 'search: loop {
+            let txs = client
+                .get_transactions(
+                    search_key.clone(),
+                    Order::Desc,
+                    PAGE_SIZE.into(),
+                    after_cursor,
+                )
+                .await?;
+
+            if txs.objects.is_empty() {
+                return Ok(None);
+            }
+
+            for tx_item in &txs.objects {
+                if let Tx::Ungrouped(tx) = tx_item {
+                    if matches!(tx.io_type, CellType::Input) {
+                        break 'search tx.tx_hash.clone().into();
+                    }
+                }
+            }
+
+            after_cursor = Some(txs.last_cursor.clone());
         };
-        if !matches!(tx.io_type, CellType::Input) {
-            return Ok(None);
-        }
 
-        let shutdown_tx_hash: Hash256 = tx.tx_hash.clone().into();
         let tx_with_status = client.get_transaction(shutdown_tx_hash.into()).await?;
         Ok(Some(tx_with_status.into()))
     }
