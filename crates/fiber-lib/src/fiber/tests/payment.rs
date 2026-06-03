@@ -967,28 +967,7 @@ fn test_send_payment_rejects_unsigned_invoice_by_default() {
 }
 
 #[test]
-fn test_send_payment_allows_unsigned_invoice_with_module_opt_out() {
-    let payee_pubkey = gen_rand_fiber_public_key();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(1000))
-        .payment_preimage(gen_rand_sha256_hash())
-        .payee_pub_key(payee_pubkey.into())
-        .build()
-        .expect("build unsigned invoice");
-
-    let payment_data = SendPaymentData::new(SendPaymentCommand {
-        invoice: Some(invoice.to_string()),
-        allow_unsigned_invoice: true,
-        ..Default::default()
-    })
-    .expect("unsigned invoice opt-out should build payment data");
-
-    assert_eq!(payment_data.target_pubkey, payee_pubkey);
-    assert_eq!(payment_data.amount, 1000);
-}
-
-#[test]
-fn test_send_payment_with_router_rejects_unsigned_invoice_by_default() {
+fn test_send_payment_with_router_rejects_unsigned_invoice() {
     let payee_pubkey = gen_rand_fiber_public_key();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(1000))
@@ -1005,7 +984,7 @@ fn test_send_payment_with_router_rejects_unsigned_invoice_by_default() {
 
     let err = SendPaymentWithRouterCommand {
         invoice: Some(invoice.to_string()),
-        router: router.clone(),
+        router,
         ..Default::default()
     }
     .build_send_payment_data(gen_rand_fiber_public_key())
@@ -1018,17 +997,6 @@ fn test_send_payment_with_router_rejects_unsigned_invoice_by_default() {
         message.contains("invoice is not signed"),
         "unexpected error: {message}"
     );
-
-    let payment_data = SendPaymentWithRouterCommand {
-        invoice: Some(invoice.to_string()),
-        router,
-        allow_unsigned_invoice: true,
-        ..Default::default()
-    }
-    .build_send_payment_data(gen_rand_fiber_public_key())
-    .expect("unsigned invoice opt-out should build payment data");
-
-    assert_eq!(payment_data.target_pubkey, payee_pubkey);
 }
 
 #[tokio::test]
@@ -4360,7 +4328,7 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
         .amount(Some(1000))
         .payment_preimage(hold_preimage)
         .payee_pub_key(node_2.pubkey.into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
         .expect("build hold invoice");
     node_2.insert_invoice(hold_invoice.clone(), None);
 
@@ -4487,7 +4455,7 @@ async fn test_forwarded_payment_relays_remove_to_upstream() {
         .amount(Some(1000))
         .payment_preimage(payment_preimage)
         .payee_pub_key(node_2.pubkey.into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
         .expect("build invoice");
     let payment_hash = *invoice.payment_hash();
     node_2.insert_invoice(invoice.clone(), Some(payment_preimage));
@@ -4535,7 +4503,7 @@ async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_ac
         .amount(Some(1000))
         .payment_preimage(hold_preimage)
         .payee_pub_key(node_2.pubkey.into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
         .expect("build hold invoice");
     node_2.insert_invoice(hold_invoice.clone(), None);
 

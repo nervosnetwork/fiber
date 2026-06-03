@@ -22,6 +22,7 @@ use fiber_types::{
     SettlementTlc, ShuttingDownFlags, TLCId,
 };
 use ractor::{ActorProcessingErr, ActorRef};
+use secp256k1::SECP256K1;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -485,7 +486,7 @@ async fn test_send_mpp_to_hold_invoice() {
         .payee_pub_key(target_pubkey.into())
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
         .expect("build invoice success");
     node_1.insert_invoice(ckb_invoice.clone(), None);
 
@@ -569,7 +570,7 @@ async fn test_mpp_force_close_keeps_preimage_for_onchain_split() {
         .payee_pub_key(node_2.get_public_key().into())
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
         .expect("build invoice success");
     node_2.insert_invoice(invoice.clone(), None);
 
@@ -686,7 +687,7 @@ async fn test_mpp_payer_force_close_keeps_watchtower_preimage_for_onchain_split(
         .payee_pub_key(node_2.get_public_key().into())
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
         .expect("build invoice success");
     node_2.insert_invoice(invoice.clone(), None);
 
@@ -881,7 +882,7 @@ async fn test_mpp_force_close_pending_confirmation_removes_watchtower_preimage_r
         .payee_pub_key(node_2.get_public_key().into())
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
         .expect("build invoice success");
     node_2.insert_invoice(invoice.clone(), None);
 

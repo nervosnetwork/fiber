@@ -240,7 +240,7 @@ async fn test_trampoline_routing_udt_private_last_will_success() {
         .hash_algorithm(HashAlgorithm::Sha256)
         .udt_type_script(udt_script.clone())
         .payee_pub_key(node_c.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
         .expect("build invoice");
     node_c.insert_invoice(invoice_bc.clone(), Some(preimage_bc));
     node_b
@@ -260,7 +260,7 @@ async fn test_trampoline_routing_udt_private_last_will_success() {
         .hash_algorithm(HashAlgorithm::Sha256)
         .udt_type_script(udt_script.clone())
         .payee_pub_key(node_d.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
         .expect("build invoice");
     node_d.insert_invoice(invoice_cd.clone(), Some(preimage_cd));
     node_c
@@ -280,7 +280,7 @@ async fn test_trampoline_routing_udt_private_last_will_success() {
         .hash_algorithm(HashAlgorithm::Sha256)
         .udt_type_script(udt_script.clone())
         .payee_pub_key(node_d.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
         .expect("build invoice");
     node_d.insert_invoice(invoice_bd.clone(), Some(preimage_bd));
 
@@ -359,7 +359,7 @@ async fn test_trampoline_routing_udt_to_ckb_private_last_hop_no_path() {
         .hash_algorithm(HashAlgorithm::Sha256)
         .udt_type_script(udt_script.clone())
         .payee_pub_key(node_d.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
         .expect("build invoice");
     node_d.insert_invoice(invoice_ad.clone(), Some(preimage_ad));
 
@@ -2990,7 +2990,7 @@ async fn test_trampoline_routing_failure_invalid_payment_secret() {
         .payment_preimage(preimage)
         .payment_secret(secret_real)
         .payee_pub_key(node_b.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_b.private_key.0))
         .unwrap();
     node_b.insert_invoice(invoice_real.clone(), Some(preimage));
 
@@ -3001,7 +3001,7 @@ async fn test_trampoline_routing_failure_invalid_payment_secret() {
         .payment_preimage(preimage)
         .payment_secret(secret_fake)
         .payee_pub_key(node_b.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_b.private_key.0))
         .unwrap();
 
     // Verify secrets are different
@@ -3058,7 +3058,7 @@ async fn test_trampoline_node_restart() {
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
         .expiry_time(Duration::from_secs(3600)) // 1 hour
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
         .expect("build invoice");
 
     // We insert invoice but NOT the preimage yet.
@@ -3377,7 +3377,7 @@ async fn test_trampoline_routing_mpp_last_hop() {
         .payee_pub_key(node_c.get_public_key().into())
         .description("mpp trampoline".to_string())
         .payment_secret(gen_rand_sha256_hash())
-        .build();
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0));
     debug!("Built invoice: {:?}", invoice);
     let invoice = invoice.expect("build invoice");
 
@@ -3450,7 +3450,7 @@ async fn test_trampoline_routing_invoice_not_allow_mpp_will_fail() {
         .allow_mpp(false) // NOT allowing MPP
         .payee_pub_key(node_c.get_public_key().into())
         .payment_secret(gen_rand_sha256_hash())
-        .build();
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0));
     debug!("Built invoice: {:?}", invoice);
     let invoice = invoice.expect("build invoice");
 
@@ -3520,7 +3520,7 @@ async fn test_trampoline_routing_mpp_intermediate_hop_will_fail() {
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .description("mpp trampoline intermediate".to_string())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
         .expect("build invoice");
     node_d.insert_invoice(invoice.clone(), Some(preimage));
     // A specifies B and C as trampoline hops.
@@ -3573,7 +3573,7 @@ async fn test_trampoline_routing_dry_run_basic() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
         .expect("build invoice");
 
     // First, do a dry run to check if the payment can be made
@@ -3706,7 +3706,7 @@ async fn test_trampoline_routing_dry_run_get_default_fee() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
         .expect("build invoice");
 
     // First, do a dry run to check if the payment can be made
@@ -3874,7 +3874,7 @@ async fn test_trampoline_mpp_with_oneway() {
             .payee_pub_key(node4.get_public_key().into())
             .allow_mpp(true)
             .allow_trampoline_routing(true)
-            .build()
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node4.private_key.0))
             .expect("build invoice");
         node4.insert_invoice(invoice.clone(), Some(preimage));
 
