@@ -123,6 +123,53 @@ impl CkbRpcClient {
     }
 }
 
+/// Paginate the CKB indexer to find the first transaction whose `io_type` is
+/// `CellType::Input` for the given funding lock script. Returns `None` if no
+/// such transaction exists.
+///
+/// Shared by both `get_shutdown_tx` and the synchronous watchtower
+/// `run_periodic_check`.
+pub(crate) fn find_first_input_tx_hash(
+    client: &ckb_sdk::CkbRpcClient,
+    funding_lock_script: &Script,
+) -> Result<Option<H256>, anyhow::Error> {
+    let search_key = SearchKey {
+        script: funding_lock_script.clone().into(),
+        script_type: ScriptType::Lock,
+        script_search_mode: Some(ckb_sdk::rpc::ckb_indexer::SearchMode::Exact),
+        with_data: None,
+        filter: None,
+        group_by_transaction: None,
+    };
+
+    const PAGE_SIZE: u32 = 100;
+    let mut after_cursor: Option<JsonBytes> = None;
+    loop {
+        let txs = client
+            .get_transactions(
+                search_key.clone(),
+                Order::Desc,
+                PAGE_SIZE.into(),
+                after_cursor,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        if txs.objects.is_empty() {
+            return Ok(None);
+        }
+
+        for tx_item in &txs.objects {
+            if let Tx::Ungrouped(tx) = tx_item {
+                if matches!(tx.io_type, CellType::Input) {
+                    return Ok(Some(tx.tx_hash.clone()));
+                }
+            }
+        }
+
+        after_cursor = Some(txs.last_cursor.clone());
+    }
+}
+
 #[async_trait::async_trait]
 impl CkbChainClient for CkbRpcClient {
     async fn get_transaction(&self, hash: H256) -> Result<GetTxResponse, anyhow::Error> {
@@ -161,47 +208,13 @@ impl CkbChainClient for CkbRpcClient {
         &self,
         funding_lock_script: Script,
     ) -> Result<Option<GetShutdownTxResponse>, anyhow::Error> {
-        let client = self.config.ckb_rpc_client();
-        let search_key = SearchKey {
-            script: funding_lock_script.into(),
-            script_type: ScriptType::Lock,
-            script_search_mode: Some(ckb_sdk::rpc::ckb_indexer::SearchMode::Exact),
-            with_data: None,
-            filter: None,
-            group_by_transaction: None,
+        let indexer_client = ckb_sdk::CkbRpcClient::new(&self.config.rpc_url);
+        let Some(tx_hash) = find_first_input_tx_hash(&indexer_client, &funding_lock_script)? else {
+            return Ok(None);
         };
 
-        // Paginate to find the first Input (funding cell spend). A
-        // single-page query with limit=1 can be blinded by a newer
-        // output created with the same lock.
-        const PAGE_SIZE: u32 = 200;
-        let mut after_cursor: Option<JsonBytes> = None;
-        let shutdown_tx_hash: Hash256 = 'search: loop {
-            let txs = client
-                .get_transactions(
-                    search_key.clone(),
-                    Order::Desc,
-                    PAGE_SIZE.into(),
-                    after_cursor,
-                )
-                .await?;
-
-            if txs.objects.is_empty() {
-                return Ok(None);
-            }
-
-            for tx_item in &txs.objects {
-                if let Tx::Ungrouped(tx) = tx_item {
-                    if matches!(tx.io_type, CellType::Input) {
-                        break 'search tx.tx_hash.clone().into();
-                    }
-                }
-            }
-
-            after_cursor = Some(txs.last_cursor.clone());
-        };
-
-        let tx_with_status = client.get_transaction(shutdown_tx_hash.into()).await?;
+        let async_client = self.config.ckb_rpc_client();
+        let tx_with_status = async_client.get_transaction(tx_hash).await?;
         Ok(Some(tx_with_status.into()))
     }
 }
