@@ -96,7 +96,8 @@ impl TryFrom<JsonPrivkey> for fiber_types::Privkey {
     type Error = String;
 
     fn try_from(jp: JsonPrivkey) -> Result<Self, Self::Error> {
-        Ok(fiber_types::Privkey::from_slice(jp.as_bytes()))
+        fiber_types::Privkey::try_from_slice(jp.as_bytes())
+            .map_err(|e| format!("Invalid private key: {e}"))
     }
 }
 
