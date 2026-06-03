@@ -379,7 +379,7 @@ where
                 );
             }
             Err(err) => {
-                error!("Failed to get funding tx: {:?}", err);
+                error!("Failed to get commitment tx: {:?}", err);
             }
         }
     }
