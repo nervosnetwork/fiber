@@ -76,7 +76,7 @@ impl CchRpcServerImpl {
                 currency,
             }
         )
-        .rpc_err_no_data()?;
+        .rpc_err()?;
 
         result.map(CchOrderResponse::from).map_err(Into::into)
     }
@@ -93,7 +93,7 @@ impl CchRpcServerImpl {
                 fiber_pay_req: params.fiber_pay_req,
             }
         )
-        .rpc_err_no_data()?;
+        .rpc_err()?;
 
         result.map(CchOrderResponse::from).map_err(Into::into)
     }
@@ -109,7 +109,7 @@ impl CchRpcServerImpl {
             TIMEOUT,
             payment_hash
         )
-        .rpc_err_no_data()?;
+        .rpc_err()?;
 
         result.map(CchOrderResponse::from).map_err(Into::into)
     }

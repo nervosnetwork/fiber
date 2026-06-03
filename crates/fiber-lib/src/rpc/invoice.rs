@@ -9,7 +9,7 @@ use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
     CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
-use crate::rpc::utils::{rpc_error, rpc_error_no_data, RpcResultExt};
+use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
 use fiber_types::{FeatureVector, Privkey};
 
@@ -170,7 +170,7 @@ where
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
-        let error = |msg: &str| Err(rpc_error(msg.to_string(), params.clone()));
+        let error = |msg: &str| Err(rpc_error(msg.to_string()));
 
         let params_currency = params.currency.into();
 
@@ -295,7 +295,7 @@ where
             Ok(invoice) => Ok(ParseInvoiceResult {
                 invoice: invoice.into(),
             }),
-            Err(e) => Err(rpc_error(e.to_string(), params)),
+            Err(e) => Err(rpc_error(e.to_string())),
         }
     }
 
@@ -321,7 +321,7 @@ where
                     status: status.into(),
                 })
             }
-            None => Err(rpc_error("invoice not found", params)),
+            None => Err(rpc_error("invoice not found")),
         }
     }
 
@@ -343,16 +343,16 @@ where
 
                 let new_status = match status {
                     CkbInvoiceStatus::Paid | CkbInvoiceStatus::Cancelled => {
-                        return Err(rpc_error(
-                            format!("invoice can not be canceled, current status: {}", status),
-                            params,
-                        ));
+                        return Err(rpc_error(format!(
+                            "invoice can not be canceled, current status: {}",
+                            status
+                        )));
                     }
                     _ => CkbInvoiceStatus::Cancelled,
                 };
                 self.store
                     .update_invoice_status(&payment_hash, new_status)
-                    .rpc_err(&params)?;
+                    .rpc_err()?;
                 if let Some(network_actor) = &self.network_actor {
                     let _ = network_actor.send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SettleHoldTlcSet(payment_hash),
@@ -364,7 +364,7 @@ where
                     status: new_status.into(),
                 })
             }
-            None => Err(rpc_error("invoice not found", params)),
+            None => Err(rpc_error("invoice not found")),
         }
     }
 
@@ -375,7 +375,7 @@ where
         let network_actor = self
             .network_actor
             .as_ref()
-            .ok_or_else(|| rpc_error_no_data("network actor not initialized"))?;
+            .ok_or_else(|| rpc_error("network actor not initialized"))?;
 
         let payment_hash = params.payment_hash.into();
         let payment_preimage = params.payment_preimage.into();
