@@ -580,7 +580,6 @@ where
             return false;
         }
         for message in messages {
-            self.update_latest_cursor(message.cursor());
             if message.chain_hash() != get_chain_hash() {
                 warn!(
                     "Chain hash mismatch: having {:?}, expecting {:?}, full message {:?}",
@@ -590,6 +589,7 @@ where
                 );
                 continue;
             }
+            self.update_latest_cursor(message.cursor());
             match message {
                 BroadcastMessageWithTimestamp::ChannelAnnouncement(
                     timestamp,
