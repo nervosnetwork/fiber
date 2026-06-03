@@ -35,7 +35,10 @@ use std::collections::{HashMap, HashSet};
 #[cfg(all(test, not(target_arch = "wasm32")))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tentacle::multiaddr::MultiAddr;
+use tentacle::{
+    multiaddr::{MultiAddr, Protocol},
+    secio::PeerId,
+};
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, trace, warn};
@@ -844,6 +847,18 @@ where
         mut node_announcement: NodeAnnouncement,
     ) -> Option<Cursor> {
         debug!("Processing node announcement: {:?}", &node_announcement);
+
+        let expected_peer_id =
+            PeerId::from_public_key(&super::types::pubkey_to_tentacle(node_announcement.node_id));
+        node_announcement.addresses.retain(|addr| {
+            addr.iter().all(|proto| {
+                if let Protocol::P2P(ref peer_id_bytes) = proto {
+                    return peer_id_bytes.as_ref() == expected_peer_id.as_bytes();
+                }
+                true
+            })
+        });
+
         if !self.announce_private_addr {
             node_announcement
                 .addresses
