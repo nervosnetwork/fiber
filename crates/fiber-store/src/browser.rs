@@ -13,7 +13,6 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use tracing::info;
-use tracing::trace;
 use tracing::warn;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsCast;
@@ -312,7 +311,6 @@ impl CommunicationChannel {
                 Some(take_while),
             ),
         };
-        trace!("Dispatching database command: {:?}", ipc_cmd);
         let CommunicationChannel {
             input_i32_arr,
             input_u8_arr,
@@ -340,11 +338,6 @@ impl CommunicationChannel {
                         "Received RequestTakeWhile but no take_while callback was provided",
                     )(&key);
 
-                    trace!(
-                        "Received take_while request for key {:?}, result {}",
-                        key,
-                        result
-                    );
                     write_command_with_payload(
                         InputCommand::ResponseTakeWhile as i32,
                         result,
