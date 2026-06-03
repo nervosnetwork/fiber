@@ -1420,6 +1420,21 @@ where
                     .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err.to_string()))
                     .map_err(ProcessingChannelError::without_shared_secret)?;
                 let shared_secret = peeled.shared_secret;
+
+                // The onion payload is encrypted but the hash_algorithm field is
+                // not cryptographically bound to the onion. A malicious sender
+                // can set a different hash_algorithm on the wire AddTlc than in
+                // the onion hop data, causing the forwarding node to produce an
+                // outgoing TLC that a downstream peer can fulfill while the
+                // upstream TLC cannot be claimed with the same preimage.
+                if add_tlc.hash_algorithm != peeled.current.hash_algorithm {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "TLC hash_algorithm ({:?}) does not match onion hash_algorithm ({:?})",
+                        add_tlc.hash_algorithm, peeled.current.hash_algorithm
+                    ))
+                    .without_shared_secret());
+                }
+
                 self.apply_add_tlc_operation_with_peeled_onion_packet(state, add_tlc, peeled)
                     .map_err(move |err| err.with_shared_secret(shared_secret))?
             }
