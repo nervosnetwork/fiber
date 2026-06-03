@@ -5517,6 +5517,15 @@ where
     ) -> ProcessingChannelResult {
         let id = open_channel.channel_id;
         let remote_funding_amount = open_channel.funding_amount;
+
+        if open_channel.chain_hash != get_chain_hash() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Invalid chain hash {:?}, expected {:?}",
+                open_channel.chain_hash,
+                get_chain_hash()
+            )));
+        }
+
         let result = check_open_channel_parameters(
             &open_channel.funding_udt_type_script,
             &open_channel.shutdown_script,
