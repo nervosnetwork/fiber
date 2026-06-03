@@ -135,6 +135,9 @@ pub enum InvoiceError {
     /// Invoice signature contains malformed base32 data.
     #[error("Invalid signature encoding")]
     InvalidSignatureEncoding,
+    /// Invoice is missing a required signature.
+    #[error("Invoice is not signed")]
+    MissingSignature,
 }
 
 /// Size of the signature in u5 encoding.
@@ -894,10 +897,15 @@ impl Display for CkbInvoice {
     }
 }
 
-impl FromStr for CkbInvoice {
-    type Err = InvoiceError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl CkbInvoice {
+    /// Parses an invoice from its bech32m string representation, accepting both
+    /// signed and unsigned invoices.
+    ///
+    /// Most callers should use [`FromStr::from_str`], which additionally requires
+    /// the invoice to be signed. Only use this method in contexts where an
+    /// unsigned invoice is legitimately expected (for example, decoding an
+    /// invoice purely for inspection).
+    pub fn from_str_allowing_unsigned(s: &str) -> Result<Self, InvoiceError> {
         let (hrp, data, var) = bech32::decode(s).map_err(InvoiceError::Bech32Error)?;
 
         if var == bech32::Variant::Bech32 {
@@ -934,6 +942,18 @@ impl FromStr for CkbInvoice {
             data: invoice_data.try_into()?,
         };
         invoice.check_signature()?;
+        Ok(invoice)
+    }
+}
+
+impl FromStr for CkbInvoice {
+    type Err = InvoiceError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invoice = CkbInvoice::from_str_allowing_unsigned(s)?;
+        if !invoice.is_signed() {
+            return Err(InvoiceError::MissingSignature);
+        }
         Ok(invoice)
     }
 }
@@ -1268,7 +1288,7 @@ fn test_parse_malformed_compressed_invoice_returns_error_without_panic() {
     data.extend(std::iter::repeat(u5::try_from_u8(31).unwrap()).take(SIGNATURE_U5_SIZE));
     let invoice = encode("fibb", data, Variant::Bech32m).unwrap();
 
-    let result = std::panic::catch_unwind(|| CkbInvoice::from_str(&invoice));
+    let result = std::panic::catch_unwind(|| CkbInvoice::from_str_allowing_unsigned(&invoice));
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_err());
@@ -1305,7 +1325,7 @@ fn test_malformed_text_attribute_returns_error_without_panic() {
         .build();
     let invoice = encode_unsigned_invoice(raw_invoice_data_with_attrs(vec![attr]));
 
-    let result = std::panic::catch_unwind(|| CkbInvoice::from_str(&invoice));
+    let result = std::panic::catch_unwind(|| CkbInvoice::from_str_allowing_unsigned(&invoice));
 
     assert!(matches!(
         result,

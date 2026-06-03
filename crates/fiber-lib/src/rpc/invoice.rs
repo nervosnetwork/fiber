@@ -290,7 +290,7 @@ where
         &self,
         params: ParseInvoiceParams,
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned> {
-        let result: Result<InternalCkbInvoice, _> = params.invoice.parse();
+        let result = InternalCkbInvoice::from_str_allowing_unsigned(&params.invoice);
         match result {
             Ok(invoice) => Ok(ParseInvoiceResult {
                 invoice: invoice.into(),

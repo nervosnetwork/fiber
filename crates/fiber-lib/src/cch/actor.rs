@@ -652,10 +652,9 @@ impl<S: CchOrderStore> CchState<S> {
     }
 
     async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<CchOrder, CchError> {
+        // `from_str` requires the invoice to carry a valid signature, so parsing
+        // here also guarantees the Fiber invoice is signed.
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
-        if !invoice.is_signed() {
-            return Err(CchError::CKBInvoiceMissingSignature);
-        }
 
         // Validate that the CKB invoice currency matches the configured network (#982)
         if invoice.currency != self.currency {

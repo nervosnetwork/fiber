@@ -210,7 +210,7 @@ impl Actor for MockNetworkActor {
 /// Extract payment hash from SendPaymentCommand
 fn extract_payment_hash_from_command(cmd: &SendPaymentCommand) -> Hash256 {
     if let Some(invoice_str) = &cmd.invoice {
-        if let Ok(invoice) = CkbInvoice::from_str(invoice_str) {
+        if let Ok(invoice) = CkbInvoice::from_str_allowing_unsigned(invoice_str) {
             return *invoice.payment_hash();
         }
         if let Ok(ln_invoice) = lightning_invoice::Bolt11Invoice::from_str(invoice_str) {
@@ -947,8 +947,11 @@ async fn test_receive_btc_rejects_unsigned_fiber_invoice() {
 
     let err = result.expect_err("unsigned Fiber invoice should be rejected");
     assert!(
-        matches!(err, CchError::CKBInvoiceMissingSignature),
-        "expected CKBInvoiceMissingSignature, got: {:?}",
+        matches!(
+            err,
+            CchError::CKBInvoiceError(crate::invoice::InvoiceError::MissingSignature)
+        ),
+        "expected CKBInvoiceError(MissingSignature), got: {:?}",
         err
     );
 }
