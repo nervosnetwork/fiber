@@ -68,6 +68,7 @@ use fiber_types::{
     NodeAnnouncement, Pubkey,
 };
 
+
 // The maximum duration drift between the broadcast message timestamp and latest cursor in store.
 pub(crate) const MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
@@ -1789,6 +1790,19 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         pubkey: &Pubkey,
         message: &BroadcastMessage,
     ) -> Result<InsertMessageStatus, GossipMessageProcessingError> {
+        let msg_chain_hash = match message {
+            BroadcastMessage::NodeAnnouncement(msg) => msg.chain_hash,
+            BroadcastMessage::ChannelAnnouncement(msg) => msg.chain_hash,
+            BroadcastMessage::ChannelUpdate(msg) => msg.chain_hash,
+        };
+        if msg_chain_hash != get_chain_hash() {
+            return Err(GossipMessageProcessingError::ProcessingError(format!(
+                "Invalid chain hash: expected {:?}, got {:?}",
+                get_chain_hash(),
+                msg_chain_hash
+            )));
+        }
+
         if let Some(existing_messages) = self.messages_to_be_saved.get(pubkey) {
             if existing_messages.contains(message) {
                 return Ok(InsertMessageStatus::Duplicate);
@@ -2801,6 +2815,19 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
 ) -> Result<(BroadcastMessageWithTimestamp, bool), VerifyBroadcastMessageError> {
+    let msg_chain_hash = match message {
+        BroadcastMessage::NodeAnnouncement(msg) => msg.chain_hash,
+        BroadcastMessage::ChannelAnnouncement(msg) => msg.chain_hash,
+        BroadcastMessage::ChannelUpdate(msg) => msg.chain_hash,
+    };
+    if msg_chain_hash != get_chain_hash() {
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
+            "Invalid chain hash: expected {:?}, got {:?}",
+            get_chain_hash(),
+            msg_chain_hash
+        )));
+    }
+
     let (timestamp, is_newly_applied) = match message {
         BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
             let on_chain_info =
