@@ -1917,14 +1917,11 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
         })
         .await;
 
-    assert!(res.is_ok());
-
-    let payment_hash = res.unwrap().payment_hash;
-    node_0.wait_until_failed(payment_hash).await;
-    let result = node_0
-        .get_payment_session(payment_hash)
-        .expect("get payment");
-    assert_eq!(result.retry_times(), 1);
+    let err = res.expect_err("invalid router amount should be rejected before sending TLC");
+    assert!(
+        err.contains("route hop amount_received is too small for forwarding fee"),
+        "unexpected error: {err}"
+    );
 
     // ================================================================
     // now we change the expiry delta in the middle hop
@@ -1939,15 +1936,11 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
         })
         .await;
 
-    assert!(res.is_ok());
-
-    let payment_hash = res.unwrap().payment_hash;
-    node_0.wait_until_failed(payment_hash).await;
-    let result = node_0
-        .get_payment_session(payment_hash)
-        .expect("get payment");
-    eprintln!("result: {:?}", result.status);
-    assert_eq!(result.attempts_count(), 1);
+    let err = res.expect_err("invalid router expiry should be rejected before sending TLC");
+    assert!(
+        err.contains("route hop incoming_tlc_expiry is too small"),
+        "unexpected error: {err}"
+    );
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
@@ -1977,7 +1970,7 @@ async fn test_send_payment_with_router_rpc_rejects_overflowing_onion_expiry() {
         Some(gen_rpc_config()),
     )
     .await;
-    let [node_0, mut node_1, node_2] = nodes.try_into().expect("3 nodes");
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     node_0
         .with_network_graph_mut(|graph| graph.set_add_rand_expiry_delta(false))
@@ -2014,8 +2007,8 @@ async fn test_send_payment_with_router_rpc_rejects_overflowing_onion_expiry() {
         .incoming_tlc_expiry = overflowing_incoming_expiry;
     let router = router.into_iter().map(JsonRouterHop::from).collect();
 
-    let payment: GetPaymentCommandResult = node_0
-        .send_rpc_request(
+    let err = node_0
+        .send_rpc_request::<_, GetPaymentCommandResult>(
             "send_payment_with_router",
             SendPaymentWithRouterParams {
                 payment_hash: None,
@@ -2028,27 +2021,11 @@ async fn test_send_payment_with_router_rpc_rejects_overflowing_onion_expiry() {
             },
         )
         .await
-        .unwrap();
-
-    let payment_hash: Hash256 = payment.payment_hash.into();
-    let node_1_pubkey = node_1.pubkey;
-    node_1
-        .expect_event(|event| match event {
-            NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
-                pubkey,
-                failed_payment_hash,
-                err,
-            )) => {
-                assert_eq!(pubkey, &node_1_pubkey);
-                assert_eq!(failed_payment_hash, &payment_hash);
-                assert_eq!(err.error_code, TlcErrorCode::IncorrectTlcExpiry);
-                true
-            }
-            _ => false,
-        })
-        .await;
-
-    node_0.wait_until_failed(payment_hash).await;
+        .expect_err("overflowing explicit router expiry should be rejected before sending TLC");
+    assert!(
+        err.to_string().contains("route hop incoming_tlc_expiry"),
+        "unexpected error: {err:?}"
+    );
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
@@ -2539,7 +2516,7 @@ async fn test_send_payment_send_with_wrong_hop() {
     assert!(res
         .unwrap_err()
         .to_string()
-        .contains("Failed to send onion packet with error UnknownNextPeer"));
+        .contains("Failed to build route, PathFind error: no path found"));
     assert_eq!(node_1.get_inflight_payment_count().await, 0);
 }
 
@@ -3308,7 +3285,7 @@ async fn test_send_payment_with_router_to_offline_channel_fails_fast() {
         })
         .await
         .unwrap_err();
-    assert!(error.contains("UnknownNextPeer"));
+    assert!(error.contains("Failed to build route, PathFind error: no path found"));
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
@@ -5908,17 +5885,11 @@ async fn test_send_payment_with_mixed_channel_hops() {
         .await;
     eprintln!("res: {:?}", res);
 
-    let payment_hash = res.unwrap().payment_hash;
-    node0.wait_until_failed(payment_hash).await;
-    let payment_res = node0.get_payment_result(payment_hash).await;
-    eprintln!("payment_res: {:?}", payment_res);
-    assert_eq!(
-        payment_res.failed_error.unwrap(),
-        "IncorrectOrUnknownPaymentDetails"
+    let err = res.expect_err("mixed CKB/UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
     );
-    let payment_session = node0.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts_count(), 1);
-    assert_eq!(payment_session.retry_times(), 1);
 }
 
 #[tokio::test]
@@ -6148,6 +6119,7 @@ async fn test_ckb_with_udt_mixed_routes_fail() {
             .send_payment_with_router(SendPaymentWithRouterCommand {
                 router: udt1_router.router_hops.clone(),
                 keysend: Some(true),
+                udt_type_script: Some(udt1_script.clone()),
                 ..Default::default()
             })
             .await
@@ -6166,60 +6138,74 @@ async fn test_ckb_with_udt_mixed_routes_fail() {
         udt1_router.router_hops[1].clone(),
         udt2_router.router_hops[2].clone(),
     ];
-    let res = node_a
+    let err = node_a
         .send_payment_with_router(SendPaymentWithRouterCommand {
             router: mixed_router,
             keysend: Some(true),
             ..Default::default()
         })
         .await
-        .unwrap();
-    node_a.wait_until_failed(res.payment_hash).await;
+        .expect_err("mixed CKB/UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
+    );
 
     let mixed_router = vec![
         udt1_router.router_hops[0].clone(),
         udt1_router.router_hops[1].clone(),
         udt2_router.router_hops[2].clone(),
     ];
-    let res = node_a
+    let err = node_a
         .send_payment_with_router(SendPaymentWithRouterCommand {
             router: mixed_router,
             keysend: Some(true),
+            udt_type_script: Some(udt1_script.clone()),
             ..Default::default()
         })
         .await
-        .unwrap();
-    node_a.wait_until_failed(res.payment_hash).await;
+        .expect_err("mixed UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
+    );
 
     let mixed_router = vec![
         ckb_router.router_hops[0].clone(),
         udt1_router.router_hops[1].clone(),
         ckb_router.router_hops[2].clone(),
     ];
-    let res = node_a
+    let err = node_a
         .send_payment_with_router(SendPaymentWithRouterCommand {
             router: mixed_router,
             keysend: Some(true),
             ..Default::default()
         })
         .await
-        .unwrap();
-    node_a.wait_until_failed(res.payment_hash).await;
+        .expect_err("mixed CKB/UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
+    );
 
     let mixed_router = vec![
         udt1_router.router_hops[0].clone(),
         udt2_router.router_hops[1].clone(),
         udt1_router.router_hops[2].clone(),
     ];
-    let res = node_a
+    let err = node_a
         .send_payment_with_router(SendPaymentWithRouterCommand {
             router: mixed_router,
             keysend: Some(true),
+            udt_type_script: Some(udt1_script.clone()),
             ..Default::default()
         })
         .await
-        .unwrap();
-    node_a.wait_until_failed(res.payment_hash).await;
+        .expect_err("mixed UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]

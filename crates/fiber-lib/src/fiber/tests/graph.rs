@@ -4,13 +4,14 @@ use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::NetworkGraph;
 use crate::fiber::graph::PathFindError;
 use crate::fiber::graph::SendPaymentState;
-use crate::fiber::network::get_chain_hash;
+use crate::fiber::network::{get_chain_hash, BuildRouterCommand};
 use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataBuilder, SendPaymentDataExt};
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::TrampolineOnionPacket;
 use crate::fiber::{
     ChannelAnnouncement, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, FeatureVector,
-    Hash256, HopHint, NodeAnnouncement, Privkey, Pubkey, RouterHop, SendPaymentData, SessionRoute,
+    Hash256, HopHint, HopRequire, NodeAnnouncement, Privkey, Pubkey, RouterHop, SendPaymentData,
+    SessionRoute,
 };
 use crate::store::Store;
 use ckb_types::{
@@ -1825,6 +1826,109 @@ fn test_graph_session_router() {
         session_route_keys,
         vec![node0.into(), node2.into(), node3.into(), node4.into()]
     );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_explicit_router_rejects_overflowing_expiry() {
+    let mut network = MockNetworkGraph::new(2);
+    network.add_edge(0, 1, Some(1000), Some(0));
+
+    let node1 = network.keys[1];
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node1.into(), 100, Hash256::default())
+            .max_fee_amount(Some(0))
+            .router(vec![RouterHop {
+                target: node1.into(),
+                channel_outpoint: network.edges[0].2.clone(),
+                amount_received: 100,
+                incoming_tlc_expiry: u64::MAX,
+            }])
+            .build()
+            .expect("valid payment data")
+            .into();
+
+    let route = network
+        .graph
+        .build_route(payment_state.amount, None, None, &payment_state);
+    assert!(matches!(route, Err(PathFindError::Overflow(_))));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_explicit_router_validates_udt() {
+    let mut network = MockNetworkGraph::new(2);
+    network.add_edge_udt(0, 1, Some(1000), Some(0), Script::default());
+
+    let node1 = network.keys[1];
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(node1.into(), 100, Hash256::default())
+            .max_fee_amount(Some(0))
+            .router(vec![RouterHop {
+                target: node1.into(),
+                channel_outpoint: network.edges[0].2.clone(),
+                amount_received: 100,
+                incoming_tlc_expiry: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+            }])
+            .build()
+            .expect("valid payment data")
+            .into();
+
+    let route = network
+        .graph
+        .build_route(payment_state.amount, None, None, &payment_state);
+    assert!(matches!(route, Err(PathFindError::NoPathFound)));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_build_path_rejects_amount_overflow() {
+    let mut network = MockNetworkGraph::new(3);
+    network.add_edge(0, 1, Some(u128::MAX), Some(0));
+    network.add_edge(1, 2, Some(u128::MAX), Some(1));
+
+    let result = network.graph.build_path(
+        network.keys[0].into(),
+        BuildRouterCommand {
+            amount: Some(u128::MAX),
+            udt_type_script: None,
+            hops_info: vec![
+                HopRequire {
+                    pubkey: network.keys[1].into(),
+                    channel_outpoint: Some(network.edges[0].2.clone()),
+                },
+                HopRequire {
+                    pubkey: network.keys[2].into(),
+                    channel_outpoint: Some(network.edges[1].2.clone()),
+                },
+            ],
+            final_tlc_expiry_delta: Some(FINAL_TLC_EXPIRY_DELTA_IN_TESTS),
+        },
+    );
+
+    assert!(matches!(result, Err(PathFindError::Overflow(_))));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_build_path_rejects_expiry_overflow() {
+    let mut network = MockNetworkGraph::new(2);
+    network.add_edge(0, 1, Some(1000), Some(0));
+
+    let result = network.graph.build_path(
+        network.keys[0].into(),
+        BuildRouterCommand {
+            amount: Some(100),
+            udt_type_script: None,
+            hops_info: vec![HopRequire {
+                pubkey: network.keys[1].into(),
+                channel_outpoint: Some(network.edges[0].2.clone()),
+            }],
+            final_tlc_expiry_delta: Some(u64::MAX),
+        },
+    );
+
+    assert!(matches!(result, Err(PathFindError::Overflow(_))));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
