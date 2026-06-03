@@ -396,6 +396,12 @@ impl Privkey {
             .into()
     }
 
+    /// Create a `Privkey` from a 32-byte slice, returning an error if the
+    /// bytes do not represent a valid secp256k1 secret key.
+    pub fn try_from_slice(key: &[u8]) -> Result<Self, secp256k1::Error> {
+        Ok(SecretKey::from_slice(key)?.into())
+    }
+
     pub fn pubkey(&self) -> Pubkey {
         Pubkey::from(self.0.public_key(SECP256K1))
     }
