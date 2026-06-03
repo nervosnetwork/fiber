@@ -68,7 +68,6 @@ use fiber_types::{
     NodeAnnouncement, Pubkey,
 };
 
-
 // The maximum duration drift between the broadcast message timestamp and latest cursor in store.
 pub(crate) const MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
