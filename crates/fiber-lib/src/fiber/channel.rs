@@ -6714,13 +6714,11 @@ impl ChannelActorState {
             Ok(fee) => fee,
             Err(_) => return false,
         };
-        let occupied_capacity = match occupied_capacity(
-            remote_close_script,
-            &self.funding_udt_type_script,
-        ) {
-            Ok(capacity) => capacity.as_u64(),
-            Err(_) => return false,
-        };
+        let occupied_capacity =
+            match occupied_capacity(remote_close_script, &self.funding_udt_type_script) {
+                Ok(capacity) => capacity.as_u64(),
+                Err(_) => return false,
+            };
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
             match Self::checked_ckb_amount_with_reserved(
                 self.to_remote_amount,
