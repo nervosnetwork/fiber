@@ -1808,7 +1808,7 @@ where
             }
         };
 
-        if !state.check_shutdown_fee_valid(shutdown.fee_rate.as_u64()) {
+        if !state.check_shutdown_fee_valid(&shutdown.close_script, shutdown.fee_rate.as_u64()) {
             return Err(ProcessingChannelError::InvalidParameter(
                 "Shutdown fee is invalid".to_string(),
             ));
@@ -6711,25 +6711,23 @@ impl ChannelActorState {
         &self.get_remote_channel_public_keys().funding_pubkey
     }
 
-    fn check_shutdown_fee_valid(&self, remote_fee_rate: u64) -> bool {
+    fn check_shutdown_fee_valid(&self, remote_close_script: &Script, remote_fee_rate: u64) -> bool {
         let remote_shutdown_fee = match checked_calculate_shutdown_tx_fee(
             remote_fee_rate,
             &self.funding_udt_type_script,
             (
-                self.get_remote_shutdown_script(),
+                remote_close_script.clone(),
                 self.get_local_shutdown_script(),
             ),
         ) {
             Ok(fee) => fee,
             Err(_) => return false,
         };
-        let occupied_capacity = match occupied_capacity(
-            &self.get_remote_shutdown_script(),
-            &self.funding_udt_type_script,
-        ) {
-            Ok(capacity) => capacity.as_u64(),
-            Err(_) => return false,
-        };
+        let occupied_capacity =
+            match occupied_capacity(remote_close_script, &self.funding_udt_type_script) {
+                Ok(capacity) => capacity.as_u64(),
+                Err(_) => return false,
+            };
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
             match Self::checked_ckb_amount_with_reserved(
                 self.to_remote_amount,
