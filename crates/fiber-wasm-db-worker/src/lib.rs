@@ -5,7 +5,7 @@ use fiber_wasm_db_common::{
     InputCommand, KV, OutputCommand, read_command_payload, write_command_with_payload,
 };
 use idb::Database;
-use log::{debug, info};
+use log::info;
 use util::{wait_for_command, wait_for_command_sync};
 use wasm_bindgen::{JsCast, prelude::wasm_bindgen};
 use web_sys::{
