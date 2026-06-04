@@ -689,6 +689,27 @@ fn test_tlc_err_packet_encryption() {
             .expect("decrypted");
         assert_eq!(decrypted_tlc_fail_detail, tlc_fail_detail);
     }
+
+    {
+        // The error packet authenticates the second hop as reporter, so a payload that
+        // blames another node in the route must be rejected.
+        let reporter_node = hops_path[1];
+        let spoofed_node = hops_path[2];
+        let node_fail = TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, reporter_node);
+        let mut tlc_fail = TlcErrPacket::new(node_fail.clone(), &hops_ss[1]);
+        tlc_fail = tlc_fail.backward(&hops_ss[0]);
+        let decrypted_tlc_fail_detail = tlc_fail
+            .decode(session_key.as_ref(), hops_path.clone())
+            .expect("decrypted");
+        assert_eq!(decrypted_tlc_fail_detail, node_fail);
+
+        let spoofed_fail = TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, spoofed_node);
+        let mut tlc_fail = TlcErrPacket::new(spoofed_fail, &hops_ss[1]);
+        tlc_fail = tlc_fail.backward(&hops_ss[0]);
+        assert!(tlc_fail
+            .decode(session_key.as_ref(), hops_path.clone())
+            .is_none());
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

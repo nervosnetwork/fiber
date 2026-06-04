@@ -128,7 +128,7 @@ impl TlcErrPacket {
             }
         }
 
-        let hops_public_keys: Vec<PublicKey> = hops_public_keys
+        let secp_hops_public_keys: Vec<PublicKey> = hops_public_keys
             .iter()
             .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
             .collect();
@@ -143,13 +143,20 @@ impl TlcErrPacket {
             })
             .ok()?;
         OnionErrorPacket::from_bytes(self.onion_packet.clone())
-            .parse(hops_public_keys, session_key, TlcErr::deserialize)
-            .map(|(error, hop_index)| {
+            .parse(secp_hops_public_keys, session_key, TlcErr::deserialize)
+            .and_then(|(error, hop_index)| {
                 for _ in hop_index..ERROR_DECODING_PASSES {
                     OnionErrorPacket::from_bytes(self.onion_packet.clone())
                         .xor_cipher_stream(&NO_SHARED_SECRET);
                 }
-                error
+                let reporter = hops_public_keys.get(hop_index)?;
+                if error
+                    .error_node_id()
+                    .is_some_and(|node_id| node_id != *reporter)
+                {
+                    return None;
+                }
+                Some(error)
             })
     }
 
