@@ -5311,6 +5311,141 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
 }
 
 #[tokio::test]
+async fn test_forward_payment_rejects_mismatched_hash_algorithm_between_wire_and_onion() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    let source_node = &mut node_0;
+    let first_channel_funding_tx: Hash256 =
+        source_node.get_channel_funding_tx(&channels[0]).unwrap();
+    let second_channel_funding_tx: Hash256 = node_1.get_channel_funding_tx(&channels[1]).unwrap();
+
+    let forward_amount: u128 = 1000;
+    let source_amount: u128 = 1001;
+    let onion_hash_algorithm = HashAlgorithm::CkbHash;
+    let wire_hash_algorithm = HashAlgorithm::Sha256;
+    let session_key = source_node.get_private_key().0.secret_bytes();
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(forward_amount))
+        .payment_preimage(preimage)
+        .hash_algorithm(onion_hash_algorithm)
+        .payee_pub_key(node_2.pubkey.into())
+        .build()
+        .expect("build invoice");
+    node_2.insert_invoice(invoice.clone(), Some(preimage));
+    let payment_hash = *invoice.payment_hash();
+
+    let old_node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let old_node_1_left_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let old_node_1_right_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let old_node_2_balance = node_2.get_local_balance_from_channel(channels[1]);
+
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: source_amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA * 3,
+            next_hop: Some(node_1.pubkey),
+            funding_tx_hash: first_channel_funding_tx,
+            hash_algorithm: onion_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: forward_amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA * 2,
+            next_hop: Some(node_2.pubkey),
+            funding_tx_hash: second_channel_funding_tx,
+            hash_algorithm: onion_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: forward_amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: onion_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result = call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: source_amount,
+                        hash_algorithm: wire_hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA * 3,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        is_trampoline_hop: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    let offered_id = TLCId::Offered(add_tlc_result.tlc_id);
+    wait_until(|| {
+        source_node
+            .get_tlc(channels[0], offered_id)
+            .is_some_and(|tlc| tlc.removed_reason.is_some())
+            || node_2.get_local_balance_from_channel(channels[1]) != old_node_2_balance
+    })
+    .await;
+
+    let tlc = source_node
+        .get_tlc(channels[0], offered_id)
+        .expect("offered tlc exists");
+    let RemoveTlcReason::RemoveTlcFail(packet) = tlc.removed_reason.expect("tlc should be removed")
+    else {
+        panic!("expected RemoveTlcFail due to mismatched hash algorithm");
+    };
+
+    let err = packet
+        .decode(&session_key, vec![node_1.pubkey])
+        .expect("decode error packet");
+    assert_eq!(
+        err.error_code,
+        TlcErrorCode::IncorrectOrUnknownPaymentDetails
+    );
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_left_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_right_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let node_2_balance = node_2.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, old_node_0_balance);
+    assert_eq!(node_1_left_balance, old_node_1_left_balance);
+    assert_eq!(node_1_right_balance, old_node_1_right_balance);
+    assert_eq!(node_2_balance, old_node_2_balance);
+}
+
+#[tokio::test]
 async fn test_send_payment_middle_hop_restart_will_be_ok() {
     async fn inner_run_restart_test(restart_node_index: usize) {
         init_tracing();
