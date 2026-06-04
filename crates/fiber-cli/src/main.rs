@@ -32,6 +32,7 @@ use rustyline::{Context, Editor, Helper};
 
 const FNN_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8227";
+const REDACTED_HISTORY_VALUE: &str = "REDACTED";
 
 const BANNER_LINES: &[&str] = &[
     r"  ╔═╗╦╔╗ ╔═╗╦═╗  ╔╗╔╔═╗╔╦╗╦ ╦╔═╗╦═╗╦╔═ ",
@@ -348,9 +349,8 @@ async fn run_interactive(
                     continue;
                 }
 
-                let _ = rl.add_history_entry(line);
-
                 if line == "exit" || line == "quit" {
+                    let _ = rl.add_history_entry(line);
                     break;
                 }
 
@@ -362,6 +362,9 @@ async fn run_interactive(
                         continue;
                     }
                 };
+
+                let history_entry = history_entry_for_args(line, &args);
+                let _ = rl.add_history_entry(history_entry.as_str());
 
                 let cli = build_interactive_cli(use_color);
                 match cli.try_get_matches_from(args) {
@@ -393,8 +396,131 @@ async fn run_interactive(
     }
 
     let _ = rl.save_history(&history_path);
+    restrict_history_permissions(&history_path);
     println!("Bye!");
     Ok(())
+}
+
+fn history_entry_for_args(original: &str, args: &[String]) -> String {
+    let mut redacted_args = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    let mut changed = false;
+
+    for arg in args {
+        if redact_next {
+            redacted_args.push(REDACTED_HISTORY_VALUE.to_string());
+            redact_next = false;
+            changed = true;
+            continue;
+        }
+
+        if let Some((flag, _value)) = arg.split_once('=') {
+            if flag.starts_with("--") && is_sensitive_history_flag(flag) {
+                redacted_args.push(format!("{flag}={REDACTED_HISTORY_VALUE}"));
+                changed = true;
+                continue;
+            }
+        }
+
+        if arg.starts_with("--") && is_sensitive_history_flag(arg) {
+            redacted_args.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+
+        if contains_sensitive_history_key(arg) {
+            redacted_args.push(REDACTED_HISTORY_VALUE.to_string());
+            changed = true;
+            continue;
+        }
+
+        redacted_args.push(arg.clone());
+    }
+
+    if changed {
+        redacted_args
+            .iter()
+            .map(|arg| quote_history_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        original.to_string()
+    }
+}
+
+fn is_sensitive_history_flag(flag: &str) -> bool {
+    let name = flag.trim_start_matches('-').to_ascii_lowercase();
+    name.contains("preimage")
+        || name.contains("private-key")
+        || name.contains("private_key")
+        || name.contains("password")
+        || name.contains("passphrase")
+        || name.contains("secret")
+        || name == "auth-token"
+        || name == "auth-token-file"
+        || name == "api-key"
+        || name == "access-token"
+        || name == "refresh-token"
+        || name.ends_with("-token")
+        || name.ends_with("_token")
+        || name.ends_with("-token-file")
+        || name.ends_with("_token_file")
+}
+
+fn contains_sensitive_history_key(arg: &str) -> bool {
+    let lower = arg.to_ascii_lowercase();
+    [
+        "payment_preimage",
+        "payment-preimage",
+        "\"preimage\"",
+        "'preimage'",
+        "private_key",
+        "private-key",
+        "auth_token",
+        "auth-token",
+        "payment_secret",
+        "payment-secret",
+        "\"secret\"",
+        "'secret'",
+        "\"password\"",
+        "'password'",
+        "\"token\"",
+        "'token'",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn quote_history_arg(arg: &str) -> String {
+    if arg.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '-' | '.' | '/' | ':' | '@' | '%' | '+' | '=' | ','
+            )
+    }) {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+fn restrict_history_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o600);
+            let _ = std::fs::set_permissions(path, permissions);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 /// Simple shell word splitting (handles basic quoting).
