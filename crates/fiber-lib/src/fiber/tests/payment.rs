@@ -19,6 +19,7 @@ use crate::fiber::{
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
+use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
 #[cfg(not(target_arch = "wasm32"))]
@@ -5307,6 +5308,113 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
     assert_eq!(
         err.error_code,
         TlcErrorCode::IncorrectOrUnknownPaymentDetails
+    );
+}
+
+#[tokio::test]
+async fn test_payment_onion_invoice_hash_algorithm_mismatch_fails() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+
+    let [mut node_a, node_b] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_a;
+    let target_pubkey = node_b.pubkey;
+
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice_hash_algorithm = HashAlgorithm::CkbHash;
+    let tlc_hash_algorithm = HashAlgorithm::Sha256;
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(invoice_hash_algorithm.hash(preimage).into())
+        .hash_algorithm(invoice_hash_algorithm)
+        .payee_pub_key(target_pubkey.into())
+        .build()
+        .expect("build hold invoice");
+    node_b.insert_invoice(invoice.clone(), None);
+
+    let payment_hash = *invoice.payment_hash();
+    let hops_infos = vec![
+        PaymentHopData {
+            amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: tlc_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: tlc_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result = call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount,
+                        hash_algorithm: tlc_hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        is_trampoline_hop: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    let offered_id = TLCId::Offered(add_tlc_result.tlc_id);
+    wait_until(|| {
+        source_node
+            .get_tlc(channels[0], offered_id)
+            .is_some_and(|tlc| tlc.removed_reason.is_some())
+    })
+    .await;
+
+    let tlc = source_node
+        .get_tlc(channels[0], offered_id)
+        .expect("offered tlc exists");
+    let RemoveTlcReason::RemoveTlcFail(packet) = tlc.removed_reason.expect("tlc should be removed")
+    else {
+        panic!("expected RemoveTlcFail due to hash algorithm mismatch");
+    };
+
+    let session_key = source_node.get_private_key().0.secret_bytes();
+    let err = packet
+        .decode(&session_key, vec![target_pubkey])
+        .expect("decode error packet");
+    assert_eq!(
+        err.error_code,
+        TlcErrorCode::IncorrectOrUnknownPaymentDetails
+    );
+    assert_eq!(
+        node_b.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
     );
 }
 
