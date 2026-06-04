@@ -220,7 +220,7 @@ where
         &self,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
-        let pubkey = Pubkey::try_from(params.pubkey).rpc_err(&params)?;
+        let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
@@ -297,11 +297,7 @@ where
         let include_closed = params.include_closed.unwrap_or_default();
 
         // Convert the optional String pubkey filter to internal Pubkey
-        let filter_pubkey = params
-            .pubkey
-            .map(Pubkey::try_from)
-            .transpose()
-            .rpc_err(&params)?;
+        let filter_pubkey = params.pubkey.map(Pubkey::try_from).transpose().rpc_err()?;
 
         // The two filter options are mutually exclusive: `only_pending` narrows to channels
         // that are still opening (or failed to open), while `include_closed` broadens to
@@ -310,7 +306,6 @@ where
         if only_pending && include_closed {
             return Err(rpc_error(
                 "only_pending and include_closed are mutually exclusive",
-                params,
             ));
         }
 
@@ -333,8 +328,8 @@ where
             if only_pending && !rpc_state.is_pending() {
                 continue;
             }
-            let offered_tlc_balance = state.get_offered_tlc_balance().rpc_err(&params)?;
-            let received_tlc_balance = state.get_received_tlc_balance().rpc_err(&params)?;
+            let offered_tlc_balance = state.get_offered_tlc_balance().rpc_err()?;
+            let received_tlc_balance = state.get_received_tlc_balance().rpc_err()?;
             // Enrich with failure_detail from ChannelOpenRecord when available
             let failure_detail = self
                 .store
@@ -516,7 +511,6 @@ where
         {
             return Err(rpc_error(
                 "close_script and fee_rate should not be set when force is true",
-                params,
             ));
         }
 
@@ -571,7 +565,7 @@ where
         &self,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
-        let pubkey = Pubkey::try_from(params.pubkey).rpc_err(&params)?;
+        let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
         let funding_lock_script_cell_deps: Vec<packed::CellDep> = params
             .funding_lock_script_cell_deps
             .clone()

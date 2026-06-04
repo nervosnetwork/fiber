@@ -138,7 +138,7 @@ where
             .map(|cursor| Cursor::from_bytes(cursor.as_bytes()))
             .transpose()
             .map_err(|e| {
-                ErrorObjectOwned::owned(INVALID_PARAMS_CODE, e.to_string(), Some(params))
+                ErrorObjectOwned::owned(INVALID_PARAMS_CODE, e.to_string(), Option::<()>::None)
             })?;
         let nodes = network_graph.get_nodes_with_params(limit, cursor);
         let last_cursor = nodes
@@ -163,7 +163,7 @@ where
             .map(|cursor| Cursor::from_bytes(cursor.as_bytes()))
             .transpose()
             .map_err(|e| {
-                ErrorObjectOwned::owned(INVALID_PARAMS_CODE, e.to_string(), Some(params))
+                ErrorObjectOwned::owned(INVALID_PARAMS_CODE, e.to_string(), Option::<()>::None)
             })?;
 
         let channels = network_graph.get_channels_with_params(limit, cursor);

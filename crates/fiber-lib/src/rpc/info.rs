@@ -60,7 +60,7 @@ impl InfoRpcServerImpl {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
 
-        handle_actor_call!(self.actor, message, ()).map(|response| NodeInfoResult {
+        handle_actor_call!(self.actor, message).map(|response| NodeInfoResult {
             version,
             commit_hash,
             features: response.features.enabled_features_names(),

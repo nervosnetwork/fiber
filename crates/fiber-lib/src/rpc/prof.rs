@@ -37,7 +37,7 @@ impl ProfRpcServerImpl {
             Ok(path) => Ok(PprofResult {
                 path: path.to_string_lossy().into_owned(),
             }),
-            Err(err) => Err(rpc_error(err.to_string(), params)),
+            Err(err) => Err(rpc_error(err.to_string())),
         }
     }
 }

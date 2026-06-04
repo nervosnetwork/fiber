@@ -263,7 +263,7 @@ impl DevRpcServerImpl {
             )
             .unwrap()
             {
-                Err(rpc_error(err.to_string(), params))
+                Err(rpc_error(err.to_string()))
             } else {
                 Ok(SubmitCommitmentTransactionResult {
                     tx_hash: JsonHash256(
@@ -272,10 +272,7 @@ impl DevRpcServerImpl {
                 })
             }
         } else {
-            Err(rpc_error(
-                "Commitment transaction not found".to_string(),
-                params,
-            ))
+            Err(rpc_error("Commitment transaction not found".to_string()))
         }
     }
 
@@ -316,18 +313,15 @@ impl DevRpcServerImpl {
             .strip_prefix("0x")
             .unwrap_or(&params.private_key);
         let private_key_bytes = hex::decode(private_key_hex)
-            .map_err(|e| rpc_error(format!("invalid private key hex: {}", e), &params))?;
+            .map_err(|e| rpc_error(format!("invalid private key hex: {}", e)))?;
         if private_key_bytes.len() != 32 {
-            return Err(rpc_error(
-                format!(
-                    "invalid private key length: expected 32 bytes, got {}",
-                    private_key_bytes.len()
-                ),
-                &params,
-            ));
+            return Err(rpc_error(format!(
+                "invalid private key length: expected 32 bytes, got {}",
+                private_key_bytes.len()
+            )));
         }
         let secret_key = SecretKey::from_slice(&private_key_bytes)
-            .map_err(|e| rpc_error(format!("invalid private key: {}", e), &params))?;
+            .map_err(|e| rpc_error(format!("invalid private key: {}", e)))?;
 
         // Convert the JSON transaction to a packed transaction
         let packed_tx: ckb_types::packed::Transaction = params.unsigned_funding_tx.clone().into();
@@ -337,7 +331,7 @@ impl DevRpcServerImpl {
         let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![std::str::FromStr::from_str(
             hex::encode(secret_key.as_ref()).as_ref(),
         )
-        .map_err(|e| rpc_error(format!("failed to create signer: {}", e), &params))?]);
+        .map_err(|e| rpc_error(format!("failed to create signer: {}", e)))?]);
 
         let pubkey_hash = blake160(
             secret_key
@@ -360,12 +354,7 @@ impl DevRpcServerImpl {
             let previous_tx = ckb_client
                 .get_transaction(tx_hash.clone())
                 .await
-                .map_err(|e| {
-                    rpc_error(
-                        format!("failed to fetch previous transaction: {}", e),
-                        &params,
-                    )
-                })?;
+                .map_err(|e| rpc_error(format!("failed to fetch previous transaction: {}", e)))?;
             let previous_tx = previous_tx.and_then(|response| {
                 response.transaction.map(|tx| match tx.inner {
                     ckb_jsonrpc_types::Either::Left(json) => {
@@ -378,22 +367,16 @@ impl DevRpcServerImpl {
                 })
             });
             let previous_tx = previous_tx.ok_or_else(|| {
-                rpc_error(
-                    format!(
-                        "previous transaction not found for input {}: {}",
-                        input_idx, tx_hash
-                    ),
-                    &params,
-                )
+                rpc_error(format!(
+                    "previous transaction not found for input {}: {}",
+                    input_idx, tx_hash
+                ))
             })?;
             let previous_output = previous_tx.outputs().get(output_index).ok_or_else(|| {
-                rpc_error(
-                    format!(
-                        "previous output index {} out of bounds for input {}",
-                        output_index, input_idx
-                    ),
-                    &params,
-                )
+                rpc_error(format!(
+                    "previous output index {} out of bounds for input {}",
+                    output_index, input_idx
+                ))
             })?;
             let lock_script = previous_output.lock();
             if lock_script.args().raw_data().as_ref() != pubkey_hash.as_bytes() {
@@ -418,7 +401,6 @@ impl DevRpcServerImpl {
         if signing_groups.is_empty() {
             return Err(rpc_error(
                 "no transaction inputs matched the provided private key".to_string(),
-                &params,
             ));
         }
 
@@ -429,16 +411,12 @@ impl DevRpcServerImpl {
                 .first()
                 .expect("script group should contain at least one input");
             let zero_lock = Bytes::from(vec![0u8; 65]);
-            let message = generate_message(&tx_view, &script_group, zero_lock).map_err(|e| {
-                rpc_error(
-                    format!("failed to generate sighash message: {}", e),
-                    &params,
-                )
-            })?;
+            let message = generate_message(&tx_view, &script_group, zero_lock)
+                .map_err(|e| rpc_error(format!("failed to generate sighash message: {}", e)))?;
 
             let signature = signer
                 .sign(pubkey_hash.as_bytes(), &message, true, &tx_view)
-                .map_err(|e| rpc_error(format!("failed to sign message: {}", e), &params))?;
+                .map_err(|e| rpc_error(format!("failed to sign message: {}", e)))?;
 
             while witnesses.len() <= input_idx {
                 witnesses.push(Default::default());

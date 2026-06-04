@@ -119,10 +119,11 @@ fn create_fake_channel_announcement_message(
 
 fn create_node_announcement_message_with_priv_key(priv_key: &Privkey) -> NodeAnnouncement {
     let node_name = "fake node";
-    let addresses = ["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
-        .iter()
-        .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
-        .collect();
+    let expected_peer_id =
+        PeerId::from_public_key(&crate::fiber::types::pubkey_to_tentacle(priv_key.pubkey()));
+    let mut address = MultiAddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid multiaddr");
+    address.push(Protocol::P2P(Cow::Owned(expected_peer_id.into_bytes())));
+    let addresses = vec![address];
     NodeAnnouncement::new_signed(
         node_name.into(),
         FeatureVector::default(),

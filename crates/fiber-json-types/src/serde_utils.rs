@@ -322,7 +322,7 @@ impl From<Privkey> for [u8; 32] {
 
 impl core::fmt::Debug for Privkey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Privkey({})", hex::encode(self.0))
+        write!(f, "Privkey(<redacted>)")
     }
 }
 
