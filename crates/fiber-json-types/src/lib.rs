@@ -26,6 +26,9 @@
 pub mod schema_helpers;
 pub mod serde_utils;
 
+#[cfg(test)]
+mod tests;
+
 #[cfg(feature = "conversion")]
 pub mod convert;
 

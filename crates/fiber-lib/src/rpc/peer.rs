@@ -75,10 +75,9 @@ impl PeerRpcServerImpl {
             if address_str.is_empty() {
                 return Err(rpc_error(
                     "address must not be empty, expected a multiaddr like /ip4/1.2.3.4/tcp/8080",
-                    &params,
                 ));
             }
-            let address = address_str.parse::<Multiaddr>().rpc_err(&params)?;
+            let address = address_str.parse::<Multiaddr>().rpc_err()?;
             let save = params.save.unwrap_or(true);
             let message = |rpc_reply| {
                 NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
@@ -92,7 +91,7 @@ impl PeerRpcServerImpl {
         }
 
         if let Some(pubkey_str) = params.pubkey {
-            let pubkey = Pubkey::try_from(pubkey_str).rpc_err(&params)?;
+            let pubkey = Pubkey::try_from(pubkey_str).rpc_err()?;
             let addr_transport = params.addr_type.map(to_transport_type);
             let message = |rpc_reply| {
                 NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
@@ -105,17 +104,14 @@ impl PeerRpcServerImpl {
             return crate::handle_actor_call!(self.actor, message, params);
         }
 
-        Err(rpc_error(
-            "either `address` or `pubkey` is required",
-            params,
-        ))
+        Err(rpc_error("either `address` or `pubkey` is required"))
     }
 
     pub async fn disconnect_peer(
         &self,
         params: DisconnectPeerParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let pubkey = Pubkey::try_from(params.pubkey).rpc_err(&params)?;
+        let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
                 pubkey,
@@ -130,7 +126,7 @@ impl PeerRpcServerImpl {
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply));
 
-        crate::handle_actor_call!(self.actor, message, ()).map(|response| ListPeersResult {
+        crate::handle_actor_call!(self.actor, message).map(|response| ListPeersResult {
             peers: response
                 .into_iter()
                 .map(|peer| PeerInfo {
