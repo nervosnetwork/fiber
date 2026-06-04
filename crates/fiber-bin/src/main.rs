@@ -32,9 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::{mpsc, RwLock};
-#[cfg(debug_assertions)]
-use tracing::error;
-use tracing::{debug, info, info_span, trace};
+use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
@@ -340,7 +338,15 @@ async fn run_node(
                                         }
                                     }
                                     if let Some(watchtower_client) = watchtower_client.as_ref() {
-                                        forward_event_to_client(event.clone(), watchtower_client).await;
+                                        if let Err(err) =
+                                            forward_event_to_client(event.clone(), watchtower_client)
+                                                .await
+                                        {
+                                            error!(
+                                                "Failed to forward event to standalone watchtower: {}",
+                                                err
+                                            );
+                                        }
                                     }
                                     if let Some(watchtower_actor) = watchtower_actor.as_ref() {
                                         forward_event_to_actor(event, watchtower_actor);
