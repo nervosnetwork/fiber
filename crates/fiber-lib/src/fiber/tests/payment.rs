@@ -5325,8 +5325,8 @@ async fn test_forward_payment_rejects_mismatched_hash_algorithm_between_wire_and
     let [mut node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
     let source_node = &mut node_0;
     let first_channel_funding_tx: Hash256 =
-        source_node.get_channel_funding_tx(&channels[0]).unwrap().into();
-    let second_channel_funding_tx: Hash256 = node_1.get_channel_funding_tx(&channels[1]).unwrap().into();
+        source_node.get_channel_funding_tx(&channels[0]).unwrap();
+    let second_channel_funding_tx: Hash256 = node_1.get_channel_funding_tx(&channels[1]).unwrap();
 
     let forward_amount: u128 = 1000;
     let source_amount: u128 = 1001;
