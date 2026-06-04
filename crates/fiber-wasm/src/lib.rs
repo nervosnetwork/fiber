@@ -34,7 +34,7 @@ use tokio::{
     select,
     sync::{RwLock, mpsc},
 };
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace};
 use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 
 pub mod api;
@@ -271,16 +271,17 @@ pub async fn fiber(
                                     break;
                                 }
                                 Some(event) => {
-                                    if let Some(watchtower_client) = watchtower_client.as_ref() {
-                                        if let Err(err) =
-                                            forward_event_to_client(event.clone(), watchtower_client)
-                                                .await
-                                        {
-                                            error!(
-                                                "Failed to forward event to standalone watchtower: {}",
-                                                err
-                                            );
-                                        }
+                                    if let Some(watchtower_client) = watchtower_client.as_ref()
+                                        && let Err(err) = forward_event_to_client(
+                                            event.clone(),
+                                            watchtower_client,
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            "Failed to forward event to standalone watchtower: {}",
+                                            err
+                                        );
                                     }
                                 }
                             }

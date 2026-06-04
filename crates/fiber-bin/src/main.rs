@@ -32,9 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::{mpsc, RwLock};
-#[cfg(debug_assertions)]
-use tracing::error;
-use tracing::{debug, info, info_span, trace};
+use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
