@@ -125,7 +125,6 @@ pub(crate) async fn handle_db_command<F>(
 where
     F: Fn(&[u8]) -> bool,
 {
-    debug!("Handle command: {:?}", cmd);
     let tx_mode = match cmd {
         DbCommandRequest::Read { .. } | DbCommandRequest::Iterator { .. } => {
             TransactionMode::ReadOnly
@@ -161,7 +160,6 @@ where
             DbCommandResponse::Read { values: res }
         }
         DbCommandRequest::Put { kvs } => {
-            debug!("Putting: {:?}", kvs);
             for KV { key, value } in kvs {
                 let key = serde_wasm_bindgen::to_value(&key).unwrap();
                 let value = serde_wasm_bindgen::to_value(&value).unwrap();
@@ -192,18 +190,10 @@ where
             let kvs = collect_iterator(&store, &start, direction, invoke_take_while, limit)
                 .await
                 .with_context(|| anyhow!("Unable to handle iterator"))?;
-            debug!(
-                "Called iterator, args=<start={} bytes, {:?}, {:?}>, result_count={}",
-                start.len(),
-                direction,
-                limit,
-                kvs.len()
-            );
             DbCommandResponse::Iterator { kvs }
         }
     };
     assert_eq!(TransactionResult::Committed, tran.await.unwrap());
-    debug!("Command result={:?}", result);
     Ok(result)
 }
 
