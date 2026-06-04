@@ -27,6 +27,8 @@ use tentacle::{
     builder::MetaBuilder,
     bytes::Bytes,
     context::{ProtocolContext, ProtocolContextMutRef, SessionContext},
+    multiaddr::Protocol,
+    secio::PeerId,
     service::{ProtocolHandle, ProtocolMeta, ServiceAsyncControl, SessionType},
     traits::ServiceProtocol,
     SessionId,
@@ -1830,6 +1832,23 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                     timestamp,
                     max_acceptable_gossip_message_timestamp,
                 ));
+            }
+        }
+
+        if let BroadcastMessage::NodeAnnouncement(node_announcement) = &message {
+            let expected_peer_id = PeerId::from_public_key(&super::types::pubkey_to_tentacle(
+                node_announcement.node_id,
+            ));
+            for addr in &node_announcement.addresses {
+                for proto in addr.iter() {
+                    if let Protocol::P2P(ref peer_id_bytes) = proto {
+                        if peer_id_bytes.as_ref() != expected_peer_id.as_bytes() {
+                            return Err(GossipMessageProcessingError::ProcessingError(
+                                "NodeAnnouncement address /p2p does not match node_id".to_string(),
+                            ));
+                        }
+                    }
+                }
             }
         }
 
