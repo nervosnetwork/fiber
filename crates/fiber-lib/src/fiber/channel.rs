@@ -1596,6 +1596,15 @@ where
                 return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
             }
 
+            let invoice_hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+            if hash_algorithm != invoice_hash_algorithm {
+                error!(
+                    "hash algorithm mismatch for invoice payment: {:?}, tlc: {:?}, invoice: {:?}",
+                    payment_hash, hash_algorithm, invoice_hash_algorithm
+                );
+                return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+            }
+
             // ensure tlc expiry is large than the now + final_tlc_minimum_expiry_delta
             if invoice.is_tlc_expire_too_soon(add_tlc.expiry) {
                 return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
