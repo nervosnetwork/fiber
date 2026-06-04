@@ -1,3 +1,4 @@
+use crate::ckb::config::new_ckb_rpc_async_client;
 use crate::ckb::CkbConfig;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_sdk::rpc::ckb_indexer::{Cell, CellType, Order, Pagination, ScriptType, SearchKey, Tx};
@@ -129,8 +130,8 @@ impl CkbRpcClient {
 ///
 /// Shared by both `get_shutdown_tx` and the synchronous watchtower
 /// `run_periodic_check`.
-pub(crate) fn find_first_input_tx_hash(
-    client: &ckb_sdk::CkbRpcClient,
+pub(crate) async fn find_first_input_tx_hash(
+    client: &ckb_sdk::CkbRpcAsyncClient,
     funding_lock_script: &Script,
 ) -> Result<Option<H256>, anyhow::Error> {
     let search_key = SearchKey {
@@ -152,6 +153,7 @@ pub(crate) fn find_first_input_tx_hash(
                 PAGE_SIZE.into(),
                 after_cursor,
             )
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         if txs.objects.is_empty() {
@@ -208,8 +210,9 @@ impl CkbChainClient for CkbRpcClient {
         &self,
         funding_lock_script: Script,
     ) -> Result<Option<GetShutdownTxResponse>, anyhow::Error> {
-        let indexer_client = ckb_sdk::CkbRpcClient::new(&self.config.rpc_url);
-        let Some(tx_hash) = find_first_input_tx_hash(&indexer_client, &funding_lock_script)? else {
+        let indexer_client = new_ckb_rpc_async_client(&self.config.rpc_url);
+        let Some(tx_hash) = find_first_input_tx_hash(&indexer_client, &funding_lock_script).await?
+        else {
             return Ok(None);
         };
 
