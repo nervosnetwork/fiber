@@ -1650,14 +1650,14 @@ where
                 tlc.total_amount = Some(record.total_amount);
             }
             (Some(invoice), None) => {
-                if invoice.allow_mpp() {
-                    // FIXME: whether we allow MPP without MPP records in onion packet?
-                    // currently we allow it pay with enough amount
-                    // TODO: add a unit test of using single path payment pay MPP invoice successfully
-                    warn!(
-                        "invoice allows MPP but no MPP records in onion packet: {:?}",
+                if invoice.allow_mpp() || invoice.payment_secret().is_some() {
+                    error!(
+                        "invoice requires payment data but no MPP records in onion packet: {:?}",
                         payment_hash
                     );
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "missing MPP payment data".to_string(),
+                    ));
                 }
                 if !is_invoice_fulfilled(invoice, std::iter::once(&*tlc)) {
                     error!("invoice is not fulfilled for payment: {:?}", payment_hash);

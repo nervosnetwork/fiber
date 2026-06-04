@@ -852,7 +852,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
+async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data_is_rejected() {
     init_tracing();
 
     let (nodes, channels) = create_n_nodes_network(
@@ -933,18 +933,26 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    // wait tlc 1 is removed
-    while source_node
+    let tlc = source_node
         .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
-        .is_some()
-    {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
+        .expect("offered tlc");
+    assert!(matches!(
+        tlc.removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    let tlc = node_1
+        .get_tlc(channels[0], TLCId::Received(add_tlc_result_1.tlc_id))
+        .expect("received tlc");
+    assert!(matches!(
+        tlc.removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
 
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
-    assert_eq!(node_0_balance, 0);
-    assert_eq!(node_1_balance, 10000000000);
+    assert_eq!(node_0_balance, 10000000000);
+    assert_eq!(node_1_balance, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
