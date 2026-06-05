@@ -660,6 +660,30 @@ where
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
 
+                // Peer-sent TxSignatures is only valid once both CommitmentSigned messages have
+                // been exchanged, i.e. the channel has reached AwaitingTxSignatures(_). The
+                // fast-path branches below would otherwise advance the channel to
+                // AwaitingChannelReady (and broadcast FundingTransactionPending) without
+                // verifying that we hold a latest local commitment transaction, which would
+                // leave the channel unable to force-close. See GHSA-x6rw-txsignatures-verification.
+                match state.state {
+                    ChannelState::AwaitingTxSignatures(flags)
+                        if flags.contains(AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT) =>
+                    {
+                        return Err(ProcessingChannelError::RepeatedProcessing(format!(
+                            "Received duplicate TxSignatures while channel is in state {:?}",
+                            state.state
+                        )));
+                    }
+                    ChannelState::AwaitingTxSignatures(_) => {}
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Received TxSignatures before commitment exchange completed; channel state is {:?}",
+                            state.state
+                        )));
+                    }
+                }
+
                 if state.ephemeral_config.external_funding.enabled
                     && state.ephemeral_config.external_funding.signed_submitted
                     && !state.is_acceptor
@@ -7706,6 +7730,17 @@ impl ChannelActorState {
         match self.state {
             ChannelState::AwaitingChannelReady(flags) => {
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    // Defense-in-depth: refuse to advertise readiness if we never received the
+                    // peer's CommitmentSigned (which is what populates
+                    // latest_commitment_transaction). Without this, get_latest_commitment_transaction
+                    // would panic on force-close. See GHSA-x6rw-txsignatures-verification.
+                    if self.latest_commitment_transaction.is_none() {
+                        error!(
+                            "Refusing to advance to ChannelReady for channel {:?}: latest_commitment_transaction is not set; the peer likely skipped sending CommitmentSigned",
+                            self.get_id()
+                        );
+                        return;
+                    }
                     if !self.is_public() {
                         self.on_new_channel_ready(myself);
                     } else {

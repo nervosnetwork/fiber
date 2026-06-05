@@ -20,7 +20,7 @@ use crate::fiber::network::{
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
     AddTlc, CommitmentSigned, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey,
-    ReestablishChannel, TlcErr,
+    ReestablishChannel, TlcErr, TxSignatures,
 };
 use crate::fiber::ChannelConnectivityState;
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
@@ -9950,6 +9950,85 @@ async fn test_external_funding_initiator_send_tx_signatures_first_preserves_exte
     assert!(
         funding_tx.witnesses().len() >= signed_tx.witnesses().len(),
         "initiator should keep submitted witnesses and merge peer witnesses"
+    );
+}
+
+/// Regression test for GHSA-x6rw-txsignatures-verification: a stale `TxSignatures`
+/// from the peer against an established channel must be rejected by the state guard.
+/// Exercises branch #3 of the `FiberChannelMessage::TxSignatures` handler (the
+/// `should_local_send_tx_signatures_first()` variant) by configuring the funding
+/// split so node_a's `to_local_amount` is below `to_remote_amount`.
+///
+/// Before the fix, branch #3 unconditionally installed the peer-supplied witnesses
+/// into `funding_tx`, broadcast `FundingTransactionPending`, and transitioned to
+/// `AwaitingChannelReady` regardless of the channel's actual state. With the guard
+/// in place, the message is rejected because the channel is in `ChannelReady`, not
+/// `AwaitingTxSignatures(_)`. (Branch #4, the `should_local_send_tx_signatures_first()
+/// == false` variant for non-external-funding channels, was already protected by an
+/// inner state check in `handle_tx_signatures`; branches #1 and #2 cover the
+/// external-funding fast paths and are protected by the same outer guard.)
+#[tokio::test]
+async fn test_tx_signatures_after_channel_ready_rejected() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 200_000_000_000, false).await;
+
+    let state_before = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(state_before.state, ChannelState::ChannelReady),
+        "channel should be ready before attack, got {:?}",
+        state_before.state
+    );
+    assert!(
+        state_before.to_local_amount < state_before.to_remote_amount,
+        "this regression test relies on node_a's to_local_amount being below to_remote_amount so should_local_send_tx_signatures_first() is true (branch #3 fires); got to_local={} to_remote={}",
+        state_before.to_local_amount,
+        state_before.to_remote_amount,
+    );
+    let funding_tx_bytes_before = state_before
+        .funding_tx
+        .as_ref()
+        .map(|tx| tx.as_slice().to_vec());
+    let latest_commitment_bytes_before = state_before
+        .latest_commitment_transaction
+        .as_ref()
+        .map(|tx| tx.as_slice().to_vec());
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+            node_b.pubkey,
+            FiberMessage::tx_signatures(TxSignatures {
+                channel_id,
+                witnesses: vec![vec![0u8; 65]],
+            }),
+        )))
+        .expect("network actor alive");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let state_after = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(state_after.state, ChannelState::ChannelReady),
+        "channel state must remain ChannelReady after a stale peer TxSignatures, got {:?}",
+        state_after.state
+    );
+    let funding_tx_bytes_after = state_after
+        .funding_tx
+        .as_ref()
+        .map(|tx| tx.as_slice().to_vec());
+    assert_eq!(
+        funding_tx_bytes_after, funding_tx_bytes_before,
+        "funding_tx must not be mutated by a stale peer TxSignatures"
+    );
+    let latest_commitment_bytes_after = state_after
+        .latest_commitment_transaction
+        .as_ref()
+        .map(|tx| tx.as_slice().to_vec());
+    assert_eq!(
+        latest_commitment_bytes_after, latest_commitment_bytes_before,
+        "latest_commitment_transaction must be unchanged by a stale peer TxSignatures"
     );
 }
 
