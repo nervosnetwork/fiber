@@ -394,7 +394,15 @@ impl PaymentTracker {
     }
 
     async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
-        tracing::debug!("payment: {:?}", payment);
+        let payment_hash = payment.payment_hash.clone();
+        let status = payment.status();
+        let has_payment_preimage = !is_payment_preimage_empty(&payment.payment_preimage);
+        tracing::debug!(
+            "payment changed payment_hash={} status={:?} has_payment_preimage={}",
+            payment_hash,
+            status,
+            has_payment_preimage
+        );
         self.port.send(map_lnd_payment_changed_event(payment)?);
         Ok(())
     }
@@ -455,7 +463,11 @@ impl InvoiceTracker {
 
     // Return true to quit the tracker
     async fn on_invoice(&self, invoice: lnrpc::Invoice) -> Result<bool> {
-        tracing::debug!("[InvoiceTracker] invoice: {:?}", invoice);
+        tracing::debug!(
+            "[InvoiceTracker] invoice update payment_hash={} state={:?}",
+            hex::encode(&invoice.r_hash),
+            invoice.state()
+        );
         let event = map_lnd_invoice_changed_event(invoice)?;
         self.port.send(event.clone());
 

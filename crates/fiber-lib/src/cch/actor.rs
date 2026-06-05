@@ -20,6 +20,7 @@ use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
     CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
+    RedactedCchTrackingEvent,
 };
 use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
@@ -339,7 +340,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::TrackingEvent(event) => {
-                tracing::debug!("event {:?}", event);
+                tracing::debug!("tracking event {:?}", RedactedCchTrackingEvent(&event));
                 let payment_hash = *event.payment_hash();
                 match state.handle_tracking_event(event).await {
                     Ok(actions) => {
@@ -357,7 +358,13 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::StoreChangeEvent(change) => {
-                tracing::debug!("store change event {:?}", change);
+                let summary = redacted_store_change_summary(&change);
+                tracing::debug!(
+                    "store change event kind={} payment_hash={:x} has_payment_preimage={}",
+                    summary.kind,
+                    summary.payment_hash,
+                    summary.has_payment_preimage
+                );
                 let events = state.map_store_change_to_events(&change);
                 for event in events {
                     let payment_hash = *event.payment_hash();
@@ -540,7 +547,12 @@ impl<S: CchOrderStore> CchState<S> {
         }
 
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
-        tracing::debug!("BTC invoice: {:?}", invoice);
+        tracing::debug!(
+            "BTC invoice parsed payment_hash={:x} currency={:?} has_amount={}",
+            Hash256::from(*invoice.payment_hash()),
+            invoice.currency(),
+            invoice.amount_milli_satoshis().is_some()
+        );
 
         // Validate that the BTC invoice network matches the expected BTC network (#978)
         let expected_ln_currency = expected_ln_currency(self.currency);
@@ -951,7 +963,13 @@ async fn subscribe_store_changes_ws(
                 item = subscription.next() => {
                     match item {
                         Some(Ok(change)) => {
-                            tracing::debug!("Received store change via WebSocket: {:?}", change);
+                            let summary = redacted_store_change_summary(&change);
+                            tracing::debug!(
+                                "received store change via websocket kind={} payment_hash={:x} has_payment_preimage={}",
+                                summary.kind,
+                                summary.payment_hash,
+                                summary.has_payment_preimage
+                            );
                             if let Err(err) = actor.send_message(CchMessage::StoreChangeEvent(change)) {
                                 tracing::error!("Failed to forward store change to CCH actor: {}", err);
                                 return;
@@ -973,5 +991,32 @@ async fn subscribe_store_changes_ws(
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RedactedStoreChangeSummary {
+    pub kind: &'static str,
+    pub payment_hash: Hash256,
+    pub has_payment_preimage: bool,
+}
+
+pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedStoreChangeSummary {
+    match change {
+        StoreChange::PutCkbInvoiceStatus { payment_hash, .. } => RedactedStoreChangeSummary {
+            kind: "PutCkbInvoiceStatus",
+            payment_hash: *payment_hash,
+            has_payment_preimage: false,
+        },
+        StoreChange::PutPaymentSession { payment_hash, .. } => RedactedStoreChangeSummary {
+            kind: "PutPaymentSession",
+            payment_hash: *payment_hash,
+            has_payment_preimage: false,
+        },
+        StoreChange::PutPreimage { payment_hash, .. } => RedactedStoreChangeSummary {
+            kind: "PutPreimage",
+            payment_hash: *payment_hash,
+            has_payment_preimage: true,
+        },
     }
 }

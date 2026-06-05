@@ -84,14 +84,20 @@ impl ActionExecutor for SettleLightningIncomingInvoiceExecutor {
         let req = invoicesrpc::SettleInvoiceMsg {
             preimage: self.payment_preimage.into(),
         };
-        tracing::debug!("SettleLightningIncomingInvoiceExecutor req: {:?}", req);
+        tracing::debug!(
+            "SettleLightningIncomingInvoiceExecutor request payment_hash={:x} has_preimage=true",
+            self.payment_hash
+        );
 
         let mut client = self.lnd_connection.create_invoices_client().await?;
         // TODO: set a fee
         match client.settle_invoice(req).await {
             Ok(resp) => {
-                let resp = resp.into_inner();
-                tracing::debug!("SettleLightningIncomingInvoiceExecutor resp: {:?}", resp);
+                let _resp = resp.into_inner();
+                tracing::debug!(
+                    "SettleLightningIncomingInvoiceExecutor response payment_hash={:x} settled=true",
+                    self.payment_hash
+                );
                 Ok(())
             }
             Err(err) => {

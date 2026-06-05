@@ -1,5 +1,5 @@
 mod event;
-pub use event::CchTrackingEvent;
+pub use event::{CchTrackingEvent, RedactedCchTrackingEvent};
 
 mod lnd_trackers;
 pub use lnd_trackers::{
