@@ -441,11 +441,11 @@ fn test_store_watchtower_preimage() {
     let path = TempDir::new("test-watchtower-store");
     let store = open_store(path).expect("created store failed");
 
-    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id_a = NodeId::local();
     let preimage_a = gen_rand_sha256_hash();
     let payment_hash_a = blake2b_256(preimage_a).into();
 
-    let node_id_b = NodeId::local();
+    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
     let preimage_b = gen_rand_sha256_hash();
     let payment_hash_b = blake2b_256(preimage_b).into();
 
@@ -469,8 +469,12 @@ fn test_store_watchtower_preimage() {
         "watch preimage should be scoped by node"
     );
     assert!(
-        store.get_preimage(&payment_hash_a).is_none(),
-        "normal preimage lookup must not read watchtower-scoped preimages"
+        store.get_preimage(&payment_hash_a).is_some(),
+        "normal preimage lookup should still read local watchtower preimages"
+    );
+    assert!(
+        store.get_preimage(&payment_hash_b).is_none(),
+        "normal preimage lookup must not read another node's watchtower preimage"
     );
 
     // watch preimage should not return a node preimage

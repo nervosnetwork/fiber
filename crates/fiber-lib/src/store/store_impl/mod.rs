@@ -1043,6 +1043,7 @@ impl PreimageStore for Store {
         let key = [&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
+            .or_else(|| self.get_watch_preimage(&NodeId::local(), payment_hash))
     }
 
     #[cfg(not(feature = "watchtower"))]
