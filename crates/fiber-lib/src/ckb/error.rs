@@ -24,6 +24,9 @@ pub enum FundingError {
     #[error("Peer sent us an invalid funding tx")]
     InvalidPeerFundingTx,
 
+    #[error("Funding tx rejected: peer-added complexity exceeds allowed limit ({0})")]
+    PeerFundingTxExceedsLimit(String),
+
     #[error(
         "Funding tx rejected: peer-added input #{input_index} has the local funding source lock args"
     )]
@@ -105,6 +108,7 @@ impl FundingError {
             CkbTxBuilderError(e) => error_chain_has_transient(e),
             CkbTxUnlockError(e) => error_chain_has_transient(e),
             PeerInputUsesOurFundingLock { .. } => false,
+            PeerFundingTxExceedsLimit(_) => false,
             _ => false,
         }
     }

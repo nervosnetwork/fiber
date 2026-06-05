@@ -1,4 +1,5 @@
 use super::super::FundingError;
+use super::limits::validate_peer_funding_tx_complexity;
 use crate::ckb::{
     config::{new_ckb_rpc_async_client, new_default_cell_collector},
     contracts::get_udt_cell_deps,
@@ -819,6 +820,10 @@ impl FundingTx {
             remote_tx.outputs().len(),
         );
 
+        // Bound the peer-added complexity before any chain lookup, so a single
+        // TxUpdate cannot amplify into an unbounded number of CKB RPC requests.
+        validate_peer_funding_tx_complexity(&local_tx, &remote_tx)?;
+
         // Version MUST be the same
         if remote_tx.version() != local_tx.version() {
             debug!(
@@ -886,30 +891,6 @@ impl FundingTx {
         {
             debug!("invalid funding tx (inputs)");
             return Err(FundingError::InvalidPeerFundingTx);
-        }
-        // Peer SHOULD NOT add inputs locked by our lock scripts
-        let ckb_client = new_ckb_rpc_async_client(&context.rpc_url);
-        for (input_index, input) in remote_tx
-            .input_pts_iter()
-            .enumerate()
-            .skip(local_tx.inputs().len())
-        {
-            match ckb_client.get_live_cell(input.into(), false).await?.cell {
-                Some(cell) => {
-                    let cell_output_lock: packed::Script = cell.output.lock.into();
-                    if cell_output_lock == context.funding_source_lock_script {
-                        debug!(
-                            "invalid funding tx (inputs): peer uses input #{} with our lock script",
-                            input_index
-                        );
-                        return Err(FundingError::PeerInputUsesOurFundingLock { input_index });
-                    }
-                }
-                None => {
-                    debug!("invalid funding tx (inputs): dead input");
-                    return Err(FundingError::InvalidPeerFundingTx);
-                }
-            };
         }
 
         // Peer SHOULD NOT remove outputs
@@ -991,6 +972,34 @@ impl FundingTx {
         }
 
         // Ignore witnesses
+
+        // Peer SHOULD NOT add inputs locked by our lock scripts. This requires one
+        // get_live_cell RPC per peer-added input, so it runs last, after all the
+        // cheap structural checks above (including the complexity budget) have
+        // passed.
+        let ckb_client = new_ckb_rpc_async_client(&context.rpc_url);
+        for (input_index, input) in remote_tx
+            .input_pts_iter()
+            .enumerate()
+            .skip(local_tx.inputs().len())
+        {
+            match ckb_client.get_live_cell(input.into(), false).await?.cell {
+                Some(cell) => {
+                    let cell_output_lock: packed::Script = cell.output.lock.into();
+                    if cell_output_lock == context.funding_source_lock_script {
+                        debug!(
+                            "invalid funding tx (inputs): peer uses input #{} with our lock script",
+                            input_index
+                        );
+                        return Err(FundingError::PeerInputUsesOurFundingLock { input_index });
+                    }
+                }
+                None => {
+                    debug!("invalid funding tx (inputs): dead input");
+                    return Err(FundingError::InvalidPeerFundingTx);
+                }
+            };
+        }
 
         self.tx = Some(remote_tx);
         Ok(())
