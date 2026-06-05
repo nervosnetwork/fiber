@@ -5,6 +5,6 @@ mod config;
 #[cfg(test)]
 mod error;
 #[cfg(test)]
-mod fuding_tests;
+mod funding_tx_tests;
 
 pub mod test_utils;
