@@ -19,6 +19,19 @@ impl Store {
         options.create_if_missing(true);
         options.set_compression_type(DBCompressionType::Lz4);
         let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::set_permissions(
+                        entry.path(),
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+            }
+        }
         Ok(Self { db })
     }
 }
