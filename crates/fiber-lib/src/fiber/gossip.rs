@@ -2948,21 +2948,23 @@ async fn get_channel_on_chain_info(
     client: &impl CkbChainClient,
 ) -> Result<ChannelOnchainInfo, VerifyBroadcastMessageError> {
     let (tx, block_hash) = get_channel_tx(outpoint, chain, client).await?;
-    let first_output = match tx.outputs().get(0) {
+    let output_index: u32 = outpoint.index().unpack();
+    let output_index = output_index as usize;
+    let first_output = match tx.outputs().get(output_index) {
         None => {
             return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
-                "On-chain transaction found but no output: {:?}",
-                &outpoint
+                "On-chain transaction found but output index {} out of range: {:?}",
+                output_index, &outpoint
             )));
         }
         Some(output) => output.clone().into(),
     };
 
-    let first_output_data = match tx.outputs_data().get(0) {
+    let first_output_data = match tx.outputs_data().get(output_index) {
         None => {
             return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
-                "On-chain transaction found but no output data: {:?}",
-                &outpoint
+                "On-chain transaction found but output data at index {} missing: {:?}",
+                output_index, &outpoint
             )));
         }
         Some(data) => data,
