@@ -1,3 +1,4 @@
+use crate::ckb::config::new_ckb_rpc_async_client;
 use crate::ckb::CkbConfig;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_sdk::rpc::ckb_indexer::{Cell, CellType, Order, Pagination, ScriptType, SearchKey, Tx};
@@ -93,6 +94,13 @@ impl From<Pagination<Cell>> for GetCellsResponse {
     }
 }
 
+fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
+    txs.iter().find_map(|tx_item| match tx_item {
+        Tx::Ungrouped(tx) if matches!(tx.io_type, CellType::Input) => Some(tx.tx_hash.clone()),
+        _ => None,
+    })
+}
+
 #[async_trait::async_trait]
 pub trait CkbChainClient: Send + Sync {
     async fn get_transaction(&self, hash: H256) -> Result<GetTxResponse, anyhow::Error>;
@@ -120,6 +128,82 @@ impl CkbRpcClient {
         Self {
             config: config.clone(),
         }
+    }
+}
+
+fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
+    SearchKey {
+        script: funding_lock_script.clone().into(),
+        script_type: ScriptType::Lock,
+        script_search_mode: Some(ckb_sdk::rpc::ckb_indexer::SearchMode::Exact),
+        with_data: None,
+        filter: None,
+        group_by_transaction: None,
+    }
+}
+
+/// Paginate the CKB indexer to find the first transaction whose `io_type` is
+/// `CellType::Input` for the given funding lock script. Returns `None` if no
+/// such transaction exists.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn find_first_input_tx_hash(
+    client: &ckb_sdk::CkbRpcClient,
+    funding_lock_script: &Script,
+) -> Result<Option<H256>, anyhow::Error> {
+    let search_key = new_shutdown_tx_search_key(funding_lock_script);
+
+    const PAGE_SIZE: u32 = 100;
+    let mut after_cursor: Option<JsonBytes> = None;
+    loop {
+        let txs = client
+            .get_transactions(
+                search_key.clone(),
+                Order::Desc,
+                PAGE_SIZE.into(),
+                after_cursor,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        if txs.objects.is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(tx_hash) = first_input_tx_hash(&txs.objects) {
+            return Ok(Some(tx_hash));
+        }
+
+        after_cursor = Some(txs.last_cursor.clone());
+    }
+}
+
+async fn find_first_input_tx_hash_async(
+    client: &ckb_sdk::CkbRpcAsyncClient,
+    funding_lock_script: &Script,
+) -> Result<Option<H256>, anyhow::Error> {
+    let search_key = new_shutdown_tx_search_key(funding_lock_script);
+
+    const PAGE_SIZE: u32 = 100;
+    let mut after_cursor: Option<JsonBytes> = None;
+    loop {
+        let txs = client
+            .get_transactions(
+                search_key.clone(),
+                Order::Desc,
+                PAGE_SIZE.into(),
+                after_cursor,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        if txs.objects.is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(tx_hash) = first_input_tx_hash(&txs.objects) {
+            return Ok(Some(tx_hash));
+        }
+
+        after_cursor = Some(txs.last_cursor.clone());
     }
 }
 
@@ -161,29 +245,46 @@ impl CkbChainClient for CkbRpcClient {
         &self,
         funding_lock_script: Script,
     ) -> Result<Option<GetShutdownTxResponse>, anyhow::Error> {
-        let client = self.config.ckb_rpc_client();
-        // query transaction spent the funding cell
-        let search_key = SearchKey {
-            script: funding_lock_script.into(),
-            script_type: ScriptType::Lock,
-            script_search_mode: Some(ckb_sdk::rpc::ckb_indexer::SearchMode::Exact),
-            with_data: None,
-            filter: None,
-            group_by_transaction: None,
-        };
-        let txs = client
-            .get_transactions(search_key, Order::Desc, 1u32.into(), None)
-            .await?;
-
-        let Some(Tx::Ungrouped(tx)) = txs.objects.first() else {
+        let indexer_client = new_ckb_rpc_async_client(&self.config.rpc_url);
+        let Some(tx_hash) =
+            find_first_input_tx_hash_async(&indexer_client, &funding_lock_script).await?
+        else {
             return Ok(None);
         };
-        if !matches!(tx.io_type, CellType::Input) {
-            return Ok(None);
-        }
 
-        let shutdown_tx_hash: Hash256 = tx.tx_hash.clone().into();
-        let tx_with_status = client.get_transaction(shutdown_tx_hash.into()).await?;
+        let async_client = self.config.ckb_rpc_client();
+        let tx_with_status = async_client.get_transaction(tx_hash).await?;
         Ok(Some(tx_with_status.into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_input_tx_hash;
+    use ckb_jsonrpc_types::{BlockNumber, Uint32};
+    use ckb_sdk::rpc::ckb_indexer::{CellType, Tx, TxWithCell};
+    use ckb_types::H256;
+
+    fn build_tx(io_type: CellType, tx_hash: u8) -> Tx {
+        Tx::Ungrouped(TxWithCell {
+            tx_hash: H256::from([tx_hash; 32]),
+            block_number: BlockNumber::from(1_u64),
+            tx_index: Uint32::from(0_u32),
+            io_index: Uint32::from(0_u32),
+            io_type,
+        })
+    }
+
+    #[test]
+    fn test_find_first_input_tx_hash_returns_first_input_from_page() {
+        let output_only_page = vec![build_tx(CellType::Output, 1), build_tx(CellType::Output, 2)];
+        let input_page = vec![
+            build_tx(CellType::Output, 3),
+            build_tx(CellType::Input, 4),
+            build_tx(CellType::Input, 5),
+        ];
+
+        assert_eq!(first_input_tx_hash(&output_only_page), None);
+        assert_eq!(first_input_tx_hash(&input_page), Some(H256::from([4; 32])));
     }
 }
