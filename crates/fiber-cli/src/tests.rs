@@ -143,6 +143,66 @@ fn test_shell_words_single_quote_inside_double_quotes() {
     assert_eq!(result, vec!["it's fine"]);
 }
 
+// ── REPL history redaction tests ────────────────────────────────────
+
+#[test]
+fn test_history_entry_preserves_non_sensitive_line() {
+    let line = "channel list_channels --limit 10";
+    let args = shell_words(line).unwrap();
+
+    assert_eq!(history_entry_for_args(line, &args), line);
+}
+
+#[test]
+fn test_history_entry_redacts_payment_preimage_value() {
+    let secret = "0x".to_string() + &"aa".repeat(32);
+    let line = format!(
+        "invoice settle_invoice --payment-hash 0x{} --payment-preimage {secret}",
+        "bb".repeat(32)
+    );
+    let args = shell_words(&line).unwrap();
+    let entry = history_entry_for_args(&line, &args);
+
+    assert!(entry.contains("--payment-preimage REDACTED"));
+    assert!(!entry.contains(&secret));
+}
+
+#[test]
+fn test_history_entry_redacts_equals_form_secret_flag() {
+    let secret = "0x".to_string() + &"cc".repeat(32);
+    let line = format!(
+        "watchtower create_preimage --payment-hash 0x{} --preimage={secret}",
+        "dd".repeat(32)
+    );
+    let args = shell_words(&line).unwrap();
+    let entry = history_entry_for_args(&line, &args);
+
+    assert!(entry.contains("--preimage=REDACTED"));
+    assert!(!entry.contains(&secret));
+}
+
+#[test]
+fn test_history_entry_redacts_private_key_with_quoted_value() {
+    let line =
+        "dev sign_external_funding_tx --unsigned-funding-tx '{}' --private-key 'very secret key'";
+    let args = shell_words(line).unwrap();
+    let entry = history_entry_for_args(line, &args);
+
+    assert!(entry.contains("--private-key REDACTED"));
+    assert!(!entry.contains("very secret key"));
+}
+
+#[test]
+fn test_history_entry_redacts_sensitive_json_value() {
+    let secret = "0x".to_string() + &"ee".repeat(32);
+    let line = format!(r#"dev remove_tlc --reason '{{"payment_preimage":"{secret}"}}'"#);
+    let args = shell_words(&line).unwrap();
+    let entry = history_entry_for_args(&line, &args);
+
+    assert!(entry.contains("--reason REDACTED"));
+    assert!(!entry.contains(&secret));
+}
+
 // ── build_cli / build_interactive_cli structure tests ────────────────
 
 #[test]
