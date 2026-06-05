@@ -6,8 +6,16 @@ use crate::ckb::contracts::{get_script_by_contract, Contract};
 use fiber_types::{ChannelData, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
 
 pub trait WatchtowerStore {
+    /// Get the channels currently being watched together with their owning node.
+    fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)>;
+
     /// Get the channels that are currently being watched by the watchtower
-    fn get_watch_channels(&self) -> Vec<ChannelData>;
+    fn get_watch_channels(&self) -> Vec<ChannelData> {
+        self.get_watch_channels_with_nodes()
+            .into_iter()
+            .map(|(_, channel_data)| channel_data)
+            .collect()
+    }
     /// Insert a channel's funding tx lock script into the store, it will be used to monitor the channel,
     /// please note that the lock script should be globally unique, so that the watchtower can identify the channel.
     #[allow(clippy::too_many_arguments)]
@@ -55,11 +63,11 @@ pub trait WatchtowerStore {
     /// Remove a watch preimage from the store.
     fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256);
 
-    /// Insert a watch preimage into the store, the payment hash should be a 32 bytes hash result of the preimage after `HashAlgorithm` is applied.
-    fn get_watch_preimage(&self, payment_hash: &Hash256) -> Option<Hash256>;
+    /// Get a watch preimage owned by the given node.
+    fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256>;
 
     /// Search for the stored preimage with the given payment hash prefix, should be the first 20 bytes of the payment hash.
-    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256>;
+    fn search_preimage(&self, node_id: &NodeId, payment_hash_prefix: &[u8]) -> Option<Hash256>;
 
     /// Mark a tlc as settled on chain
     fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]);

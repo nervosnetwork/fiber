@@ -1043,15 +1043,6 @@ impl PreimageStore for Store {
         let key = [&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
-            // Try to get the preimage from watchtower store
-            .or_else(|| {
-                let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
-                let iter = self
-                    .collect_by_prefix_with(prefix.as_slice(), PrefixIterOptions::new().limit(1));
-                iter.into_iter()
-                    .next()
-                    .map(|kv| deserialize_from(kv.value.as_ref(), "Watchtower Preimage"))
-            })
     }
 
     #[cfg(not(feature = "watchtower"))]
@@ -1327,11 +1318,15 @@ impl NetworkGraphStateStore for Store {
 
 #[cfg(feature = "watchtower")]
 impl WatchtowerStore for Store {
-    fn get_watch_channels(&self) -> Vec<ChannelData> {
+    fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
         self.collect_by_prefix(&prefix)
             .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelData"))
+            .filter_map(|kv| {
+                let (node_id, _) = Self::parse_watchtower_channel_key(&kv.key)?;
+                let channel_data = deserialize_from(kv.value.as_ref(), "ChannelData");
+                Some((node_id, channel_data))
+            })
             .collect()
     }
 
@@ -1481,20 +1476,20 @@ impl WatchtowerStore for Store {
         );
     }
 
-    fn get_watch_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
-        // The preimage is verified before insert_watch_preimage, so we can just pick one.
-        let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
-        self.collect_by_prefix_with(prefix.as_slice(), PrefixIterOptions::new().limit(1))
-            .into_iter()
-            .next()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
+    fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256> {
+        self.get(Self::watchtower_preimage_key(node_id, payment_hash))
+            .map(|v| deserialize_from(v.as_ref(), "Preimage"))
     }
 
-    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+    fn search_preimage(&self, node_id: &NodeId, payment_hash_prefix: &[u8]) -> Option<Hash256> {
         let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash_prefix].concat();
-        self.collect_by_prefix_with(prefix.as_slice(), PrefixIterOptions::new().limit(1))
+        self.collect_by_prefix(prefix.as_slice())
             .into_iter()
-            .next()
+            .find(|kv| {
+                let key = &kv.key;
+                let node_offset = 1 + 32;
+                key.len() >= node_offset && key[node_offset..] == node_id.as_ref()[..]
+            })
             .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
     }
 

@@ -245,13 +245,13 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
-fn run_periodic_check<S>(store: S, node_id: NodeId, signer: LocalSigner, rpc_url: String)
+fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_url: String)
 where
     S: WatchtowerStore + Send + Sync + 'static,
 {
     let mut cell_collector = new_default_cell_collector(&rpc_url);
 
-    for channel_data in store.get_watch_channels() {
+    for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
         let ckb_client =
             CkbRpcClient::with_builder(&rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
                 .expect("create ckb rpc client should not fail");
@@ -342,7 +342,7 @@ where
                                                 &signer,
                                                 &mut cell_collector,
                                                 &store,
-                                                node_id.clone(),
+                                                channel_node_id.clone(),
                                             );
                                         }
                                     }
@@ -356,7 +356,7 @@ where
                                         &signer,
                                         &mut cell_collector,
                                         &store,
-                                        node_id.clone(),
+                                        channel_node_id.clone(),
                                     );
                                 }
                             } else {
@@ -523,7 +523,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         &channel_data.channel_id,
         &ckb_client,
         store,
-        self_node_id,
+        &self_node_id,
     );
 
     let (current_epoch, current_time) = match ckb_client.get_tip_header() {
@@ -645,6 +645,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         cell_header_epoch,
                         current_epoch,
                         current_time,
+                        &self_node_id,
                         for_remote,
                         channel_data.clone(),
                         settlement_witness,
@@ -682,7 +683,7 @@ fn find_preimages<S: WatchtowerStore>(
     channel_id: &Hash256,
     ckb_client: &CkbRpcClient,
     store: &S,
-    self_node_id: NodeId,
+    self_node_id: &NodeId,
 ) {
     let mut after = None;
     loop {
@@ -807,6 +808,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
     cell_header_epoch: EpochNumberWithFraction,
     current_epoch: EpochNumberWithFraction,
     current_time: u64,
+    self_node_id: &NodeId,
     for_remote: bool,
     channel_data: ChannelData,
     settlement_witness: Option<SettlementWitness>,
@@ -921,7 +923,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 } else if let Some(private_key) =
                                     tlc.find_matched_private_key(&settlement_data, true)
                                 {
-                                    if let Some(preimage) = store.search_preimage(&tlc.payment_hash)
+                                    if let Some(preimage) =
+                                        store.search_preimage(self_node_id, &tlc.payment_hash)
                                     {
                                         unlock_option = Some((
                                             Unlock {
@@ -1017,7 +1020,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             } else if let Some(private_key) =
                                 tlc.find_matched_private_key(&settlement_data, true)
                             {
-                                if let Some(preimage) = store.search_preimage(&tlc.payment_hash) {
+                                if let Some(preimage) =
+                                    store.search_preimage(self_node_id, &tlc.payment_hash)
+                                {
                                     unlock_option = Some((
                                         Unlock {
                                             unlock_type: i as u8,
@@ -1109,7 +1114,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                         {
-                            if let Some(preimage) = store.get_watch_preimage(&tlc.payment_hash) {
+                            if let Some(preimage) =
+                                store.get_watch_preimage(self_node_id, &tlc.payment_hash)
+                            {
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: i as u8,

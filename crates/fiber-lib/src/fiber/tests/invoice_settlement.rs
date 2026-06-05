@@ -767,7 +767,10 @@ async fn test_mpp_payer_force_close_keeps_watchtower_preimage_for_onchain_split(
     insert_watch_channel_with_pending_tlc(&node_1, channels[0], payment_hash);
     replay_watchtower_preimage_events(&node_1, payment_hash, &preimage_events);
     assert!(
-        node_1.store.get_watch_preimage(&payment_hash).is_some(),
+        node_1
+            .store
+            .get_watch_preimage(&NodeId::local(), &payment_hash)
+            .is_some(),
         "watchtower must keep the preimage after the payer force-closes one same-hash MPP split; preimage events: {preimage_events:?}"
     );
 }
@@ -945,7 +948,10 @@ async fn test_mpp_force_close_pending_confirmation_removes_watchtower_preimage_r
     insert_watch_channel_with_pending_tlc(&node_1, channels[0], payment_hash);
     replay_watchtower_preimage_events(&node_1, payment_hash, &preimage_events);
     assert!(
-        node_1.store.get_watch_preimage(&payment_hash).is_some(),
+        node_1
+            .store
+            .get_watch_preimage(&NodeId::local(), &payment_hash)
+            .is_some(),
         "watchtower must keep the preimage while another same-hash split is still waiting for on-chain settlement; preimage events: {preimage_events:?}"
     );
 }
