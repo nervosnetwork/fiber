@@ -215,11 +215,11 @@ fn is_port_available(port: u16) -> bool {
 
 fn generate_ports(num_ports: usize) -> Vec<u16> {
     let mut ports = HashSet::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     while ports.len() < num_ports {
         // avoid https://en.wikipedia.org/wiki/Ephemeral_port
-        let port: u16 = rng.gen_range(1024..32768);
+        let port: u16 = rng.random_range(1024..32768);
         if is_port_available(port) {
             ports.insert(port);
         }
