@@ -64,6 +64,7 @@ pub struct InFlightCkbTxActorArguments {
 pub struct InFlightCkbTxActorState {
     transaction: Option<TransactionView>,
     result: Option<CkbTxTracingResult>,
+    permanent_send_failure_reported: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +100,7 @@ where
         Ok(InFlightCkbTxActorState {
             transaction: args.transaction,
             result: None,
+            permanent_send_failure_reported: false,
         })
     }
 
@@ -231,6 +233,10 @@ where
             return self.report_tracing_result(myself, result).await;
         }
 
+        if state.permanent_send_failure_reported {
+            return Ok(());
+        }
+
         let tx = match state.transaction.as_ref().cloned() {
             Some(tx) => tx,
             None => return Ok(()),
@@ -257,6 +263,7 @@ where
                 );
                 // Check if this is a permanent error that should stop retrying
                 if is_permanent_error(&err) {
+                    state.permanent_send_failure_reported = true;
                     let _ = self
                         .chain_actor
                         .send_message(CkbChainMessage::ReportRejected(self.tx_hash));
