@@ -97,7 +97,10 @@ impl AnnouncedNodeName {
             return Err("Node Alias can not be longer than 32 bytes".to_string());
         }
         let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
-        std::str::from_utf8(&slice[..end]).map_err(|err| err.to_string())?;
+        let name = std::str::from_utf8(&slice[..end]).map_err(|err| err.to_string())?;
+        if name.chars().any(|c| c.is_control()) {
+            return Err("Node announce name can not contain control chars".to_string());
+        }
 
         let mut bytes = [0; 32];
         bytes[..slice.len()].copy_from_slice(slice);
@@ -1282,6 +1285,12 @@ mod tests {
             .build()
     }
 
+    fn raw_node_name(name: &[u8]) -> [u8; 32] {
+        let mut raw_name = [0u8; 32];
+        raw_name[..name.len()].copy_from_slice(name);
+        raw_name
+    }
+
     #[test]
     fn node_announcement_from_molecule_rejects_non_utf8_node_name() {
         let mut raw_name = [0u8; 32];
@@ -1291,6 +1300,33 @@ mod tests {
         let err = NodeAnnouncement::try_from(node_announcement_with_raw_name(raw_name))
             .expect_err("invalid UTF-8 node_name must be rejected");
         assert!(err.to_string().contains("Invalid node_name"));
+    }
+
+    #[test]
+    fn node_announcement_from_molecule_rejects_control_chars_in_node_name() {
+        for raw_name in [
+            raw_node_name(b"\x1bc"),
+            raw_node_name(b"bad\x07name"),
+            raw_node_name("bad\u{85}name".as_bytes()),
+        ] {
+            let err = NodeAnnouncement::try_from(node_announcement_with_raw_name(raw_name))
+                .expect_err("control chars in node_name must be rejected");
+            assert!(err.to_string().contains("Invalid node_name"));
+        }
+    }
+
+    #[test]
+    fn announced_node_name_allows_printable_utf8() {
+        let name = "节点-café";
+        let announced_name =
+            AnnouncedNodeName::from_string(name).expect("printable UTF-8 node name is valid");
+        assert_eq!(announced_name.as_str(), name);
+
+        let announcement = NodeAnnouncement::try_from(node_announcement_with_raw_name(
+            raw_node_name(name.as_bytes()),
+        ))
+        .expect("printable UTF-8 node_name from molecule is valid");
+        assert_eq!(announcement.node_name.as_str(), name);
     }
 
     #[test]

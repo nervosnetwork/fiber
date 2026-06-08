@@ -229,7 +229,7 @@ fn yaml_needs_quoting(s: &str) -> bool {
                 | '\n'
                 | '\r'
         )
-    })
+    }) || s.chars().any(|c| c.is_control())
 }
 
 #[cfg(test)]
@@ -254,6 +254,36 @@ mod tests {
         assert!(yaml_needs_quoting("on"));
         assert!(yaml_needs_quoting("off"));
         assert!(yaml_needs_quoting("~"));
+    }
+
+    #[test]
+    fn test_yaml_quoting_with_control_chars() {
+        for c in '\0'..='\x1f' {
+            let s = c.to_string();
+            assert!(
+                yaml_needs_quoting(&s),
+                "Control character U+{:04X} should require quoting",
+                c as u32
+            );
+        }
+
+        for n in 0x7f..=0x9f {
+            let c = char::from_u32(n).unwrap_or('\u{FFFD}');
+            let s = c.to_string();
+            assert!(
+                yaml_needs_quoting(&s),
+                "Control character U+{:04X} should require quoting",
+                n
+            );
+        }
+        for c in 'a'..='z' {
+            let s = c.to_string();
+            assert!(
+                !yaml_needs_quoting(&s),
+                "Printable character '{}' should not require quoting",
+                c
+            );
+        }
     }
 
     #[test]
