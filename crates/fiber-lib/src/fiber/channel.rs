@@ -2034,8 +2034,21 @@ where
             replay_order_hint: Some(ReplayOrderHint::RevokeThenCommit),
             created_at_ms: now_timestamp_as_millis_u64(),
         };
+        state.last_was_revoke = false;
+        let signing_flags = match flags {
+            CommitmentSignedFlags::SigningCommitment(flags) => {
+                let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
+                state.update_state(ChannelState::SigningCommitment(flags));
+                Some(flags)
+            }
+            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
+                state.set_waiting_ack(myself, true);
+                None
+            }
+        };
         self.store
-            .store_pending_commit_diff(&state.get_id(), &commit_diff);
+            .insert_channel_actor_state_with_pending_commit_diff(state.clone(), &commit_diff);
+
         // Notify outside observers.
         self.network
             .send_message(NetworkActorMessage::new_notification(
@@ -2058,19 +2071,14 @@ where
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        state.last_was_revoke = false;
 
         match flags {
-            CommitmentSignedFlags::SigningCommitment(flags) => {
-                let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                state.update_state(ChannelState::SigningCommitment(flags));
+            CommitmentSignedFlags::SigningCommitment(_) => {
+                let flags = signing_flags.expect("signing flags should be set");
                 state.maybe_transfer_to_tx_signatures(flags)?;
             }
-            CommitmentSignedFlags::ChannelReady() => {
-                state.set_waiting_ack(myself, true);
-            }
+            CommitmentSignedFlags::ChannelReady() => {}
             CommitmentSignedFlags::PendingShutdown() => {
-                state.set_waiting_ack(myself, true);
                 state.maybe_transfer_to_shutdown().await?;
             }
         }
@@ -8296,9 +8304,23 @@ impl ChannelActorState {
                 if my_local_commitment_number == peer_remote_commitment_number
                     && my_remote_commitment_number == peer_local_commitment_number
                 {
-                    // commitments are the same, sync up the tlcs
-                    self.set_waiting_ack(myself, false);
-                    self.resend_tlcs_on_reestablish(true)?;
+                    // We persist waiting_ack and CommitDiff before sending CommitmentSigned. If
+                    // the node crashes after that persist but before the frame reaches the peer,
+                    // reestablish sees equal commitment numbers and must replay the stored commit.
+                    if let (true, Some(commit_diff)) =
+                        (my_waiting_ack, pending_commit_diff.as_ref())
+                    {
+                        self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
+                        self.resend_commitment_from_diff(commit_diff)?;
+                        self.last_was_revoke = false;
+                        self.reestablishing = false;
+                        self.pending_reestablish_channel_ready = true;
+                        reestablish_complete = false;
+                    } else {
+                        // commitments are the same, sync up the tlcs
+                        self.set_waiting_ack(myself, false);
+                        self.resend_tlcs_on_reestablish(true)?;
+                    }
                 } else if peer_local_commitment_number
                     .checked_add(1)
                     .is_some_and(|next| my_remote_commitment_number == next)
@@ -8507,7 +8529,7 @@ impl ChannelActorState {
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    debug_event!(network, "resend add tlc from diff");
+                    debug_event!(network, "resend add tlc");
                 }
                 TlcReplayUpdate::Remove(remove) => {
                     network
@@ -8518,7 +8540,7 @@ impl ChannelActorState {
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    debug_event!(network, "resend remove tlc from diff");
+                    debug_event!(network, "resend remove tlc");
                 }
             }
         }
@@ -9434,6 +9456,15 @@ impl ChannelActorState {
 pub trait ChannelActorStateStore {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
+    fn insert_channel_actor_state_with_pending_commit_diff(
+        &self,
+        state: ChannelActorState,
+        diff: &CommitDiff,
+    ) {
+        let channel_id = state.get_id();
+        self.insert_channel_actor_state(state);
+        self.store_pending_commit_diff(&channel_id, diff);
+    }
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256>;

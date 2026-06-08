@@ -737,6 +737,28 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
+    fn insert_channel_actor_state_with_pending_commit_diff(
+        &self,
+        state: ChannelActorState,
+        diff: &CommitDiff,
+    ) {
+        let channel_id = state.get_id();
+        let mut batch = self.batch();
+
+        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
+        batch.put(kv.key(), kv.value());
+        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
+            batch.put(kv.key(), kv.value());
+        }
+        let kv = KeyValue::ChannelActorState(state.id, state);
+        batch.put(kv.key(), kv.value());
+
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        batch.put(key, serialize_to_vec(diff, "CommitDiff"));
+        batch.commit();
+    }
+
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
         if old_id == &state.id {
             self.insert_channel_actor_state(state);
