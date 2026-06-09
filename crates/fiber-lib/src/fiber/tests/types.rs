@@ -707,15 +707,15 @@ fn test_tlc_err_packet_encryption() {
         let spoofed_node = hops_path[2];
         let node_fail = TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, reporter_node);
         let mut tlc_fail = TlcErrPacket::new(node_fail.clone(), &hops_ss[1]);
-        tlc_fail = tlc_fail.backward(&hops_ss[0]);
+        tlc_fail = tlc_fail.backward(&hops_ss[0]).expect("backward");
         let decrypted_tlc_fail_detail = tlc_fail
             .decode(session_key.as_ref(), hops_path.clone())
             .expect("decrypted");
-        assert_eq!(decrypted_tlc_fail_detail, node_fail);
+        assert_eq!(decrypted_tlc_fail_detail.error, node_fail);
 
         let spoofed_fail = TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, spoofed_node);
         let mut tlc_fail = TlcErrPacket::new(spoofed_fail, &hops_ss[1]);
-        tlc_fail = tlc_fail.backward(&hops_ss[0]);
+        tlc_fail = tlc_fail.backward(&hops_ss[0]).expect("backward");
         assert!(tlc_fail
             .decode(session_key.as_ref(), hops_path.clone())
             .is_none());

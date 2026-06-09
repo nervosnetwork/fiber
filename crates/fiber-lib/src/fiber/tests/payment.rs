@@ -5614,7 +5614,7 @@ async fn test_payment_onion_invoice_hash_algorithm_mismatch_fails() {
         .decode(&session_key, vec![target_pubkey])
         .expect("decode error packet");
     assert_eq!(
-        err.error_code,
+        err.error.error_code,
         TlcErrorCode::IncorrectOrUnknownPaymentDetails
     );
     assert_eq!(
@@ -5744,7 +5744,7 @@ async fn test_forward_payment_rejects_mismatched_hash_algorithm_between_wire_and
         .decode(&session_key, vec![node_1.pubkey])
         .expect("decode error packet");
     assert_eq!(
-        err.error_code,
+        err.error.error_code,
         TlcErrorCode::IncorrectOrUnknownPaymentDetails
     );
 
