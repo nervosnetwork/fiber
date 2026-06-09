@@ -16,6 +16,7 @@ pub(crate) use funding_tx::{
 };
 #[cfg(test)]
 pub(crate) use funding_tx::{
-    secp_sighash_placeholder_witness, FundingTxBuilder, SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES,
+    secp_sighash_placeholder_witness, verify_peer_funding_contribution, FundingTxBuilder,
+    PeerInputCell, SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES,
 };
 pub use funding_tx::{FundingRequest, FundingTx};

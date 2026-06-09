@@ -1,4 +1,7 @@
-use crate::ckb::tests::test_utils::complete_commitment_tx;
+use crate::ckb::tests::test_utils::{
+    complete_commitment_tx, MockChainActorMiddleware, MockChainActorState,
+};
+use crate::ckb::{CkbChainMessage, FundingContext, FundingTx};
 use crate::fiber::channel::{
     funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse,
     ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, ProcessingChannelResult,
@@ -43,9 +46,10 @@ use crate::{
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
+use ckb_types::bytes::BufMut;
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
-    core::{tx_pool::TxStatus, FeeRate},
+    core::{tx_pool::TxStatus, Capacity, FeeRate},
     packed::{Bytes, CellDep, CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
@@ -58,11 +62,13 @@ use fiber_types::{
     TlcErrPacket, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
+use molecule::bytes::BytesMut;
 use musig2::secp::Point;
 use musig2::KeyAggContext;
-use ractor::call;
+use ractor::{call, ActorProcessingErr, ActorRef};
 use secp256k1::SECP256K1;
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error};
 
@@ -364,6 +370,230 @@ async fn test_open_and_accept_channel() {
     let _accept_channel_result = call!(node_b.network_actor, message)
         .expect("node_b alive")
         .expect("accept channel success");
+}
+
+#[derive(Clone, Debug)]
+enum InitialFundingUnderfunding {
+    CkbCapacity,
+    UdtAmount,
+    Inputs,
+}
+
+#[derive(Clone, Debug)]
+struct UnderfundInitialFundingTx {
+    kind: InitialFundingUnderfunding,
+    funded: Arc<Mutex<bool>>,
+    verify_with_real_funding_tx: bool,
+}
+
+#[async_trait::async_trait]
+impl MockChainActorMiddleware for UnderfundInitialFundingTx {
+    async fn handle(
+        &mut self,
+        _inner_self: ActorRef<CkbChainMessage>,
+        message: CkbChainMessage,
+        _state: &mut MockChainActorState,
+    ) -> Result<Option<CkbChainMessage>, ActorProcessingErr> {
+        let CkbChainMessage::Fund(mut tx, request, reply) = message else {
+            if !self.verify_with_real_funding_tx {
+                return Ok(Some(message));
+            }
+            let CkbChainMessage::VerifyFundingTx {
+                local_tx,
+                remote_tx,
+                funding_cell_lock_script,
+                funding_udt_type_script,
+                funding_source_lock_script,
+                reply,
+            } = message
+            else {
+                return Ok(Some(message));
+            };
+            let context = FundingContext {
+                rpc_url: "http://127.0.0.1:8114".to_string(),
+                funding_source_lock_script: funding_source_lock_script
+                    .unwrap_or_else(Script::default),
+                funding_source_lock_script_cell_deps: Vec::new(),
+                funding_cell_lock_script,
+                funding_udt_type_script,
+            };
+            let mut funding_tx: FundingTx = local_tx.into();
+            let result = funding_tx
+                .update_for_peer(remote_tx.into_view(), context)
+                .await;
+            let _ = reply.send(result);
+            return Ok(None);
+        };
+
+        let mut funded = self.funded.lock().expect("funding flag");
+        if *funded {
+            return Ok(Some(CkbChainMessage::Fund(tx, request, reply)));
+        }
+        *funded = true;
+
+        let (capacity, output_data) = match self.kind {
+            InitialFundingUnderfunding::CkbCapacity => {
+                let required = request
+                    .local_amount
+                    .checked_add(request.local_reserved_ckb_amount as u128)
+                    .expect("valid requested CKB capacity");
+                (required - 1, Default::default())
+            }
+            InitialFundingUnderfunding::UdtAmount => {
+                let mut data = BytesMut::with_capacity(16);
+                data.put(&(request.local_amount - 1).to_le_bytes()[..]);
+                (
+                    request.local_reserved_ckb_amount as u128,
+                    data.freeze().pack(),
+                )
+            }
+            InitialFundingUnderfunding::Inputs => {
+                let required = request
+                    .local_amount
+                    .checked_add(request.local_reserved_ckb_amount as u128)
+                    .expect("valid requested CKB capacity");
+                (required, Default::default())
+            }
+        };
+
+        let mut output_builder = ckb_types::packed::CellOutput::new_builder()
+            .capacity(Capacity::shannons(capacity as u64).pack())
+            .lock(request.script.clone());
+        if let Some(udt_type_script) = request.udt_type_script.clone() {
+            output_builder = output_builder.type_(Some(udt_type_script).pack());
+        }
+
+        let tx_builder = tx
+            .take()
+            .map(|tx| tx.as_advanced_builder())
+            .unwrap_or_default();
+        tx.update_for_self(
+            tx_builder
+                .set_inputs(vec![])
+                .set_outputs(vec![output_builder.build()])
+                .set_outputs_data(vec![output_data])
+                .build(),
+        );
+
+        let _ = reply.send(Ok(tx));
+        Ok(None)
+    }
+
+    fn clone_box(&self) -> Box<dyn MockChainActorMiddleware> {
+        Box::new(self.clone())
+    }
+}
+
+async fn open_channel_with_underfunded_initial_tx(
+    underfunding: InitialFundingUnderfunding,
+    funding_udt_type_script: Option<Script>,
+    verify_with_real_funding_tx: bool,
+) {
+    let funded = Arc::new(Mutex::new(false));
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("test-fnn-node-{}-", i));
+        if i == 0 {
+            builder = builder.mock_chain_actor_middleware(Box::new(UnderfundInitialFundingTx {
+                kind: underfunding.clone(),
+                funded: funded.clone(),
+                verify_with_real_funding_tx,
+            }));
+        }
+        builder.build()
+    })
+    .await;
+    let [node_a, mut node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+
+    let params = ChannelParameters {
+        node_a_funding_amount: 100_000_000_000,
+        node_b_funding_amount: MIN_RESERVED_CKB,
+        public: false,
+        funding_udt_type_script,
+        ..Default::default()
+    };
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: node_b.pubkey,
+                public: params.public,
+                one_way: params.one_way,
+                shutdown_script: None,
+                funding_amount: params.node_a_funding_amount,
+                funding_udt_type_script: params.funding_udt_type_script.clone(),
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _) => pubkey == &node_a.pubkey,
+            _ => false,
+        })
+        .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: params.node_b_funding_amount,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+
+    let new_channel_id = accept_channel_result.new_channel_id;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if id == &new_channel_id))
+        .await;
+    assert!(*funded.lock().expect("funding flag"));
+    assert!(node_b
+        .get_channel_actor_state_unchecked(new_channel_id)
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_acceptor_rejects_initial_funding_tx_with_insufficient_ckb_capacity() {
+    open_channel_with_underfunded_initial_tx(InitialFundingUnderfunding::CkbCapacity, None, false)
+        .await;
+}
+
+#[tokio::test]
+async fn test_acceptor_rejects_initial_funding_tx_with_insufficient_udt_balance() {
+    open_channel_with_underfunded_initial_tx(
+        InitialFundingUnderfunding::UdtAmount,
+        Some(Script::default()),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_acceptor_rejects_initial_funding_tx_with_no_inputs() {
+    open_channel_with_underfunded_initial_tx(InitialFundingUnderfunding::Inputs, None, true).await;
 }
 
 #[tokio::test]
@@ -10446,4 +10676,138 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
             .contains("Total reserved CKB amount overflows"),
         "expected total reserved overflow, got {err}"
     );
+}
+
+/// UDT collaborative funding: peer-supplied funding cell CKB capacity must match negotiated totals.
+/// Reproduces the under-funded `output[0]` case (`local_reserved + 1` shannons) vs `is_tx_final` UDT branch.
+mod udt_funding_cell_capacity_tests {
+    use super::*;
+    use crate::fiber::channel::ChannelActorState;
+    use ckb_types::core::{Capacity, TransactionBuilder};
+    use ckb_types::packed::CellOutput;
+    use fiber_types::{
+        ChannelActorData, ChannelBasePublicKeys, ChannelConnectivityState, ChannelTlcInfo,
+        CollaboratingFundingTxFlags, CommitmentNumbers, InMemorySigner, TlcState,
+    };
+    use std::collections::{HashMap, VecDeque};
+    use std::time::SystemTime;
+
+    const LOCAL_RESERVED_SHANNONS: u64 = 6_200_000_000;
+    const REMOTE_RESERVED_SHANNONS: u64 = 6_200_000_000;
+    const LIQUID_UDT_AMOUNT: u128 = 1_000_000;
+
+    fn udt_type_script() -> Script {
+        Script::default()
+    }
+
+    fn minimal_udt_channel_state() -> ChannelActorState {
+        let seed = [7u8; 32];
+        let signer = InMemorySigner::generate_from_seed(&seed);
+        let local_funding = signer.get_base_public_keys().funding_pubkey;
+        let remote_funding = gen_rand_fiber_public_key();
+
+        ChannelActorState {
+            core: ChannelActorData {
+                state: ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty()),
+                public_channel_info: None,
+                local_tlc_info: ChannelTlcInfo::default(),
+                remote_tlc_info: None,
+                local_pubkey: gen_rand_fiber_public_key(),
+                remote_pubkey: gen_rand_fiber_public_key(),
+                id: gen_rand_sha256_hash(),
+                funding_tx: None,
+                funding_tx_confirmed_at: None,
+                funding_udt_type_script: Some(udt_type_script()),
+                is_acceptor: false,
+                is_one_way: false,
+                to_local_amount: LIQUID_UDT_AMOUNT / 2,
+                to_remote_amount: LIQUID_UDT_AMOUNT / 2,
+                local_reserved_ckb_amount: LOCAL_RESERVED_SHANNONS,
+                remote_reserved_ckb_amount: REMOTE_RESERVED_SHANNONS,
+                commitment_fee_rate: 0,
+                commitment_delay_epoch: 0,
+                funding_fee_rate: 0,
+                signer,
+                local_channel_public_keys: ChannelBasePublicKeys {
+                    funding_pubkey: local_funding,
+                    tlc_base_key: gen_rand_fiber_public_key(),
+                },
+                commitment_numbers: CommitmentNumbers::default(),
+                local_constraints: ChannelConstraints::default(),
+                remote_constraints: ChannelConstraints::default(),
+                tlc_state: TlcState::default(),
+                retryable_tlc_operations: VecDeque::new(),
+                waiting_forward_tlc_tasks: HashMap::new(),
+                remote_shutdown_script: None,
+                local_shutdown_script: Script::default(),
+                last_committed_remote_nonce: None,
+                remote_revocation_nonce_for_verify: None,
+                remote_revocation_nonce_for_send: None,
+                remote_revocation_nonce_for_next: None,
+                remote_commitment_points: vec![],
+                remote_channel_public_keys: Some(ChannelBasePublicKeys {
+                    funding_pubkey: remote_funding,
+                    tlc_base_key: gen_rand_fiber_public_key(),
+                }),
+                local_shutdown_info: None,
+                remote_shutdown_info: None,
+                shutdown_transaction_hash: None,
+                latest_commitment_transaction: None,
+                reestablishing: false,
+                connectivity_state: ChannelConnectivityState::Online,
+                last_revoke_ack_msg: None,
+                pending_replay_updates: vec![],
+                last_was_revoke: false,
+                created_at: SystemTime::now(),
+                external_funding: None,
+            },
+            waiting_peer_response: None,
+            network: None,
+            scheduled_channel_update_handle: None,
+            pending_notify_settle_tlcs: vec![],
+            pending_reestablish_channel_ready: false,
+            defer_peer_tlc_updates: false,
+            deferred_peer_tlc_updates: VecDeque::new(),
+            ephemeral_config: Default::default(),
+            private_key: None,
+            funding_abort_detail: None,
+        }
+    }
+
+    fn funding_tx_with_capacity(state: &ChannelActorState, capacity_shannons: u64) -> Transaction {
+        let output = CellOutput::new_builder()
+            .lock(state.get_funding_lock_script())
+            .type_(Some(udt_type_script()).pack())
+            .capacity(Capacity::shannons(capacity_shannons).pack())
+            .build();
+        TransactionBuilder::default()
+            .output(output)
+            .output_data(LIQUID_UDT_AMOUNT.to_le_bytes().pack())
+            .build()
+            .data()
+    }
+
+    #[test]
+    fn udt_funding_tx_is_final_when_capacity_matches_total_reserved() {
+        let state = minimal_udt_channel_state();
+        let total = LOCAL_RESERVED_SHANNONS + REMOTE_RESERVED_SHANNONS;
+        let tx = funding_tx_with_capacity(&state, total);
+        assert!(
+            state.is_tx_final(&tx).expect("tx shape"),
+            "fully funded cell should be treated as final"
+        );
+    }
+
+    /// Malicious acceptor sets `output[0].capacity` to `local_reserved + 1` shannons while UDT
+    /// amount is correct; the initiator must not treat this as a completed funding tx.
+    #[test]
+    fn udt_funding_tx_must_not_be_final_when_ckb_capacity_below_total_reserved() {
+        let state = minimal_udt_channel_state();
+        let malicious_capacity = LOCAL_RESERVED_SHANNONS + 1;
+        let tx = funding_tx_with_capacity(&state, malicious_capacity);
+        assert!(
+            !state.is_tx_final(&tx).expect("tx shape"),
+            "under-filled funding cell must not be considered final (UDT capacity bypass)"
+        );
+    }
 }

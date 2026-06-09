@@ -7466,6 +7466,18 @@ impl ChannelActorState {
                     return Ok(());
                 }
 
+                if self.is_acceptor && self.funding_tx.is_none() {
+                    if let Err(err) = self.check_remote_initial_funding_contribution(&msg.tx) {
+                        error!("Rejecting underfunded initial funding tx: {}", err);
+                        myself
+                            .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                                StopReason::AbortFunding,
+                            )))
+                            .expect("myself alive");
+                        return Ok(());
+                    }
+                }
+
                 self.funding_tx = Some(msg.tx.clone());
                 if self.is_tx_final(&msg.tx)? {
                     self.maybe_complete_tx_collaboration(msg.tx)?;
@@ -7511,6 +7523,66 @@ impl ChannelActorState {
                 self.update_state(ChannelState::CollaboratingFundingTx(flags));
             }
         }
+        Ok(())
+    }
+
+    fn check_remote_initial_funding_contribution(
+        &self,
+        tx: &Transaction,
+    ) -> ProcessingChannelResult {
+        let tx = tx.clone().into_view();
+        let (output, data) =
+            tx.output_with_data(0)
+                .ok_or(ProcessingChannelError::InvalidParameter(
+                    "Funding transaction should have at least one output".to_string(),
+                ))?;
+        let current_capacity: u64 = output.capacity().unpack();
+
+        if self.funding_udt_type_script.is_some() {
+            if current_capacity < self.remote_reserved_ckb_amount {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Initial funding tx CKB capacity {} is less than required remote reserved CKB {}",
+                    current_capacity, self.remote_reserved_ckb_amount
+                )));
+            }
+
+            if data.as_ref().len() < 16 {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "UDT output data too short, expected at least 16 bytes".to_string(),
+                ));
+            }
+            let mut amount_bytes = [0u8; 16];
+            amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
+            let udt_amount = u128::from_le_bytes(amount_bytes);
+            if udt_amount < self.to_remote_amount {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Initial funding tx UDT amount {} is less than required remote amount {}",
+                    udt_amount, self.to_remote_amount
+                )));
+            }
+
+            return Ok(());
+        }
+
+        let remote_amount = u64::try_from(self.to_remote_amount).map_err(|_| {
+            ProcessingChannelError::InvalidState(
+                "Remote CKB funding amount does not fit into u64".to_string(),
+            )
+        })?;
+        let required_capacity = remote_amount
+            .checked_add(self.remote_reserved_ckb_amount)
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidState(
+                    "Remote CKB funding amount overflows capacity".to_string(),
+                )
+            })?;
+        if current_capacity < required_capacity {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Initial funding tx CKB capacity {} is less than required remote contribution {}",
+                current_capacity, required_capacity
+            )));
+        }
+
         Ok(())
     }
 
@@ -8629,7 +8701,7 @@ impl ChannelActorState {
 
         Ok(())
     }
-    fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
+    pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
         let tx = tx.clone().into_view();
 
         let first_output = tx
@@ -8668,6 +8740,15 @@ impl ChannelActorState {
         }
 
         if self.funding_udt_type_script.is_some() {
+            // For UDT channels the funding cell carries the negotiated reserved CKB on top
+            // of the UDT amount in cell data. Reject anything below the negotiated total so
+            // that a peer cannot ship an under-funded output[0] (e.g. `local_reserved + 1`
+            // shannon) and silently advance the channel to a state where every close path
+            // requires more CKB than the funding cell holds.
+            if current_capacity < self.get_total_reserved_ckb_amount()? {
+                return Ok(false);
+            }
+
             let (_output, data) =
                 tx.output_with_data(0)
                     .ok_or(ProcessingChannelError::InvalidParameter(

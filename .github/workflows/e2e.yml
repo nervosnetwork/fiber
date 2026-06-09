@@ -68,6 +68,10 @@ jobs:
             test_env: "test"
             release: "0.202.0"
             extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=fund_from_peer"
+          - workflow: "funding-tx-verification"
+            test_env: "test"
+            release: "0.202.0"
+            extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=missing_inputs"
 
     runs-on: ubuntu-latest
     steps:

@@ -1,10 +1,11 @@
 use crate::ckb::funding::{
-    secp_sighash_placeholder_witness, FundingContext, FundingTxBuilder, LiveCellsExclusionMap,
+    secp_sighash_placeholder_witness, verify_peer_funding_contribution, FundingContext,
+    FundingTxBuilder, LiveCellsExclusionMap, PeerInputCell,
     SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES,
 };
 use crate::ckb::{is_secp_sighash_placeholder_witness, FundingError, FundingRequest, FundingTx};
 use ckb_types::{
-    core::Capacity,
+    core::{Capacity, TransactionView},
     packed::{self, CellInput, Script},
     prelude::*,
 };
@@ -66,6 +67,94 @@ fn has_exclusion(map: &LiveCellsExclusionMap, tx_hash: &packed::Byte32) -> bool 
 
 fn exclusion_map_is_empty(map: &LiveCellsExclusionMap) -> bool {
     map.map.is_empty()
+}
+
+fn test_output(capacity: u64, type_script: Option<Script>) -> packed::CellOutput {
+    packed::CellOutput::new_builder()
+        .capacity(Capacity::shannons(capacity).pack())
+        .lock(Script::default())
+        .type_(type_script.pack())
+        .build()
+}
+
+fn test_tx(outputs: Vec<packed::CellOutput>, outputs_data: Vec<packed::Bytes>) -> TransactionView {
+    packed::Transaction::default()
+        .as_advanced_builder()
+        .set_outputs(outputs)
+        .set_outputs_data(outputs_data)
+        .build()
+}
+
+fn peer_input_cell(
+    capacity: u64,
+    type_script: Option<Script>,
+    data: packed::Bytes,
+) -> PeerInputCell {
+    PeerInputCell {
+        output: test_output(capacity, type_script),
+        data: data.raw_data(),
+    }
+}
+
+#[test]
+fn test_verify_peer_funding_contribution_rejects_insufficient_ckb_inputs() {
+    let local_tx = test_tx(vec![], vec![]);
+    let remote_tx = test_tx(
+        vec![test_output(100, None), test_output(50, None)],
+        vec![packed::Bytes::default(), packed::Bytes::default()],
+    );
+
+    let result = verify_peer_funding_contribution(
+        &local_tx,
+        &remote_tx,
+        &[peer_input_cell(149, None, packed::Bytes::default())],
+    );
+    assert!(matches!(result, Err(FundingError::InvalidPeerFundingTx)));
+
+    verify_peer_funding_contribution(
+        &local_tx,
+        &remote_tx,
+        &[peer_input_cell(150, None, packed::Bytes::default())],
+    )
+    .expect("peer inputs cover funding cell and change");
+}
+
+#[test]
+fn test_verify_peer_funding_contribution_rejects_excess_udt_change() {
+    let udt_type_script = Script::new_builder()
+        .code_hash(packed::Byte32::from_slice(&[1u8; 32]).unwrap())
+        .hash_type(packed::Byte::new(0))
+        .build();
+    let local_tx = test_tx(vec![], vec![]);
+    let remote_tx = test_tx(
+        vec![
+            test_output(14_200_000_000, Some(udt_type_script.clone())),
+            test_output(14_200_000_000, Some(udt_type_script.clone())),
+        ],
+        vec![1500u128.to_le_bytes().pack(), 500u128.to_le_bytes().pack()],
+    );
+
+    let result = verify_peer_funding_contribution(
+        &local_tx,
+        &remote_tx,
+        &[peer_input_cell(
+            28_400_000_000,
+            Some(udt_type_script.clone()),
+            1999u128.to_le_bytes().pack(),
+        )],
+    );
+    assert!(matches!(result, Err(FundingError::InvalidPeerFundingTx)));
+
+    verify_peer_funding_contribution(
+        &local_tx,
+        &remote_tx,
+        &[peer_input_cell(
+            28_400_000_000,
+            Some(udt_type_script),
+            2000u128.to_le_bytes().pack(),
+        )],
+    )
+    .expect("peer UDT inputs cover funding cell and UDT change");
 }
 
 #[test]
