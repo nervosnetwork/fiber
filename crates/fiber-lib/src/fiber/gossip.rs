@@ -3347,9 +3347,8 @@ where
         });
         myself.send_interval(store_prune_interval, || {
             let prune_duration = HARD_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION;
-            let stale_timestamp = now_timestamp_as_millis_u64()
-                .checked_sub(prune_duration.as_millis() as u64)
-                .unwrap_or_default();
+            let stale_timestamp =
+                now_timestamp_as_millis_u64().saturating_sub(prune_duration.as_millis() as u64);
             GossipActorMessage::PruneStaleGossipMessages(stale_timestamp)
         });
         let delayed_outbound_messages =

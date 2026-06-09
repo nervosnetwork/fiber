@@ -1885,7 +1885,7 @@ where
             NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, source, reply) => {
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
                 let has_known_addresses = !addresses.is_empty();
-                let address = select_connect_peer_address(addresses.into_iter(), addr_type);
+                let address = select_connect_peer_address(addresses, addr_type);
                 let Some(addr) = address else {
                     let err = if let Some(transport) = addr_type {
                         Error::NoMatchingAddress(pubkey, transport)
@@ -6002,14 +6002,14 @@ where
             let mut multiaddr =
                 MultiAddr::from_str(announced_addr.as_str()).expect("valid announced listen addr");
             match multiaddr.pop() {
-                Some(Protocol::P2P(c)) => {
-                    // If the announced listen addr has a peer id, it must match our peer id.
-                    if c.as_ref() != my_peer_id.as_bytes() {
-                        panic!(
-                            "Announced listen addr is using invalid peer id: announced addr {}, actual peer id {:?}",
-                            announced_addr, my_peer_id
-                        );
-                    }
+                Some(Protocol::P2P(c)) if c.as_ref() != my_peer_id.as_bytes() => {
+                    panic!(
+                        "Announced listen addr is using invalid peer id: announced addr {}, actual peer id {:?}",
+                        announced_addr, my_peer_id
+                    );
+                }
+                Some(Protocol::P2P(_)) => {
+                    // Peer id matches, continue.
                 }
                 Some(component) => {
                     // Push this unrecognized component back to the multiaddr.

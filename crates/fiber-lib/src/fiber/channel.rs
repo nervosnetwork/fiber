@@ -864,15 +864,10 @@ where
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
                 let flags = match state.state {
-                    ChannelState::AwaitingTxSignatures(flags) => {
-                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
-                            AwaitingChannelReadyFlags::empty()
-                        } else {
-                            return Err(ProcessingChannelError::InvalidState(format!(
-                                "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}",
-                                state.state
-                            )));
-                        }
+                    ChannelState::AwaitingTxSignatures(flags)
+                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) =>
+                    {
+                        AwaitingChannelReadyFlags::empty()
                     }
                     ChannelState::AwaitingChannelReady(flags) => flags,
                     _ => {
