@@ -68,6 +68,21 @@ fn never_temporary_variants() {
     assert!(!FundingError::DeadCell.is_temporary());
     assert!(!FundingError::OverflowError.is_temporary());
     assert!(!FundingError::InvalidPeerFundingTx.is_temporary());
+    assert!(
+        !FundingError::PeerFundingTxExceedsLimit("peer-added inputs 65 > 64".to_string())
+            .is_temporary()
+    );
+}
+
+#[test]
+fn peer_funding_tx_exceeds_limit_display_includes_detail() {
+    let detail = "peer-added inputs 65 > 64";
+    let err = FundingError::PeerFundingTxExceedsLimit(detail.to_string());
+    let msg = err.to_string();
+    assert!(
+        msg.contains(detail),
+        "expected display to contain the violated budget, got: {msg}"
+    );
 }
 
 #[test]

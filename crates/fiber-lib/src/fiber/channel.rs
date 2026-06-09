@@ -24,7 +24,7 @@ use crate::utils::payment::is_invoice_fulfilled;
 use crate::{
     ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
-        is_secp_sighash_placeholder_witness, FundingRequest,
+        is_secp_sighash_placeholder_witness, validate_peer_funding_tx_complexity, FundingRequest,
     },
     fiber::{
         config::{DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
@@ -7392,6 +7392,24 @@ impl ChannelActorState {
                         }
                     }
                 }
+                // Defense in depth: reject overly complex peer funding txs before
+                // queueing work on the shared CKB chain actor. The same budget is
+                // re-checked inside VerifyFundingTx prior to any chain lookup.
+                let local_tx_view = self.funding_tx.clone().unwrap_or_default().into_view();
+                let remote_tx_view = msg.tx.clone().into_view();
+                if let Err(err) =
+                    validate_peer_funding_tx_complexity(&local_tx_view, &remote_tx_view)
+                {
+                    error!("rejecting TxUpdate from peer before verification: {}", err);
+                    let abort_reason = err.to_string();
+                    myself
+                        .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                            StopReason::AbortFundingWithDetail(abort_reason),
+                        )))
+                        .expect("myself alive");
+                    return Ok(());
+                }
+
                 if let Err(err) = call!(network, |tx| NetworkActorMessage::Command(
                     NetworkActorCommand::VerifyFundingTx {
                         local_tx: self.funding_tx.clone().unwrap_or_default(),

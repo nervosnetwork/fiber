@@ -189,6 +189,19 @@ table TxUpdate {
 
 Both parties must save the funding tx field of the previous message to compare it with the latest message field. They must also mark which inputs/outputs belong to their side. If a TxUpdate message from the other party removes or modifies inputs/outputs from their side, it is considered an illegal operation, and the entire process should be terminated.
 
+#### Peer-added complexity limits
+
+Verifying a peer's `tx` requires one chain lookup per peer-added input, so an unbounded `TxUpdate` lets a single message amplify into many chain RPC requests. To bound this, a node MUST reject a `TxUpdate` whose `tx` exceeds any of the following peer-added limits relative to its own previous version of the funding transaction, before performing any chain lookup. When the local node still has the default empty funding transaction, these deltas equal the remote transaction totals. The rejection is signalled with a `TxAbort` describing the violated budget.
+
+| Limit | Maximum |
+| --- | --- |
+| Serialized transaction size (in block) | `133120` bytes (the P2P frame cap, `1024 * (128 + 2)`) |
+| Peer-added inputs (beyond the local version) | `64` |
+| Peer-added outputs (beyond the local version) | `3` (funding cell plus UDT and CKB change when the peer funds first; CKB-only channels use two) |
+| Peer-added cell deps (beyond the local version) | `8` |
+
+These values are the implementation defaults; future versions may make them configurable and advertise them during connection or channel negotiation so the initiator can build a compliant transaction up front.
+
 ### TxComplete
 
 After successfully exchanging TxComplete messages, both parties should have constructed the transaction and move to the next part of the protocol to exchange signatures for the commitment transaction.
