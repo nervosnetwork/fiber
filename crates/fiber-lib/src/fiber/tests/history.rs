@@ -126,6 +126,190 @@ fn test_trampoline_failure_does_not_mark_outer_route_history() {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_authenticated_error_hop_rejects_forged_channel_attribution() {
+    let node_a = gen_rand_fiber_public_key();
+    let node_b = gen_rand_fiber_public_key();
+    let node_c = gen_rand_fiber_public_key();
+    let node_d = gen_rand_fiber_public_key();
+    let channel_ab = gen_rand_channel_outpoint();
+    let channel_bc = gen_rand_channel_outpoint();
+    let channel_cd = gen_rand_channel_outpoint();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node_a,
+            amount: 1000,
+            channel_outpoint: channel_ab.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_b,
+            amount: 900,
+            channel_outpoint: channel_bc,
+        },
+        SessionRouteNode {
+            pubkey: node_c,
+            amount: 800,
+            channel_outpoint: channel_cd.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_d,
+            amount: 700,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    let forged_error = TlcErr::new_channel_fail(
+        TlcErrorCode::PermanentChannelFailure,
+        node_c,
+        channel_cd.clone(),
+        None,
+    );
+
+    let mut result = InternalResult::default();
+    let need_retry = result.record_payment_fail_at_hop(&route, 1, forged_error);
+
+    assert!(need_retry);
+    assert!(result
+        .pairs
+        .keys()
+        .all(|(outpoint, _)| outpoint != &channel_cd));
+    assert!(result
+        .pairs
+        .keys()
+        .any(|(outpoint, _)| outpoint == &channel_ab));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_remove_tlc_fail_decode_fallback_does_not_record_history() {
+    let route = vec![
+        SessionRouteNode {
+            pubkey: gen_rand_fiber_public_key(),
+            amount: 1000,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: gen_rand_fiber_public_key(),
+            amount: 900,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: gen_rand_fiber_public_key(),
+            amount: 800,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+    ];
+
+    let mut result = InternalResult::default();
+    let need_retry =
+        result.record_payment_fail(&route, TlcErr::new(TlcErrorCode::InvalidOnionError));
+
+    assert!(!need_retry);
+    assert!(result.pairs.is_empty());
+    assert!(result.nodes_to_channel_map.is_empty());
+    assert!(result.fail_node.is_none());
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_authenticated_downstream_channel_failure_records_only_failed_channel() {
+    let node_a = gen_rand_fiber_public_key();
+    let node_b = gen_rand_fiber_public_key();
+    let node_c = gen_rand_fiber_public_key();
+    let node_d = gen_rand_fiber_public_key();
+    let channel_ab = gen_rand_channel_outpoint();
+    let channel_bc = gen_rand_channel_outpoint();
+    let channel_cd = gen_rand_channel_outpoint();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node_a,
+            amount: 1000,
+            channel_outpoint: channel_ab.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_b,
+            amount: 900,
+            channel_outpoint: channel_bc.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_c,
+            amount: 800,
+            channel_outpoint: channel_cd.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_d,
+            amount: 700,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    let channel_error = TlcErr::new_channel_fail(
+        TlcErrorCode::PermanentChannelFailure,
+        node_c,
+        channel_cd.clone(),
+        None,
+    );
+
+    let mut result = InternalResult::default();
+    let need_retry = result.record_payment_fail_at_hop(&route, 2, channel_error);
+
+    assert!(need_retry);
+    assert!(result
+        .pairs
+        .keys()
+        .any(|(outpoint, _)| outpoint == &channel_cd));
+    assert!(result
+        .pairs
+        .keys()
+        .all(|(outpoint, _)| outpoint != &channel_ab && outpoint != &channel_bc));
+    assert!(result.fail_node.is_none());
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_authenticated_final_hop_error_without_extra_data_records_history() {
+    let node_a = gen_rand_fiber_public_key();
+    let node_b = gen_rand_fiber_public_key();
+    let node_c = gen_rand_fiber_public_key();
+    let channel_ab = gen_rand_channel_outpoint();
+    let channel_bc = gen_rand_channel_outpoint();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node_a,
+            amount: 1000,
+            channel_outpoint: channel_ab.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_b,
+            amount: 900,
+            channel_outpoint: channel_bc.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_c,
+            amount: 800,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    let mut result = InternalResult::default();
+    let need_retry = result.record_payment_fail_at_hop(
+        &route,
+        2,
+        TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
+    );
+
+    assert!(!need_retry);
+    assert!(result
+        .pairs
+        .keys()
+        .any(|(outpoint, _)| outpoint == &channel_ab));
+    assert!(result
+        .pairs
+        .keys()
+        .any(|(outpoint, _)| outpoint == &channel_bc));
+}
+
 #[test]
 // Not supported on wasm: using std::thread::sleep
 fn test_history_with_time_pass() {

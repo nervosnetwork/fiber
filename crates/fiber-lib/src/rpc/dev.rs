@@ -220,7 +220,6 @@ impl DevRpcServerImpl {
                 // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
                 crate::fiber::types::RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                     TlcErr::new(err_code.expect("expect error code")),
-                    // Do not encrypt the error message when removing the TLC via RPC.
                     // TODO: use tlc id to look up the shared secret in the store
                     &NO_SHARED_SECRET,
                 ))

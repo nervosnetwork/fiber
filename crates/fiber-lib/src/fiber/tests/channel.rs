@@ -23,7 +23,7 @@ use crate::fiber::types::{
     ReestablishChannel, TlcErr, TxSignatures,
 };
 use crate::fiber::ChannelConnectivityState;
-use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 use crate::store::sample::StoreSample;
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::*;
@@ -53,9 +53,9 @@ use fiber_types::{
     derive_private_key, derive_tlc_pubkey, AddTlcCommand, AwaitingChannelReadyFlags,
     AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus, ChannelState,
     CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, NegotiatingFundingFlags,
-    OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason,
-    RetryableTlcOperation, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket,
-    TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlc, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
+    TlcErrPacket, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use musig2::secp::Point;
@@ -75,6 +75,60 @@ fn create_deferred_replay_test_add_tlc(channel_id: Hash256, tlc_id: u64) -> AddT
         expiry: now_timestamp_as_millis_u64() + 60_000,
         hash_algorithm: HashAlgorithm::CkbHash,
         onion_packet: None,
+    }
+}
+
+fn create_mock_pending_add_tlc_command(
+    source: &NetworkNode,
+    target: &NetworkNode,
+    amount: u128,
+    hash_algorithm: HashAlgorithm,
+    payment_hash: Hash256,
+    expiry: u64,
+) -> AddTlcCommand {
+    if target.store.get_invoice(&payment_hash).is_none() {
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payment_hash(payment_hash)
+            .payee_pub_key(target.pubkey.into())
+            .build()
+            .expect("build mock pending invoice");
+        target.insert_invoice(invoice, None);
+    }
+
+    let hops_infos = vec![
+        PaymentHopData {
+            amount,
+            expiry,
+            next_hop: Some(target.pubkey),
+            hash_algorithm,
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount,
+            expiry,
+            hash_algorithm,
+            ..Default::default()
+        },
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        source.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create mock pending onion packet");
+
+    AddTlcCommand {
+        amount,
+        payment_hash,
+        attempt_id: None,
+        expiry,
+        hash_algorithm,
+        onion_packet: packet.next,
+        shared_secret: packet.shared_secret,
+        is_trampoline_hop: false,
+        previous_tlc: None,
     }
 }
 
@@ -1992,23 +2046,21 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let preimage = [1; 32];
     let digest = algorithm.hash(preimage);
     let tlc_amount = 1000000000;
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2113,23 +2165,21 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     let preimage = [1; 32];
     let digest = correct_algorithm.hash(preimage);
     let tlc_amount = 1000000000;
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: correct_algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        correct_algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2168,22 +2218,20 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     let preimage = [2; 32];
     // create a new payment hash
     let digest = correct_algorithm.hash(preimage);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: wrong_algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        wrong_algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2244,76 +2292,83 @@ async fn do_test_channel_remote_commitment_error() {
     )
     .await;
 
-    let mut all_sent = vec![];
-    let mut batch_remove_count = 0;
-    while batch_remove_count <= 3 {
-        let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+    async fn wait_for_tlc_count(
+        node_a: &NetworkNode,
+        node_b: &NetworkNode,
+        channel_id: Hash256,
+        expected_tlcs: usize,
+    ) {
+        wait_until(|| {
+            let node_a_state = node_a.get_channel_actor_state(channel_id);
+            let node_b_state = node_b.get_channel_actor_state(channel_id);
 
-        // create a new payment hash
-        let hash_algorithm = HashAlgorithm::Sha256;
-        let digest = hash_algorithm.hash(preimage);
-        if let Ok(res) = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                ChannelCommandWithId {
-                    channel_id: new_channel_id,
-                    command: ChannelCommand::AddTlc(
-                        AddTlcCommand {
-                            amount: 1000,
-                            hash_algorithm,
-                            payment_hash: digest.into(),
-                            attempt_id: None,
-                            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                            onion_packet: None,
-                            shared_secret: NO_SHARED_SECRET,
-                            is_trampoline_hop: false,
-                            previous_tlc: None,
-                        },
-                        rpc_reply,
-                    ),
-                },
-            ))
+            !node_a_state.tlc_state.waiting_ack
+                && !node_b_state.tlc_state.waiting_ack
+                && node_a_state.tlc_state.offered_tlcs.tlcs.len() == expected_tlcs
+                && node_b_state.tlc_state.received_tlcs.tlcs.len() == expected_tlcs
         })
-        .expect("node_b alive")
-        {
-            all_sent.push((preimage, res.tlc_id));
+        .await;
+    }
+
+    let mut all_sent = vec![];
+    for _ in 0..4 {
+        while all_sent.len() < tlc_number_in_flight_limit {
+            let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+            let hash_algorithm = HashAlgorithm::Sha256;
+            let payment_hash = hash_algorithm.hash(preimage);
+            let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+            let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                    ChannelCommandWithId {
+                        channel_id: new_channel_id,
+                        command: ChannelCommand::AddTlc(
+                            create_mock_pending_add_tlc_command(
+                                &node_a,
+                                &node_b,
+                                1000,
+                                hash_algorithm,
+                                payment_hash.into(),
+                                expiry,
+                            ),
+                            rpc_reply,
+                        ),
+                    },
+                ))
+            })
+            .expect("node_a alive")
+            .expect("successfully added tlc");
+            all_sent.push((preimage, add_tlc_result.tlc_id));
+            wait_for_tlc_count(&node_a, &node_b, new_channel_id, all_sent.len()).await;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        if all_sent.len() >= tlc_number_in_flight_limit {
-            while all_sent.len() > tlc_number_in_flight_limit - 2 {
-                if let Some((preimage, tlc_id)) = all_sent.first().cloned() {
-                    let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-                        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                            ChannelCommandWithId {
-                                channel_id: new_channel_id,
-                                command: ChannelCommand::RemoveTlc(
-                                    RemoveTlcCommand {
-                                        id: tlc_id,
-                                        reason: RemoveTlcReason::RemoveTlcFulfill(
-                                            RemoveTlcFulfill {
-                                                payment_preimage: Hash256::from(preimage),
-                                            },
-                                        ),
-                                    },
-                                    rpc_reply,
-                                ),
+        while all_sent.len() > tlc_number_in_flight_limit - 2 {
+            let (preimage, tlc_id) = all_sent.remove(0);
+            let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                    ChannelCommandWithId {
+                        channel_id: new_channel_id,
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: tlc_id,
+                                reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                    payment_preimage: Hash256::from(preimage),
+                                }),
                             },
-                        ))
-                    })
-                    .expect("node_b alive");
-                    dbg!(&remove_tlc_result);
+                            rpc_reply,
+                        ),
+                    },
+                ))
+            })
+            .expect("node_b alive");
 
-                    if remove_tlc_result.is_ok()
-                        || remove_tlc_result
-                            .unwrap_err()
-                            .to_string()
-                            .contains("Trying to remove non-existing tlc")
-                    {
-                        all_sent.remove(0);
-                    }
-                }
-            }
-            batch_remove_count += 1;
+            assert!(
+                remove_tlc_result.is_ok()
+                    || remove_tlc_result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Trying to remove non-existing tlc")
+            );
+            wait_for_tlc_count(&node_a, &node_b, new_channel_id, all_sent.len()).await;
         }
     }
 }
@@ -2464,23 +2519,21 @@ async fn test_network_add_two_tlcs_remove_one() {
     let preimage_a = [1; 32];
     let algorithm = HashAlgorithm::Sha256;
     let digest = algorithm.hash(preimage_a);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result_a = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 1000,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2490,25 +2543,23 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("successfully added tlc");
 
     // if we don't wait for a while, the next add_tlc will fail with temporary failure
-    let preimage_b = [2; 32];
+    let failed_preimage_b = [2; 32];
     let algorithm = HashAlgorithm::Sha256;
-    let digest = algorithm.hash(preimage_b);
+    let digest = algorithm.hash(failed_preimage_b);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 2000,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        2000,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2520,34 +2571,35 @@ async fn test_network_add_two_tlcs_remove_one() {
     // now wait for a while, then add a tlc again, it will success
     loop {
         let node_a_state = node_a.get_channel_actor_state(channel_id);
-        if !node_a_state.is_waiting_tlc_ack() {
+        let node_b_state = node_b.get_channel_actor_state(channel_id);
+        if !node_a_state.is_waiting_tlc_ack() && !node_b_state.is_waiting_tlc_ack() {
             break;
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
+    let preimage_b = [3; 32];
+    let digest = algorithm.hash(preimage_b);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result_b = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 2000,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        2000,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
         ))
     })
     .expect("node_b alive");
-    assert!(add_tlc_result_b.is_ok());
+    assert!(add_tlc_result_b.is_ok(), "{:?}", add_tlc_result_b);
 
     eprintln!("add_tlc_result: {:?}", add_tlc_result_b);
 
@@ -2869,22 +2921,20 @@ async fn test_check_active_channel_event_does_not_remove_expired_received_tlc() 
         create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, false).await;
 
     let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 1000,
-                        hash_algorithm: HashAlgorithm::CkbHash,
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
                         payment_hash,
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2932,22 +2982,20 @@ async fn test_check_channels_does_not_fallback_when_channel_actor_missing() {
         create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, false).await;
 
     let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 1000,
-                        hash_algorithm: HashAlgorithm::CkbHash,
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
                         payment_hash,
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -3246,22 +3294,20 @@ async fn test_restarted_offline_channel_registers_expired_received_tlc_remove() 
             .await;
 
     let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 1000,
-                        hash_algorithm: HashAlgorithm::CkbHash,
+                    create_mock_pending_add_tlc_command(
+                        &node_b,
+                        &node_a,
+                        1000,
+                        HashAlgorithm::CkbHash,
                         payment_hash,
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -3278,6 +3324,11 @@ async fn test_restarted_offline_channel_registers_expired_received_tlc_remove() 
         .get_mut(&TLCId::Received(add_tlc_result.tlc_id))
         .expect("received tlc exists")
         .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    let shared_secret = node_a_channel_state
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_result.tlc_id))
+        .expect("received tlc exists")
+        .shared_secret;
     node_a
         .update_channel_actor_state(
             node_a_channel_state,
@@ -3299,7 +3350,7 @@ async fn test_restarted_offline_channel_registers_expired_received_tlc_remove() 
                 TLCId::Received(add_tlc_result.tlc_id),
                 RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                     TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                    &NO_SHARED_SECRET,
+                    &shared_secret,
                 )),
             )),
         "offline restored channel should register retryable remove for expired received tlc"
@@ -3315,22 +3366,20 @@ async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
             .await;
 
     let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 1000,
-                        hash_algorithm: HashAlgorithm::CkbHash,
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
                         payment_hash,
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -3529,17 +3578,16 @@ async fn test_open_channel_constraints_limit_incoming_tlcs() {
     // A's advertised max is A's incoming/accepted TLC limit, so it should not
     // limit TLCs A offers to B.
     for i in 1..=node_a_max_accepted_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3556,17 +3604,16 @@ async fn test_open_channel_constraints_limit_incoming_tlcs() {
 
     // B offering TLCs to A consumes A's advertised incoming/accepted TLC limit.
     for i in 1..=node_a_max_accepted_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3613,17 +3660,16 @@ async fn do_test_add_tlc_with_number_limit() {
 
     // A's max applies to incoming TLCs, so it should not limit A -> B.
     for i in 1..=node_a_max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3640,17 +3686,16 @@ async fn do_test_add_tlc_with_number_limit() {
 
     // B -> A consumes A's advertised incoming TLC limit.
     for i in 1..=node_a_max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3696,17 +3741,16 @@ async fn do_test_add_tlc_number_limit_reverse() {
     let tlc_amount = 1000000000;
     // B's max applies to incoming TLCs, so it should not limit B -> A.
     for i in 1..=node_b_max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3723,17 +3767,16 @@ async fn do_test_add_tlc_number_limit_reverse() {
 
     // A -> B consumes B's advertised incoming TLC limit.
     for i in 1..=node_b_max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3780,17 +3823,16 @@ async fn do_test_add_tlc_value_limit() {
 
     // A's max applies to incoming TLCs, so it should not limit A -> B.
     for i in 1..=max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3806,17 +3848,16 @@ async fn do_test_add_tlc_value_limit() {
 
     // B -> A consumes A's advertised incoming TLC value limit.
     for i in 1..=max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3863,17 +3904,16 @@ async fn do_test_add_tlc_value_limit_reverse() {
 
     // B's max applies to incoming TLCs, so it should not limit B -> A.
     for i in 1..=max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3889,17 +3929,16 @@ async fn do_test_add_tlc_value_limit_reverse() {
 
     // A -> B consumes B's advertised incoming TLC value limit.
     for i in 1..=max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3971,6 +4010,70 @@ async fn test_peer_add_tlc_checks_local_incoming_constraints() {
 
     let node_a_state = node_a.get_channel_actor_state(new_channel_id);
     assert_eq!(node_a_state.tlc_state.received_tlcs.tlcs.len(), 0);
+}
+
+#[tokio::test]
+async fn test_peer_plaintext_remove_tlc_fail_is_rejected_before_state_mutation() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("add tlc succeeds");
+
+    wait_for_tlc_sync(&node_a, &node_b, channel_id, 1).await;
+
+    let mut plaintext_error = vec![0; 32];
+    plaintext_error.extend(TlcErr::new(TlcErrorCode::TemporaryNodeFailure).serialize());
+    let plaintext_packet = TlcErrPacket {
+        onion_packet: plaintext_error,
+    };
+    assert!(plaintext_packet.is_plaintext());
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::remove_tlc(RemoveTlc {
+                    channel_id,
+                    tlc_id: add_tlc_result.tlc_id,
+                    reason: RemoveTlcReason::RemoveTlcFail(plaintext_packet),
+                }),
+            )),
+        ))
+        .expect("send malicious remove_tlc peer message");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    let offered_tlc = state
+        .tlc_state
+        .get(&TLCId::Offered(add_tlc_result.tlc_id))
+        .expect("offered tlc should remain present");
+    assert_eq!(offered_tlc.outbound_status(), OutboundTlcStatus::Committed);
+    assert!(offered_tlc.removed_reason.is_none());
 }
 
 #[tokio::test]
@@ -4481,23 +4584,21 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
     let preimage = [1; 32];
     let digest = algorithm.hash(preimage);
     let tlc_amount = 1000000000;
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -5198,6 +5299,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
     let algorithm = HashAlgorithm::CkbHash;
     let digest = algorithm.hash(preimage);
     let tlc_amount = 1000000000;
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let node_a_state = node_a.get_channel_actor_state(channel_id);
     let node_b_state = node_b.get_channel_actor_state(channel_id);
@@ -5209,17 +5311,14 @@ async fn test_normal_shutdown_with_remove_tlc() {
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -5770,23 +5869,21 @@ async fn test_node_reestablish_resend_remove_tlc() {
     let preimage = [2; 32];
     // create a new payment hash
     let payment_hash = HashAlgorithm::CkbHash.hash(preimage);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 1000,
-                        hash_algorithm: HashAlgorithm::CkbHash,
-                        payment_hash: payment_hash.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -5946,23 +6043,21 @@ async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_befor
     let payment_hash_0: Hash256 = HashAlgorithm::CkbHash.hash(preimage_0).into();
     let preimage_1 = [2; 32];
     let payment_hash_1: Hash256 = HashAlgorithm::CkbHash.hash(preimage_1).into();
+    let expiry_0 = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_0 = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 3_000_000,
-                        hash_algorithm: HashAlgorithm::CkbHash,
-                        payment_hash: payment_hash_0,
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        3_000_000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash_0,
+                        expiry_0,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -5973,22 +6068,20 @@ async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_befor
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
+    let expiry_1 = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_1 = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 6_000_000,
-                        hash_algorithm: HashAlgorithm::CkbHash,
-                        payment_hash: payment_hash_1,
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        6_000_000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash_1,
+                        expiry_1,
+                    ),
                     rpc_reply,
                 ),
             },

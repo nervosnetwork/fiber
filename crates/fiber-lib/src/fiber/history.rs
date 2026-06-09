@@ -164,6 +164,77 @@ impl InternalResult {
         }
     }
 
+    fn error_channel_is_adjacent_to_hop(
+        nodes: &[SessionRouteNode],
+        index: usize,
+        channel_outpoint: &OutPoint,
+    ) -> bool {
+        (index > 0 && nodes[index - 1].channel_outpoint == *channel_outpoint)
+            || (index + 1 < nodes.len() && nodes[index].channel_outpoint == *channel_outpoint)
+    }
+
+    fn error_attribution_matches_hop(
+        nodes: &[SessionRouteNode],
+        index: usize,
+        tlc_err: &TlcErr,
+    ) -> bool {
+        if index >= nodes.len() {
+            return false;
+        }
+
+        if let Some(node_id) = tlc_err.error_node_id() {
+            if node_id != nodes[index].pubkey {
+                return false;
+            }
+        }
+
+        if let Some(channel_outpoint) = tlc_err.error_channel_outpoint() {
+            return Self::error_channel_is_adjacent_to_hop(nodes, index, &channel_outpoint);
+        }
+
+        true
+    }
+
+    pub fn record_payment_fail_at_hop(
+        &mut self,
+        nodes: &[SessionRouteNode],
+        route_index: usize,
+        tlc_err: TlcErr,
+    ) -> bool {
+        if route_index >= nodes.len() {
+            error!(
+                "Authenticated error index out of route bounds: index={} route={:?} error={:?}",
+                route_index, nodes, tlc_err
+            );
+            return false;
+        }
+
+        if let Some(TlcErrData::TrampolineFailed { node_id, .. }) = &tlc_err.extra_data {
+            if *node_id == nodes[route_index].pubkey {
+                error!(
+                    "Payment failed beyond trampoline node: error_code={:?} trampoline_node={:?} route={:?}",
+                    tlc_err.error_code, node_id, nodes
+                );
+                return false;
+            }
+        }
+
+        let tlc_err = if Self::error_attribution_matches_hop(nodes, route_index, &tlc_err) {
+            tlc_err
+        } else {
+            error!(
+                "TLC error attribution does not match authenticated hop: authenticated_index={} authenticated_node={:?} error_node={:?} error_channel={:?}",
+                route_index,
+                nodes[route_index].pubkey,
+                tlc_err.error_node_id(),
+                tlc_err.error_channel_outpoint()
+            );
+            TlcErr::new_node_fail(TlcErrorCode::InvalidOnionError, nodes[route_index].pubkey)
+        };
+
+        self.record_payment_fail_with_index(nodes, route_index, tlc_err)
+    }
+
     pub fn record_payment_fail(&mut self, nodes: &[SessionRouteNode], tlc_err: TlcErr) -> bool {
         if let Some(TlcErrData::TrampolineFailed { node_id, .. }) = &tlc_err.extra_data {
             error!(
@@ -177,7 +248,6 @@ impl InternalResult {
             return false;
         }
 
-        let mut need_retry = true;
         let error_index = nodes
             .iter()
             .position(|s| Some(s.pubkey) == tlc_err.error_node_id());
@@ -190,6 +260,16 @@ impl InternalResult {
             return false;
         };
 
+        self.record_payment_fail_with_index(nodes, index, tlc_err)
+    }
+
+    fn record_payment_fail_with_index(
+        &mut self,
+        nodes: &[SessionRouteNode],
+        index: usize,
+        tlc_err: TlcErr,
+    ) -> bool {
+        let mut need_retry = true;
         let len = nodes.len();
         assert!(len >= 2);
         let error_code = tlc_err.error_code;

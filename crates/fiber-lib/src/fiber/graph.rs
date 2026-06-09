@@ -1176,6 +1176,11 @@ where
         self.history.apply_internal_result(result);
     }
 
+    /// Record a failed attempt without an authenticated route index.
+    ///
+    /// This path derives failure attribution from the error payload itself, so use it only when
+    /// there is no authenticated onion-error hop available, such as first-hop/local errors or
+    /// onion-error decode fallback.
     pub(crate) fn record_attempt_fail(
         &mut self,
         attempt: &Attempt,
@@ -1188,6 +1193,27 @@ where
         let mut internal_result = InternalResult::default();
         let nodes = &attempt.route.nodes;
         let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
+        self.history.apply_internal_result(internal_result);
+        let is_send_payment_with_router = self
+            .store
+            .get_payment_session(attempt.payment_hash)
+            .is_some_and(|p| p.is_payment_with_router());
+        return need_to_retry && !is_send_payment_with_router;
+    }
+
+    /// Record a failed attempt at a route index authenticated by onion error decoding.
+    ///
+    /// `route_index` is already mapped into `attempt.route.nodes`; the source node is index 0.
+    pub(crate) fn record_attempt_fail_at_hop(
+        &mut self,
+        attempt: &Attempt,
+        tlc_err: TlcErr,
+        route_index: usize,
+    ) -> bool {
+        self.untrack_attempt_router(attempt);
+        let mut internal_result = InternalResult::default();
+        let nodes = &attempt.route.nodes;
+        let need_to_retry = internal_result.record_payment_fail_at_hop(nodes, route_index, tlc_err);
         self.history.apply_internal_result(internal_result);
         let is_send_payment_with_router = self
             .store

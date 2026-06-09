@@ -10,15 +10,17 @@ use crate::now_timestamp_as_millis_u64;
 use crate::tests::gen_utils::gen_rand_fiber_public_key;
 use crate::time::SystemTime;
 use ckb_types::packed::{OutPoint, Script};
+use fiber_sphinx::OnionErrorPacket;
 use fiber_types::{
     AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelState, ChannelTlcInfo,
     CommitmentNumbers, InMemorySigner, PaymentCustomRecords, TLCId, TlcInfo, TlcState, TlcStatus,
-    NO_SHARED_SECRET,
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
-use fiber_types::{HashAlgorithm, TlcErrorCode};
+use fiber_types::{HashAlgorithm, TlcErr, TlcErrorCode};
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+const TEST_SHARED_SECRET: [u8; 32] = [42u8; 32];
 
 /// Mock store for testing that implements PreimageStore, InvoiceStore, and ChannelActorStateStore
 struct MockStore {
@@ -242,7 +244,7 @@ fn create_test_channel_state_with_tlc(
         expiry: now_timestamp_as_millis_u64() + 1000000,
         hash_algorithm: HashAlgorithm::CkbHash,
         onion_packet: None,
-        shared_secret: NO_SHARED_SECRET,
+        shared_secret: TEST_SHARED_SECRET,
         is_trampoline_hop: false,
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
@@ -333,7 +335,10 @@ fn is_fulfill_settlement(settlement: &TlcSettlement) -> bool {
 fn get_error_code(settlement: &TlcSettlement) -> Option<TlcErrorCode> {
     match &settlement.remove_tlc_command().reason {
         RemoveTlcReason::RemoveTlcFail(packet) => {
-            packet.decode(&[0u8; 32], vec![]).map(|e| e.error_code)
+            let (_, payload) = OnionErrorPacket::from_bytes(packet.onion_packet.clone())
+                .xor_cipher_stream(&TEST_SHARED_SECRET)
+                .split();
+            TlcErr::deserialize(&payload).map(|e| e.error_code)
         }
         _ => None,
     }

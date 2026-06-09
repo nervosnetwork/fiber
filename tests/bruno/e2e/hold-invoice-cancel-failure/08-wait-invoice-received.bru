@@ -1,0 +1,61 @@
+meta {
+  name: wait invoice received
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_invoice",
+    "params": [
+      {
+        "payment_hash": "{{HOLD_PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+vars:post-response {
+  INVOICE_RECEIVED_MAX_ITERATIONS: 20
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  const status = res.body.result.status;
+  const iteration = Number(bru.getVar("INVOICE_RECEIVED_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("INVOICE_RECEIVED_MAX_ITERATIONS"));
+
+  console.log("invoice status: ", { status, iteration });
+
+  if (status === "Received") {
+    bru.setVar("INVOICE_RECEIVED_ITERATION", 0);
+    return;
+  }
+
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("INVOICE_RECEIVED_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait invoice received");
+    return;
+  }
+
+  bru.setVar("INVOICE_RECEIVED_ITERATION", 0);
+  throw new Error(`invoice did not reach Received, last_status=${String(status)}`);
+}

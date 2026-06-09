@@ -32,6 +32,14 @@ pub struct TlcErrPacket {
     pub onion_packet: Vec<u8>,
 }
 
+/// A TLC error decoded from an onion error packet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecodedTlcErr {
+    pub error: TlcErr,
+    /// Index into the hop public keys passed to [`TlcErrPacket::decode`].
+    pub hop_index: usize,
+}
+
 /// Shared secret indicating no encryption (for origin node).
 pub const NO_SHARED_SECRET: [u8; 32] = [0u8; 32];
 const NO_ERROR_PACKET_HMAC: [u8; 32] = [0u8; 32];
@@ -48,14 +56,8 @@ pub const ONION_SESSION_KEY_MAX_ATTEMPTS: usize = 7;
 impl TlcErrPacket {
     /// Create a new TlcErrPacket from raw payload bytes.
     /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
-    /// Use all zeros (NO_SHARED_SECRET) for the origin node.
     pub fn from_payload(payload: Vec<u8>, shared_secret: &[u8; 32]) -> Self {
-        let onion_packet = if shared_secret != &NO_SHARED_SECRET {
-            OnionErrorPacket::create(shared_secret, payload)
-        } else {
-            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC, payload)
-        }
-        .into_bytes();
+        let onion_packet = OnionErrorPacket::create(shared_secret, payload).into_bytes();
         TlcErrPacket { onion_packet }
     }
 
@@ -66,16 +68,15 @@ impl TlcErrPacket {
 
     /// Intermediate node backwards the error to the previous hop using the shared secret
     /// used in forwarding the onion packet.
-    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
-        if !self.is_plaintext() {
-            let onion_packet = OnionErrorPacket::from_bytes(self.onion_packet)
-                .xor_cipher_stream(shared_secret)
-                .into_bytes();
-            TlcErrPacket { onion_packet }
-        } else {
-            // If it is not encrypted, just send back as it is.
-            self
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Result<Self, TlcErrPacketError> {
+        if self.is_plaintext() {
+            return Err(TlcErrPacketError::PlaintextForward);
         }
+
+        let onion_packet = OnionErrorPacket::from_bytes(self.onion_packet)
+            .xor_cipher_stream(shared_secret)
+            .into_bytes();
+        Ok(TlcErrPacket { onion_packet })
     }
 }
 
@@ -107,7 +108,7 @@ const ERROR_DECODING_PASSES: usize = 27;
 
 impl TlcErrPacket {
     /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
-    /// Use all zeros for the origin node. Takes a structured `TlcErr` and serializes it.
+    /// Takes a structured `TlcErr` and serializes it.
     pub fn new(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
         let payload = tlc_fail.serialize();
         Self::from_payload(payload, shared_secret)
@@ -118,17 +119,10 @@ impl TlcErrPacket {
         &self,
         session_key: &[u8; 32],
         hops_public_keys: Vec<crate::Pubkey>,
-    ) -> Option<TlcErr> {
+    ) -> Option<DecodedTlcErr> {
         use secp256k1::{PublicKey, SecretKey};
 
-        if self.is_plaintext() {
-            let error = TlcErr::deserialize(&self.onion_packet[32..]);
-            if error.is_some() {
-                return error;
-            }
-        }
-
-        let secp_hops_public_keys: Vec<PublicKey> = hops_public_keys
+        let hops_public_keys: Vec<PublicKey> = hops_public_keys
             .iter()
             .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
             .collect();
@@ -143,20 +137,13 @@ impl TlcErrPacket {
             })
             .ok()?;
         OnionErrorPacket::from_bytes(self.onion_packet.clone())
-            .parse(secp_hops_public_keys, session_key, TlcErr::deserialize)
-            .and_then(|(error, hop_index)| {
+            .parse(hops_public_keys, session_key, TlcErr::deserialize)
+            .map(|(error, hop_index)| {
                 for _ in hop_index..ERROR_DECODING_PASSES {
                     OnionErrorPacket::from_bytes(self.onion_packet.clone())
                         .xor_cipher_stream(&NO_SHARED_SECRET);
                 }
-                let reporter = hops_public_keys.get(hop_index)?;
-                if error
-                    .error_node_id()
-                    .is_some_and(|node_id| node_id != *reporter)
-                {
-                    return None;
-                }
-                Some(error)
+                DecodedTlcErr { error, hop_index }
             })
     }
 
@@ -175,6 +162,12 @@ impl TlcErrPacket {
         });
         Self::new(tlc_err, shared_secret)
     }
+}
+
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlcErrPacketError {
+    #[error("Refusing to forward plaintext TLC error packet")]
+    PlaintextForward,
 }
 
 /// Errors that can occur when processing an onion packet.

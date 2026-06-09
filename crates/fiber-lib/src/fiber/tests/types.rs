@@ -6,8 +6,8 @@ use crate::{
         BasicMppPaymentData, BroadcastMessageID, Cursor, FeatureVector, Hash256, HashAlgorithm,
         NodeAnnouncement, NodeId, OnionPacketError, PaymentCustomRecords, PaymentHopData,
         PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr,
-        TlcErrData, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET, ONION_PACKET_VERSION_V0,
-        ONION_PACKET_VERSION_V1,
+        TlcErrData, TlcErrPacket, TlcErrPacketError, TlcErrorCode, NO_SHARED_SECRET,
+        ONION_PACKET_VERSION_V0, ONION_PACKET_VERSION_V1,
     },
     gen_deterministic_fiber_private_key, gen_rand_channel_outpoint, gen_rand_fiber_private_key,
     gen_rand_fiber_public_key, gen_rand_sha256_hash, now_timestamp_as_millis_u64,
@@ -623,10 +623,18 @@ fn test_tlc_fail_error() {
     assert!(!tlc_fail_detail.error_code.is_node());
     assert!(tlc_fail_detail.error_code.is_bad_onion());
     assert!(tlc_fail_detail.error_code.is_perm());
-    let tlc_fail = TlcErrPacket::new(tlc_fail_detail.clone(), &NO_SHARED_SECRET);
 
-    let convert_back: TlcErr = tlc_fail.decode(&[0u8; 32], vec![]).expect("decoded fail");
-    assert_eq!(tlc_fail_detail, convert_back);
+    let mut plaintext_packet_bytes = vec![0; 32];
+    plaintext_packet_bytes.extend(tlc_fail_detail.serialize());
+    let tlc_fail = TlcErrPacket {
+        onion_packet: plaintext_packet_bytes,
+    };
+    assert!(tlc_fail.is_plaintext());
+    assert!(tlc_fail.decode(&[1u8; 32], vec![]).is_none());
+    assert_eq!(
+        tlc_fail.backward(&[2u8; 32]),
+        Err(TlcErrPacketError::PlaintextForward)
+    );
 
     let node_fail = TlcErr::new_node_fail(
         TlcErrorCode::PermanentNodeFailure,
@@ -634,8 +642,8 @@ fn test_tlc_fail_error() {
     );
     assert!(node_fail.error_code.is_node());
     let tlc_fail = TlcErrPacket::new(node_fail.clone(), &NO_SHARED_SECRET);
-    let convert_back = tlc_fail.decode(&[0u8; 32], vec![]).expect("decoded fail");
-    assert_eq!(node_fail, convert_back);
+    assert!(!tlc_fail.is_plaintext());
+    assert!(tlc_fail.decode(&[1u8; 32], vec![]).is_none());
 
     let error_code = TlcErrorCode::PermanentNodeFailure;
     let convert = TlcErrorCode::from_str("PermanentNodeFailure").expect("convert error");
@@ -676,18 +684,20 @@ fn test_tlc_err_packet_encryption() {
         let decrypted_tlc_fail_detail = tlc_fail
             .decode(session_key.as_ref(), hops_path.clone())
             .expect("decrypted");
-        assert_eq!(decrypted_tlc_fail_detail, tlc_fail_detail);
+        assert_eq!(decrypted_tlc_fail_detail.error, tlc_fail_detail);
+        assert_eq!(decrypted_tlc_fail_detail.hop_index, 0);
     }
 
     {
         // Error from the the last hop
         let mut tlc_fail = TlcErrPacket::new(tlc_fail_detail.clone(), &hops_ss[2]);
-        tlc_fail = tlc_fail.backward(&hops_ss[1]);
-        tlc_fail = tlc_fail.backward(&hops_ss[0]);
+        tlc_fail = tlc_fail.backward(&hops_ss[1]).expect("encrypted error");
+        tlc_fail = tlc_fail.backward(&hops_ss[0]).expect("encrypted error");
         let decrypted_tlc_fail_detail = tlc_fail
             .decode(session_key.as_ref(), hops_path.clone())
             .expect("decrypted");
-        assert_eq!(decrypted_tlc_fail_detail, tlc_fail_detail);
+        assert_eq!(decrypted_tlc_fail_detail.error, tlc_fail_detail);
+        assert_eq!(decrypted_tlc_fail_detail.hop_index, 2);
     }
 
     {
@@ -710,6 +720,54 @@ fn test_tlc_err_packet_encryption() {
             .decode(session_key.as_ref(), hops_path.clone())
             .is_none());
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_tlc_err_packet_payload_can_claim_different_route_node_than_authenticated_hop() {
+    let hops_path = [
+        "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
+        "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
+        "027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007",
+    ]
+    .iter()
+    .map(|s| {
+        let pk = PublicKey::from_str(s).expect("valid public key");
+        Pubkey(pk.serialize())
+    })
+    .collect::<Vec<_>>();
+
+    let session_key = SecretKey::from_slice(&[0x41; 32]).expect("32 bytes, within curve order");
+    let hops_pubkeys: Vec<PublicKey> = hops_path
+        .iter()
+        .map(|k| PublicKey::from_slice(&k.0).expect("valid pubkey"))
+        .collect();
+    let hops_ss: Vec<[u8; 32]> =
+        OnionSharedSecretIter::new(hops_pubkeys.iter(), session_key, SECP256K1)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid blinding factors for hard-coded session key");
+
+    let claimed_node = hops_path[2];
+    let claimed_channel = gen_rand_channel_outpoint();
+    let forged_error = TlcErr::new_channel_fail(
+        TlcErrorCode::PermanentChannelFailure,
+        claimed_node,
+        claimed_channel.clone(),
+        None,
+    );
+
+    let packet = TlcErrPacket::new(forged_error.clone(), &hops_ss[0]);
+    let decoded = packet
+        .decode(session_key.as_ref(), hops_path)
+        .expect("decrypted");
+
+    assert_eq!(decoded.hop_index, 0);
+    assert_eq!(decoded.error, forged_error);
+    assert_eq!(decoded.error.error_node_id(), Some(claimed_node));
+    assert_eq!(
+        decoded.error.error_channel_outpoint(),
+        Some(claimed_channel)
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -754,7 +812,8 @@ fn test_trampoline_failed_wrapper_is_decodable_by_payer() {
         .decode(session_key.as_ref(), hops_path.clone())
         .expect("payer decodes wrapper");
 
-    assert_eq!(decoded, wrapper_err);
+    assert_eq!(decoded.error, wrapper_err);
+    assert_eq!(decoded.hop_index, 0);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -798,7 +857,8 @@ fn test_direct_trampoline_failed_wrapper_uses_outer_shared_secret() {
     let decoded = wrapper_packet
         .decode(session_key.as_ref(), hops_path)
         .expect("payer decodes direct trampoline wrapper");
-    assert_eq!(decoded, wrapper_err);
+    assert_eq!(decoded.error, wrapper_err);
+    assert_eq!(decoded.hop_index, 0);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

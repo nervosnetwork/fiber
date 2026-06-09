@@ -1,0 +1,39 @@
+meta {
+  name: Node2 cancel hold invoice
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "cancel_invoice",
+    "params": [
+      {
+        "payment_hash": "{{HOLD_PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.status: eq "Cancelled"
+}
+
+script:post-response {
+  console.log("cancel invoice result: ", res.body.result);
+  await new Promise(r => setTimeout(r, 1000));
+}

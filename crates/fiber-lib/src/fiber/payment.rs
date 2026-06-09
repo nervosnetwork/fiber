@@ -1780,17 +1780,31 @@ where
                 }
             }
             RemoveTlcReason::RemoveTlcFail(reason) => {
-                let tlc_error = reason
-                    .decode(&attempt.session_key, attempt.hops_public_keys())
-                    .unwrap_or_else(|| {
-                        debug_event!(self.network, "InvalidOnionError");
-                        TlcErr::new(TlcErrorCode::InvalidOnionError)
-                    });
-                let need_to_retry = self.network_graph.write().await.record_attempt_fail(
-                    &attempt,
-                    tlc_error.clone(),
-                    false,
-                );
+                let (tlc_error, route_index) =
+                    match reason.decode(&attempt.session_key, attempt.hops_public_keys()) {
+                        Some(decoded)
+                            if decoded.hop_index.saturating_add(1) < attempt.route.nodes.len() =>
+                        {
+                            (decoded.error, Some(decoded.hop_index + 1))
+                        }
+                        _ => {
+                            debug_event!(self.network, "InvalidOnionError");
+                            (TlcErr::new(TlcErrorCode::InvalidOnionError), None)
+                        }
+                    };
+                let need_to_retry = if let Some(route_index) = route_index {
+                    self.network_graph.write().await.record_attempt_fail_at_hop(
+                        &attempt,
+                        tlc_error.clone(),
+                        route_index,
+                    )
+                } else {
+                    self.network_graph.write().await.record_attempt_fail(
+                        &attempt,
+                        tlc_error.clone(),
+                        false,
+                    )
+                };
                 debug!(
                     "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
                     payment_hash,

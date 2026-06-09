@@ -1433,7 +1433,7 @@ where
         // - Extract public key from onion_packet[1..34]
         // - Obtain share secret using DH Key Exchange from the public key
         // and the network private key stored in the network actor state.
-        let should_settle = match add_tlc.onion_packet.clone() {
+        let (should_settle, shared_secret) = match add_tlc.onion_packet.clone() {
             Some(onion_packet) => {
                 let peeled = onion_packet
                     .peel(
@@ -1444,7 +1444,6 @@ where
                     .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err.to_string()))
                     .map_err(ProcessingChannelError::without_shared_secret)?;
                 let shared_secret = peeled.shared_secret;
-
                 // The onion payload is encrypted but the hash_algorithm field is
                 // not cryptographically bound to the onion. A malicious sender
                 // can set a different hash_algorithm on the wire AddTlc than in
@@ -1456,37 +1455,34 @@ where
                         "TLC hash_algorithm ({:?}) does not match onion hash_algorithm ({:?})",
                         add_tlc.hash_algorithm, peeled.current.hash_algorithm
                     ))
-                    .without_shared_secret());
+                    .with_shared_secret(shared_secret));
                 }
 
-                self.apply_add_tlc_operation_with_peeled_onion_packet(state, add_tlc, peeled)
-                    .map_err(move |err| err.with_shared_secret(shared_secret))?
+                let should_settle = self
+                    .apply_add_tlc_operation_with_peeled_onion_packet(state, add_tlc, peeled)
+                    .map_err(move |err| err.with_shared_secret(shared_secret))?;
+                // Persist the secret only after onion validation succeeds. Delayed
+                // final-hop failures read it later from the stored TLC.
+                state
+                    .tlc_state
+                    .get_mut(&add_tlc.tlc_id)
+                    .expect("expect tlc")
+                    .shared_secret = shared_secret;
+                (should_settle, shared_secret)
             }
             None => {
-                // The TLC is with a NO_SHARED_SECRET and no onion packet.
-                // this may only happen in testing or development environment.
-                debug_assert!(add_tlc.onion_packet.is_none());
-                if cfg!(debug_assertions) {
-                    warn!(
-                        "Processing TLC with no onion packet, only for testing or development environment"
-                    );
-                    // allow test code to manually add tlc without onion packet
-                    true
-                } else {
-                    return Err(ProcessingChannelError::PeelingOnionPacketError(
-                        "TLC with no onion packet is not supported".to_string(),
-                    )
-                    .without_shared_secret());
-                }
+                return Err(ProcessingChannelError::PeelingOnionPacketError(
+                    "TLC with no onion packet is not supported".to_string(),
+                )
+                .without_shared_secret());
             }
         };
 
-        // we don't need to settle down the tlc if it is not the last hop here,
-        // some e2e tests are calling AddTlc manually, so we can not use onion packet to
-        // check whether it's the last hop here, maybe need to revisit in future.
+        // We don't need to settle the TLC if the authenticated onion payload shows
+        // this node is not the last hop.
         if should_settle {
             self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
-                .map_err(|err| err.without_shared_secret())?;
+                .map_err(|err| err.with_shared_secret(shared_secret))?;
         }
 
         Ok(())
@@ -1771,6 +1767,14 @@ where
         state.check_for_tlc_update(TlcUpdateAction::RemoveTlcPeer)?;
         // TODO: here if we received a invalid remove tlc, it's maybe a malioucious peer,
         // maybe we need to go through shutdown process for this error
+        if matches!(&remove_tlc.reason, RemoveTlcReason::RemoveTlcFail(packet) if packet.is_plaintext())
+        {
+            // Reject before mutating state; plaintext peer failures are unauthenticated and
+            // would otherwise strand the upstream TLC.
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Plaintext TLC failure is not accepted from peers".to_string(),
+            ));
+        }
         state
             .check_remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_tlc.reason)?;
         let payment_hash = state
@@ -1877,7 +1881,20 @@ where
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
-                let remove_reason = remove_reason.backward(&tlc_info.shared_secret);
+                let remove_reason = match remove_reason.backward(&tlc_info.shared_secret) {
+                    Ok(remove_reason) => remove_reason,
+                    Err(err) => {
+                        warn!(
+                            "Not forwarding TLC failure: error={}, channel_id={:?}, tlc_id={:?}, previous_channel_id={:?}, previous_tlc_id={:?}",
+                            err,
+                            state.get_id(),
+                            tlc_id,
+                            previous_channel_id,
+                            previous_tlc_id
+                        );
+                        return Ok(());
+                    }
+                };
 
                 let _ = self.register_retryable_relay_tlc_remove(
                     TLCId::Received(previous_tlc_id),

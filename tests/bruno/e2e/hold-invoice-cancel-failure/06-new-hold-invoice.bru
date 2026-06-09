@@ -1,0 +1,59 @@
+meta {
+  name: Node2 create hold invoice
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "new_invoice",
+    "params": [
+      {
+        "amount": "0x3e8",
+        "currency": "Fibd",
+        "description": "hold invoice canceled after received",
+        "expiry": "0xe10",
+        "final_expiry_delta": "0xDFFA0",
+        "payment_hash": "{{HOLD_PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:pre-request {
+  function generateRandomHash() {
+    let hash = "0x";
+    for (let i = 0; i < 64; i++) {
+      hash += Math.floor(Math.random() * 16).toString(16);
+    }
+    return hash;
+  }
+
+  const paymentHash = generateRandomHash();
+  bru.setVar("HOLD_PAYMENT_HASH", paymentHash);
+}
+
+script:post-response {
+  console.log("hold invoice: ", res.body.result);
+  bru.setVar("HOLD_INVOICE", res.body.result.invoice_address);
+  bru.setVar("HOLD_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
+  await new Promise(r => setTimeout(r, 1000));
+}

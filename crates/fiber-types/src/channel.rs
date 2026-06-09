@@ -3,8 +3,7 @@
 use crate::crate_time::SystemTime;
 use crate::gen::fiber as molecule_fiber;
 use crate::invoice::HashAlgorithm;
-use crate::onion::PaymentOnionPacket;
-use crate::onion::TlcErrPacket;
+use crate::onion::{PaymentOnionPacket, TlcErrPacket, TlcErrPacketError};
 use crate::protocol::{ChannelAnnouncement, ChannelUpdate, EcdsaSignature};
 use crate::serde_utils::PartialSignatureAsBytes;
 use crate::serde_utils::PubNonceAsBytes;
@@ -1655,14 +1654,14 @@ impl Debug for RemoveTlcReason {
 impl RemoveTlcReason {
     /// Intermediate node backwards the error to the previous hop using the shared secret
     /// used in forwarding the onion packet.
-    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Result<Self, TlcErrPacketError> {
         match self {
             RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
-                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill)
+                Ok(RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill))
             }
-            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.backward(shared_secret))
-            }
+            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => Ok(RemoveTlcReason::RemoveTlcFail(
+                remove_tlc_fail.backward(shared_secret)?,
+            )),
         }
     }
 }
