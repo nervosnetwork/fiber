@@ -1923,11 +1923,11 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-json-types"
-version = "0.9.0-rc2"
+version = "0.9.0-rc3"
 dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-types 0.9.0-rc2",
+ "fiber-types 0.9.0-rc3",
  "hex",
  "molecule",
  "musig2",
@@ -1965,14 +1965,14 @@ dependencies = [
 
 [[package]]
 name = "fiber-store"
-version = "0.9.0-rc2"
+version = "0.9.0-rc3"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "ckb-rocksdb",
  "console_error_panic_hook",
  "fiber-types 0.8.1",
- "fiber-types 0.9.0-rc2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fiber-types 0.9.0-rc3 (registry+https://github.com/rust-lang/crates.io-index)",
  "fiber-wasm-db-common",
  "serde",
  "thiserror 1.0.69",
@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-types"
-version = "0.9.0-rc2"
+version = "0.9.0-rc3"
 dependencies = [
  "anyhow",
  "arcode",
@@ -2055,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-types"
-version = "0.9.0-rc2"
+version = "0.9.0-rc3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caf98fdf0da58a6326deb059de9719057beafbdac50ea6f0a5c32ad9127fc135"
 dependencies = [
@@ -2123,7 +2123,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.9.0-rc2"
+version = "0.9.0-rc3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2144,7 +2144,7 @@ dependencies = [
  "fiber-json-types",
  "fiber-sphinx 3.0.0",
  "fiber-store",
- "fiber-types 0.9.0-rc2",
+ "fiber-types 0.9.0-rc3",
  "futures",
  "getrandom 0.3.4",
  "git-version",

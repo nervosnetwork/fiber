@@ -1,6 +1,6 @@
 [package]
 name = "fiber-store"
-version = "0.9.0-rc2"
+version = "0.9.0-rc3"
 edition = "2021"
 description = "Key-value store backends and migration framework for Fiber Network"
 build = "build.rs"
@@ -17,7 +17,7 @@ thiserror = "1.0.58"
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 # Fiber types for migration
-fiber-types-090 = { package = "fiber-types", version = "0.9.0-rc2" }
+fiber-types-090 = { package = "fiber-types", version = "0.9.0-rc3" }
 
 # Old fiber types for deserializing legacy data
 fiber-types-081 = { package = "fiber-types", version = "0.8.1" }
