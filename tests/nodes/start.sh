@@ -11,7 +11,15 @@ testcase_name="${1:-}"
 testcase_dir="$(dirname "$script_dir")/bruno/${testcase_name}"
 start_node_ids=()
 enable_fiber_metrics="${ENABLE_FIBER_METRICS:-}"
+fiber_build_features="${FIBER_BUILD_FEATURES:-}"
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::trackers::lnd_trackers=off,fnn::fiber::gossip=off,fnn::fiber::graph=off,fnn::utils::actor=off
+
+append_fiber_build_feature() {
+    local feature="$1"
+    if [[ ",$fiber_build_features," != *",$feature,"* ]]; then
+        fiber_build_features="${fiber_build_features:+$fiber_build_features,}$feature"
+    fi
+}
 
 if ! [ -d "$testcase_dir" ]; then
   echo "usage: ${BASH_SOURCE[0]} TESTCASE" >&2
@@ -80,9 +88,15 @@ case "$test_env" in
         build_args+=(--profile "$test_env")
         ;;
 esac
+if [[ "$test_env" != "release" ]]; then
+    append_fiber_build_feature debug-add-tlc
+fi
 if [[ -n "$enable_fiber_metrics" ]]; then
-    echo "building fnn with metrics feature enabled"
-    build_args+=(--features metrics)
+    append_fiber_build_feature metrics
+fi
+if [[ -n "$fiber_build_features" ]]; then
+    echo "building fnn with features: $fiber_build_features"
+    build_args+=(--features "$fiber_build_features")
 fi
 cargo build "${build_args[@]}"
 

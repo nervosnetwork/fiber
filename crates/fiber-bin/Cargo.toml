@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [features]
 default = ["fnn/rocksdb"]
+debug-add-tlc = ["fnn/debug-add-tlc"]
 metrics = ["fnn/metrics"]
 sqlite = ["fnn/sqlite"]
 

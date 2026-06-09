@@ -5273,6 +5273,7 @@ async fn test_shutdown_with_pending_tlc() {
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(1000))
         .payment_hash(payment_hash)
+        .hash_algorithm(hash_algorithm)
         .payee_pub_key(nodes[1].pubkey.into())
         .build()
         .expect("build pending invoice");
@@ -7331,7 +7332,7 @@ async fn test_delayed_final_hold_invoice_cancel_failure_is_decodable_by_payer() 
         .payee_pub_key(target_pubkey.into())
         .allow_mpp(false)
         .payment_secret(payment_secret)
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
         .expect("build invoice success");
 
     node_1.insert_invoice(ckb_invoice.clone(), None);

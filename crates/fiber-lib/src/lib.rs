@@ -1,4 +1,7 @@
 mod config;
+#[cfg(all(not(debug_assertions), feature = "debug-add-tlc"))]
+compile_error!("debug-add-tlc must not be enabled in release builds");
+
 #[cfg(feature = "metrics")]
 pub mod metrics;
 pub use config::Config;
