@@ -10683,6 +10683,7 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
 mod udt_funding_cell_capacity_tests {
     use super::*;
     use crate::fiber::channel::ChannelActorState;
+    use crate::time::SystemTime;
     use ckb_types::core::{Capacity, TransactionBuilder};
     use ckb_types::packed::CellOutput;
     use fiber_types::{
@@ -10690,7 +10691,6 @@ mod udt_funding_cell_capacity_tests {
         CollaboratingFundingTxFlags, CommitmentNumbers, InMemorySigner, TlcState,
     };
     use std::collections::{HashMap, VecDeque};
-    use std::time::SystemTime;
 
     const LOCAL_RESERVED_SHANNONS: u64 = 6_200_000_000;
     const REMOTE_RESERVED_SHANNONS: u64 = 6_200_000_000;

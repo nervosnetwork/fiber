@@ -32,3 +32,4 @@ crash-*
 package-lock.json
 target
 /tests/perf/artifacts/
+.tool-versions
