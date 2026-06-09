@@ -147,12 +147,18 @@ impl Actor for CkbTxTracingActor {
         match message {
             CreateTracer(arguments) => state.create_tracer(myself, arguments).await,
             RemoveTracers(arguments) => state.remove_tracers(arguments),
-            ReportRejected(tx_hash) => state.report_rejected(myself, tx_hash).await,
+            ReportRejected(tx_hash) => state.report_tracing_result(
+                CkbTxTracingResult {
+                    tx_hash,
+                    tx_status: TxStatus::Rejected(
+                        "Transaction rejected when submitting".to_string(),
+                    ),
+                },
+                None,
+            ),
             Internal(InternalMessage::RunTracers) => state.run_tracers(myself, None).await,
             Internal(InternalMessage::ReportTracingResult(result, tip_block_number)) => {
-                state
-                    .report_tracing_result(myself, result, tip_block_number)
-                    .await
+                state.report_tracing_result(result, Some(tip_block_number))
             }
         }
     }
@@ -187,36 +193,6 @@ impl CkbTxTracingState {
         Ok(())
     }
 
-    async fn report_rejected(
-        &mut self,
-        myself: ActorRef<CkbTxTracingMessage>,
-        tx_hash: Hash256,
-    ) -> Result<(), ActorProcessingErr> {
-        // Get tip block number for reporting
-        let ckb_client = new_ckb_rpc_async_client(&self.rpc_url);
-        let tip_block_number = match ckb_client.get_tip_block_number().await {
-            Ok(n) => u64::from(n),
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to get tip block number when reporting rejected tx {}: {:?}",
-                    tx_hash,
-                    err
-                );
-                return Ok(());
-            }
-        };
-
-        // Create a rejected result
-        let result = CkbTxTracingResult {
-            tx_hash,
-            tx_status: TxStatus::Rejected("Transaction rejected when submitting".to_string()),
-        };
-
-        // Report the result which will trigger callbacks for tracers with Rejected mask
-        self.report_tracing_result(myself, result, tip_block_number)
-            .await
-    }
-
     /// Run the tracers to check the txs statuses.
     ///
     /// When `tx_hashes` is None, all tracers are checked. Otherwise only the specified tx hashes are checked.
@@ -237,11 +213,10 @@ impl CkbTxTracingState {
         Ok(())
     }
 
-    async fn report_tracing_result(
+    fn report_tracing_result(
         &mut self,
-        _myself: ActorRef<CkbTxTracingMessage>,
         result: CkbTxTracingResult,
-        tip_block_number: u64,
+        tip_block_number: Option<u64>,
     ) -> Result<(), ActorProcessingErr> {
         let tx_tracers = if let Some(tx_tracers) = self.tracers.get_mut(&result.tx_hash) {
             tx_tracers
@@ -251,26 +226,34 @@ impl CkbTxTracingState {
 
         let tx_status = result.tx_status.clone();
 
-        match tx_status {
-            TxStatus::Committed(block_number, ..) => {
-                // Always use the latest committed block number
-                tx_tracers.last_block = block_number;
-            }
-            _ => {
-                // Otherwise, use tip block number when first entered this status
-                if tx_tracers.last_block == 0 || tx_status != tx_tracers.last_status {
-                    tx_tracers.last_block = tip_block_number
+        if let Some(tip_block_number) = tip_block_number {
+            match tx_status {
+                TxStatus::Committed(block_number, ..) => {
+                    // Always use the latest committed block number
+                    tx_tracers.last_block = block_number;
+                }
+                _ => {
+                    // Otherwise, use tip block number when first entered this status
+                    if tx_tracers.last_block == 0 || tx_status != tx_tracers.last_status {
+                        tx_tracers.last_block = tip_block_number
+                    }
                 }
             }
         }
         tx_tracers.last_status = tx_status.clone();
 
+        let last_block = tx_tracers.last_block;
+        let has_enough_confirmations = |tracer: &CkbTxTracer| match tip_block_number {
+            Some(tip_block_number) => {
+                tip_block_number.saturating_sub(last_block) >= tracer.confirmations
+            }
+            None => true,
+        };
+
         // Leave only tracers not fired
         for i in (0..tx_tracers.tracers.len()).rev() {
             let tracer = &tx_tracers.tracers[i];
-            if tracer.mask.contains((&tx_status).into())
-                && tip_block_number.saturating_sub(tx_tracers.last_block) >= tracer.confirmations
-            {
+            if tracer.mask.contains((&tx_status).into()) && has_enough_confirmations(tracer) {
                 let tracer = tx_tracers.tracers.swap_remove(i);
                 // ignore the error if the receiver is dropped
                 let _ = tracer.callback.send(result.clone());
@@ -324,5 +307,59 @@ impl TracingTask {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ckb_types::core::tx_pool::TxStatus;
+    use ractor::{Actor, RpcReplyPort};
+    use tokio::{
+        sync::oneshot,
+        time::{timeout, Duration as TokioDuration},
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn synthetic_rejected_callback_fires_before_next_unknown_poll() {
+        let (actor, _handle) = Actor::spawn(
+            None,
+            CkbTxTracingActor::new(),
+            CkbTxTracingArguments {
+                rpc_url: "http://127.0.0.1:0".to_string(),
+                polling_interval: Duration::from_secs(3600),
+            },
+        )
+        .await
+        .expect("spawn tx tracing actor");
+
+        let tx_hash = Hash256::from([42; 32]);
+        let (send, recv) = oneshot::channel();
+        actor
+            .send_message(CkbTxTracingMessage::CreateTracer(CkbTxTracer {
+                tx_hash,
+                confirmations: 4,
+                mask: CkbTxTracingMask::Rejected,
+                callback: RpcReplyPort::from(send),
+            }))
+            .expect("create tracer");
+        actor
+            .send_message(CkbTxTracingMessage::ReportRejected(tx_hash))
+            .expect("report rejected");
+        actor
+            .send_message(CkbTxTracingMessage::report_tracing_result(
+                CkbTxTracingResult::unknown(tx_hash),
+                101,
+            ))
+            .expect("report unknown");
+
+        let result = timeout(TokioDuration::from_millis(50), recv)
+            .await
+            .expect("synthetic rejected callback should fire before next unknown poll")
+            .expect("receive tracing result");
+        assert!(matches!(result.tx_status, TxStatus::Rejected(_)));
+
+        actor.stop(None);
     }
 }
