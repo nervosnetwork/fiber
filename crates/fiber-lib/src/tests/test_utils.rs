@@ -806,7 +806,7 @@ impl NetworkNode {
             .amount(Some(amount))
             .payment_preimage(preimage)
             .payee_pub_key(self.get_public_key().into())
-            .build()
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &self.private_key.0))
             .expect("build invoice")
     }
 
@@ -916,7 +916,9 @@ impl NetworkNode {
             .payee_pub_key(target_pubkey.into())
             .allow_mpp(true)
             .payment_secret(gen_rand_sha256_hash())
-            .build()
+            .build_with_sign(|hash| {
+                SECP256K1.sign_ecdsa_recoverable(hash, &target_node.private_key.0)
+            })
             .expect("build invoice success");
 
         target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));

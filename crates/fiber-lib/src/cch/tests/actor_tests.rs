@@ -210,7 +210,7 @@ impl Actor for MockNetworkActor {
 /// Extract payment hash from SendPaymentCommand
 fn extract_payment_hash_from_command(cmd: &SendPaymentCommand) -> Hash256 {
     if let Some(invoice_str) = &cmd.invoice {
-        if let Ok(invoice) = CkbInvoice::from_str(invoice_str) {
+        if let Ok(invoice) = CkbInvoice::from_str_allowing_unsigned(invoice_str) {
             return *invoice.payment_hash();
         }
         if let Ok(ln_invoice) = lightning_invoice::Bolt11Invoice::from_str(invoice_str) {
@@ -926,6 +926,34 @@ async fn test_receive_btc_rejects_currency_mismatch() {
         }
         other => panic!("Expected CKBInvoiceNetworkMismatch, got {:?}", other),
     }
+}
+
+/// Tests that receive_btc rejects unsigned Fiber invoices before creating orders.
+#[tokio::test]
+async fn test_receive_btc_rejects_unsigned_fiber_invoice() {
+    let harness = setup_test_harness().await;
+    let (_, payment_hash) = create_valid_preimage_pair(101);
+    let mut invoice = create_test_fiber_invoice(payment_hash);
+    invoice.signature = None;
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    let err = result.expect_err("unsigned Fiber invoice should be rejected");
+    assert!(
+        matches!(
+            err,
+            CchError::CKBInvoiceError(crate::invoice::InvoiceError::MissingSignature)
+        ),
+        "expected CKBInvoiceError(MissingSignature), got: {:?}",
+        err
+    );
 }
 
 /// Tests that receive_btc rejects a plain CKB invoice without UDT type script.

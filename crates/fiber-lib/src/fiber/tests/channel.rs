@@ -3121,7 +3121,7 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
         .amount(Some(1000))
         .payment_preimage(hold_preimage)
         .payee_pub_key(node_2.pubkey.into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
         .expect("build hold invoice");
     node_2.insert_invoice(hold_invoice.clone(), None);
 
@@ -7071,7 +7071,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
         .payment_preimage(gen_rand_sha256_hash())
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
         .expect("build invoice success")
         .to_string();
 
@@ -7120,7 +7120,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
         .expect("build invoice success");
 
     node_3.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -7188,7 +7188,7 @@ async fn test_received_invoice_without_preimage_keeps_payment_pending() {
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(invoice_expiry_seconds))
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
         .expect("build invoice success");
 
     // Insert invoice WITHOUT preimage - this simulates a hold invoice scenario
@@ -7252,7 +7252,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
         .expect("build invoice success");
 
     node_3.insert_invoice(ckb_invoice.clone(), Some(preimage));

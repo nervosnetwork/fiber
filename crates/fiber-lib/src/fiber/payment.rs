@@ -21,7 +21,7 @@ use crate::fiber::{
     KeyPair, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
-use crate::invoice::{CkbInvoice, InvoiceStore, PreimageStore};
+use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore, PreimageStore};
 use crate::Error;
 use crate::{debug_event, now_timestamp_as_millis_u64};
 use ckb_hash::blake2b_256;
@@ -353,12 +353,17 @@ pub trait SendPaymentDataExt {
 
 impl SendPaymentDataExt for SendPaymentData {
     fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
+        // `from_str` requires the invoice to carry a valid signature, so parsing
+        // here also guarantees the invoice is signed.
         let invoice = command
             .invoice
             .as_ref()
             .map(|invoice| invoice.parse::<CkbInvoice>())
             .transpose()
-            .map_err(|_| "invoice is invalid".to_string())?;
+            .map_err(|err| match err {
+                InvoiceError::MissingSignature => "invoice is not signed".to_string(),
+                _ => "invoice is invalid".to_string(),
+            })?;
 
         if let Some(invoice) = invoice.clone() {
             if invoice.is_expired() {

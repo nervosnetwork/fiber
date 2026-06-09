@@ -17,7 +17,7 @@ use crate::{
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords, PaymentHopData,
         PaymentStatus, PeeledPaymentOnionPacket, TLCId, USER_CUSTOM_RECORDS_MAX_INDEX,
     },
-    gen_rand_secp256k1_public_key, gen_rand_sha256_hash, gen_rpc_config,
+    gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash, gen_rpc_config,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     now_timestamp_as_millis_u64,
     rpc::invoice::NewInvoiceParams,
@@ -100,7 +100,7 @@ async fn test_send_mpp_will_not_enabled_if_not_set_allow_mpp() {
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
         .expect("build invoice success");
 
     node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -2430,7 +2430,7 @@ async fn test_send_mpp_will_success_with_same_payment_after_restarted() {
         .payee_pub_key(target_pubkey.into())
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &target_node.private_key.0))
         .expect("build invoice success");
 
     target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -2616,7 +2616,7 @@ async fn test_send_payment_with_invoice_removed_from_last_hop() {
         .payee_pub_key(target_pubkey.into())
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &target_node.private_key.0))
         .expect("build invoice success");
 
     //target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -3205,7 +3205,7 @@ async fn test_mpp_fail_on_total_amount_not_match() {
         .payee_pub_key(target_pubkey.into())
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
         .expect("build invoice success");
 
     let mut modified_ckb_invoice = ckb_invoice.clone();
@@ -3474,7 +3474,7 @@ async fn test_send_3_nodes_pay_self() {
         .payee_pub_key(target_pubkey.into())
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_0.private_key.0))
         .expect("build invoice success");
 
     node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -3985,7 +3985,7 @@ async fn test_send_payment_mpp_with_node_not_in_graph() {
     .await;
     let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
 
-    let wrong_target_pubkey = gen_rand_secp256k1_public_key();
+    let (wrong_private_key, wrong_target_pubkey) = gen_rand_secp256k1_keypair_tuple();
     let preimage = gen_rand_sha256_hash();
     let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(1000))
@@ -3993,7 +3993,7 @@ async fn test_send_payment_mpp_with_node_not_in_graph() {
         .payee_pub_key(wrong_target_pubkey)
         .payment_secret(gen_rand_sha256_hash())
         .allow_mpp(true)
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &wrong_private_key))
         .expect("build invoice success");
 
     node_2.insert_invoice(ckb_invoice.clone(), Some(preimage));
