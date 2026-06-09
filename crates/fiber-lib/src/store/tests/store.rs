@@ -441,11 +441,11 @@ fn test_store_watchtower_preimage() {
     let path = TempDir::new("test-watchtower-store");
     let store = open_store(path).expect("created store failed");
 
-    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id_a = NodeId::local();
     let preimage_a = gen_rand_sha256_hash();
     let payment_hash_a = blake2b_256(preimage_a).into();
 
-    let node_id_b = NodeId::local();
+    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
     let preimage_b = gen_rand_sha256_hash();
     let payment_hash_b = blake2b_256(preimage_b).into();
 
@@ -455,46 +455,110 @@ fn test_store_watchtower_preimage() {
     store.insert_watch_preimage(node_id_a.clone(), payment_hash_a, preimage_a);
     store.insert_watch_preimage(node_id_b.clone(), payment_hash_b, preimage_b);
 
-    assert!(
-        store.get_preimage(&payment_hash_a).is_some(),
-        "should return a watch preimage also"
-    );
     assert_eq!(
-        store.get_watch_preimage(&payment_hash_a).unwrap(),
+        store
+            .get_watch_preimage(&node_id_a, &payment_hash_a)
+            .unwrap(),
         preimage_a,
         "query watch preimage"
+    );
+    assert!(
+        store
+            .get_watch_preimage(&node_id_b, &payment_hash_a)
+            .is_none(),
+        "watch preimage should be scoped by node"
+    );
+    assert!(
+        store.get_preimage(&payment_hash_a).is_some(),
+        "normal preimage lookup should still read local watchtower preimages"
+    );
+    assert!(
+        store.get_preimage(&payment_hash_b).is_none(),
+        "normal preimage lookup must not read another node's watchtower preimage"
     );
 
     // watch preimage should not return a node preimage
     store.insert_preimage(payment_hash_c, preimage_c);
     assert!(
-        store.get_watch_preimage(&payment_hash_c).is_none(),
+        store
+            .get_watch_preimage(&node_id_a, &payment_hash_c)
+            .is_none(),
         "query non exist watch preimage"
     );
 
     assert!(
         store
-            .search_preimage(&payment_hash_c.as_ref()[..20])
+            .search_preimage(&node_id_a, &payment_hash_c.as_ref()[..20])
             .is_none(),
         "search a non exist watch preimage"
     );
     // search preimage only returns watch preimage
     assert_eq!(
         store
-            .search_preimage(&payment_hash_a.as_ref()[..20])
+            .search_preimage(&node_id_a, &payment_hash_a.as_ref()[..20])
             .unwrap(),
         preimage_a,
         "search"
     );
+    assert!(
+        store
+            .search_preimage(&node_id_b, &payment_hash_a.as_ref()[..20])
+            .is_none(),
+        "search should not cross node scope"
+    );
 
     // delete preimage with wrong node
     store.remove_watch_preimage(node_id_a, payment_hash_b);
-    assert!(store.get_watch_preimage(&payment_hash_b).is_some(), "exist");
-
-    store.remove_watch_preimage(node_id_b, payment_hash_b);
     assert!(
-        store.get_watch_preimage(&payment_hash_b).is_none(),
+        store
+            .get_watch_preimage(&node_id_b, &payment_hash_b)
+            .is_some(),
+        "exist"
+    );
+
+    store.remove_watch_preimage(node_id_b.clone(), payment_hash_b);
+    assert!(
+        store
+            .get_watch_preimage(&node_id_b, &payment_hash_b)
+            .is_none(),
         "removed"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_preimage_search_is_node_scoped_with_same_prefix() {
+    let path = TempDir::new("test-watchtower-store-same-prefix");
+    let store = open_store(path).expect("created store failed");
+
+    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
+
+    let preimage_a = gen_rand_sha256_hash();
+    let preimage_b = gen_rand_sha256_hash();
+
+    let mut payment_hash_bytes = [7u8; 32];
+    payment_hash_bytes[31] = 1;
+    let payment_hash_a: Hash256 = payment_hash_bytes.into();
+
+    payment_hash_bytes[31] = 2;
+    let payment_hash_b: Hash256 = payment_hash_bytes.into();
+
+    let payment_hash_prefix = &payment_hash_a.as_ref()[..20];
+
+    store.insert_watch_preimage(node_id_b.clone(), payment_hash_b, preimage_b);
+    store.insert_watch_preimage(node_id_a.clone(), payment_hash_a, preimage_a);
+
+    assert_eq!(
+        store.search_preimage(&node_id_a, payment_hash_prefix),
+        Some(preimage_a),
+        "search should skip another node's preimage with the same prefix"
+    );
+    assert_eq!(
+        store.search_preimage(&node_id_b, payment_hash_prefix),
+        Some(preimage_b),
+        "search should still find the matching node's preimage"
     );
 }
 
@@ -541,7 +605,7 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
 
     store.remove_watch_preimage(node_id.clone(), payment_hash);
     assert_eq!(
-        store.get_watch_preimage(&payment_hash),
+        store.get_watch_preimage(&node_id, &payment_hash),
         Some(preimage),
         "preimage is retained while a watched TLC still references it"
     );
@@ -549,7 +613,7 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
     let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[..20].try_into().unwrap();
     store.update_tlc_settled(&channel_id, payment_hash_prefix);
     assert!(
-        store.get_watch_preimage(&payment_hash).is_none(),
+        store.get_watch_preimage(&node_id, &payment_hash).is_none(),
         "watchtower GC removes the preimage after the watched TLC is settled"
     );
 }
