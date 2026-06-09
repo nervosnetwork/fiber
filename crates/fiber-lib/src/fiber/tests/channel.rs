@@ -96,6 +96,7 @@ fn create_mock_pending_add_tlc_command(
         let invoice = InvoiceBuilder::new(Currency::Fibd)
             .amount(Some(amount))
             .payment_hash(payment_hash)
+            .hash_algorithm(hash_algorithm)
             .payee_pub_key(target.pubkey.into())
             .build()
             .expect("build mock pending invoice");
@@ -2798,15 +2799,20 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive");
     assert!(add_tlc_result.is_err());
 
-    // now wait for a while, then add a tlc again, it will success
-    loop {
+    // now wait for the failed add_tlc to settle, then add a tlc again, it will success
+    wait_until(|| {
         let node_a_state = node_a.get_channel_actor_state(channel_id);
         let node_b_state = node_b.get_channel_actor_state(channel_id);
-        if !node_a_state.is_waiting_tlc_ack() && !node_b_state.is_waiting_tlc_ack() {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
+        node_a_state.is_ready()
+            && node_b_state.is_ready()
+            && !node_a_state.reestablishing
+            && !node_b_state.reestablishing
+            && !node_a_state.is_waiting_tlc_ack()
+            && !node_b_state.is_waiting_tlc_ack()
+            && !node_a_state.has_pending_operations()
+            && !node_b_state.has_pending_operations()
+    })
+    .await;
     let preimage_b = [3; 32];
     let digest = algorithm.hash(preimage_b);
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
@@ -8563,7 +8569,14 @@ async fn test_reestablish_bidirectional_pending() {
     );
 
     node_a.restart().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    wait_until(|| {
+        let state_a = node_a.get_channel_actor_state(channel_id);
+        let state_b = node_b.get_channel_actor_state(channel_id);
+        !state_a.reestablishing
+            && state_a.get_local_commitment_number() == state_b.get_remote_commitment_number()
+            && state_a.get_remote_commitment_number() == state_b.get_local_commitment_number()
+    })
+    .await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -8855,6 +8868,11 @@ async fn test_reestablish_dual_owed_ordering() {
         state_a_after.get_local_commitment_number(),
         state_b_after.get_remote_commitment_number(),
         "Commitment numbers should remain symmetric after dual-owed replay"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "Remote commitment numbers should remain symmetric after dual-owed replay"
     );
 }
 

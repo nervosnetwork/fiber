@@ -114,6 +114,7 @@ wasm-bindgen-futures = "0.4"
 [features]
 bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
+debug-add-tlc = []
 portable = ["fiber-store/portable"]
 rocksdb = ["fiber-store/rocksdb"]
 sample = ["fiber-types/sample"]
