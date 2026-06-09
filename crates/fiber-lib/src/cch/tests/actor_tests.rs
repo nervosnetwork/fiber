@@ -121,6 +121,8 @@ struct MockNetworkState {
     event_port: Arc<OutputPort<CchTrackingEvent>>,
     /// Tracks payment hashes for which SendPayment was called (outgoing Fiber payments)
     sent_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
+    /// Tracks the `max_fee_amount` of each outgoing Fiber SendPayment, keyed by payment hash.
+    sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
 }
 
 /// Mock network actor that handles commands from action executors
@@ -162,6 +164,11 @@ impl Actor for MockNetworkActor {
                         .lock()
                         .unwrap()
                         .insert(payment_hash);
+                    state
+                        .sent_fiber_payment_fees
+                        .lock()
+                        .unwrap()
+                        .insert(payment_hash, cmd.max_fee_amount);
 
                     // Return success response - the executor will create CchTrackingEvent
                     let response = SendPaymentResponse {
@@ -284,6 +291,16 @@ impl TestHarness {
             .contains(&payment_hash)
     }
 
+    /// Return the `max_fee_amount` of the outgoing Fiber SendPayment for `payment_hash`, if sent.
+    fn fiber_payment_max_fee(&self, payment_hash: Hash256) -> Option<Option<u128>> {
+        self.mock_state
+            .sent_fiber_payment_fees
+            .lock()
+            .unwrap()
+            .get(&payment_hash)
+            .copied()
+    }
+
     /// Simulate outgoing Fiber payment succeeding with preimage
     /// Only works if the payment was actually sent via MockNetworkActor
     /// This injects the event via OutputPort, simulating what FiberStoreWatcher would do
@@ -387,6 +404,7 @@ async fn setup_test_harness_with_config_and_store(
         cch_actor: Arc::new(Mutex::new(None)),
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
@@ -635,7 +653,107 @@ async fn test_receive_btc_happy_path() {
     assert!(order.failure_reason.is_none());
 }
 
-/// Tests that expired orders are marked as Failed when resuming from the store.
+/// Drive a ReceiveBTC-style order (incoming Lightning, outgoing Fiber) up to the point where
+/// the outgoing Fiber `SendPayment` has been dispatched, and return the `max_fee_amount` that
+/// was attached to the `SendPaymentCommand`.
+///
+/// `amount_sats`/`fee_sats` configure the order economics so callers can exercise the fee
+/// budget binding (the outgoing route fee must be capped at the collected CCH fee).
+async fn dispatch_fiber_outgoing_and_capture_fee(
+    harness: &TestHarness,
+    seed: u8,
+    amount_sats: u128,
+    fee_sats: u128,
+) -> Option<u128> {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(seed);
+
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(
+        payment_hash,
+        DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+    );
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: fiber_invoice.to_string(),
+        incoming_invoice: CchInvoice::Lightning(lightning_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats,
+        fee_sats,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    harness.simulate_incoming_invoice_received(payment_hash);
+
+    // Reaching OutgoingInFlight proves MockNetworkActor received the SendPayment command.
+    harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 1000)
+        .await;
+
+    harness
+        .fiber_payment_max_fee(payment_hash)
+        .expect("outgoing Fiber payment should have been dispatched")
+}
+
+/// The outgoing Fiber payment must carry `max_fee_amount` equal to the order's collected fee.
+///
+/// This is a regression test for the issue where CCH did not bind its fee budget to the
+/// outgoing payment, allowing the default user-payment fee cap (0.5% of amount) to authorize a
+/// route fee far larger than the fee the operator charged.
+#[tokio::test]
+async fn test_receive_btc_outgoing_fiber_fee_capped_at_collected_fee() {
+    let harness = setup_test_harness().await;
+
+    // Pick economics where the default Fiber cap (0.5% * amount = 5000) vastly exceeds the
+    // tiny collected CCH fee (100). Without binding, the route could spend up to 5000.
+    let amount_sats = 1_000_000;
+    let fee_sats = 100;
+    let max_fee =
+        dispatch_fiber_outgoing_and_capture_fee(&harness, 60, amount_sats, fee_sats).await;
+
+    assert_eq!(
+        max_fee,
+        Some(fee_sats),
+        "outgoing Fiber payment must be capped at the collected CCH fee, not the default 0.5% cap"
+    );
+
+    // Sanity check: the default user-payment cap would have been much larger than fee_sats.
+    let default_cap = amount_sats * 5 / 1000;
+    assert!(
+        default_cap > fee_sats,
+        "test scenario must have default cap exceeding collected fee to be meaningful"
+    );
+}
+
+/// The `max_outgoing_fee_percentage` config knob must scale the outgoing fee budget.
+#[tokio::test]
+async fn test_receive_btc_outgoing_fiber_fee_scaled_by_percentage() {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        max_outgoing_fee_percentage: 50,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let fee_sats = 1_000;
+    let max_fee = dispatch_fiber_outgoing_and_capture_fee(&harness, 61, 1_000_000, fee_sats).await;
+
+    assert_eq!(
+        max_fee,
+        Some(fee_sats * 50 / 100),
+        "outgoing Fiber fee budget must be scaled by max_outgoing_fee_percentage"
+    );
+}
+
 #[tokio::test]
 async fn test_resume_expired_order_marked_as_failed() {
     let (_preimage, payment_hash) = create_valid_preimage_pair(150);

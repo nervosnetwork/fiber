@@ -140,6 +140,9 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        // Validate generic config invariants (e.g. the outgoing fee budget percentage).
+        args.config.validate().map_err(|e| anyhow!(e))?;
+
         // Validate that we have either an in-process network actor or a fiber RPC URL
         if args.network_actor.is_none() {
             if args.config.fiber_rpc_url.is_none() {

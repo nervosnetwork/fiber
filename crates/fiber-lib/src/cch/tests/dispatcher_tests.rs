@@ -318,3 +318,100 @@ fn test_invoice_and_payment_handlers_are_inverse_for_lightning() {
     assert_eq!(invoice_handler, InvoiceHandlerType::Lightning);
     assert_eq!(payment_handler, PaymentHandlerType::Fiber);
 }
+
+// =============================================================================
+// outgoing_fee_budget_sats tests
+// =============================================================================
+
+#[test]
+fn test_outgoing_fee_budget_full_percentage_uses_entire_fee() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fee_sats = 1_000;
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 100),
+        1_000
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_scales_with_percentage() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fee_sats = 1_000;
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 50),
+        500
+    );
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 1),
+        10
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_rounds_down() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fee_sats = 99;
+    // 99 * 50 / 100 = 49.5 -> 49 (integer division floors, never exceeding the collected fee)
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 50),
+        49
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_never_exceeds_collected_fee() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    for fee_sats in [0u128, 1, 7, 1_000, u128::from(u64::MAX)] {
+        order.fee_sats = fee_sats;
+        for pct in 1..=100u64 {
+            let budget =
+                crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, pct);
+            assert!(
+                budget <= fee_sats,
+                "budget {} must never exceed collected fee {} (pct {})",
+                budget,
+                fee_sats,
+                pct
+            );
+        }
+    }
+}
+
+// =============================================================================
+// CchConfig::validate tests
+// =============================================================================
+
+#[test]
+fn test_config_validate_accepts_boundaries() {
+    use crate::cch::CchConfig;
+    let mut config = CchConfig {
+        max_outgoing_fee_percentage: 1,
+        ..Default::default()
+    };
+    assert!(config.validate().is_ok());
+    config.max_outgoing_fee_percentage = 100;
+    assert!(config.validate().is_ok());
+    config.max_outgoing_fee_percentage = 50;
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_config_validate_rejects_out_of_range() {
+    use crate::cch::CchConfig;
+    let mut config = CchConfig {
+        max_outgoing_fee_percentage: 0,
+        ..Default::default()
+    };
+    assert!(config.validate().is_err());
+    config.max_outgoing_fee_percentage = 101;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn test_config_default_percentage_is_full() {
+    use crate::cch::CchConfig;
+    // The default must be a valid, full-budget percentage so existing deployments keep working.
+    let config = CchConfig::default();
+    assert_eq!(config.max_outgoing_fee_percentage, 100);
+    assert!(config.validate().is_ok());
+}
