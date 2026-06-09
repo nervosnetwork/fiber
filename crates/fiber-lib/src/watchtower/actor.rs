@@ -1,13 +1,16 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use anyhow::anyhow;
 use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::{Either, Status};
 use ckb_sdk::{
-    rpc::ckb_indexer::{Cell, Order, ScriptType, SearchKey, SearchMode},
+    rpc::ckb_indexer::{Cell, Order, ScriptType, SearchKey, SearchKeyFilter, SearchMode},
     traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
     transaction::builder::FeeCalculator,
     util::blake160,
@@ -270,7 +273,23 @@ where
             Ok(Some(tx_with_status)) => {
                 if tx_with_status.tx_status.status != Status::Committed {
                     error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx_hash);
-                } else if let Some(tx) = tx_with_status.transaction {
+                    continue;
+                }
+
+                let Some(first_commitment_block_number) = tx_with_status
+                    .tx_status
+                    .block_number
+                    .as_ref()
+                    .map(|block_number| block_number.value())
+                else {
+                    error!(
+                        "Cannot find the commitment tx block number: {:?}, maybe ckb indexer bug?",
+                        tx_hash
+                    );
+                    continue;
+                };
+
+                if let Some(tx) = tx_with_status.transaction {
                     match tx.inner {
                         Either::Left(tx) => {
                             let tx: Transaction = tx.inner.into();
@@ -343,6 +362,7 @@ where
                                                 &mut cell_collector,
                                                 &store,
                                                 channel_node_id.clone(),
+                                                first_commitment_block_number,
                                             );
                                         }
                                     }
@@ -357,6 +377,7 @@ where
                                         &mut cell_collector,
                                         &store,
                                         channel_node_id.clone(),
+                                        first_commitment_block_number,
                                     );
                                 }
                             } else {
@@ -503,53 +524,66 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     cell_collector: &mut DefaultCellCollector,
     store: &S,
     self_node_id: NodeId,
+    first_commitment_block_number: u64,
 ) {
     let lock_args = commitment_lock.args().raw_data();
     let script = commitment_lock
         .as_builder()
         .args(lock_args[0..36].to_vec().pack())
         .build();
-    let search_key = SearchKey {
-        script: script.into(),
-        script_type: ScriptType::Lock,
-        script_search_mode: Some(SearchMode::Prefix),
-        with_data: None,
-        filter: None,
-        group_by_transaction: Some(true),
-    };
-
-    find_preimages(
-        search_key.clone(),
-        &channel_data.channel_id,
-        &ckb_client,
-        store,
-        &self_node_id,
-    );
-
-    let (current_epoch, current_time) = match ckb_client.get_tip_header() {
-        Ok(tip_header) => match ckb_client.get_block_median_time(tip_header.hash.clone()) {
-            Ok(Some(median_time)) => {
-                let tip_header: HeaderView = tip_header.into();
-                let epoch = tip_header.epoch();
-                (epoch, median_time.value())
+    let (current_epoch, current_time, tip_block_number) = match ckb_client.get_tip_header() {
+        Ok(tip_header) => {
+            let tip_block_number = tip_header.inner.number.value();
+            match ckb_client.get_block_median_time(tip_header.hash.clone()) {
+                Ok(Some(median_time)) => {
+                    let tip_header: HeaderView = tip_header.into();
+                    let epoch = tip_header.epoch();
+                    (epoch, median_time.value(), tip_block_number)
+                }
+                Ok(None) => {
+                    error!(
+                        "Cannot find median time: {:?}, ckb rpc bug?",
+                        tip_header.hash
+                    );
+                    return;
+                }
+                Err(err) => {
+                    error!("Failed to get median time: {:?}", err);
+                    return;
+                }
             }
-            Ok(None) => {
-                error!(
-                    "Cannot find median time: {:?}, ckb rpc bug?",
-                    tip_header.hash
-                );
-                return;
-            }
-            Err(err) => {
-                error!("Failed to get median time: {:?}", err);
-                return;
-            }
-        },
+        }
         Err(err) => {
             error!("Failed to get tip header: {:?}", err);
             return;
         }
     };
+
+    let search_key = SearchKey {
+        script: script.clone().into(),
+        script_type: ScriptType::Lock,
+        script_search_mode: Some(SearchMode::Prefix),
+        with_data: None,
+        filter: Some(SearchKeyFilter {
+            block_range: Some([
+                first_commitment_block_number.into(),
+                tip_block_number.saturating_add(1).into(),
+            ]),
+            ..Default::default()
+        }),
+        group_by_transaction: Some(true),
+    };
+
+    let settlement_witness_input_indices = scan_watched_settlement_txs(
+        search_key.clone(),
+        &ckb_client,
+        &script,
+        first_commitment_tx_out_point.clone(),
+        &channel_data.channel_id,
+        store,
+        &self_node_id,
+    );
+
     // the live cells number should be 1 or 0 for normal case.
     // however, an attacker may create a lot of cells to implement a tx pinning attack, we have to use loop to get all cells
     let mut after = None;
@@ -597,7 +631,15 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                     match tx.inner {
                                         Either::Left(tx) => {
                                             let tx: Transaction = tx.inner.into();
-                                            match tx.witnesses().get(0) {
+                                            let Some(witness_index) =
+                                                settlement_witness_input_indices
+                                                    .get(&commitment_tx_hash.pack())
+                                                    .copied()
+                                            else {
+                                                warn!("Found a commitment tx, but it does not spend a watched commitment outpoint: {:?}", commitment_tx_hash);
+                                                continue;
+                                            };
+                                            match tx.witnesses().get(witness_index) {
                                                 Some(witness) => {
                                                     let witness = witness.raw_data();
                                                     if witness.len() > 18
@@ -677,19 +719,24 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     }
 }
 
-// find all on-chain transactions with the preimage and store them
-fn find_preimages<S: WatchtowerStore>(
+#[allow(clippy::too_many_arguments)]
+fn scan_watched_settlement_txs<S: WatchtowerStore>(
     search_key: SearchKey,
-    channel_id: &Hash256,
     ckb_client: &CkbRpcClient,
+    commitment_lock_prefix: &Script,
+    first_commitment_tx_out_point: OutPoint,
+    channel_id: &Hash256,
     store: &S,
     self_node_id: &NodeId,
-) {
+) -> HashMap<ckb_types::packed::Byte32, usize> {
+    let mut watched_outpoints = HashSet::from([first_commitment_tx_out_point]);
+    let mut processed_tx_hashes = HashSet::new();
+    let mut settlement_witness_input_indices = HashMap::new();
     let mut after = None;
     loop {
         match ckb_client.get_transactions(
             search_key.clone(),
-            Order::Desc,
+            Order::Asc,
             100u32.into(),
             after.clone(),
         ) {
@@ -698,83 +745,27 @@ fn find_preimages<S: WatchtowerStore>(
                     break;
                 }
                 after = Some(txs.last_cursor.clone());
-                for tx in txs.objects {
-                    match ckb_client.get_transaction(tx.tx_hash()) {
+                for indexed_tx in txs.objects {
+                    match ckb_client.get_transaction(indexed_tx.tx_hash()) {
                         Ok(Some(tx_with_status)) => {
                             if tx_with_status.tx_status.status != Status::Committed {
-                                error!("Cannot find the tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx.tx_hash());
+                                error!("Cannot find the tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, indexed_tx.tx_hash());
                             } else if let Some(tx) = tx_with_status.transaction {
                                 match tx.inner {
                                     Either::Left(tx) => {
                                         let tx: Transaction = tx.inner.into();
-                                        match tx.witnesses().get(0) {
-                                            Some(witness) => {
-                                                let witness = witness.raw_data();
-                                                if witness.len() > 18
-                                                    && witness[0..16] == XUDT_COMPATIBLE_WITNESS
-                                                {
-                                                    if let Some(settlement_witness) =
-                                                        SettlementWitness::build_from_witness(
-                                                            &witness[16..],
-                                                        )
-                                                    {
-                                                        for unlock in settlement_witness.unlocks {
-                                                            if unlock.unlock_type < 0xFE {
-                                                                if let Some(tlc) =
-                                                                    settlement_witness
-                                                                        .pending_htlcs
-                                                                        .get(
-                                                                            unlock.unlock_type
-                                                                                as usize,
-                                                                        )
-                                                                {
-                                                                    if unlock.with_preimage {
-                                                                        let preimage = unlock
-                                                                            .preimage
-                                                                            .unwrap();
-                                                                        let payment_hash = tlc
-                                                                            .hash_algorithm()
-                                                                            .hash(
-                                                                                preimage.as_ref(),
-                                                                            );
-                                                                        if payment_hash.starts_with(
-                                                                            &tlc.payment_hash,
-                                                                        ) {
-                                                                            store
-                                                                            .insert_watch_preimage(
-                                                                                self_node_id
-                                                                                    .clone(),
-                                                                                payment_hash.into(),
-                                                                                preimage,
-                                                                            );
-                                                                        } else {
-                                                                            warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
-                                                                        }
-                                                                    } else {
-                                                                        store.update_tlc_settled(
-                                                                            channel_id,
-                                                                            tlc.payment_hash,
-                                                                        );
-                                                                    }
-                                                                }
-                                                            } else {
-                                                                settlement_witness
-                                                                    .pending_htlcs
-                                                                    .iter()
-                                                                    .for_each(|tlc| {
-                                                                        store.update_tlc_settled(
-                                                                            channel_id,
-                                                                            tlc.payment_hash,
-                                                                        );
-                                                                    })
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            None => {
-                                                warn!("Found a commitment tx, but the witnesses are empty: {:?}", tx.calc_tx_hash());
-                                            }
+                                        let tx_hash = tx.calc_tx_hash();
+                                        if let Some(witness_index) = process_watched_settlement_tx(
+                                            &tx,
+                                            &mut watched_outpoints,
+                                            &mut processed_tx_hashes,
+                                            commitment_lock_prefix,
+                                            channel_id,
+                                            store,
+                                            self_node_id,
+                                        ) {
+                                            settlement_witness_input_indices
+                                                .insert(tx_hash, witness_index);
                                         }
                                     }
                                     Either::Right(_) => {
@@ -786,7 +777,7 @@ fn find_preimages<S: WatchtowerStore>(
                         Ok(None) => {
                             error!(
                                 "Cannot find the tx: {:?}, maybe ckb indexer bug?",
-                                tx.tx_hash()
+                                indexed_tx.tx_hash()
                             );
                         }
                         Err(err) => {
@@ -798,6 +789,108 @@ fn find_preimages<S: WatchtowerStore>(
             Err(err) => {
                 error!("Failed to get transactions: {:?}", err);
             }
+        }
+    }
+    settlement_witness_input_indices
+}
+
+fn lock_matches_commitment_prefix(lock: &Script, commitment_lock_prefix: &Script) -> bool {
+    let lock_args = lock.args().raw_data();
+    lock.code_hash() == commitment_lock_prefix.code_hash()
+        && lock.hash_type() == commitment_lock_prefix.hash_type()
+        && lock_args.starts_with(commitment_lock_prefix.args().raw_data().as_ref())
+}
+
+fn process_watched_settlement_tx<S: WatchtowerStore>(
+    tx: &Transaction,
+    watched_outpoints: &mut HashSet<OutPoint>,
+    processed_tx_hashes: &mut HashSet<ckb_types::packed::Byte32>,
+    commitment_lock_prefix: &Script,
+    channel_id: &Hash256,
+    store: &S,
+    self_node_id: &NodeId,
+) -> Option<usize> {
+    let tx_hash = tx.calc_tx_hash();
+    if processed_tx_hashes.contains(&tx_hash) {
+        return None;
+    }
+    // The commitment-lock contract reads `load_witness(0, Source::GroupInput)`.
+    // Since it enforces a single group input, that witness is stored at the
+    // global input index that spends the watched commitment/settlement cell,
+    // not necessarily at `witnesses[0]`.
+    let inputs = tx.raw().inputs();
+    let watched_input_index = (0..inputs.len()).find(|index| {
+        let previous_output = inputs
+            .get(*index)
+            .expect("input index checked")
+            .previous_output();
+        watched_outpoints.contains(&previous_output)
+    })?;
+
+    processed_tx_hashes.insert(tx_hash.clone());
+    find_preimages(tx, watched_input_index, channel_id, store, self_node_id);
+
+    let outputs = tx.raw().outputs();
+    if let Some(output) = outputs.get(0) {
+        if lock_matches_commitment_prefix(&output.lock(), commitment_lock_prefix) {
+            watched_outpoints.insert(OutPoint::new(tx_hash, 0));
+        }
+    }
+
+    Some(watched_input_index)
+}
+
+// find all on-chain transactions with the preimage and store them
+fn find_preimages<S: WatchtowerStore>(
+    tx: &Transaction,
+    witness_index: usize,
+    channel_id: &Hash256,
+    store: &S,
+    self_node_id: &NodeId,
+) {
+    match tx.witnesses().get(witness_index) {
+        Some(witness) => {
+            let witness = witness.raw_data();
+            if witness.len() > 18 && witness[0..16] == XUDT_COMPATIBLE_WITNESS {
+                if let Some(settlement_witness) =
+                    SettlementWitness::build_from_witness(&witness[16..])
+                {
+                    for unlock in settlement_witness.unlocks {
+                        if unlock.unlock_type < 0xFE {
+                            if let Some(tlc) = settlement_witness
+                                .pending_htlcs
+                                .get(unlock.unlock_type as usize)
+                            {
+                                if unlock.with_preimage {
+                                    let preimage = unlock.preimage.unwrap();
+                                    let payment_hash = tlc.hash_algorithm().hash(preimage.as_ref());
+                                    if payment_hash.starts_with(&tlc.payment_hash) {
+                                        store.insert_watch_preimage(
+                                            self_node_id.clone(),
+                                            payment_hash.into(),
+                                            preimage,
+                                        );
+                                    } else {
+                                        warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
+                                    }
+                                } else {
+                                    store.update_tlc_settled(channel_id, tlc.payment_hash);
+                                }
+                            }
+                        } else {
+                            settlement_witness.pending_htlcs.iter().for_each(|tlc| {
+                                store.update_tlc_settled(channel_id, tlc.payment_hash);
+                            })
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            warn!(
+                "Found a commitment tx, but the witnesses are empty: {:?}",
+                tx.calc_tx_hash()
+            );
         }
     }
 }
@@ -1966,4 +2059,366 @@ fn mul(
         new_numerator / scale_factor,
         new_denominator / scale_factor,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct TestWatchtowerStore {
+        settled_tlcs: Mutex<Vec<(Hash256, [u8; 20])>>,
+    }
+
+    impl TestWatchtowerStore {
+        fn settled_tlcs(&self) -> Vec<(Hash256, [u8; 20])> {
+            self.settled_tlcs.lock().expect("lock poisoned").clone()
+        }
+    }
+
+    impl WatchtowerStore for TestWatchtowerStore {
+        fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
+            vec![]
+        }
+
+        fn insert_watch_channel(
+            &self,
+            _node_id: NodeId,
+            _channel_id: Hash256,
+            _funding_udt_type_script: Option<Script>,
+            _local_settlement_key: Privkey,
+            _remote_settlement_key: Pubkey,
+            _local_funding_pubkey: Pubkey,
+            _remote_funding_pubkey: Pubkey,
+            _settlement_data: SettlementData,
+        ) {
+        }
+
+        fn remove_watch_channel(&self, _node_id: NodeId, _channel_id: Hash256) {}
+
+        fn update_revocation(
+            &self,
+            _node_id: NodeId,
+            _channel_id: Hash256,
+            _revocation_data: RevocationData,
+            _remote_settlement_data: SettlementData,
+        ) {
+        }
+
+        fn update_pending_remote_settlement(
+            &self,
+            _node_id: NodeId,
+            _channel_id: Hash256,
+            _pending_remote_settlement_data: SettlementData,
+        ) {
+        }
+
+        fn update_local_settlement(
+            &self,
+            _node_id: NodeId,
+            _channel_id: Hash256,
+            _local_settlement_data: SettlementData,
+        ) {
+        }
+
+        fn insert_watch_preimage(
+            &self,
+            _node_id: NodeId,
+            _payment_hash: Hash256,
+            _preimage: Hash256,
+        ) {
+        }
+
+        fn remove_watch_preimage(&self, _node_id: NodeId, _payment_hash: Hash256) {}
+
+        fn get_watch_preimage(
+            &self,
+            _node_id: &NodeId,
+            _payment_hash: &Hash256,
+        ) -> Option<Hash256> {
+            None
+        }
+
+        fn search_preimage(
+            &self,
+            _node_id: &NodeId,
+            _payment_hash_prefix: &[u8],
+        ) -> Option<Hash256> {
+            None
+        }
+
+        fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]) {
+            self.settled_tlcs
+                .lock()
+                .expect("lock poisoned")
+                .push((*channel_id, payment_hash));
+        }
+    }
+
+    fn commitment_lock_prefix() -> Script {
+        Script::new_builder()
+            .code_hash(Byte32::from([1u8; 32]))
+            .hash_type(ScriptHashType::Type)
+            .args([2u8; 36].to_vec().pack())
+            .build()
+    }
+
+    fn settlement_lock(prefix: &Script) -> Script {
+        let mut args = prefix.args().raw_data().to_vec();
+        args.extend_from_slice(&[3u8; 20]);
+        args.push(1);
+        prefix.clone().as_builder().args(args.pack()).build()
+    }
+
+    fn settlement_witness(payment_hash: [u8; 20]) -> Vec<u8> {
+        let settlement_witness = SettlementWitness {
+            pending_htlc_count: 1,
+            pending_htlcs: vec![Htlc {
+                htlc_type: 0,
+                payment_amount: 1_000,
+                payment_hash,
+                remote_htlc_pubkey_hash: [4u8; 20],
+                local_htlc_pubkey_hash: [5u8; 20],
+                htlc_expiry: 0,
+            }],
+            settlement_remote_pubkey_hash: [6u8; 20],
+            settlement_remote_amount: 2_000,
+            settlement_local_pubkey_hash: [7u8; 20],
+            settlement_local_amount: 3_000,
+            unlocks: vec![],
+        };
+        let unlock = Unlock {
+            unlock_type: 0,
+            with_preimage: false,
+            signature: [0u8; 65],
+            preimage: None,
+        };
+
+        [
+            XUDT_COMPATIBLE_WITNESS.as_slice(),
+            &[0x01],
+            settlement_witness.to_witness().as_slice(),
+            unlock.to_witness().as_slice(),
+        ]
+        .concat()
+    }
+
+    fn tx_with_input_output_and_witness(
+        input_out_point: OutPoint,
+        output_lock: Script,
+        witness: Option<Vec<u8>>,
+    ) -> Transaction {
+        tx_with_inputs_outputs_and_witnesses(
+            vec![input_out_point],
+            vec![output_lock],
+            witness.into_iter().collect(),
+        )
+    }
+
+    fn tx_with_inputs_outputs_and_witnesses(
+        input_out_points: Vec<OutPoint>,
+        output_locks: Vec<Script>,
+        witnesses: Vec<Vec<u8>>,
+    ) -> Transaction {
+        let mut tx_builder = Transaction::default().as_advanced_builder();
+        for input_out_point in input_out_points {
+            tx_builder = tx_builder.input(
+                CellInput::new_builder()
+                    .previous_output(input_out_point)
+                    .build(),
+            );
+        }
+        for output_lock in output_locks {
+            tx_builder = tx_builder
+                .output(CellOutput::new_builder().lock(output_lock).build())
+                .output_data(Bytes::default());
+        }
+        for witness in witnesses {
+            tx_builder = tx_builder.witness(witness.pack());
+        }
+        tx_builder.build().data()
+    }
+
+    #[test]
+    fn unrelated_same_prefix_tx_does_not_pollute_store() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let payment_hash = [42u8; 20];
+        let attacker_tx = tx_with_input_output_and_witness(
+            OutPoint::new([8u8; 32].pack(), 0),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(payment_hash)),
+        );
+        let mut watched_outpoints = HashSet::from([OutPoint::new([7u8; 32].pack(), 0)]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        let processed = process_watched_settlement_tx(
+            &attacker_tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &self_node_id,
+        );
+
+        assert!(processed.is_none());
+        assert!(store.settled_tlcs().is_empty());
+        assert_eq!(watched_outpoints.len(), 1);
+    }
+
+    #[test]
+    fn watched_non_first_input_does_not_parse_unrelated_witness_zero() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let malicious_payment_hash = [42u8; 20];
+        let watched_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let fee_out_point = OutPoint::new([8u8; 32].pack(), 0);
+        let tx = tx_with_inputs_outputs_and_witnesses(
+            vec![fee_out_point, watched_out_point.clone()],
+            vec![settlement_lock(&lock_prefix)],
+            vec![settlement_witness(malicious_payment_hash), vec![]],
+        );
+        let mut watched_outpoints = HashSet::from([watched_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        let processed = process_watched_settlement_tx(
+            &tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &self_node_id,
+        );
+
+        assert_eq!(processed, Some(1));
+        assert!(store.settled_tlcs().is_empty());
+    }
+
+    #[test]
+    fn watched_settlement_tx_updates_store_and_tracks_next_outpoint() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let payment_hash = [42u8; 20];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let tx = tx_with_input_output_and_witness(
+            first_commitment_out_point.clone(),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(payment_hash)),
+        );
+        let mut watched_outpoints = HashSet::from([first_commitment_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        let processed = process_watched_settlement_tx(
+            &tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &self_node_id,
+        );
+
+        assert_eq!(processed, Some(0));
+        assert_eq!(store.settled_tlcs(), vec![(channel_id, payment_hash)]);
+        assert!(watched_outpoints.contains(&OutPoint::new(tx.calc_tx_hash(), 0)));
+    }
+
+    #[test]
+    fn watched_tx_does_not_track_extra_same_prefix_output() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let payment_hash = [42u8; 20];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let tx = tx_with_inputs_outputs_and_witnesses(
+            vec![first_commitment_out_point.clone()],
+            vec![settlement_lock(&lock_prefix), settlement_lock(&lock_prefix)],
+            vec![settlement_witness(payment_hash)],
+        );
+        let extra_same_prefix_out_point = OutPoint::new(tx.calc_tx_hash(), 1);
+        let mut watched_outpoints = HashSet::from([first_commitment_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        let processed = process_watched_settlement_tx(
+            &tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &self_node_id,
+        );
+
+        assert_eq!(processed, Some(0));
+        assert!(!watched_outpoints.contains(&extra_same_prefix_out_point));
+    }
+
+    #[test]
+    fn asc_processing_handles_parent_before_child_without_candidate_cache() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let parent_payment_hash = [42u8; 20];
+        let child_payment_hash = [43u8; 20];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let parent_tx = tx_with_input_output_and_witness(
+            first_commitment_out_point.clone(),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(parent_payment_hash)),
+        );
+        let child_tx = tx_with_input_output_and_witness(
+            OutPoint::new(parent_tx.calc_tx_hash(), 0),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(child_payment_hash)),
+        );
+        let mut watched_outpoints = HashSet::from([first_commitment_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        assert_eq!(
+            process_watched_settlement_tx(
+                &parent_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            process_watched_settlement_tx(
+                &child_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            Some(0)
+        );
+
+        assert_eq!(
+            store.settled_tlcs(),
+            vec![
+                (channel_id, parent_payment_hash),
+                (channel_id, child_payment_hash)
+            ]
+        );
+    }
 }
