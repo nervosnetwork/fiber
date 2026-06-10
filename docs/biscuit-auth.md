@@ -46,17 +46,12 @@ rule("list_channels", r#"allow if read("channels");"#);
 rule("shutdown_channel", r#"allow if write("channels");"#); 
 rule("update_channel", r#"allow if write("channels");"#); 
 // dev 
-rule("commitment_signed", r#"allow if write("messages");"#); 
-rule("add_tlc", r#"allow if write("channels");"#); 
-rule("remove_tlc", r#"allow if write("channels");"#); 
-rule(
-    "check_channel_shutdown",
-    r#"allow if write("channels");"#,
-);
-rule( 
-    "submit_commitment_transaction", 
-    r#"allow if write("chain");"#, 
-); 
+rule("commitment_signed", r#"allow if write("dev");"#);
+rule("add_tlc", r#"allow if write("dev");"#);
+rule("remove_tlc", r#"allow if write("dev");"#);
+rule("check_channel_shutdown", r#"allow if write("dev");"#);
+rule("sign_external_funding_tx", r#"allow if write("dev");"#);
+rule("submit_commitment_transaction", r#"allow if write("dev");"#);
 // graph 
 rule("graph_nodes", r#"allow if read("graph");"#); 
 rule("graph_channels", r#"allow if read("graph");"#); 
