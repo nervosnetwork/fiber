@@ -35,6 +35,34 @@ script:pre-request {
   req.setBody(body);
 }
 
-assert {
-  Number(BigInt(res.body.result.capacity) - BigInt(bru.getVar("NODE2_BALANCE"))): gt 8995000
+script:post-response {
+  const initialCapacity = BigInt(bru.getVar("NODE2_BALANCE"));
+  const currentCapacity = BigInt(res.body.result.capacity);
+  const diff = currentCapacity - initialCapacity;
+  const threshold = BigInt(8995000);
+  const iteration = Number(bru.getVar("NODE2_BALANCE_POLL_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("NODE2_BALANCE_POLL_MAX_ITERATIONS") || 8);
+
+  console.log("node2 balance diff: ", {
+    diff: diff.toString(),
+    threshold: threshold.toString(),
+    iteration,
+    maxIterations,
+  });
+
+  if (diff > threshold) {
+    bru.setVar("NODE2_BALANCE_POLL_ITERATION", 0);
+    return;
+  }
+
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("NODE2_BALANCE_POLL_ITERATION", iteration + 1);
+    bru.setNextRequest("generate a few blocks for final settlement tx committed");
+    return;
+  }
+
+  bru.setVar("NODE2_BALANCE_POLL_ITERATION", 0);
+  throw new Error(
+    `node2 balance diff too low after ${maxIterations} polling attempts, diff=${diff.toString()}, expected > ${threshold.toString()}`,
+  );
 }
