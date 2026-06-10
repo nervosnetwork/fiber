@@ -864,15 +864,10 @@ where
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
                 let flags = match state.state {
-                    ChannelState::AwaitingTxSignatures(flags) => {
-                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
-                            AwaitingChannelReadyFlags::empty()
-                        } else {
-                            return Err(ProcessingChannelError::InvalidState(format!(
-                                "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}",
-                                state.state
-                            )));
-                        }
+                    ChannelState::AwaitingTxSignatures(flags)
+                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) =>
+                    {
+                        AwaitingChannelReadyFlags::empty()
                     }
                     ChannelState::AwaitingChannelReady(flags) => flags,
                     _ => {
@@ -1471,10 +1466,22 @@ where
                 (should_settle, shared_secret)
             }
             None => {
-                return Err(ProcessingChannelError::PeelingOnionPacketError(
-                    "TLC with no onion packet is not supported".to_string(),
-                )
-                .without_shared_secret());
+                #[cfg(all(debug_assertions, feature = "debug-add-tlc"))]
+                {
+                    state
+                        .tlc_state
+                        .get_mut(&add_tlc.tlc_id)
+                        .expect("expect tlc")
+                        .applied_flags = AppliedFlags::ADD;
+                    (true, NO_SHARED_SECRET)
+                }
+                #[cfg(not(all(debug_assertions, feature = "debug-add-tlc")))]
+                {
+                    return Err(ProcessingChannelError::PeelingOnionPacketError(
+                        "TLC with no onion packet is not supported".to_string(),
+                    )
+                    .without_shared_secret());
+                }
             }
         };
 

@@ -701,24 +701,27 @@ fn test_tlc_err_packet_encryption() {
     }
 
     {
-        // The error packet authenticates the second hop as reporter, so a payload that
-        // blames another node in the route must be rejected.
+        // The error packet authenticates the second hop as reporter. Decoding must keep
+        // that authenticated hop index even if the payload claims a different node;
+        // payment history handles attribution validation with route context.
         let reporter_node = hops_path[1];
         let spoofed_node = hops_path[2];
         let node_fail = TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, reporter_node);
         let mut tlc_fail = TlcErrPacket::new(node_fail.clone(), &hops_ss[1]);
-        tlc_fail = tlc_fail.backward(&hops_ss[0]);
+        tlc_fail = tlc_fail.backward(&hops_ss[0]).expect("backward");
         let decrypted_tlc_fail_detail = tlc_fail
             .decode(session_key.as_ref(), hops_path.clone())
             .expect("decrypted");
-        assert_eq!(decrypted_tlc_fail_detail, node_fail);
+        assert_eq!(decrypted_tlc_fail_detail.error, node_fail);
 
         let spoofed_fail = TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, spoofed_node);
-        let mut tlc_fail = TlcErrPacket::new(spoofed_fail, &hops_ss[1]);
-        tlc_fail = tlc_fail.backward(&hops_ss[0]);
-        assert!(tlc_fail
+        let mut tlc_fail = TlcErrPacket::new(spoofed_fail.clone(), &hops_ss[1]);
+        tlc_fail = tlc_fail.backward(&hops_ss[0]).expect("backward");
+        let decrypted_tlc_fail_detail = tlc_fail
             .decode(session_key.as_ref(), hops_path.clone())
-            .is_none());
+            .expect("decrypted");
+        assert_eq!(decrypted_tlc_fail_detail.error, spoofed_fail);
+        assert_eq!(decrypted_tlc_fail_detail.hop_index, 1);
     }
 }
 

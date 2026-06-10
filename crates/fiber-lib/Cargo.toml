@@ -2,7 +2,7 @@
 build = "src/build.rs"
 edition = "2021"
 name = "fnn"
-version = "0.9.0-rc2"
+version = "0.9.0-rc3"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -114,6 +114,7 @@ wasm-bindgen-futures = "0.4"
 [features]
 bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
+debug-add-tlc = []
 portable = ["fiber-store/portable"]
 rocksdb = ["fiber-store/rocksdb"]
 sample = ["fiber-types/sample"]
