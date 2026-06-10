@@ -730,8 +730,9 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
     self_node_id: &NodeId,
 ) -> HashMap<ckb_types::packed::Byte32, usize> {
     let mut watched_outpoints = HashSet::from([first_commitment_tx_out_point]);
-    let mut processed_tx_hashes = HashSet::new();
     let mut settlement_witness_input_indices = HashMap::new();
+
+    let mut candidates: Vec<Transaction> = Vec::new();
     let mut after = None;
     loop {
         match ckb_client.get_transactions(
@@ -754,19 +755,7 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
                                 match tx.inner {
                                     Either::Left(tx) => {
                                         let tx: Transaction = tx.inner.into();
-                                        let tx_hash = tx.calc_tx_hash();
-                                        if let Some(witness_index) = process_watched_settlement_tx(
-                                            &tx,
-                                            &mut watched_outpoints,
-                                            &mut processed_tx_hashes,
-                                            commitment_lock_prefix,
-                                            channel_id,
-                                            store,
-                                            self_node_id,
-                                        ) {
-                                            settlement_witness_input_indices
-                                                .insert(tx_hash, witness_index);
-                                        }
+                                        candidates.push(tx);
                                     }
                                     Either::Right(_) => {
                                         // unreachable, ignore
@@ -789,6 +778,32 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
             Err(err) => {
                 error!("Failed to get transactions: {:?}", err);
             }
+        }
+    }
+
+    let mut processed_tx_hashes = HashSet::new();
+    loop {
+        let mut progress = false;
+        for tx in &candidates {
+            let tx_hash = tx.calc_tx_hash();
+            if processed_tx_hashes.contains(&tx_hash) {
+                continue;
+            }
+            if let Some(witness_index) = process_watched_settlement_tx(
+                tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                commitment_lock_prefix,
+                channel_id,
+                store,
+                self_node_id,
+            ) {
+                settlement_witness_input_indices.insert(tx_hash, witness_index);
+                progress = true;
+            }
+        }
+        if !progress {
+            break;
         }
     }
     settlement_witness_input_indices
@@ -2411,6 +2426,81 @@ mod tests {
                 &self_node_id,
             ),
             Some(0)
+        );
+
+        assert_eq!(
+            store.settled_tlcs(),
+            vec![
+                (channel_id, parent_payment_hash),
+                (channel_id, child_payment_hash)
+            ]
+        );
+    }
+
+    #[test]
+    fn one_pass_processing_misses_child_when_indexer_returns_child_before_parent() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let parent_payment_hash = [42u8; 20];
+        let child_payment_hash = [43u8; 20];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let parent_tx = tx_with_input_output_and_witness(
+            first_commitment_out_point.clone(),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(parent_payment_hash)),
+        );
+        let child_tx = tx_with_input_output_and_witness(
+            OutPoint::new(parent_tx.calc_tx_hash(), 0),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(child_payment_hash)),
+        );
+        let mut watched_outpoints = HashSet::from([first_commitment_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        // Simulate child-before-parent order: child is skipped on first pass
+        assert_eq!(
+            process_watched_settlement_tx(
+                &child_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            None,
+            "child processed before parent should return None"
+        );
+
+        // Parent is processed, adding its output to watched_outpoints
+        assert_eq!(
+            process_watched_settlement_tx(
+                &parent_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            Some(0)
+        );
+
+        // With multi-pass retry, child is retried and now succeeds
+        assert_eq!(
+            process_watched_settlement_tx(
+                &child_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            Some(0),
+            "child should succeed on retry after parent is processed"
         );
 
         assert_eq!(
