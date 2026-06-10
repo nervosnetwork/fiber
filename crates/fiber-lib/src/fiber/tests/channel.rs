@@ -3242,6 +3242,12 @@ async fn test_check_channels_does_not_fallback_when_channel_actor_missing() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
+    stop_channel_actor(&node_b, channel_id);
+    node_b.expect_debug_event("ChannelActorStopped").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Keep the expired TLC only in persisted state. Reloading it into the live
+    // channel actor lets periodic TLC maintenance race this CheckChannels test.
     let mut node_b_channel_state = node_b.get_channel_actor_state(channel_id);
     node_b_channel_state
         .tlc_state
@@ -3249,17 +3255,8 @@ async fn test_check_channels_does_not_fallback_when_channel_actor_missing() {
         .expect("received tlc exists")
         .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
     node_b
-        .update_channel_actor_state(
-            node_b_channel_state,
-            Some(ReloadParams {
-                notify_changes: false,
-            }),
-        )
-        .await;
-
-    stop_channel_actor(&node_b, channel_id);
-    node_b.expect_debug_event("ChannelActorStopped").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+        .store
+        .insert_channel_actor_state(node_b_channel_state);
 
     node_b
         .network_actor
