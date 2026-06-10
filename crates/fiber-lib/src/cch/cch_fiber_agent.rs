@@ -25,11 +25,14 @@ use crate::rpc::{
     payment::{GetPaymentCommandResult, SendPaymentCommandParams},
 };
 
-/// Permissive `max_fee_rate` for CCH outgoing payments. Fiber caps the routing fee at
-/// `min(max_fee_amount, max_fee_amount_by_rate)`, where `max_fee_amount_by_rate` derives from
-/// `max_fee_rate`. CCH already binds the outgoing fee via `max_fee_amount` (the order fee budget),
-/// so this disables the secondary rate cap and lets `max_fee_amount` be the binding constraint.
-const CCH_OUTGOING_MAX_FEE_RATE: u64 = u64::MAX;
+/// Fee limits for a CCH outgoing payment. `max_fee_amount` is the order fee budget; `max_fee_rate`
+/// is derived from it and the payment amount so Fiber's default rate cap does not clamp the fee
+/// below the budget.
+#[derive(Clone, Copy)]
+pub struct OutgoingFeeLimit {
+    pub max_fee_amount: u128,
+    pub max_fee_rate: u64,
+}
 
 /// Messages for the fiber agent actor. Each variant carries an RpcReplyPort for the response.
 pub enum CchFiberAgentMessage {
@@ -38,6 +41,7 @@ pub enum CchFiberAgentMessage {
         String,
         Option<u64>,
         Option<u128>,
+        Option<u64>,
         RpcReplyPort<Result<PaymentStatus>>,
     ),
     SettleInvoice(Hash256, Hash256, RpcReplyPort<Result<()>>),
@@ -80,9 +84,15 @@ impl Actor for CchFiberAgentActor {
                 let result = state.add_invoice(invoice).await;
                 let _ = port.send(result);
             }
-            CchFiberAgentMessage::SendPayment(pay_req, tlc_expiry_limit, max_fee_amount, port) => {
+            CchFiberAgentMessage::SendPayment(
+                pay_req,
+                tlc_expiry_limit,
+                max_fee_amount,
+                max_fee_rate,
+                port,
+            ) => {
                 let result = state
-                    .send_payment(pay_req, tlc_expiry_limit, max_fee_amount)
+                    .send_payment(pay_req, tlc_expiry_limit, max_fee_amount, max_fee_rate)
                     .await;
                 let _ = port.send(result);
             }
@@ -133,6 +143,7 @@ impl CchFiberAgentHttpBackend {
         pay_req: String,
         tlc_expiry_limit: Option<u64>,
         max_fee_amount: Option<u128>,
+        max_fee_rate: Option<u64>,
     ) -> Result<PaymentStatus> {
         let payment_params = SendPaymentCommandParams {
             target_pubkey: None,
@@ -143,7 +154,7 @@ impl CchFiberAgentHttpBackend {
             invoice: Some(pay_req),
             timeout: None,
             max_fee_amount,
-            max_fee_rate: Some(CCH_OUTGOING_MAX_FEE_RATE),
+            max_fee_rate,
             max_parts: None,
             trampoline_hops: None,
             keysend: None,
@@ -216,6 +227,7 @@ impl CchFiberAgent {
         pay_req: String,
         tlc_expiry_limit: Option<u64>,
         max_fee_amount: Option<u128>,
+        max_fee_rate: Option<u64>,
     ) -> Result<PaymentStatus> {
         let Self::InProcess { network_actor } = self;
         let message = |rpc_reply| -> NetworkActorMessage {
@@ -224,7 +236,7 @@ impl CchFiberAgent {
                     invoice: Some(pay_req),
                     tlc_expiry_limit,
                     max_fee_amount,
-                    max_fee_rate: Some(CCH_OUTGOING_MAX_FEE_RATE),
+                    max_fee_rate,
                     ..Default::default()
                 },
                 rpc_reply,
@@ -301,17 +313,20 @@ impl CchFiberAgentRef {
     ///
     /// `max_fee_amount` caps the outgoing routing fee at the CCH order's fee budget so the
     /// operator never spends more on the outgoing leg than it collected on the incoming leg.
+    /// `max_fee_rate` is derived from `max_fee_amount` and the payment amount so Fiber's default
+    /// rate cap does not clamp the fee below the budget.
     pub async fn forward_send_payment(
         &self,
         outgoing_pay_req: String,
         tlc_expiry_limit: u64,
-        max_fee_amount: u128,
+        fee_limit: OutgoingFeeLimit,
         target: &ActorRef<CchMessage>,
         payment_hash: Hash256,
         retry_count: u32,
     ) -> Result<(), ractor::RactorErr<CchMessage>> {
         let tlc_limit = Some(tlc_expiry_limit);
-        let max_fee = Some(max_fee_amount);
+        let max_fee = Some(fee_limit.max_fee_amount);
+        let max_fee_rate = Some(fee_limit.max_fee_rate);
         let target_ref = target.clone();
         match self {
             Self::InProcess(network_actor) => {
@@ -323,7 +338,7 @@ impl CchFiberAgentRef {
                             invoice: Some(pay_req),
                             tlc_expiry_limit: tlc_limit,
                             max_fee_amount: max_fee,
-                            max_fee_rate: Some(CCH_OUTGOING_MAX_FEE_RATE),
+                            max_fee_rate,
                             ..Default::default()
                         },
                         tx,
@@ -344,6 +359,7 @@ impl CchFiberAgentRef {
                         outgoing_pay_req,
                         tlc_limit,
                         max_fee,
+                        max_fee_rate,
                         port
                     ),
                     target_ref,

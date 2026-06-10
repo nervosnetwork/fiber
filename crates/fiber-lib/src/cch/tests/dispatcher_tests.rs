@@ -378,6 +378,56 @@ fn test_outgoing_fee_budget_never_exceeds_collected_fee() {
 }
 
 // =============================================================================
+// outgoing_max_fee_rate tests
+// =============================================================================
+
+#[test]
+fn test_outgoing_max_fee_rate_zero_amount_is_zero() {
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_max_fee_rate(0, 100),
+        0
+    );
+}
+
+#[test]
+fn test_outgoing_max_fee_rate_rounds_up() {
+    // ceil(5 * 1000 / 1000) = 5
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_max_fee_rate(1_000, 5),
+        5
+    );
+    // ceil(1 * 1000 / 1000) = 1 (would floor to 0, rounding up keeps the budget reachable)
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_max_fee_rate(1_000, 1),
+        1
+    );
+}
+
+#[test]
+fn test_outgoing_max_fee_rate_cap_covers_budget() {
+    // The rate-derived cap, ceil(amount * rate / 1000), must always be >= the fee budget so the
+    // CCH budget (not the default rate) is the binding constraint.
+    const DENOM: u128 = 1000;
+    for amount in [1u128, 7, 1_000, 21_000, 1_000_000] {
+        for max_fee_amount in [0u128, 1, 5, 50, 999, amount] {
+            let rate = crate::cch::actions::send_outgoing_payment::outgoing_max_fee_rate(
+                amount,
+                max_fee_amount,
+            );
+            let cap = (amount * rate as u128).div_ceil(DENOM);
+            assert!(
+                cap >= max_fee_amount,
+                "rate-derived cap {} must cover budget {} (amount {}, rate {})",
+                cap,
+                max_fee_amount,
+                amount,
+                rate
+            );
+        }
+    }
+}
+
+// =============================================================================
 // CchConfig::validate tests
 // =============================================================================
 

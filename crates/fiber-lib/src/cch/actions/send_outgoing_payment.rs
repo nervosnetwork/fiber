@@ -12,9 +12,10 @@ use crate::cch::{
     },
     actor::CchState,
     trackers::{map_lnd_payment_changed_event, CchTrackingEvent, LndConnectionInfo},
-    CchFiberAgentRef, CchMessage, CchOrderStore,
+    CchFiberAgentRef, CchMessage, CchOrderStore, OutgoingFeeLimit,
 };
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::payment::MAX_FEE_RATE_DENOMINATOR;
 use crate::invoice::CkbInvoice;
 use crate::time::{SystemTime, UNIX_EPOCH};
 use fiber_types::{payment::PaymentStatus, CchInvoice, CchOrder, CchOrderStatus, Hash256};
@@ -34,6 +35,23 @@ pub(crate) fn outgoing_fee_budget_sats(order: &CchOrder, max_outgoing_fee_percen
         / 100
 }
 
+/// Compute the `max_fee_rate` (proportional, over `MAX_FEE_RATE_DENOMINATOR`) that corresponds to
+/// spending up to `max_fee_amount` satoshis on a payment of `amount` satoshis.
+///
+/// Fiber caps the routing fee at `min(max_fee_amount, max_fee_amount_by_rate)`, where
+/// `max_fee_amount_by_rate = ceil(amount * max_fee_rate / MAX_FEE_RATE_DENOMINATOR)`. Rounding the
+/// rate up guarantees the rate-derived cap is at least `max_fee_amount`, so the CCH fee budget
+/// (`max_fee_amount`) stays the binding constraint instead of Fiber's default rate cap.
+pub(crate) fn outgoing_max_fee_rate(amount: u128, max_fee_amount: u128) -> u64 {
+    if amount == 0 {
+        return 0;
+    }
+    let rate = max_fee_amount
+        .saturating_mul(MAX_FEE_RATE_DENOMINATOR)
+        .div_ceil(amount);
+    u64::try_from(rate).unwrap_or(u64::MAX)
+}
+
 pub struct SendOutgoingPaymentDispatcher;
 
 pub struct SendFiberOutgoingPaymentExecutor {
@@ -46,10 +64,11 @@ pub struct SendFiberOutgoingPaymentExecutor {
     /// This caps the route to prevent the outgoing payment from exceeding
     /// the incoming payment's remaining expiry time.
     tlc_expiry_limit: u64,
-    /// Maximum routing fee (in satoshis) the CCH is willing to spend on the outgoing
-    /// payment. Derived from the order fee budget so the outgoing route fee never exceeds
-    /// the fee charged on the incoming leg.
-    max_fee_amount: u128,
+    /// Fee limits for the outgoing payment. `max_fee_amount` is the order fee budget so the
+    /// outgoing route fee never exceeds the fee charged on the incoming leg; `max_fee_rate` is
+    /// derived from it and the payment amount so Fiber's default rate cap does not clamp the fee
+    /// below the budget.
+    fee_limit: OutgoingFeeLimit,
 }
 
 #[async_trait::async_trait]
@@ -62,14 +81,14 @@ impl ActionExecutor for SendFiberOutgoingPaymentExecutor {
             outgoing_pay_req,
             retry_count,
             tlc_expiry_limit,
-            max_fee_amount,
+            fee_limit,
         } = *self;
 
         fiber_agent_ref
             .forward_send_payment(
                 outgoing_pay_req,
                 tlc_expiry_limit,
-                max_fee_amount,
+                fee_limit,
                 &cch_actor_ref,
                 payment_hash,
                 retry_count,
@@ -360,7 +379,10 @@ impl SendOutgoingPaymentDispatcher {
                     outgoing_pay_req: order.outgoing_pay_req.clone(),
                     retry_count,
                     tlc_expiry_limit,
-                    max_fee_amount: fee_budget_sats,
+                    fee_limit: OutgoingFeeLimit {
+                        max_fee_amount: fee_budget_sats,
+                        max_fee_rate: outgoing_max_fee_rate(order.amount_sats, fee_budget_sats),
+                    },
                 }))
             }
             PaymentHandlerType::Lightning => {
