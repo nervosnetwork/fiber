@@ -6,7 +6,7 @@ use ckb_types::{
     prelude::{Builder, Entity, Unpack},
 };
 use molecule::prelude::Byte;
-use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
+use ractor::{call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tokio::sync::RwLock;
 
 use crate::tests::test_utils::{
@@ -31,8 +31,8 @@ use crate::{
     ckb::{tests::test_utils::submit_tx, CkbChainMessage},
     fiber::{
         gossip::{
-            ExtendedGossipMessageStoreMessage, GossipMessageStore, GossipMessageUpdates,
-            SubscribableGossipMessageStore,
+            ActiveSyncSaveMessagesResult, ExtendedGossipMessageStoreMessage, GossipMessageStore,
+            GossipMessageUpdates, SubscribableGossipMessageStore,
         },
         types::{BroadcastMessage, BroadcastMessageWithTimestamp, Cursor},
     },
@@ -586,6 +586,30 @@ async fn test_saving_channel_update_independency() {
             test(node1_has_invalid_signature, node2_has_invalid_signature).await;
         }
     }
+}
+
+#[tokio::test]
+async fn test_active_sync_rejects_future_timestamp_without_saving() {
+    let context = GossipTestingContext::new().await;
+    let peer = crate::gen_rand_fiber_public_key();
+    let (_, mut announcement) = gen_rand_node_announcement();
+    announcement.timestamp = now_timestamp_as_millis_u64() + 120_000;
+
+    let result = call!(
+        context.get_extended_actor(),
+        ExtendedGossipMessageStoreMessage::SaveActiveSyncMessages,
+        peer,
+        vec![BroadcastMessage::NodeAnnouncement(announcement.clone())]
+    )
+    .expect("store actor alive");
+
+    assert!(matches!(result, ActiveSyncSaveMessagesResult::Rejected(_)));
+    assert_eq!(
+        context
+            .get_store()
+            .get_latest_node_announcement(&announcement.node_id),
+        None
+    );
 }
 
 #[tokio::test]
