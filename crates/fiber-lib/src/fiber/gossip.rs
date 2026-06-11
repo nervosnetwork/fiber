@@ -61,7 +61,7 @@ use super::{
         BroadcastMessageQuery, BroadcastMessageQueryFlags, BroadcastMessageWithTimestamp,
         BroadcastMessagesFilter, BroadcastMessagesFilterResult, ChannelOnchainInfo,
         GetBroadcastMessages, GetBroadcastMessagesResult, GossipMessage, QueryBroadcastMessages,
-        QueryBroadcastMessagesResult,
+        QueryBroadcastMessagesResult, MAX_NUM_OF_BROADCAST_MESSAGES,
     },
     FiberConfig,
 };
@@ -90,8 +90,9 @@ const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration = Duration::from_secs(60);
 const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS: u64 =
     MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT.as_millis() as u64;
 
-const MAX_NUM_OF_BROADCAST_MESSAGES: u16 = 1000;
 pub(crate) const DEFAULT_NUM_OF_BROADCAST_MESSAGE: u16 = 100;
+const MAX_INCOMPLETE_GOSSIP_MESSAGES_PER_PEER: usize = 1000;
+const MAX_INCOMPLETE_GOSSIP_MESSAGES_TOTAL: usize = 10_000;
 
 const MAX_NUM_OF_ACTIVE_SYNCING_PEERS: usize = 3;
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
@@ -137,6 +138,57 @@ fn broadcast_message_type(message: &BroadcastMessage) -> &'static str {
         BroadcastMessage::ChannelUpdate(_) => "channel_update",
         BroadcastMessage::NodeAnnouncement(_) => "node_announcement",
     }
+}
+
+fn is_valid_broadcast_message_result_len(len: usize, requested_count: usize) -> bool {
+    len <= requested_count && len <= MAX_NUM_OF_BROADCAST_MESSAGES as usize
+}
+
+fn is_valid_query_broadcast_messages_result(
+    result: &QueryBroadcastMessagesResult,
+    requested_count: usize,
+) -> bool {
+    if result.messages.len() > requested_count
+        || result.missing_queries.len() > requested_count
+        || result
+            .messages
+            .len()
+            .saturating_add(result.missing_queries.len())
+            > requested_count
+    {
+        return false;
+    }
+
+    result
+        .missing_queries
+        .iter()
+        .all(|index| usize::from(*index) < requested_count)
+}
+
+fn filter_messages_with_returned_dependencies(
+    dependency_results: &[BroadcastMessage],
+    incomplete_messages: &[BroadcastMessage],
+) -> Vec<BroadcastMessage> {
+    let returned_channel_announcements = dependency_results
+        .iter()
+        .filter_map(|message| match message {
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                Some(channel_announcement.channel_outpoint.clone())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
+    incomplete_messages
+        .iter()
+        .filter(|message| match message {
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                returned_channel_announcements.contains(&channel_update.channel_outpoint)
+            }
+            _ => true,
+        })
+        .cloned()
+        .collect()
 }
 
 pub trait GossipMessageStore {
@@ -770,8 +822,17 @@ pub struct GossipSyncingActorState<S, C> {
     cursor: Cursor,
     peer_state: SyncingPeerState,
     request_id: u64,
-    inflight_requests:
-        HashMap<u64, JoinHandle<Result<(), MessagingErr<GossipSyncingActorMessage>>>>,
+    inflight_requests: HashMap<u64, InflightGetBroadcastMessagesRequest>,
+}
+
+struct InflightGetBroadcastMessagesRequest {
+    requested_count: u16,
+    timeout_handle: JoinHandle<Result<(), MessagingErr<GossipSyncingActorMessage>>>,
+}
+
+struct PendingQueryBroadcastMessages {
+    requested_count: usize,
+    reply: RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>,
 }
 
 impl<S, C> GossipSyncingActorState<S, C> {
@@ -893,9 +954,28 @@ where
                     &state.peer_pubkey,
                     result
                 );
-                if let Some(handle) = state.inflight_requests.remove(&result.id) {
+                if let Some(inflight) = state.inflight_requests.remove(&result.id) {
                     // Stop the timeout notification.
-                    handle.abort();
+                    inflight.timeout_handle.abort();
+                    if result.messages.len() > inflight.requested_count as usize {
+                        warn!(
+                            "Received oversized GetBroadcastMessagesResult from peer {:?}: messages = {}, requested = {}",
+                            state.peer_pubkey,
+                            result.messages.len(),
+                            inflight.requested_count
+                        );
+                        myself.stop(Some(
+                            "Received oversized GetBroadcastMessagesResult".to_string(),
+                        ));
+                        state
+                            .gossip_actor
+                            .send_message(GossipActorMessage::MaliciousPeerFound {
+                                peer: state.peer_pubkey,
+                                violation: GossipViolation::InvalidSyncResponse,
+                            })
+                            .expect("gossip actor alive");
+                        return Ok(());
+                    }
                     let messages = result.messages;
                     let mut retry_cursor_later = false;
                     // If we are receiving an empty response, then the syncing process is finished.
@@ -1019,7 +1099,13 @@ where
                 });
                 // If the request with the same request_id is completed before the timeout,
                 // we will use this handle to cancel the timeout notification.
-                state.inflight_requests.insert(request_id, handle);
+                state.inflight_requests.insert(
+                    request_id,
+                    InflightGetBroadcastMessagesRequest {
+                        requested_count: DEFAULT_NUM_OF_BROADCAST_MESSAGE,
+                        timeout_handle: handle,
+                    },
+                );
             }
         }
         Ok(())
@@ -1393,6 +1479,10 @@ impl BroadcastMessageOutput {
 pub enum GossipError {
     #[error("Request timeout")]
     Timeout,
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+    #[error("Invalid response: {0}")]
+    InvalidResponse(String),
     #[error("Failed to send message: {0:?}")]
     FailedToSendMessage(Error),
 }
@@ -1407,6 +1497,8 @@ pub enum GossipMessageProcessingError {
     MessageTooNew(u64, u64),
     #[error("Failed to process the message: {0}")]
     ProcessingError(String),
+    #[error("Incomplete gossip message backlog is full")]
+    IncompleteBacklogFull,
     #[error("A newer message is already saved: {0:?}")]
     NewerMessageSaved(BroadcastMessageWithTimestamp),
 }
@@ -1415,7 +1507,8 @@ impl GossipMessageProcessingError {
     fn violation(&self) -> Option<GossipViolation> {
         match self {
             GossipMessageProcessingError::MessageTooNew(_, _)
-            | GossipMessageProcessingError::ProcessingError(_) => {
+            | GossipMessageProcessingError::ProcessingError(_)
+            | GossipMessageProcessingError::IncompleteBacklogFull => {
                 Some(GossipViolation::PolicyRejectedMessage)
             }
             GossipMessageProcessingError::NewerMessageSaved(_) => None,
@@ -1426,6 +1519,7 @@ impl GossipMessageProcessingError {
         match self {
             GossipMessageProcessingError::MessageTooNew(_, _) => "message_too_new",
             GossipMessageProcessingError::ProcessingError(_) => "processing_error",
+            GossipMessageProcessingError::IncompleteBacklogFull => "incomplete_backlog_full",
             GossipMessageProcessingError::NewerMessageSaved(_) => "newer_message_saved",
         }
     }
@@ -1730,14 +1824,17 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                     ) {
                         Ok(Ok(result)) => {
                             let mut all_messages = result.messages;
-                            // We need also to save the incomplete messages to the store.
-                            all_messages.extend(messages.iter().map(Clone::clone));
-                            myself
-                                .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
-                                    peer,
-                                    all_messages,
-                                ))
-                                .expect("actor alive");
+                            let messages_with_dependencies =
+                                filter_messages_with_returned_dependencies(&all_messages, messages);
+                            all_messages.extend(messages_with_dependencies);
+                            if !all_messages.is_empty() {
+                                myself
+                                    .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
+                                        peer,
+                                        all_messages,
+                                    ))
+                                    .expect("actor alive");
+                            }
                         }
                         Ok(Err(e)) => {
                             error!("Failed to query messages from peer {:?}: {:?}", peer, e);
@@ -1784,6 +1881,60 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                 }
                 _ => None,
             })
+    }
+
+    fn pending_channel_update_count_for_peer(&self, peer: &Pubkey) -> usize {
+        self.messages_to_be_saved
+            .get(peer)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter(|message| Self::message_requires_query(message))
+                    .count()
+            })
+            .unwrap_or_default()
+    }
+
+    fn pending_channel_update_count(&self) -> usize {
+        self.messages_to_be_saved
+            .values()
+            .flatten()
+            .filter(|message| Self::message_requires_query(message))
+            .count()
+    }
+
+    fn ensure_incomplete_backlog_capacity(
+        &self,
+        peer: &Pubkey,
+        message: &BroadcastMessage,
+    ) -> Result<(), GossipMessageProcessingError> {
+        if !Self::message_requires_query(message) || self.has_dependencies_available(message) {
+            return Ok(());
+        }
+
+        let peer_count = self.pending_channel_update_count_for_peer(peer);
+        if peer_count >= MAX_INCOMPLETE_GOSSIP_MESSAGES_PER_PEER {
+            warn!(
+                peer = format!("{peer:?}"),
+                peer_count,
+                peer_limit = MAX_INCOMPLETE_GOSSIP_MESSAGES_PER_PEER,
+                "Dropping incomplete gossip message due to per-peer backlog cap"
+            );
+            return Err(GossipMessageProcessingError::IncompleteBacklogFull);
+        }
+
+        let total_count = self.pending_channel_update_count();
+        if total_count >= MAX_INCOMPLETE_GOSSIP_MESSAGES_TOTAL {
+            warn!(
+                peer = format!("{peer:?}"),
+                total_count,
+                total_limit = MAX_INCOMPLETE_GOSSIP_MESSAGES_TOTAL,
+                "Dropping incomplete gossip message due to global backlog cap"
+            );
+            return Err(GossipMessageProcessingError::IncompleteBacklogFull);
+        }
+
+        Ok(())
     }
 
     async fn insert_message_to_be_saved_list(
@@ -1865,6 +2016,8 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                 }
             }
         }
+
+        self.ensure_incomplete_backlog_capacity(pubkey, message)?;
 
         trace!(
             "New gossip message saved to memory: peer {:?}, message {:?}",
@@ -2262,8 +2415,7 @@ pub(crate) struct GossipActorState<S, C> {
     chain_client: C,
     delayed_outbound_messages: DelayedGossipMessageQueue,
     next_delayed_flush_at_ms: Option<u64>,
-    query_reply_ports:
-        HashMap<(Pubkey, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
+    query_reply_ports: HashMap<(Pubkey, u64), PendingQueryBroadcastMessages>,
     peer_states: HashMap<Pubkey, PeerState>,
     latest_remote_broadcast_timestamp: Arc<AtomicU64>,
     active_sync_started_at: HashMap<Pubkey, u64>,
@@ -3452,12 +3604,20 @@ where
                 state.schedule_next_delayed_flush();
             }
             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
-                if let Some(reply) = state.query_reply_ports.remove(&(peer, request_id)) {
-                    let _ = reply.send(Err(GossipError::Timeout));
+                if let Some(pending) = state.query_reply_ports.remove(&(peer, request_id)) {
+                    let _ = pending.reply.send(Err(GossipError::Timeout));
                 }
             }
             GossipActorMessage::QueryBroadcastMessages(peer, queries, reply) => {
+                if queries.is_empty() || queries.len() > MAX_NUM_OF_BROADCAST_MESSAGES as usize {
+                    let _ = reply.send(Err(GossipError::InvalidRequest(format!(
+                        "invalid query count {}",
+                        queries.len()
+                    ))));
+                    return Ok(());
+                }
                 let id = state.get_and_increment_request_id();
+                let requested_count = queries.len();
                 match state
                     .send_message_to_peer(
                         &peer,
@@ -3473,7 +3633,13 @@ where
                         let _ = reply.send(Err(GossipError::FailedToSendMessage(error)));
                     }
                     Ok(_) => {
-                        state.query_reply_ports.insert((peer, id), reply);
+                        state.query_reply_ports.insert(
+                            (peer, id),
+                            PendingQueryBroadcastMessages {
+                                requested_count,
+                                reply,
+                            },
+                        );
                         myself.send_after(QUERY_BROADCAST_MESSAGES_TIMEOUT, move || {
                             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, id)
                         });
@@ -3597,6 +3763,23 @@ where
                 GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
                     messages,
                 }) => {
+                    if !is_valid_broadcast_message_result_len(
+                        messages.len(),
+                        MAX_NUM_OF_BROADCAST_MESSAGES as usize,
+                    ) {
+                        warn!(
+                            "Received oversized BroadcastMessagesFilterResult from peer {:?}: messages = {}",
+                            pubkey,
+                            messages.len()
+                        );
+                        state
+                            .handle_malicious_peer_found(
+                                &pubkey,
+                                GossipViolation::InvalidSyncResponse,
+                            )
+                            .await;
+                        return Ok(());
+                    }
                     observe_received_broadcast_messages(messages.len());
                     observe_received_propagation_latencies(&messages, GOSSIP_INGRESS_PASSIVE);
                     state
@@ -3639,6 +3822,23 @@ where
                     }
                 }
                 GossipMessage::GetBroadcastMessagesResult(result) => {
+                    if !is_valid_broadcast_message_result_len(
+                        result.messages.len(),
+                        MAX_NUM_OF_BROADCAST_MESSAGES as usize,
+                    ) {
+                        warn!(
+                            "Received oversized GetBroadcastMessagesResult from peer {:?}: messages = {}",
+                            pubkey,
+                            result.messages.len()
+                        );
+                        state
+                            .handle_malicious_peer_found(
+                                &pubkey,
+                                GossipViolation::InvalidSyncResponse,
+                            )
+                            .await;
+                        return Ok(());
+                    }
                     observe_received_broadcast_messages(result.messages.len());
                     observe_received_propagation_latencies(
                         &result.messages,
@@ -3691,10 +3891,44 @@ where
                     }
                 }
                 GossipMessage::QueryBroadcastMessagesResult(result) => {
-                    observe_received_broadcast_messages(result.messages.len());
-                    observe_received_propagation_latencies(&result.messages, GOSSIP_INGRESS_QUERY);
-                    if let Some(reply) = state.query_reply_ports.remove(&(pubkey, result.id)) {
-                        let _ = reply.send(Ok(result));
+                    let pending = state.query_reply_ports.remove(&(pubkey, result.id));
+                    if let Some(pending) = pending {
+                        if !is_valid_query_broadcast_messages_result(
+                            &result,
+                            pending.requested_count,
+                        ) {
+                            warn!(
+                                "Received invalid QueryBroadcastMessagesResult from peer {:?}: messages = {}, missing_queries = {}, requested = {}",
+                                pubkey,
+                                result.messages.len(),
+                                result.missing_queries.len(),
+                                pending.requested_count
+                            );
+                            let _ = pending.reply.send(Err(GossipError::InvalidResponse(format!(
+                                "invalid query result size: messages = {}, missing_queries = {}, requested = {}",
+                                result.messages.len(),
+                                result.missing_queries.len(),
+                                pending.requested_count
+                            ))));
+                            state
+                                .handle_malicious_peer_found(
+                                    &pubkey,
+                                    GossipViolation::InvalidSyncResponse,
+                                )
+                                .await;
+                            return Ok(());
+                        }
+                        observe_received_broadcast_messages(result.messages.len());
+                        observe_received_propagation_latencies(
+                            &result.messages,
+                            GOSSIP_INGRESS_QUERY,
+                        );
+                        let _ = pending.reply.send(Ok(result));
+                    } else {
+                        warn!(
+                            "Received QueryBroadcastMessagesResult from peer {:?} with unknown request id: {:?}",
+                            pubkey, result.id
+                        );
                     }
                 }
             },
@@ -3781,4 +4015,79 @@ impl ServiceProtocol for GossipProtocolHandle {
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{fiber::types::ChannelUpdateChannelFlags, ChannelTestContext};
+
+    #[test]
+    fn test_broadcast_result_len_validation_enforces_request_and_protocol_limit() {
+        assert!(is_valid_broadcast_message_result_len(100, 100));
+        assert!(!is_valid_broadcast_message_result_len(101, 100));
+        assert!(!is_valid_broadcast_message_result_len(
+            MAX_NUM_OF_BROADCAST_MESSAGES as usize + 1,
+            MAX_NUM_OF_BROADCAST_MESSAGES as usize + 1
+        ));
+    }
+
+    #[test]
+    fn test_query_result_validation_enforces_query_count_and_missing_indexes() {
+        assert!(is_valid_query_broadcast_messages_result(
+            &QueryBroadcastMessagesResult {
+                id: 0,
+                messages: vec![],
+                missing_queries: vec![0, 1],
+            },
+            2,
+        ));
+        assert!(!is_valid_query_broadcast_messages_result(
+            &QueryBroadcastMessagesResult {
+                id: 0,
+                messages: vec![],
+                missing_queries: vec![0, 1],
+            },
+            1,
+        ));
+        assert!(!is_valid_query_broadcast_messages_result(
+            &QueryBroadcastMessagesResult {
+                id: 0,
+                messages: vec![],
+                missing_queries: vec![2],
+            },
+            2,
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_dependency_filter_replays_only_messages_with_returned_dependencies() {
+        let channel_context_1 = ChannelTestContext::gen().await;
+        let channel_context_2 = ChannelTestContext::gen().await;
+        let update_with_dependency =
+            BroadcastMessage::ChannelUpdate(channel_context_1.create_channel_update_of_node1(
+                ChannelUpdateChannelFlags::empty(),
+                42,
+                42,
+                42,
+                Some(1_000),
+            ));
+        let update_without_dependency =
+            BroadcastMessage::ChannelUpdate(channel_context_2.create_channel_update_of_node1(
+                ChannelUpdateChannelFlags::empty(),
+                42,
+                42,
+                42,
+                Some(1_000),
+            ));
+
+        let replayed = filter_messages_with_returned_dependencies(
+            &[BroadcastMessage::ChannelAnnouncement(
+                channel_context_1.channel_announcement.clone(),
+            )],
+            &[update_with_dependency.clone(), update_without_dependency],
+        );
+
+        assert_eq!(replayed, vec![update_with_dependency]);
+    }
 }

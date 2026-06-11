@@ -32,6 +32,8 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use thiserror::Error;
 
+pub(crate) const MAX_NUM_OF_BROADCAST_MESSAGES: u16 = 1000;
+
 /// Convert a `tentacle::secio::PublicKey` to a `Pubkey`.
 pub fn pubkey_from_tentacle(pk: tentacle::secio::PublicKey) -> Pubkey {
     secp256k1::PublicKey::from_slice(pk.inner_ref())
@@ -72,6 +74,16 @@ impl From<std::convert::Infallible> for Error {
     fn from(e: std::convert::Infallible) -> Self {
         match e {}
     }
+}
+
+fn check_broadcast_message_vec_len(len: usize, field: &str) -> Result<(), Error> {
+    let limit = MAX_NUM_OF_BROADCAST_MESSAGES as usize;
+    if len > limit {
+        return Err(Error::AnyHow(anyhow!(
+            "{field} length {len} exceeds gossip limit {limit}"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1320,9 +1332,13 @@ impl TryFrom<molecule_gossip::BroadcastMessagesFilterResult> for BroadcastMessag
     fn try_from(
         broadcast_messages_filter_result: molecule_gossip::BroadcastMessagesFilterResult,
     ) -> Result<Self, Self::Error> {
+        let messages = broadcast_messages_filter_result.messages();
+        check_broadcast_message_vec_len(
+            messages.len(),
+            "broadcast_messages_filter_result.messages",
+        )?;
         Ok(BroadcastMessagesFilterResult {
-            messages: broadcast_messages_filter_result
-                .messages()
+            messages: messages
                 .into_iter()
                 .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
@@ -1395,10 +1411,11 @@ impl TryFrom<molecule_gossip::GetBroadcastMessagesResult> for GetBroadcastMessag
     fn try_from(
         get_broadcast_messages_result: molecule_gossip::GetBroadcastMessagesResult,
     ) -> Result<Self, Self::Error> {
+        let messages = get_broadcast_messages_result.messages();
+        check_broadcast_message_vec_len(messages.len(), "get_broadcast_messages_result.messages")?;
         Ok(GetBroadcastMessagesResult {
             id: get_broadcast_messages_result.id().unpack(),
-            messages: get_broadcast_messages_result
-                .messages()
+            messages: messages
                 .into_iter()
                 .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
@@ -1439,11 +1456,12 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessages> for QueryBroadcastMessages
     fn try_from(
         query_broadcast_messages: molecule_gossip::QueryBroadcastMessages,
     ) -> Result<Self, Self::Error> {
+        let queries = query_broadcast_messages.queries();
+        check_broadcast_message_vec_len(queries.len(), "query_broadcast_messages.queries")?;
         Ok(QueryBroadcastMessages {
             id: query_broadcast_messages.id().unpack(),
             chain_hash: query_broadcast_messages.chain_hash().into(),
-            queries: query_broadcast_messages
-                .queries()
+            queries: queries
                 .into_iter()
                 .map(|query| query.try_into())
                 .collect::<Result<Vec<_>, Error>>()?,
@@ -1490,18 +1508,27 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMe
     fn try_from(
         query_broadcast_messages_result: molecule_gossip::QueryBroadcastMessagesResult,
     ) -> Result<Self, Self::Error> {
+        let messages = query_broadcast_messages_result.messages();
+        let missing_queries = query_broadcast_messages_result.missing_queries();
+        check_broadcast_message_vec_len(
+            messages.len(),
+            "query_broadcast_messages_result.messages",
+        )?;
+        check_broadcast_message_vec_len(
+            missing_queries.len(),
+            "query_broadcast_messages_result.missing_queries",
+        )?;
+        check_broadcast_message_vec_len(
+            messages.len().saturating_add(missing_queries.len()),
+            "query_broadcast_messages_result.total",
+        )?;
         Ok(QueryBroadcastMessagesResult {
             id: query_broadcast_messages_result.id().unpack(),
-            messages: query_broadcast_messages_result
-                .messages()
+            messages: messages
                 .into_iter()
                 .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
-            missing_queries: query_broadcast_messages_result
-                .missing_queries()
-                .into_iter()
-                .map(u16::from)
-                .collect(),
+            missing_queries: missing_queries.into_iter().map(u16::from).collect(),
         })
     }
 }
