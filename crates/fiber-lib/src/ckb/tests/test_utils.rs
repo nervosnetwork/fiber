@@ -792,7 +792,7 @@ impl Actor for MockChainActor {
                 }
             }
 
-            ReportRejected(_) => {
+            ReportSendTxError(_, _) => {
                 // ignore
             }
 

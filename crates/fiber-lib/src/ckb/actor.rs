@@ -77,7 +77,7 @@ pub enum CkbChainMessage {
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     CreateTxTracer(CkbTxTracer),
     RemoveTxTracers(Hash256),
-    ReportRejected(Hash256),
+    ReportSendTxError(Hash256, RpcError),
 
     Stop,
 }
@@ -358,10 +358,10 @@ impl Actor for CkbChainActor {
                     .ckb_tx_tracing_actor
                     .send_message(CkbTxTracingMessage::RemoveTracers(tx_hash))?;
             }
-            CkbChainMessage::ReportRejected(tx_hash) => {
+            CkbChainMessage::ReportSendTxError(tx_hash, err) => {
                 state
                     .ckb_tx_tracing_actor
-                    .send_message(CkbTxTracingMessage::ReportRejected(tx_hash))?;
+                    .send_message(CkbTxTracingMessage::ReportSendTxError(tx_hash, err))?;
             }
 
             CkbChainMessage::Stop => {
