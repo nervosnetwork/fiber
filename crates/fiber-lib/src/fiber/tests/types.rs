@@ -2,7 +2,10 @@ use crate::fiber::network::get_chain_hash;
 use crate::{
     fiber::{
         gen::{fiber as molecule_fiber, gossip},
-        types::{AddTlc, TrampolineHopPayload, TrampolineOnionPacket},
+        types::{
+            AddTlc, QueryBroadcastMessagesResult, TrampolineHopPayload, TrampolineOnionPacket,
+            MAX_NUM_OF_BROADCAST_MESSAGES,
+        },
         BasicMppPaymentData, BroadcastMessageID, Cursor, FeatureVector, Hash256, HashAlgorithm,
         NodeAnnouncement, NodeId, OnionPacketError, PaymentCustomRecords, PaymentHopData,
         PaymentOnionPacket, PaymentSphinxCodec, PeeledPaymentOnionPacket, Privkey, Pubkey, TlcErr,
@@ -156,6 +159,23 @@ fn test_cursor_types() {
             BroadcastMessageID::ChannelUpdate(channel_outpoint.clone())
         ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id))
     );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_query_broadcast_messages_result_decode_rejects_oversized_missing_queries() {
+    let result = gossip::QueryBroadcastMessagesResult::new_builder()
+        .id(0u64.pack())
+        .messages(gossip::BroadcastMessages::new_builder().build())
+        .missing_queries(
+            (0..=MAX_NUM_OF_BROADCAST_MESSAGES)
+                .map(Into::into)
+                .collect(),
+        )
+        .build();
+
+    let decoded: Result<QueryBroadcastMessagesResult, _> = result.try_into();
+    assert!(decoded.is_err());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
