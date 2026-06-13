@@ -1,3 +1,4 @@
+use ckb_sdk::RpcError;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::OutPoint,
@@ -15,6 +16,11 @@ use crate::{
 
 use super::{NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE};
 use fiber_types::Hash256;
+
+/// Check if an RPC error is a permanent error that should not be retried.
+fn is_permanent_error(err: &RpcError) -> bool {
+    crate::ckb::is_permanent_send_tx_error(err)
+}
 
 // tx index is not returned on older ckb version, using dummy tx index instead.
 // Waiting for https://github.com/nervosnetwork/ckb/pull/4583/ to be released.
@@ -269,6 +275,11 @@ where
                     self.tx_hash,
                     err
                 );
+                if is_permanent_error(&err) {
+                    let _ = self
+                        .chain_actor
+                        .send_message(CkbChainMessage::ReportSendTxError(self.tx_hash, err));
+                }
             }
             Err(err) => {
                 tracing::error!(
