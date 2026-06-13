@@ -96,15 +96,12 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     );
     b.rule("submit_signed_funding_tx", r#"allow if write("channels");"#);
     // dev
-    b.rule("commitment_signed", r#"allow if write("messages");"#);
-    b.rule("add_tlc", r#"allow if write("channels");"#);
-    b.rule("remove_tlc", r#"allow if write("channels");"#);
-    b.rule("check_channel_shutdown", r#"allow if write("channels");"#);
-    b.rule("sign_external_funding_tx", r#"allow if write("channels");"#);
-    b.rule(
-        "submit_commitment_transaction",
-        r#"allow if write("chain");"#,
-    );
+    b.rule("commitment_signed", r#"allow if write("dev");"#);
+    b.rule("add_tlc", r#"allow if write("dev");"#);
+    b.rule("remove_tlc", r#"allow if write("dev");"#);
+    b.rule("check_channel_shutdown", r#"allow if write("dev");"#);
+    b.rule("sign_external_funding_tx", r#"allow if write("dev");"#);
+    b.rule("submit_commitment_transaction", r#"allow if write("dev");"#);
     // prof
     b.rule("pprof", r#"allow if write("pprof");"#);
     // graph
@@ -355,6 +352,57 @@ mod tests {
         assert!(auth
             .check_permission("subscribe_store_changes", &internal_token)
             .is_ok());
+    }
+
+    #[test]
+    fn test_biscuit_auth_dev_methods_require_write_dev() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        let production_write_token = biscuit!(
+            r#"
+          write("channels");
+          write("messages");
+          write("chain");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+        let dev_write_token = biscuit!(
+            r#"
+          write("dev");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+        let dev_methods = [
+            "commitment_signed",
+            "add_tlc",
+            "remove_tlc",
+            "check_channel_shutdown",
+            "sign_external_funding_tx",
+            "submit_commitment_transaction",
+        ];
+
+        for method in dev_methods {
+            assert!(auth
+                .check_permission(method, &production_write_token)
+                .is_err());
+            assert!(auth.check_permission(method, &dev_write_token).is_ok());
+        }
+
+        assert!(auth
+            .check_permission("open_channel", &production_write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_signed_funding_tx", &dev_write_token)
+            .is_err());
     }
 
     #[test]
