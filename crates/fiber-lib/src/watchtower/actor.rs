@@ -1057,7 +1057,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 }
                             }
 
-                            if pending_tlcs_count == 0 {
+                            if pending_tlcs_count == 0
+                                && cell_header_epoch.to_rational()
+                                    + delay_epoch.to_rational()
+                                    <= current_epoch.to_rational()
+                            {
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: 0xFF,
@@ -1158,7 +1162,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             }
                         }
 
-                        if pending_tlcs_count == 0 {
+                        if pending_tlcs_count == 0
+                            && cell_header_epoch.to_rational()
+                                + delay_epoch.to_rational()
+                                <= current_epoch.to_rational()
+                        {
                             unlock_option = Some((
                                 Unlock {
                                     unlock_type: 0xFE,
