@@ -12,14 +12,45 @@ use crate::cch::{
     },
     actor::CchState,
     trackers::{map_lnd_payment_changed_event, CchTrackingEvent, LndConnectionInfo},
-    CchFiberAgentRef, CchMessage, CchOrderStore,
+    CchFiberAgentRef, CchMessage, CchOrderStore, OutgoingFeeLimit,
 };
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::payment::MAX_FEE_RATE_DENOMINATOR;
 use crate::invoice::CkbInvoice;
 use crate::time::{SystemTime, UNIX_EPOCH};
 use fiber_types::{payment::PaymentStatus, CchInvoice, CchOrder, CchOrderStatus, Hash256};
 
 const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
+
+/// Compute the routing fee budget (in satoshis) available for the outgoing payment leg.
+///
+/// The budget is `fee_sats * max_outgoing_fee_percentage / 100`, where `fee_sats` is the fee
+/// charged on the incoming/order leg. This enforces the invariant that the total outgoing route
+/// fee never exceeds the fee the operator collected. `max_outgoing_fee_percentage` is validated
+/// to be within `1..=100` at startup, so the multiplication only ever shrinks `fee_sats`.
+pub(crate) fn outgoing_fee_budget_sats(order: &CchOrder, max_outgoing_fee_percentage: u64) -> u128 {
+    order
+        .fee_sats
+        .saturating_mul(max_outgoing_fee_percentage as u128)
+        / 100
+}
+
+/// Compute the `max_fee_rate` (proportional, over `MAX_FEE_RATE_DENOMINATOR`) that corresponds to
+/// spending up to `max_fee_amount` satoshis on a payment of `amount` satoshis.
+///
+/// Fiber caps the routing fee at `min(max_fee_amount, max_fee_amount_by_rate)`, where
+/// `max_fee_amount_by_rate = ceil(amount * max_fee_rate / MAX_FEE_RATE_DENOMINATOR)`. Rounding the
+/// rate up guarantees the rate-derived cap is at least `max_fee_amount`, so the CCH fee budget
+/// (`max_fee_amount`) stays the binding constraint instead of Fiber's default rate cap.
+pub(crate) fn outgoing_max_fee_rate(amount: u128, max_fee_amount: u128) -> u64 {
+    if amount == 0 {
+        return 0;
+    }
+    let rate = max_fee_amount
+        .saturating_mul(MAX_FEE_RATE_DENOMINATOR)
+        .div_ceil(amount);
+    u64::try_from(rate).unwrap_or(u64::MAX)
+}
 
 pub struct SendOutgoingPaymentDispatcher;
 
@@ -33,6 +64,11 @@ pub struct SendFiberOutgoingPaymentExecutor {
     /// This caps the route to prevent the outgoing payment from exceeding
     /// the incoming payment's remaining expiry time.
     tlc_expiry_limit: u64,
+    /// Fee limits for the outgoing payment. `max_fee_amount` is the order fee budget so the
+    /// outgoing route fee never exceeds the fee charged on the incoming leg; `max_fee_rate` is
+    /// derived from it and the payment amount so Fiber's default rate cap does not clamp the fee
+    /// below the budget.
+    fee_limit: OutgoingFeeLimit,
 }
 
 #[async_trait::async_trait]
@@ -45,12 +81,14 @@ impl ActionExecutor for SendFiberOutgoingPaymentExecutor {
             outgoing_pay_req,
             retry_count,
             tlc_expiry_limit,
+            fee_limit,
         } = *self;
 
         fiber_agent_ref
             .forward_send_payment(
                 outgoing_pay_req,
                 tlc_expiry_limit,
+                fee_limit,
                 &cch_actor_ref,
                 payment_hash,
                 retry_count,
@@ -70,6 +108,11 @@ pub struct SendLightningOutgoingPaymentExecutor {
     /// This caps the route to prevent the outgoing payment from exceeding
     /// the incoming payment's remaining expiry time.
     cltv_limit: i32,
+    /// Maximum routing fee (in satoshis) the CCH is willing to spend on the outgoing
+    /// payment. Derived from the order fee budget so the outgoing route fee never exceeds
+    /// the fee charged on the incoming leg. LND treats a zero fee limit as zero-fee-only
+    /// routing, so this must be set whenever a non-zero fee budget is available.
+    fee_limit_sat: i64,
 }
 
 #[async_trait::async_trait]
@@ -79,17 +122,18 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
             payment_request: self.outgoing_pay_req,
             timeout_seconds: BTC_PAYMENT_TIMEOUT_SECONDS,
             cltv_limit: self.cltv_limit,
+            fee_limit_sat: self.fee_limit_sat,
             ..Default::default()
         };
         tracing::debug!(
-            "SendLightningOutgoingPaymentExecutor request payment_hash={:x} timeout_seconds={} cltv_limit={}",
+            "SendLightningOutgoingPaymentExecutor request payment_hash={:x} timeout_seconds={} cltv_limit={} fee_limit_sat={}",
             self.payment_hash,
             req.timeout_seconds,
-            req.cltv_limit
+            req.cltv_limit,
+            req.fee_limit_sat
         );
 
         let mut client = self.lnd_connection.create_router_client().await?;
-        // TODO: set a fee
         let mut stream = client.send_payment_v2(req).await?.into_inner();
         // Wait for the first message then quit
         let payment_result_opt = stream.next().await;
@@ -318,6 +362,11 @@ impl SendOutgoingPaymentDispatcher {
         let max_outgoing_seconds =
             Self::check_expiry_or_fail(cch_actor_ref, order, max_outgoing_seconds)?;
 
+        // Cap the outgoing routing fee at the fee the operator collected on the incoming leg
+        // (scaled by the configured percentage) so a route cannot consume more than was charged.
+        let fee_budget_sats =
+            outgoing_fee_budget_sats(order, state.config.max_outgoing_fee_percentage);
+
         match dispatch_payment_handler(order) {
             PaymentHandlerType::Fiber => {
                 let tlc_expiry_limit = max_outgoing_seconds
@@ -330,16 +379,23 @@ impl SendOutgoingPaymentDispatcher {
                     outgoing_pay_req: order.outgoing_pay_req.clone(),
                     retry_count,
                     tlc_expiry_limit,
+                    fee_limit: OutgoingFeeLimit {
+                        max_fee_amount: fee_budget_sats,
+                        max_fee_rate: outgoing_max_fee_rate(order.amount_sats, fee_budget_sats),
+                    },
                 }))
             }
             PaymentHandlerType::Lightning => {
                 let cltv_limit = (max_outgoing_seconds / 600) as i32;
+                // LND fee limits are i64; clamp the (already small) sat budget defensively.
+                let fee_limit_sat = i64::try_from(fee_budget_sats).unwrap_or(i64::MAX);
                 Some(Box::new(SendLightningOutgoingPaymentExecutor {
                     payment_hash: order.payment_hash,
                     cch_actor_ref: cch_actor_ref.clone(),
                     outgoing_pay_req: order.outgoing_pay_req.clone(),
                     lnd_connection: state.lnd_connection.clone(),
                     cltv_limit,
+                    fee_limit_sat,
                 }))
             }
         }

@@ -10,6 +10,8 @@ pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS: u64 = 360; // 60 hours (~10
 pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS: u64 = 60 * 60 * 60; // 60 hours
 /// Default minimum outgoing invoice relative expiry time in seconds.
 pub const DEFAULT_MIN_OUTGOING_INVOICE_EXPIRY_DELTA_SECONDS: u64 = 6 * 60 * 60; // 6 hours
+/// Default percentage of the collected CCH fee that may be spent on outgoing routing fees.
+pub const DEFAULT_MAX_OUTGOING_FEE_PERCENTAGE: u64 = 100;
 
 // Use prefix `cch-`/`CCH_`
 #[derive(ClapSerde, Debug, Clone)]
@@ -84,6 +86,22 @@ pub struct CchConfig {
         help = "The proportional fee charged per million satoshis based on the cross-chain order value, default is 1"
     )]
     pub fee_rate_per_million_sats: u64,
+
+    /// Maximum percentage of the collected CCH fee that may be used as the routing
+    /// fee budget for the outgoing payment leg.
+    ///
+    /// The outgoing payment fee is capped at `fee_sats * max_outgoing_fee_percentage / 100`,
+    /// where `fee_sats` is the fee charged on the incoming/order leg. This guarantees the
+    /// outgoing route fee never exceeds the fee the operator collected. Defaults to 100,
+    /// i.e. the entire collected fee may be spent on the outgoing route.
+    #[default(DEFAULT_MAX_OUTGOING_FEE_PERCENTAGE)]
+    #[arg(
+        name = "CCH_MAX_OUTGOING_FEE_PERCENTAGE",
+        long = "cch-max-outgoing-fee-percentage",
+        env,
+        help = format!("Maximum percentage of the collected CCH fee usable as the outgoing payment routing fee budget (1-100), default is {}", DEFAULT_MAX_OUTGOING_FEE_PERCENTAGE),
+    )]
+    pub max_outgoing_fee_percentage: u64,
 
     /// Final tlc expiry time for BTC network.
     #[default(DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS)]
@@ -174,6 +192,21 @@ impl CchConfig {
                 Ok(())
             }
         }
+    }
+
+    /// Validate config values that must hold regardless of run mode.
+    ///
+    /// Currently checks that `max_outgoing_fee_percentage` is within the valid
+    /// `1..=100` range so the outgoing payment fee budget is always a sane fraction
+    /// of the collected CCH fee.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=100).contains(&self.max_outgoing_fee_percentage) {
+            return Err(format!(
+                "`max_outgoing_fee_percentage` must be between 1 and 100, got {}",
+                self.max_outgoing_fee_percentage
+            ));
+        }
+        Ok(())
     }
 
     pub fn resolve_lnd_cert_path(&self) -> Option<PathBuf> {

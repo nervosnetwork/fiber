@@ -47,7 +47,7 @@ use tracing::{debug, error, instrument, warn};
 // This is a safety guard against excessive route construction work.
 const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
 const DEFAULT_MAX_FEE_RATE: u64 = 5;
-const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
+pub(crate) const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
 
 fn check_trampoline_outgoing_tlc_expiry(
     session: &mut PaymentSession,
