@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::network::{SendOnionPacketCommand, SendPaymentResponse, ASSUME_NETWORK_MYSELF_ALIVE};
-use super::types::BroadcastMessageWithTimestamp;
+use super::types::{validate_payment_custom_records_size, BroadcastMessageWithTimestamp};
 use crate::fiber::channel::{ChannelActorStateStore, ProcessingChannelError};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
@@ -15,7 +15,6 @@ use crate::fiber::graph::{
 };
 use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_TRY_LIMIT,
-    MAX_CUSTOM_RECORDS_SIZE,
 };
 use crate::fiber::{
     KeyPair, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
@@ -268,14 +267,7 @@ impl SendPaymentDataBuilder {
         }
 
         if let Some(custom_records) = &self.custom_records {
-            if custom_records.data.values().map(|v| v.len()).sum::<usize>()
-                > MAX_CUSTOM_RECORDS_SIZE
-            {
-                return Err(format!(
-                    "the sum size of custom_records's value can not more than {} bytes",
-                    MAX_CUSTOM_RECORDS_SIZE
-                ));
-            }
+            validate_payment_custom_records_size(custom_records)?;
         }
 
         if let Some(max_parts) = self.max_parts {
