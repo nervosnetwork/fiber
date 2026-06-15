@@ -62,7 +62,8 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                 .map_err(|e| format!("Failed to create watch channel: {e}"))?;
         }
         NetworkServiceEvent::ChannelClosed(_, channel_id, _)
-        | NetworkServiceEvent::ChannelAbandon(channel_id) => {
+        | NetworkServiceEvent::ChannelAbandon(channel_id)
+        | NetworkServiceEvent::ChannelFundingAborted(channel_id) => {
             watchtower_client
                 .remove_watch_channel(RemoveWatchChannelParams {
                     channel_id: channel_id.into(),
