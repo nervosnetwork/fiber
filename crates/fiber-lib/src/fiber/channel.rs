@@ -57,18 +57,18 @@ use ckb_types::{
     H256,
 };
 use fiber_types::{
-    blake2b_hash_with_salt, derive_tlc_pubkey, AddTlcCommand, AppliedFlags,
-    AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData, ChannelActorData,
-    ChannelAnnouncement, ChannelBasePublicKeys, ChannelConnectivityState, ChannelConstraints,
-    ChannelFlags, ChannelOpenRecord, ChannelState, ChannelTlcInfo, ChannelUpdate,
-    ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags,
-    CommitmentNumbers, EcdsaSignature, ExternalFundingPersistState, Hash256, InMemorySigner,
-    InboundTlcStatus, Musig2Context, NegotiatingFundingFlags, OutboundTlcStatus,
-    PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey,
-    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
-    NO_SHARED_SECRET,
+    blake2b_hash_with_salt, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand,
+    AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData,
+    ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys, ChannelConnectivityState,
+    ChannelConstraints, ChannelFlags, ChannelOpenRecord, ChannelState, ChannelTlcInfo,
+    ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, CloseFlags,
+    CollaboratingFundingTxFlags, CommitmentNumbers, EcdsaSignature, ExternalFundingPersistState,
+    Hash256, InMemorySigner, InboundTlcStatus, Musig2Context, NegotiatingFundingFlags,
+    OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc,
+    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData, SettlementTlc,
+    ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket,
+    TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -3610,7 +3610,7 @@ where
                     &open_channel, &pubkey
                 );
 
-                let counterpart_pubkeys = (&open_channel).into();
+                let counterpart_pubkeys: ChannelBasePublicKeys = (&open_channel).into();
                 let public = open_channel.is_public();
                 let is_one_way = open_channel.is_one_way();
                 let OpenChannel {
@@ -3674,6 +3674,19 @@ where
                     max_tlc_number_in_flight,
                     *remote_max_tlc_number_in_flight,
                 )?;
+
+                if !is_tlc_key_derivation_safe(
+                    &counterpart_pubkeys.tlc_base_key,
+                    first_per_commitment_point,
+                ) || !is_tlc_key_derivation_safe(
+                    &counterpart_pubkeys.tlc_base_key,
+                    second_per_commitment_point,
+                ) {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "peer tlc_basepoint and per_commitment_point derive to invalid key"
+                            .to_string(),
+                    )));
+                }
 
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
@@ -7281,6 +7294,18 @@ impl ChannelActorState {
             self.local_constraints.max_tlc_number_in_flight,
             accept_channel.max_tlc_number_in_flight,
         )?;
+
+        if !is_tlc_key_derivation_safe(
+            &accept_channel.tlc_basepoint,
+            &accept_channel.first_per_commitment_point,
+        ) || !is_tlc_key_derivation_safe(
+            &accept_channel.tlc_basepoint,
+            &accept_channel.second_per_commitment_point,
+        ) {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "peer tlc_basepoint and per_commitment_point derive to invalid key".to_string(),
+            ));
+        }
 
         self.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::INIT_SENT,
