@@ -587,6 +587,8 @@ where
             FiberChannelMessage::TxUpdate(tx) => {
                 if state.ephemeral_config.external_funding.enabled
                     && state.state.is_awaiting_external_funding()
+                    && (state.is_acceptor
+                        || state.ephemeral_config.external_funding.signed_submitted)
                 {
                     self.handle_external_funding_tx_sync(myself, state, tx.tx)
                         .await?;
