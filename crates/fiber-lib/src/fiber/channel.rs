@@ -7678,8 +7678,6 @@ impl ChannelActorState {
             }
         };
 
-        self.clean_up_failed_tlcs();
-
         #[cfg(debug_assertions)]
         {
             debug!(
@@ -7691,6 +7689,8 @@ impl ChannelActorState {
 
         let (commitment_tx, settlement_data) =
             self.verify_and_complete_tx(commitment_signed.funding_tx_partial_signature)?;
+
+        self.clean_up_failed_tlcs();
 
         // Notify outside observers.
         self.network()
