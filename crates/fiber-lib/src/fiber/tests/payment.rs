@@ -338,10 +338,10 @@ async fn test_send_payment_custom_records_with_limit_error() {
         .await;
 
     let err = res.unwrap_err().to_string();
-    assert!(err.contains("the sum size of custom_records's value can not more than"));
+    assert!(err.contains("custom_records encoded size"));
 
     // normal case
-    let long_value = "a".repeat(1024 * 2);
+    let long_value = "a".repeat(1024);
     let data: HashMap<_, _> = vec![(1, long_value.into_bytes())].into_iter().collect();
     let custom_records = PaymentCustomRecords { data };
     let res = source_node
@@ -362,6 +362,99 @@ async fn test_send_payment_custom_records_with_limit_error() {
         .expect("custom records");
     assert_eq!(got_custom_records, custom_records);
     assert_eq!(source_node.get_inflight_payment_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_receive_payment_rejects_oversized_custom_records() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let amount = 1000;
+    let hash_algorithm = HashAlgorithm::Sha256;
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = hash_algorithm.hash(payment_preimage).into();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let custom_records = PaymentCustomRecords {
+        data: vec![(1, vec![1; MAX_CUSTOM_RECORDS_SIZE + 1])]
+            .into_iter()
+            .collect(),
+    };
+
+    let hops_infos = vec![
+        PaymentHopData {
+            amount,
+            expiry,
+            next_hop: Some(node_1.pubkey),
+            hash_algorithm,
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount,
+            expiry,
+            payment_preimage: Some(payment_preimage),
+            hash_algorithm,
+            custom_records: Some(custom_records),
+            ..Default::default()
+        },
+    ];
+
+    let packet = PeeledPaymentOnionPacket::create(
+        node_0.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result = ractor::call!(node_0.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                        attempt_id: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive");
+    assert!(add_tlc_result.is_ok());
+
+    let target_pubkey = node_1.pubkey;
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
+                pubkey,
+                failed_payment_hash,
+                err,
+            )) => {
+                pubkey == &target_pubkey
+                    && failed_payment_hash == &payment_hash
+                    && err.error_code == TlcErrorCode::IncorrectOrUnknownPaymentDetails
+            }
+            _ => false,
+        })
+        .await;
+    assert!(node_1.get_payment_custom_records(&payment_hash).is_none());
 }
 
 // This test will send two payments from node_0 to node_1, the first payment will run

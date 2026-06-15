@@ -34,10 +34,11 @@ use crate::{
             get_chain_hash, sign_network_message, FiberMessageWithTarget, CHECK_CHANNELS_INTERVAL,
         },
         types::{
-            peeled_packet_mpp_custom_records, AcceptChannel, AddTlc, AnnouncementSignatures,
-            ChannelReady, ClosingSigned, CommitmentSigned, FiberChannelMessage, FiberMessage,
-            HoldTlc, OpenChannel, ReestablishChannel, RemoveTlc, Shutdown, TrampolineHopPayload,
-            TrampolineOnionPacket, TxCollaborationMsg, TxComplete, TxUpdate,
+            peeled_packet_mpp_custom_records, validate_payment_custom_records_size, AcceptChannel,
+            AddTlc, AnnouncementSignatures, ChannelReady, ClosingSigned, CommitmentSigned,
+            FiberChannelMessage, FiberMessage, HoldTlc, OpenChannel, ReestablishChannel, RemoveTlc,
+            Shutdown, TrampolineHopPayload, TrampolineOnionPacket, TxCollaborationMsg, TxComplete,
+            TxUpdate,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -1739,6 +1740,8 @@ where
             }
 
             if let Some(custom_records) = final_custom_records {
+                validate_payment_custom_records_size(&custom_records)
+                    .map_err(ProcessingChannelError::InvalidParameter)?;
                 self.store
                     .insert_payment_custom_records(&payment_hash, custom_records);
             }

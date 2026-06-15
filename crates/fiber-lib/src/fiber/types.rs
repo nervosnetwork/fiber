@@ -33,7 +33,6 @@ use std::fmt::Display;
 use thiserror::Error;
 
 pub(crate) const MAX_NUM_OF_BROADCAST_MESSAGES: u16 = 1000;
-
 /// Convert a `tentacle::secio::PublicKey` to a `Pubkey`.
 pub fn pubkey_from_tentacle(pk: tentacle::secio::PublicKey) -> Pubkey {
     secp256k1::PublicKey::from_slice(pk.inner_ref())
@@ -83,6 +82,22 @@ fn check_broadcast_message_vec_len(len: usize, field: &str) -> Result<(), Error>
             "{field} length {len} exceeds gossip limit {limit}"
         )));
     }
+    Ok(())
+}
+
+pub(crate) fn validate_payment_custom_records_size(
+    custom_records: &PaymentCustomRecords,
+) -> Result<(), String> {
+    let molecule_custom_records: molecule_fiber::CustomRecords = custom_records.clone().into();
+    let encoded_size = molecule_custom_records.as_slice().len();
+
+    if encoded_size > super::network::MAX_CUSTOM_RECORDS_SIZE {
+        return Err(format!(
+            "custom_records encoded size {encoded_size} exceeds limit {} bytes",
+            super::network::MAX_CUSTOM_RECORDS_SIZE
+        ));
+    }
+
     Ok(())
 }
 
