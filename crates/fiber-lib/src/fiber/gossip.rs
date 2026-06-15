@@ -108,6 +108,10 @@ const MAX_NUM_CONCURRENT_QUERY_TASKS: usize = 10;
 const QUERY_BROADCAST_MESSAGES_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_PEER_FILTER_RETRY_DELAY: Duration = Duration::from_millis(500);
 const DEFERRED_SYNC_CURSOR_RETRY_DELAY: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const ACTIVE_SYNC_FAILURE_RETRY_DELAY: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const ACTIVE_SYNC_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(10);
 const GOSSIP_INGRESS_PASSIVE: &str = "passive";
 const GOSSIP_INGRESS_ACTIVE_GET: &str = "active_get";
 const GOSSIP_INGRESS_QUERY: &str = "query";
@@ -482,7 +486,18 @@ pub(crate) enum GossipActorMessage {
     PruneStaleGossipMessages(u64),
 
     // The active syncing process is finished for a peer.
-    ActiveSyncingFinished(Pubkey, Cursor),
+    ActiveSyncingFinished {
+        peer: Pubkey,
+        session_id: SessionId,
+        sync_id: u64,
+        cursor: Cursor,
+    },
+    // The active syncing process stopped before completion for a peer.
+    ActiveSyncingAborted {
+        peer: Pubkey,
+        session_id: SessionId,
+        sync_id: u64,
+    },
 
     // A malicious peer is found during gossip validation or policy checks.
     MaliciousPeerFound {
@@ -669,7 +684,7 @@ where
 
     async fn update_peer_filter(
         &self,
-        state: &mut GossipActorState<S, C>,
+        state: &mut GossipActorState<S>,
         pubkey: &Pubkey,
         after_cursor: &Cursor,
         myself: ActorRef<GossipActorMessage>,
@@ -808,11 +823,11 @@ impl DelayedGossipMessageQueue {
     }
 }
 
-pub struct GossipSyncingActorState<S, C> {
+pub struct GossipSyncingActorState<S> {
     peer_pubkey: Pubkey,
+    session_id: SessionId,
+    sync_id: u64,
     gossip_actor: ActorRef<GossipActorMessage>,
-    chain_actor: ActorRef<CkbChainMessage>,
-    chain_client: C,
     store: ExtendedGossipMessageStore<S>,
     // The problem of using the cursor from the store is that a malicious peer may only
     // send large cursor to us, which may cause us to miss some messages.
@@ -835,20 +850,20 @@ struct PendingQueryBroadcastMessages {
     reply: RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>,
 }
 
-impl<S, C> GossipSyncingActorState<S, C> {
+impl<S> GossipSyncingActorState<S> {
     fn new(
         peer_pubkey: Pubkey,
+        session_id: SessionId,
+        sync_id: u64,
         gossip_actor: ActorRef<GossipActorMessage>,
-        chain_actor: ActorRef<CkbChainMessage>,
-        chain_client: C,
         store: ExtendedGossipMessageStore<S>,
         cursor: Cursor,
     ) -> Self {
         Self {
             peer_pubkey,
+            session_id,
+            sync_id,
             gossip_actor,
-            chain_actor,
-            chain_client,
             store,
             cursor,
             peer_state: Default::default(),
@@ -868,11 +883,11 @@ impl<S, C> GossipSyncingActorState<S, C> {
     }
 }
 
-pub(crate) struct GossipSyncingActor<S, C> {
-    _phantom: std::marker::PhantomData<(S, C)>,
+pub(crate) struct GossipSyncingActor<S> {
+    _phantom: std::marker::PhantomData<S>,
 }
 
-impl<S, C> GossipSyncingActor<S, C> {
+impl<S> GossipSyncingActor<S> {
     fn new() -> Self {
         Self {
             _phantom: Default::default(),
@@ -892,18 +907,17 @@ pub(crate) enum GossipSyncingActorMessage {
 }
 
 #[async_trait::async_trait]
-impl<S, C> Actor for GossipSyncingActor<S, C>
+impl<S> Actor for GossipSyncingActor<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
-    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     type Msg = GossipSyncingActorMessage;
-    type State = GossipSyncingActorState<S, C>;
+    type State = GossipSyncingActorState<S>;
     type Arguments = (
         Pubkey,
+        SessionId,
+        u64,
         ActorRef<GossipActorMessage>,
-        ActorRef<CkbChainMessage>,
-        C,
         ExtendedGossipMessageStore<S>,
         Cursor,
     );
@@ -911,16 +925,16 @@ where
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (peer_pubkey, gossip_actor, chain_actor, chain_client, store, cursor): Self::Arguments,
+        (peer_pubkey, session_id, sync_id, gossip_actor, store, cursor): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         myself
             .send_message(GossipSyncingActorMessage::NewGetRequest())
             .expect("gossip syncing actor alive");
         Ok(GossipSyncingActorState::new(
             peer_pubkey,
+            session_id,
+            sync_id,
             gossip_actor,
-            chain_actor,
-            chain_client,
             store,
             cursor,
         ))
@@ -977,88 +991,89 @@ where
                         return Ok(());
                     }
                     let messages = result.messages;
-                    let mut retry_cursor_later = false;
                     // If we are receiving an empty response, then the syncing process is finished.
-                    match messages.last() {
-                        Some(last_message) => {
-                            // We need the message timestamp to construct a valid cursor.
-                            match get_message_cursor(
-                                last_message,
-                                &state.store.store,
-                                &state.chain_actor,
-                                &state.chain_client,
-                            )
-                            .await
-                            {
-                                Ok(cursor) => {
-                                    state.cursor = cursor;
-                                }
-                                Err(Error::DeferredChannelAnnouncementVerification(
-                                    outpoint,
-                                    reason,
-                                )) => {
-                                    warn!(
-                                        peer = format!("{:?}", &state.peer_pubkey),
-                                        outpoint = format!("{:?}", outpoint),
-                                        reason,
-                                        "Deferring active sync cursor advancement until channel announcement can be verified locally"
-                                    );
-                                    retry_cursor_later = true;
-                                }
-                                Err(error) => {
-                                    warn!(
-                                        "Failed to verify the last message in the response: message {:?}, peer {:?}",
-                                        error, &state.peer_pubkey
-                                    );
-                                    myself.stop(Some(
-                                        "Failed to verify the last message in the response"
-                                            .to_string(),
-                                    ));
-                                    state
-                                        .gossip_actor
-                                        .send_message(GossipActorMessage::MaliciousPeerFound {
-                                            peer: state.peer_pubkey,
-                                            violation: GossipViolation::InvalidSyncResponse,
-                                        })
-                                        .expect("gossip actor alive");
-                                    return Ok(());
-                                }
-                            }
+                    if messages.is_empty() {
+                        state
+                            .gossip_actor
+                            .send_message(GossipActorMessage::ActiveSyncingFinished {
+                                peer: state.peer_pubkey,
+                                session_id: state.session_id,
+                                sync_id: state.sync_id,
+                                cursor: state.cursor.clone(),
+                            })
+                            .expect("gossip actor alive");
+                        myself.stop(Some("Active syncing finished".to_string()));
+                        return Ok(());
+                    }
+
+                    match call!(
+                        &state.store.actor,
+                        ExtendedGossipMessageStoreMessage::SaveActiveSyncMessages,
+                        state.peer_pubkey,
+                        messages
+                    ) {
+                        Ok(ActiveSyncSaveMessagesResult::Validated(cursor)) => {
+                            state.cursor = cursor;
                         }
-                        None => {
+                        Ok(ActiveSyncSaveMessagesResult::Pending) => {
+                            trace!(
+                                "Deferring active sync cursor advancement for peer {:?}",
+                                &state.peer_pubkey
+                            );
+                            std::mem::drop(
+                                myself.send_after(DEFERRED_SYNC_CURSOR_RETRY_DELAY, || {
+                                    GossipSyncingActorMessage::NewGetRequest()
+                                }),
+                            );
+                            return Ok(());
+                        }
+                        Ok(ActiveSyncSaveMessagesResult::Rejected(violation)) => {
+                            warn!(
+                                "Active sync response from peer {:?} rejected: {:?}",
+                                &state.peer_pubkey, violation
+                            );
                             state
                                 .gossip_actor
-                                .send_message(GossipActorMessage::ActiveSyncingFinished(
-                                    state.peer_pubkey,
-                                    state.cursor.clone(),
-                                ))
+                                .send_message(GossipActorMessage::ActiveSyncingAborted {
+                                    peer: state.peer_pubkey,
+                                    session_id: state.session_id,
+                                    sync_id: state.sync_id,
+                                })
                                 .expect("gossip actor alive");
-                            myself.stop(Some("Active syncing finished".to_string()));
+                            myself.stop(Some("Rejected active sync response".to_string()));
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            warn!(
+                                "Failed to save active sync messages from peer {:?}: {:?}",
+                                &state.peer_pubkey, error
+                            );
+                            state
+                                .gossip_actor
+                                .send_message(GossipActorMessage::MaliciousPeerFound {
+                                    peer: state.peer_pubkey,
+                                    violation: GossipViolation::InvalidSyncResponse,
+                                })
+                                .expect("gossip actor alive");
+                            state
+                                .gossip_actor
+                                .send_message(GossipActorMessage::ActiveSyncingAborted {
+                                    peer: state.peer_pubkey,
+                                    session_id: state.session_id,
+                                    sync_id: state.sync_id,
+                                })
+                                .expect("gossip actor alive");
+                            myself.stop(Some("Failed to save active sync messages".to_string()));
                             return Ok(());
                         }
                     }
-
-                    state
-                        .store
-                        .actor
-                        .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
-                            state.peer_pubkey,
-                            messages,
-                        ))
-                        .expect("store actor alive");
                     trace!(
                         "Sending new GetBroadcastMessages request after receiving response: pubkey {:?}",
                         &state.peer_pubkey
                     );
-                    if retry_cursor_later {
-                        std::mem::drop(myself.send_after(DEFERRED_SYNC_CURSOR_RETRY_DELAY, || {
-                            GossipSyncingActorMessage::NewGetRequest()
-                        }));
-                    } else {
-                        myself
-                            .send_message(GossipSyncingActorMessage::NewGetRequest())
-                            .expect("gossip syncing actor alive");
-                    }
+                    myself
+                        .send_message(GossipSyncingActorMessage::NewGetRequest())
+                        .expect("gossip syncing actor alive");
                 } else {
                     warn!(
                         "Received GetBroadcastMessages response from peer {:?} with unknown request id: {:?}",
@@ -1243,20 +1258,39 @@ where
 // BroadcastMessageFilter to enough number of peers to passively receive
 // updates.
 #[derive(Debug)]
+struct ActiveSyncSession {
+    session_id: SessionId,
+    sync_id: u64,
+    actor: ActorRef<GossipSyncingActorMessage>,
+    started_at_ms: u64,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct FinishedActiveSyncSession {
+    session_id: SessionId,
+    sync_id: u64,
+    finished_at_ms: u64,
+    cursor: Cursor,
+}
+
+#[derive(Debug)]
 #[allow(dead_code)]
 enum PeerSyncStatus {
     // We are not syncing with the peer.
     NotSyncing(),
     // We are actively sending GetBroadcastMessages to the peer.
     // The actor here is responsible to get syncing process running.
-    ActiveGet(ActorRef<GossipSyncingActorMessage>),
+    ActiveGet(ActiveSyncSession),
     // We are only passively receiving messages from the peer.
     // The cursor here is the filter that we sent to the peer.
     PassiveFilter(Cursor),
     // We have finished syncing with the peer. The cursor here is the latest cursor
     // that we have received from the peer. The u64 here is the timestamp
     // of the finishing syncing time.
-    FinishedActiveSyncing(u64, Cursor),
+    FinishedActiveSyncing(FinishedActiveSyncSession),
+    // We attempted active syncing with the peer, but the sync actor failed before completion.
+    FailedActiveSyncing(u64),
 }
 
 impl PeerSyncStatus {
@@ -1269,13 +1303,17 @@ impl PeerSyncStatus {
     }
 
     fn is_finished_active_syncing(&self) -> bool {
-        matches!(self, PeerSyncStatus::FinishedActiveSyncing(_, _))
+        matches!(self, PeerSyncStatus::FinishedActiveSyncing(_))
     }
 
-    fn can_start_active_syncing(&self) -> bool {
-        !self.is_active_syncing()
-            && !self.is_passive_syncing()
-            && !self.is_finished_active_syncing()
+    fn can_start_active_syncing(&self, now_ms: u64) -> bool {
+        match self {
+            PeerSyncStatus::NotSyncing() => true,
+            PeerSyncStatus::FailedActiveSyncing(retry_after_ms) => now_ms >= *retry_after_ms,
+            PeerSyncStatus::ActiveGet(_)
+            | PeerSyncStatus::PassiveFilter(_)
+            | PeerSyncStatus::FinishedActiveSyncing(_) => false,
+        }
     }
 
     fn can_start_passive_syncing(&self) -> bool {
@@ -1309,8 +1347,8 @@ impl Drop for PeerState {
                 .actor
                 .stop(Some("peer state dropped".to_string()));
         }
-        if let PeerSyncStatus::ActiveGet(actor) = &self.sync_status {
-            actor.stop(Some("peer state dropped".to_string()));
+        if let PeerSyncStatus::ActiveGet(session) = &self.sync_status {
+            session.actor.stop(Some("peer state dropped".to_string()));
         }
     }
 }
@@ -1563,6 +1601,13 @@ enum InsertMessageStatus {
     Inserted,
     InsertedDuplicate,
     Duplicate,
+}
+
+#[derive(Debug)]
+pub(crate) enum ActiveSyncSaveMessagesResult {
+    Validated(Cursor),
+    Pending,
+    Rejected(GossipViolation),
 }
 
 pub struct ExtendedGossipMessageStoreState<S, C> {
@@ -1966,16 +2011,6 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             .iter()
             .any(|(peer, messages)| peer != pubkey && messages.contains(message));
 
-        if let Some(existing_message) = get_existing_newer_broadcast_message(message, &self.store) {
-            if &BroadcastMessage::from(existing_message.clone()) != message {
-                return Err(GossipMessageProcessingError::NewerMessageSaved(
-                    existing_message,
-                ));
-            } else {
-                return Ok(InsertMessageStatus::Duplicate);
-            }
-        }
-
         if let Some(timestamp) = message.timestamp() {
             let max_acceptable_gossip_message_timestamp = max_acceptable_gossip_message_timestamp();
             if timestamp > max_acceptable_gossip_message_timestamp {
@@ -1983,6 +2018,16 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                     timestamp,
                     max_acceptable_gossip_message_timestamp,
                 ));
+            }
+        }
+
+        if let Some(existing_message) = get_existing_newer_broadcast_message(message, &self.store) {
+            if &BroadcastMessage::from(existing_message.clone()) != message {
+                return Err(GossipMessageProcessingError::NewerMessageSaved(
+                    existing_message,
+                ));
+            } else {
+                return Ok(InsertMessageStatus::Duplicate);
             }
         }
 
@@ -2032,6 +2077,164 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             InsertMessageStatus::InsertedDuplicate
         } else {
             InsertMessageStatus::Inserted
+        })
+    }
+
+    fn cursor_for_known_message(&self, message: &BroadcastMessage) -> Option<Cursor> {
+        match message {
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => self
+                .store
+                .get_latest_channel_announcement(&channel_announcement.channel_outpoint)
+                .map(|(timestamp, _)| {
+                    Cursor::new(
+                        timestamp,
+                        BroadcastMessageID::ChannelAnnouncement(
+                            channel_announcement.channel_outpoint.clone(),
+                        ),
+                    )
+                }),
+            BroadcastMessage::ChannelUpdate(channel_update) => Some(Cursor::new(
+                channel_update.timestamp,
+                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone()),
+            )),
+            BroadcastMessage::NodeAnnouncement(node_announcement) => Some(Cursor::new(
+                node_announcement.timestamp,
+                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
+            )),
+        }
+    }
+
+    async fn save_active_sync_messages(
+        &mut self,
+        peer: &Pubkey,
+        messages: Vec<BroadcastMessage>,
+    ) -> ActiveSyncSaveMessagesResult {
+        let mut verified_messages = Vec::new();
+        let mut result = None;
+        let mut latest_validated_cursor = None;
+        let now_ms = now_timestamp_as_millis_u64();
+
+        for message in messages {
+            if !self.allow_inbound_remote_broadcast_message(peer, &message, now_ms) {
+                result = Some(ActiveSyncSaveMessagesResult::Pending);
+                break;
+            }
+
+            match self.insert_message_to_be_saved_list(peer, &message).await {
+                Ok(InsertMessageStatus::Inserted) => {}
+                Ok(InsertMessageStatus::InsertedDuplicate) => {
+                    observe_duplicate_broadcast_message();
+                }
+                Ok(InsertMessageStatus::Duplicate) => {
+                    observe_duplicate_broadcast_message();
+                    match get_existing_broadcast_message(&message, &self.store) {
+                        Some(_) => {
+                            latest_validated_cursor = self.cursor_for_known_message(&message);
+                            continue;
+                        }
+                        None => {
+                            result = Some(ActiveSyncSaveMessagesResult::Pending);
+                            break;
+                        }
+                    }
+                }
+                Err(error @ GossipMessageProcessingError::NewerMessageSaved(_)) => {
+                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
+                    trace!("Failed to save message: {:?}, error: {:?}", message, error);
+                    latest_validated_cursor = self.cursor_for_known_message(&message);
+                    continue;
+                }
+                Err(error) => {
+                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
+                    trace!("Failed to save message: {:?}, error: {:?}", message, error);
+                    if let Some(violation) = error.violation() {
+                        self.gossip_actor
+                            .send_message(GossipActorMessage::MaliciousPeerFound {
+                                peer: *peer,
+                                violation,
+                            })
+                            .expect("gossip actor alive");
+                        result = Some(ActiveSyncSaveMessagesResult::Rejected(violation));
+                    } else {
+                        result = Some(ActiveSyncSaveMessagesResult::Pending);
+                    }
+                    break;
+                }
+            }
+
+            if !self.has_dependencies_available(&message) {
+                observe_missing_dependency_message(broadcast_message_type(&message));
+                result = Some(ActiveSyncSaveMessagesResult::Pending);
+                break;
+            }
+            if self.should_defer_message_verification(&message) {
+                result = Some(ActiveSyncSaveMessagesResult::Pending);
+                break;
+            }
+
+            match verify_and_save_broadcast_message(
+                &message,
+                &self.store,
+                &self.chain_actor,
+                &self.chain_client,
+            )
+            .await
+            {
+                Ok((verified_message, is_newly_applied)) => {
+                    self.remove_pending_message(&message, &[*peer]);
+                    latest_validated_cursor = Some(verified_message.cursor());
+                    if is_newly_applied {
+                        self.latest_remote_broadcast_timestamp
+                            .fetch_max(verified_message.cursor().timestamp, Ordering::AcqRel);
+                        observe_applied_broadcast_message();
+                        observe_applied_propagation_latency(&verified_message);
+                    } else {
+                        observe_duplicate_broadcast_message();
+                    }
+                    verified_messages.push(verified_message);
+                }
+                Err(
+                    error @ VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
+                        _,
+                        _,
+                    ),
+                ) => {
+                    trace!(
+                        "Deferring active sync message verification for {:?}: {:?}",
+                        message,
+                        error
+                    );
+                    result = Some(ActiveSyncSaveMessagesResult::Pending);
+                    break;
+                }
+                Err(error) => {
+                    self.remove_pending_message(&message, &[*peer]);
+                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
+                    trace!(
+                        "Failed to verify and save message {:?}: {:?}",
+                        message,
+                        error
+                    );
+                    let violation =
+                        classify_verify_and_save_broadcast_message_error(&message, &error)
+                            .unwrap_or(GossipViolation::InvalidBroadcastMessage);
+                    self.gossip_actor
+                        .send_message(GossipActorMessage::MaliciousPeerFound {
+                            peer: *peer,
+                            violation,
+                        })
+                        .expect("gossip actor alive");
+                    result = Some(ActiveSyncSaveMessagesResult::Rejected(violation));
+                    break;
+                }
+            }
+        }
+
+        self.broadcast_messages(&verified_messages);
+        result.unwrap_or_else(|| {
+            latest_validated_cursor
+                .map(ActiveSyncSaveMessagesResult::Validated)
+                .unwrap_or(ActiveSyncSaveMessagesResult::Pending)
         })
     }
 
@@ -2318,6 +2521,11 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
                 }
             }
 
+            ExtendedGossipMessageStoreMessage::SaveActiveSyncMessages(peer, messages, reply) => {
+                let result = state.save_active_sync_messages(&peer, messages).await;
+                let _ = reply.send(result);
+            }
+
             ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessages(messages) => {
                 state.store_and_broadcast_messages(&messages);
             }
@@ -2360,7 +2568,7 @@ pub struct QueryResult {
 }
 
 #[derive(AsRefStr)]
-pub enum ExtendedGossipMessageStoreMessage {
+pub(crate) enum ExtendedGossipMessageStoreMessage {
     // A new subscription for gossip message updates. We will send a batch of messages to the subscriber
     // via the returned output port.
     NewSubscription(
@@ -2377,6 +2585,13 @@ pub enum ExtendedGossipMessageStoreMessage {
     // Save new broadcast messages to the store. The messages will be first saved to the memory,
     // then if all the dependencies are met, they are periodically saved to the store and sent to the subscribers.
     SaveMessages(Pubkey, Vec<BroadcastMessage>),
+    // Save messages received during active sync and reply with cursor advancement only after
+    // the last message in the batch is validated or already known locally.
+    SaveActiveSyncMessages(
+        Pubkey,
+        Vec<BroadcastMessage>,
+        RpcReplyPort<ActiveSyncSaveMessagesResult>,
+    ),
     // Save new messages to the store, and broadcast them to the subscribers immediately.
     // These messages will not be saved to the memory and wait for the dependencies to be met.
     // We normally use this variant to send our own messages to the subscribers.
@@ -2391,16 +2606,12 @@ pub enum ExtendedGossipMessageStoreMessage {
     Tick,
 }
 
-pub(crate) struct GossipActorState<S, C> {
+pub(crate) struct GossipActorState<S> {
     store: ExtendedGossipMessageStore<S>,
     control: Option<ServiceAsyncControl>,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
     peer_channel_index: PeerChannelIndex,
     policy: GossipPolicyState,
-    // The number of active syncing peers that we have finished syncing with.
-    // Together with the number of current active syncing peers, this is
-    // used to determine if we should start a new active syncing peer.
-    num_finished_active_syncing_peers: usize,
     // The number of targeted active syncing peers that we want to have.
     // Currently we will only start this many active syncing peers.
     num_targeted_active_syncing_peers: usize,
@@ -2410,24 +2621,28 @@ pub(crate) struct GossipActorState<S, C> {
     // not isolated from the network.
     num_targeted_outbound_passive_syncing_peers: usize,
     next_request_id: u64,
+    next_active_sync_id: u64,
     myself: ActorRef<GossipActorMessage>,
-    chain_actor: ActorRef<CkbChainMessage>,
-    chain_client: C,
     delayed_outbound_messages: DelayedGossipMessageQueue,
     next_delayed_flush_at_ms: Option<u64>,
     query_reply_ports: HashMap<(Pubkey, u64), PendingQueryBroadcastMessages>,
     peer_states: HashMap<Pubkey, PeerState>,
     latest_remote_broadcast_timestamp: Arc<AtomicU64>,
-    active_sync_started_at: HashMap<Pubkey, u64>,
 }
 
-impl<S, C> GossipActorState<S, C>
+impl<S> GossipActorState<S>
 where
     S: GossipMessageStore + Clone + Send + Sync + 'static,
-    C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     fn is_ready_for_passive_syncing(&self) -> bool {
-        self.num_finished_active_syncing_peers > 0
+        self.num_of_finished_active_syncing_peers() > 0
+    }
+
+    fn num_of_finished_active_syncing_peers(&self) -> usize {
+        self.peer_states
+            .values()
+            .filter(|state| state.sync_status.is_finished_active_syncing())
+            .count()
     }
 
     fn num_of_active_syncing_peers(&self) -> usize {
@@ -2463,14 +2678,15 @@ where
     }
 
     fn peers_to_start_active_syncing(&self) -> Vec<Pubkey> {
+        let now_ms = now_timestamp_as_millis_u64();
         match self.num_targeted_active_syncing_peers.checked_sub(
-            self.num_finished_active_syncing_peers + self.num_of_active_syncing_peers(),
+            self.num_of_finished_active_syncing_peers() + self.num_of_active_syncing_peers(),
         ) {
             None => vec![],
             Some(num) => self
                 .peer_states
                 .iter()
-                .filter(|(_, state)| state.sync_status.can_start_active_syncing())
+                .filter(|(_, state)| state.sync_status.can_start_active_syncing(now_ms))
                 .take(num)
                 .map(|(pubkey, _)| pubkey)
                 .cloned()
@@ -2528,18 +2744,23 @@ where
     async fn start_new_active_syncer(&mut self, pubkey: &Pubkey) {
         let safe_cursor = self.get_safe_cursor_to_start_syncing();
         let started_at = now_timestamp_as_millis_u64();
+        let session_id = self
+            .get_peer_session(pubkey)
+            .expect("start active sync for connected peer");
+        let sync_id = self.next_active_sync_id;
+        self.next_active_sync_id += 1;
         let sync_actor = Actor::spawn_linked(
             Some(format!(
                 "gossip syncing actor to peer {:?} supervised by {:?}",
                 pubkey,
                 self.myself.get_id()
             )),
-            GossipSyncingActor::new(),
+            GossipSyncingActor::<S>::new(),
             (
                 *pubkey,
+                session_id,
+                sync_id,
                 self.myself.clone(),
-                self.chain_actor.clone(),
-                self.chain_client.clone(),
                 self.store.clone(),
                 safe_cursor,
             ),
@@ -2551,8 +2772,12 @@ where
         self.peer_states
             .get_mut(pubkey)
             .expect("get peer state")
-            .change_sync_status(PeerSyncStatus::ActiveGet(sync_actor.0));
-        self.active_sync_started_at.insert(*pubkey, started_at);
+            .change_sync_status(PeerSyncStatus::ActiveGet(ActiveSyncSession {
+                session_id,
+                sync_id,
+                actor: sync_actor.0,
+                started_at_ms: started_at,
+            }));
         observe_active_sync_started();
     }
 
@@ -2907,35 +3132,6 @@ pub(crate) struct GossipProtocolHandle {
     sender: Option<oneshot::Sender<ServiceAsyncControl>>,
 }
 
-async fn get_message_cursor<S: GossipMessageStore>(
-    message: &BroadcastMessage,
-    store: &S,
-    chain: &ActorRef<CkbChainMessage>,
-    client: &impl CkbChainClient,
-) -> Result<Cursor, Error> {
-    match message {
-        BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-            let timestamp =
-                get_channel_timestamp(&channel_announcement.channel_outpoint, store, chain, client)
-                    .await?;
-            Ok(Cursor::new(
-                timestamp,
-                BroadcastMessageID::ChannelAnnouncement(
-                    channel_announcement.channel_outpoint.clone(),
-                ),
-            ))
-        }
-        BroadcastMessage::ChannelUpdate(channel_update) => Ok(Cursor::new(
-            channel_update.timestamp,
-            BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone()),
-        )),
-        BroadcastMessage::NodeAnnouncement(node_announcement) => Ok(Cursor::new(
-            node_announcement.timestamp,
-            BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
-        )),
-    }
-}
-
 fn get_existing_broadcast_message<S: GossipMessageStore>(
     message: &BroadcastMessage,
     store: &S,
@@ -3075,23 +3271,6 @@ async fn get_channel_tx(
             ),
         ),
     }
-}
-
-async fn get_channel_timestamp<S: GossipMessageStore>(
-    outpoint: &OutPoint,
-    store: &S,
-    chain: &ActorRef<CkbChainMessage>,
-    client: &impl CkbChainClient,
-) -> Result<u64, Error> {
-    if let Some((timestamp, _)) = store.get_latest_channel_announcement(outpoint) {
-        return Ok(timestamp);
-    }
-
-    let on_chain_info = get_channel_on_chain_info(outpoint, chain, client)
-        .await
-        .map_err(Error::from)?;
-
-    Ok(on_chain_info.timestamp)
 }
 
 async fn get_channel_on_chain_info(
@@ -3416,7 +3595,7 @@ where
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     type Msg = GossipActorMessage;
-    type State = GossipActorState<S, C>;
+    type State = GossipActorState<S>;
     type Arguments = (
         Option<Pubkey>,
         oneshot::Receiver<ServiceAsyncControl>,
@@ -3514,16 +3693,13 @@ where
             num_targeted_active_syncing_peers,
             num_targeted_outbound_passive_syncing_peers,
             myself,
-            chain_actor,
-            chain_client,
             next_request_id: Default::default(),
+            next_active_sync_id: Default::default(),
             delayed_outbound_messages,
             next_delayed_flush_at_ms: Default::default(),
             query_reply_ports: Default::default(),
-            num_finished_active_syncing_peers: Default::default(),
             peer_states: Default::default(),
             latest_remote_broadcast_timestamp,
-            active_sync_started_at: Default::default(),
         };
         Ok(state)
     }
@@ -3596,7 +3772,6 @@ where
             }
             GossipActorMessage::PeerDisconnected(pubkey, _session) => {
                 state.peer_states.remove(&pubkey);
-                state.active_sync_started_at.remove(&pubkey);
                 state.drop_delayed_outbound_messages_for_peer(
                     &pubkey,
                     now_timestamp_as_millis_u64(),
@@ -3666,7 +3841,7 @@ where
                 trace!(
                     "Gossip network maintenance ticked, current state: num of peers: {}, num of finished syncing peers: {}, num of active syncing peers: {}, num of passive syncing peers: {}",
                     state.peer_states.len(),
-                    state.num_finished_active_syncing_peers,
+                    state.num_of_finished_active_syncing_peers(),
                     state.num_of_active_syncing_peers(),
                     state.num_of_passive_syncing_peers(),
                 );
@@ -3708,19 +3883,61 @@ where
                 }
             }
 
-            GossipActorMessage::ActiveSyncingFinished(pubkey, cursor) => {
-                state.num_finished_active_syncing_peers += 1;
-                if let Some(started_at) = state.active_sync_started_at.remove(&pubkey) {
-                    let now = now_timestamp_as_millis_u64();
-                    observe_active_sync_completion(now.saturating_sub(started_at));
+            GossipActorMessage::ActiveSyncingFinished {
+                peer,
+                session_id,
+                sync_id,
+                cursor,
+            } => {
+                let Some(peer_state) = state.peer_states.get_mut(&peer) else {
+                    return Ok(());
+                };
+                let PeerSyncStatus::ActiveGet(active_session) = &peer_state.sync_status else {
+                    return Ok(());
+                };
+                if peer_state.session_id != session_id
+                    || active_session.session_id != session_id
+                    || active_session.sync_id != sync_id
+                {
+                    return Ok(());
                 }
+                let now = now_timestamp_as_millis_u64();
+                observe_active_sync_completion(now.saturating_sub(active_session.started_at_ms));
                 observe_active_sync_finished();
-                if let Some(peer_state) = state.peer_states.get_mut(&pubkey) {
-                    peer_state.change_sync_status(PeerSyncStatus::FinishedActiveSyncing(
-                        now_timestamp_as_millis_u64(),
+                peer_state.change_sync_status(PeerSyncStatus::FinishedActiveSyncing(
+                    FinishedActiveSyncSession {
+                        session_id,
+                        sync_id,
+                        finished_at_ms: now,
                         cursor,
-                    ));
+                    },
+                ));
+            }
+
+            GossipActorMessage::ActiveSyncingAborted {
+                peer,
+                session_id,
+                sync_id,
+            } => {
+                let Some(peer_state) = state.peer_states.get_mut(&peer) else {
+                    return Ok(());
+                };
+                let PeerSyncStatus::ActiveGet(active_session) = &peer_state.sync_status else {
+                    return Ok(());
+                };
+                if peer_state.session_id != session_id
+                    || active_session.session_id != session_id
+                    || active_session.sync_id != sync_id
+                {
+                    return Ok(());
                 }
+                let retry_after_ms = now_timestamp_as_millis_u64()
+                    .saturating_add(ACTIVE_SYNC_FAILURE_RETRY_DELAY.as_millis() as u64);
+                peer_state.change_sync_status(PeerSyncStatus::FailedActiveSyncing(retry_after_ms));
+                myself.send_message(GossipActorMessage::TickNetworkMaintenance)?;
+                std::mem::drop(myself.send_after(ACTIVE_SYNC_FAILURE_RETRY_DELAY, || {
+                    GossipActorMessage::TickNetworkMaintenance
+                }));
             }
 
             GossipActorMessage::MaliciousPeerFound { peer, violation } => {
@@ -3846,12 +4063,13 @@ where
                     );
                     let peer_state = state.peer_states.get(&pubkey);
                     if let Some(PeerState {
-                        sync_status: PeerSyncStatus::ActiveGet(actor),
+                        sync_status: PeerSyncStatus::ActiveGet(active_session),
                         ..
                     }) = peer_state
                     {
-                        let _ =
-                            actor.send_message(GossipSyncingActorMessage::ResponseReceived(result));
+                        let _ = active_session
+                            .actor
+                            .send_message(GossipSyncingActorMessage::ResponseReceived(result));
                     } else {
                         warn!(
                             "Received GetBroadcastMessagesResult from peer {:?} in state {:?}",
