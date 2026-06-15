@@ -18,6 +18,7 @@ use ckb_types::packed::Transaction;
 use ckb_types::prelude::{Pack, Unpack};
 use ckb_types::H256;
 use molecule::prelude::{Builder, Entity};
+use musig2::secp::{Point, Scalar};
 use musig2::BinaryEncoding;
 use musig2::PartialSignature;
 use musig2::PubNonce;
@@ -1189,6 +1190,22 @@ pub fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey
 /// Derive the TLC public key from a base key and commitment point.
 pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     derive_public_key(base_key, commitment_point)
+}
+
+/// Check if the TLC key derivation for a given base key and commitment point
+/// would produce a valid (non-infinity) result.
+///
+/// This is used to validate peer-provided keys before accepting them,
+/// preventing a malicious peer from crafting key pairs that would cause
+/// `derive_tlc_pubkey` to panic with "valid public key" due to infinity.
+pub fn is_tlc_key_derivation_safe(base_key: &Pubkey, commitment_point: &Pubkey) -> bool {
+    let tweak = get_tweak_by_commitment_point(commitment_point);
+    let Ok(scalar) = Scalar::from_slice(&tweak) else {
+        return false;
+    };
+    let base_point = Point::from(base_key);
+    let result = base_point + scalar.base_point_mul();
+    result.not_inf().is_ok()
 }
 
 /// Derive the commitment secret for a given commitment number from a seed.

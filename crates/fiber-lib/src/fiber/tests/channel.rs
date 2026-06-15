@@ -54,16 +54,16 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use fiber_types::{
-    derive_private_key, derive_tlc_pubkey, AddTlcCommand, AwaitingChannelReadyFlags,
-    AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus, ChannelState,
-    CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, NegotiatingFundingFlags,
-    OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlc, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
-    TlcErrPacket, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    derive_private_key, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand,
+    AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus,
+    ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
+    NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlc,
+    RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, ShuttingDownFlags,
+    SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
-use musig2::secp::Point;
+use musig2::secp::{Point, Scalar};
 use musig2::KeyAggContext;
 use ractor::{call, ActorProcessingErr, ActorRef};
 use secp256k1::SECP256K1;
@@ -269,6 +269,62 @@ fn test_derive_private_and_public_tlc_keys() {
     let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
     let derived_pubkey = derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point);
     assert_eq!(derived_privkey.pubkey(), derived_pubkey);
+}
+
+/// Generates a malicious (tlc_basepoint, commitment_point) pair where the TLC
+/// key derivation would produce the point at infinity.
+fn malicious_tlc_basepoint_and_commitment_point() -> (Pubkey, Pubkey) {
+    for i in 0..1024u64 {
+        let seed = format!("byzantine-ptlc-poc-{i}");
+        let signer = InMemorySigner::generate_from_seed(seed.as_bytes());
+        let commitment_point = signer.get_commitment_point(1);
+        let tweak = fiber_types::get_tweak_by_commitment_point(&commitment_point);
+
+        if let Ok(scalar) = Scalar::from_slice(&tweak) {
+            let tlc_basepoint: Pubkey = (-scalar).base_point_mul().into();
+            return (tlc_basepoint, commitment_point);
+        }
+    }
+
+    panic!("failed to find a commitment point with a valid tweak scalar");
+}
+
+#[test]
+fn test_is_tlc_key_derivation_safe_rejects_malicious_keys() {
+    let (tlc_basepoint, commitment_point) = malicious_tlc_basepoint_and_commitment_point();
+
+    // Verify the malicious pair is NOT considered safe
+    assert!(
+        !is_tlc_key_derivation_safe(&tlc_basepoint, &commitment_point),
+        "malicious TLC basepoint and commitment point should be rejected"
+    );
+}
+
+#[test]
+fn test_is_tlc_key_derivation_safe_accepts_honest_keys() {
+    let signer = InMemorySigner::generate_from_seed(b"honest-seed");
+    let tlc_basepoint = signer.tlc_base_key.pubkey();
+    let commitment_point = signer.get_commitment_point(1);
+
+    assert!(
+        is_tlc_key_derivation_safe(&tlc_basepoint, &commitment_point),
+        "honest TLC basepoint and commitment point should be accepted"
+    );
+}
+
+#[test]
+fn test_malicious_keys_would_have_caused_panic() {
+    use fiber_types::derive_tlc_pubkey;
+    let (tlc_basepoint, commitment_point) = malicious_tlc_basepoint_and_commitment_point();
+
+    let result = std::panic::catch_unwind(|| {
+        let _ = derive_tlc_pubkey(&tlc_basepoint, &commitment_point);
+    });
+
+    assert!(
+        result.is_err(),
+        "malicious TLC basepoint and commitment point should cause a panic in derive_tlc_pubkey"
+    );
 }
 
 #[tokio::test]
