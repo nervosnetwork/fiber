@@ -107,6 +107,10 @@ const MAX_NUM_CONCURRENT_QUERY_TASKS: usize = 10;
 const QUERY_BROADCAST_MESSAGES_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_PEER_FILTER_RETRY_DELAY: Duration = Duration::from_millis(500);
 const DEFERRED_SYNC_CURSOR_RETRY_DELAY: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const ACTIVE_SYNC_FAILURE_RETRY_DELAY: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const ACTIVE_SYNC_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(10);
 const GOSSIP_INGRESS_PASSIVE: &str = "passive";
 const GOSSIP_INGRESS_ACTIVE_GET: &str = "active_get";
 const GOSSIP_INGRESS_QUERY: &str = "query";
@@ -435,6 +439,12 @@ pub(crate) enum GossipActorMessage {
         session_id: SessionId,
         sync_id: u64,
         cursor: Cursor,
+    },
+    // The active syncing process stopped before completion for a peer.
+    ActiveSyncingAborted {
+        peer: Pubkey,
+        session_id: SessionId,
+        sync_id: u64,
     },
 
     // A malicious peer is found during gossip validation or policy checks.
@@ -942,6 +952,14 @@ where
                                 "Active sync response from peer {:?} rejected: {:?}",
                                 &state.peer_pubkey, violation
                             );
+                            state
+                                .gossip_actor
+                                .send_message(GossipActorMessage::ActiveSyncingAborted {
+                                    peer: state.peer_pubkey,
+                                    session_id: state.session_id,
+                                    sync_id: state.sync_id,
+                                })
+                                .expect("gossip actor alive");
                             myself.stop(Some("Rejected active sync response".to_string()));
                             return Ok(());
                         }
@@ -955,6 +973,14 @@ where
                                 .send_message(GossipActorMessage::MaliciousPeerFound {
                                     peer: state.peer_pubkey,
                                     violation: GossipViolation::InvalidSyncResponse,
+                                })
+                                .expect("gossip actor alive");
+                            state
+                                .gossip_actor
+                                .send_message(GossipActorMessage::ActiveSyncingAborted {
+                                    peer: state.peer_pubkey,
+                                    session_id: state.session_id,
+                                    sync_id: state.sync_id,
                                 })
                                 .expect("gossip actor alive");
                             myself.stop(Some("Failed to save active sync messages".to_string()));
@@ -1177,6 +1203,8 @@ enum PeerSyncStatus {
     // that we have received from the peer. The u64 here is the timestamp
     // of the finishing syncing time.
     FinishedActiveSyncing(FinishedActiveSyncSession),
+    // We attempted active syncing with the peer, but the sync actor failed before completion.
+    FailedActiveSyncing(u64),
 }
 
 impl PeerSyncStatus {
@@ -1192,10 +1220,14 @@ impl PeerSyncStatus {
         matches!(self, PeerSyncStatus::FinishedActiveSyncing(_))
     }
 
-    fn can_start_active_syncing(&self) -> bool {
-        !self.is_active_syncing()
-            && !self.is_passive_syncing()
-            && !self.is_finished_active_syncing()
+    fn can_start_active_syncing(&self, now_ms: u64) -> bool {
+        match self {
+            PeerSyncStatus::NotSyncing() => true,
+            PeerSyncStatus::FailedActiveSyncing(retry_after_ms) => now_ms >= *retry_after_ms,
+            PeerSyncStatus::ActiveGet(_)
+            | PeerSyncStatus::PassiveFilter(_)
+            | PeerSyncStatus::FinishedActiveSyncing(_) => false,
+        }
     }
 
     fn can_start_passive_syncing(&self) -> bool {
@@ -2494,6 +2526,7 @@ where
     }
 
     fn peers_to_start_active_syncing(&self) -> Vec<Pubkey> {
+        let now_ms = now_timestamp_as_millis_u64();
         match self.num_targeted_active_syncing_peers.checked_sub(
             self.num_of_finished_active_syncing_peers() + self.num_of_active_syncing_peers(),
         ) {
@@ -2501,7 +2534,7 @@ where
             Some(num) => self
                 .peer_states
                 .iter()
-                .filter(|(_, state)| state.sync_status.can_start_active_syncing())
+                .filter(|(_, state)| state.sync_status.can_start_active_syncing(now_ms))
                 .take(num)
                 .map(|(pubkey, _)| pubkey)
                 .cloned()
@@ -3713,6 +3746,32 @@ where
                         cursor,
                     },
                 ));
+            }
+
+            GossipActorMessage::ActiveSyncingAborted {
+                peer,
+                session_id,
+                sync_id,
+            } => {
+                let Some(peer_state) = state.peer_states.get_mut(&peer) else {
+                    return Ok(());
+                };
+                let PeerSyncStatus::ActiveGet(active_session) = &peer_state.sync_status else {
+                    return Ok(());
+                };
+                if peer_state.session_id != session_id
+                    || active_session.session_id != session_id
+                    || active_session.sync_id != sync_id
+                {
+                    return Ok(());
+                }
+                let retry_after_ms = now_timestamp_as_millis_u64()
+                    .saturating_add(ACTIVE_SYNC_FAILURE_RETRY_DELAY.as_millis() as u64);
+                peer_state.change_sync_status(PeerSyncStatus::FailedActiveSyncing(retry_after_ms));
+                myself.send_message(GossipActorMessage::TickNetworkMaintenance)?;
+                std::mem::drop(myself.send_after(ACTIVE_SYNC_FAILURE_RETRY_DELAY, || {
+                    GossipActorMessage::TickNetworkMaintenance
+                }));
             }
 
             GossipActorMessage::MaliciousPeerFound { peer, violation } => {
