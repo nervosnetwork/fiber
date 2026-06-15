@@ -1295,12 +1295,10 @@ impl NetworkGraphStateStore for Store {
                         .ok()?,
                 );
 
-                // Only return attempts that are pending (Created or Retrying)
+                // Channel-ready retries should only wake attempts that previously failed
+                // retryably. Fresh Created attempts may still be in their first send path.
                 let attempt = self.get_attempt(payment_hash, attempt_id)?;
-                if matches!(
-                    attempt.status,
-                    AttemptStatus::Created | AttemptStatus::Retrying
-                ) {
+                if matches!(attempt.status, AttemptStatus::Retrying) {
                     Some(attempt)
                 } else {
                     None
