@@ -958,9 +958,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
         if channel_data
             .revocation_data
             .as_ref()
-            .map(|r| r.commitment_number)
-            .unwrap_or_default()
-            == commitment_number - 1
+            .and_then(|r| {
+                commitment_number
+                    .checked_sub(1)
+                    .map(|prev| r.commitment_number == prev)
+            })
+            .unwrap_or(false)
         {
             channel_data.remote_settlement_data.clone()
         } else {
