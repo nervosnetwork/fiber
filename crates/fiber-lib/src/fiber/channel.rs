@@ -1874,7 +1874,9 @@ where
             signature: None,
         });
 
-        state.step_shutting_down(flags).await?;
+        state
+            .step_shutting_down(flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT)
+            .await?;
         Ok(())
     }
 
@@ -9555,7 +9557,7 @@ impl ChannelActorState {
 
     /// Perform the next step in shutting down the channel.
     async fn step_shutting_down(&mut self, flags: ShuttingDownFlags) -> ProcessingChannelResult {
-        let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+        let mut flags = flags;
 
         // Only automatically reply shutdown if only their shutdown message is sent.
         // If we are in a state other than only their shutdown is sent,
