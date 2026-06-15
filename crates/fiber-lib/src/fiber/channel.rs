@@ -6515,7 +6515,7 @@ impl ChannelActorState {
             .collect::<Vec<TLCId>>();
 
         for tlc_id in to_be_removed_ids {
-            self.tlc_state.apply_remove_tlc(tlc_id);
+            self.apply_remove_tlc(tlc_id);
         }
     }
 
