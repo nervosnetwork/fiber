@@ -3835,30 +3835,26 @@ where
                     .into_iter()
                     .filter(|msg| match msg {
                         BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
-                            match verify_channel_update(channel_update, state.store.get_store())
+                            // Only verify when the announcement exists; if it hasn't
+                            // arrived yet, allow the update through (the gossip protocol
+                            // handles deferred verification).
+                            let store = state.store.get_store();
+                            if store
+                                .get_latest_channel_announcement(
+                                    &channel_update.channel_outpoint,
+                                )
+                                .is_none()
                             {
+                                return true;
+                            }
+                            match verify_channel_update(channel_update, store) {
                                 Ok(_) => true,
                                 Err(e) => {
-                                    // Allow updates whose announcement hasn't arrived yet
-                                    // (the gossip protocol handles deferred verification).
-                                    // Only reject updates with invalid/missing signatures.
-                                    let is_missing_announcement = matches!(&e,
-                                        VerifyBroadcastMessageError::InvalidParameter(msg)
-                                        if msg.contains("Channel announcement message not found")
+                                    debug!(
+                                        "Rejected unverified ChannelUpdate from TryBroadcastMessages: {:?}",
+                                        e
                                     );
-                                    if is_missing_announcement {
-                                        debug!(
-                                            "Allowing ChannelUpdate with unknown announcement (deferred verification): {:?}",
-                                            e
-                                        );
-                                        true
-                                    } else {
-                                        debug!(
-                                            "Rejected unverified ChannelUpdate from TryBroadcastMessages: {:?}",
-                                            e
-                                        );
-                                        false
-                                    }
+                                    false
                                 }
                             }
                         }
