@@ -3700,6 +3700,15 @@ where
         funding_tx: Transaction,
         partial_witnesses: Option<Vec<Vec<u8>>>,
     ) -> crate::Result<()> {
+        // Guard against stale retries: if the channel has been aborted
+        // or closed since the retry was scheduled, skip signing.
+        if state.store.get_channel_actor_state(&channel_id).is_none() {
+            debug!(
+                "Skipping do_sign_funding_tx: channel {:?} no longer exists (likely aborted)",
+                channel_id
+            );
+            return Ok(());
+        }
         let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
         let has_partial_witnesses = partial_witnesses.is_some();
         debug!(
