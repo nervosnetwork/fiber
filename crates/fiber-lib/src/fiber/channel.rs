@@ -3393,6 +3393,18 @@ where
                 if reason == StopReason::Abandon {
                     state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
                 } else if reason.is_abort_funding() {
+                    // Re-verify that abort is still valid in case channel state
+                    // changed after the timeout event was scheduled (e.g. a queued
+                    // TxSignatures already signed and broadcast the funding tx).
+                    if !state.can_abort_funding_on_timeout() {
+                        debug!(
+                            "Skip abort funding: channel {} state {:?} no longer abortable",
+                            state.get_id(),
+                            state.state
+                        );
+                        myself.stop(Some(format!("ChannelStopped: {:?}", reason)));
+                        return Ok(());
+                    }
                     if let Some(detail) = reason.funding_abort_detail() {
                         state.funding_abort_detail = Some(detail.to_string());
                     }
