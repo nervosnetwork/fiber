@@ -180,7 +180,16 @@ impl UdtCfgInfosExt for UdtCfgInfos {
                     && udt.script.hash_type == hash_type
                 {
                     let args = format!("0x{:x}", udt_script.args().raw_data());
-                    let pattern = Regex::new(&udt.script.args).expect("invalid expression");
+                    let pattern = match Regex::new(&udt.script.args) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Invalid UDT regex pattern '{}': {e}, skipping",
+                                udt.script.args
+                            );
+                            continue;
+                        }
+                    };
                     if pattern.is_match(&args) {
                         return Some(udt);
                     }
