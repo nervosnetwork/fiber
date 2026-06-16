@@ -471,7 +471,7 @@ pub struct NetworkGraph<S> {
     announce_private_addr: bool,
 
     #[cfg(test)]
-    pub(crate) add_rand_expiry_delta: bool,
+    pub(crate) fixed_rand_expiry_delta: Option<u64>,
 
     #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub(crate) payment_find_path_stats: Arc<Mutex<HashMap<Hash256, u128>>>,
@@ -535,7 +535,7 @@ where
             history: PaymentHistory::new(source, None, store),
             announce_private_addr,
             #[cfg(test)]
-            add_rand_expiry_delta: true,
+            fixed_rand_expiry_delta: None,
             #[cfg(any(feature = "metrics", test, feature = "bench"))]
             payment_find_path_stats: Default::default(),
         };
@@ -558,8 +558,8 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn set_add_rand_expiry_delta(&mut self, add: bool) {
-        self.add_rand_expiry_delta = add;
+    pub(crate) fn set_fixed_rand_expiry_delta(&mut self, expiry_delta: u64) {
+        self.fixed_rand_expiry_delta = Some(expiry_delta);
     }
 
     pub(crate) fn reset_channel_stats_for_direct_channel(
@@ -2076,8 +2076,8 @@ where
 
     fn rand_tlc_expiry_delta(&self, route: &[RouterHop]) -> u64 {
         #[cfg(test)]
-        if !self.add_rand_expiry_delta {
-            return 0;
+        if let Some(expiry_delta) = self.fixed_rand_expiry_delta {
+            return expiry_delta;
         }
         // https://github.com/lightning/bolts/blob/master/07-routing-gossip.md#recommendations-for-routing
         // Add a small random tlc_expiry_delta to each hop for privacy reason.

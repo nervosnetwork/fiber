@@ -868,7 +868,7 @@ fn test_graph_trampoline_routing_outer_route_fee_is_deducted_from_budget() {
     // The B->C forwarding fee must consume part of max_fee_amount before the remaining
     // budget is allocated to the inner trampoline payload.
     let mut network = MockNetworkGraph::new(4);
-    network.graph.set_add_rand_expiry_delta(false);
+    network.graph.set_fixed_rand_expiry_delta(0);
 
     let sender = network.keys[1];
     network.set_source(sender);
@@ -915,7 +915,7 @@ fn test_graph_trampoline_routing_outer_route_fee_can_exhaust_inner_budget() {
     init_tracing();
 
     let mut network = MockNetworkGraph::new(4);
-    network.graph.set_add_rand_expiry_delta(false);
+    network.graph.set_fixed_rand_expiry_delta(0);
 
     let sender = network.keys[1];
     network.set_source(sender);
@@ -997,7 +997,7 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
     let mut network = MockNetworkGraph::new(5);
 
     // Make expiries deterministic for assertions.
-    network.graph.set_add_rand_expiry_delta(false);
+    network.graph.set_fixed_rand_expiry_delta(0);
 
     let sender = network.keys[1];
     network.set_source(sender);
@@ -1121,7 +1121,7 @@ fn test_graph_trampoline_routing_tlc_expiry_limit_too_small_fails() {
     // Topology: sender(A)=node1 --(public)--> t1=node2 --(public)--> t2=node3 --(public)--> t3=node4
     // final=node5 disconnected. We set tlc_expiry_limit too small for the required trampoline slack.
     let mut network = MockNetworkGraph::new(5);
-    network.graph.set_add_rand_expiry_delta(false);
+    network.graph.set_fixed_rand_expiry_delta(0);
 
     let sender = network.keys[1];
     network.set_source(sender);
@@ -1168,7 +1168,7 @@ fn test_graph_trampoline_routing_service_fee_budget_too_low_fails() {
     // With an explicit trampoline hop fee_rate, if max_fee_amount is too low to cover
     // trampoline service fees, building the trampoline route should fail.
     let mut network = MockNetworkGraph::new(3);
-    network.graph.set_add_rand_expiry_delta(false);
+    network.graph.set_fixed_rand_expiry_delta(0);
 
     let sender = network.keys[1];
     network.set_source(sender);
@@ -1208,7 +1208,7 @@ fn test_graph_trampoline_routing_fee_rate_explicit_zero_allows_zero_fee_budget()
     // If trampoline hop fee_rate is explicitly set to 0. With max_fee_amount=0,
     // building a trampoline route should still succeed (route only needs to reach the first trampoline).
     let mut network = MockNetworkGraph::new(3);
-    network.graph.set_add_rand_expiry_delta(false);
+    network.graph.set_fixed_rand_expiry_delta(0);
 
     let sender = network.keys[1];
     network.set_source(sender);
@@ -1247,7 +1247,7 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
     // - amount_to_forward ladder derived from per-hop fee_rate
     // - build_max_fee_amount derived from remaining fee budget allocation.
     let mut network = MockNetworkGraph::new(5);
-    network.graph.set_add_rand_expiry_delta(false);
+    network.graph.set_fixed_rand_expiry_delta(0);
 
     let sender = network.keys[1];
     network.set_source(sender);
@@ -1562,7 +1562,7 @@ fn do_test_graph_build_route_expiry(n_nodes: usize) {
     let timestamp_before_building_route = now_timestamp_as_millis_u64();
     // Send a payment from the first node to the last node
 
-    network.graph.set_add_rand_expiry_delta(false);
+    network.graph.set_fixed_rand_expiry_delta(0);
     let payment_state: SendPaymentState =
         SendPaymentDataBuilder::new(last_node.into(), 100, Hash256::default())
             .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
