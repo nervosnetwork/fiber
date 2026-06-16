@@ -3196,17 +3196,25 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
 
     let (timestamp, is_newly_applied) = match message {
         BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-            let on_chain_info =
-                get_channel_on_chain_info(channel_announcement.out_point(), chain, client).await?;
-            let already_saved =
-                verify_channel_announcement(channel_announcement, &on_chain_info, store).await?;
-            if !already_saved {
+            // Check store cache first to skip expensive CKB RPC calls for
+            // already-known announcements.
+            let already_saved = store
+                .get_latest_channel_announcement(&channel_announcement.channel_outpoint)
+                .is_some_and(|(_, existing)| existing == *channel_announcement);
+            if already_saved {
+                (0, false)
+            } else {
+                let on_chain_info =
+                    get_channel_on_chain_info(channel_announcement.out_point(), chain, client)
+                        .await?;
+                let _ = verify_channel_announcement(channel_announcement, &on_chain_info, store)
+                    .await?;
                 store.save_channel_announcement(
                     on_chain_info.timestamp,
                     channel_announcement.clone(),
                 );
+                (on_chain_info.timestamp, true)
             }
-            (on_chain_info.timestamp, !already_saved)
         }
         BroadcastMessage::ChannelUpdate(channel_update) => {
             let already_saved = verify_channel_update(channel_update, store)?;
