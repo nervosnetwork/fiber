@@ -1131,6 +1131,16 @@ async fn test_trampoline_routing_max_trampoline_hops_success() {
     wait_until_graph_channel_updates_along_path(&node_t3, &[&node_t3, &node_x34, &node_t4]).await;
     wait_until_graph_channel_updates_along_path(&node_t4, &[&node_t4, &node_x45, &node_t5]).await;
 
+    // This synthetic max-hop topology inserts public intermediate nodes between trampoline hops.
+    // Pin the privacy expiry slack so success does not depend on the random delta chosen in CI.
+    let fixed_rand_expiry_delta = DEFAULT_TLC_EXPIRY_DELTA * 6;
+    for node in [&node_a, &node_t1, &node_t2, &node_t3, &node_t4, &node_t5] {
+        node.with_network_graph_mut(|graph| {
+            graph.set_fixed_rand_expiry_delta(fixed_rand_expiry_delta)
+        })
+        .await;
+    }
+
     // Trampoline forwarding will call into routing/path finding.
     reset_find_path_call_count_for_tests();
 
@@ -2349,7 +2359,7 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
     let channel_ab = channels[0];
 
     node_b
-        .with_network_graph_mut(|graph| graph.set_add_rand_expiry_delta(false))
+        .with_network_graph_mut(|graph| graph.set_fixed_rand_expiry_delta(0))
         .await;
     wait_until_graph_channel_has_update(&node_b, &node_b, &node_c).await;
 

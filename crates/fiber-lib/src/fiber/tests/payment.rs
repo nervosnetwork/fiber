@@ -2334,7 +2334,7 @@ async fn test_send_payment_with_router_rpc_rejects_overflowing_onion_expiry() {
     let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
 
     node_0
-        .with_network_graph_mut(|graph| graph.set_add_rand_expiry_delta(false))
+        .with_network_graph_mut(|graph| graph.set_fixed_rand_expiry_delta(0))
         .await;
     let router = node_0
         .build_router(BuildRouterCommand {
