@@ -54,12 +54,13 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use fiber_types::{
-    derive_private_key, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand,
+    derive_private_key, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand, AppliedFlags,
     AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus,
-    ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
+    ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, InboundTlcStatus,
     NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlc,
     RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
@@ -10891,6 +10892,111 @@ mod udt_funding_cell_capacity_tests {
             .output_data(LIQUID_UDT_AMOUNT.to_le_bytes().pack())
             .build()
             .data()
+    }
+
+    #[test]
+    fn test_clean_up_failed_tlcs_prunes_commitment_points() {
+        init_tracing();
+
+        let mut state = minimal_udt_channel_state();
+
+        // Set up remote_commitment_points at numbers 1, 3, 5.
+        // They will be pruned down based on remaining TLC references after cleanup.
+        state.remote_commitment_points = vec![
+            (1, gen_rand_fiber_public_key()),
+            (3, gen_rand_fiber_public_key()),
+            (5, gen_rand_fiber_public_key()),
+        ];
+
+        // Set commitment numbers so point 1 is always retained.
+        state.commitment_numbers = CommitmentNumbers {
+            local: 1,
+            remote: 1,
+        };
+
+        // TLC 1: confirmed and flagged for removal → clean_up_failed_tlcs will remove it.
+        // It references commitment number 3 which should be pruned after removal.
+        let tlc_to_remove = TlcInfo {
+            status: TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed),
+            tlc_id: TLCId::Received(1),
+            amount: 1000,
+            payment_hash: gen_rand_sha256_hash(),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            created_at: CommitmentNumbers {
+                local: 3,
+                remote: 3,
+            },
+            removed_reason: Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: gen_rand_sha256_hash(),
+            })),
+            forwarding_tlc: None,
+            removed_confirmed_at: Some(1),
+            applied_flags: AppliedFlags::REMOVE,
+        };
+        state.tlc_state.received_tlcs.tlcs.push(tlc_to_remove);
+
+        // TLC 2: NOT confirmed, NOT flagged → NOT removed.
+        // It references commitment number 5 which should be retained.
+        let tlc_to_keep = TlcInfo {
+            status: TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed),
+            tlc_id: TLCId::Received(2),
+            amount: 1000,
+            payment_hash: gen_rand_sha256_hash(),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            created_at: CommitmentNumbers {
+                local: 5,
+                remote: 5,
+            },
+            removed_reason: Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: gen_rand_sha256_hash(),
+            })),
+            forwarding_tlc: None,
+            removed_confirmed_at: None,
+            applied_flags: AppliedFlags::empty(),
+        };
+        state.tlc_state.received_tlcs.tlcs.push(tlc_to_keep);
+
+        assert_eq!(
+            state.remote_commitment_points.len(),
+            3,
+            "should start with 3 commitment points"
+        );
+
+        state.clean_up_failed_tlcs();
+
+        // After cleanup:
+        // - TLC 1 (refs commit 3) removed → commit point 3 should be pruned
+        // - TLC 2 (refs commit 5) still present → commit point 5 retained
+        // - Commitment numbers (1, 1) → commit point 1 retained
+        let remaining_numbers: Vec<u64> = state
+            .remote_commitment_points
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+        remaining_numbers,
+        vec![1, 5],
+        "commitment point 3 should be pruned; only 1 (commitment number) and 5 (remaining TLC) should stay"
+    );
+        assert_eq!(
+            state.tlc_state.received_tlcs.tlcs.len(),
+            1,
+            "only the non-removable TLC should remain"
+        );
     }
 
     #[test]
