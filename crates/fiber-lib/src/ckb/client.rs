@@ -33,10 +33,14 @@ impl From<Option<ckb_jsonrpc_types::TransactionWithStatusResponse>> for GetTxRes
     fn from(value: Option<ckb_jsonrpc_types::TransactionWithStatusResponse>) -> Self {
         match value {
             Some(response) => Self {
-                transaction: response.transaction.map(|tx| match tx.inner {
-                    ckb_jsonrpc_types::Either::Left(json) => transaction_view_from_json(json),
-                    ckb_jsonrpc_types::Either::Right(_) => {
-                        panic!("bytes response format not used");
+                transaction: response.transaction.and_then(|tx| match tx.inner {
+                    ckb_jsonrpc_types::Either::Left(json) => Some(transaction_view_from_json(json)),
+                    ckb_jsonrpc_types::Either::Right(bytes) => {
+                        tracing::warn!(
+                            "CKB RPC returned unexpected bytes transaction format ({} bytes), ignoring",
+                            bytes.len()
+                        );
+                        None
                     }
                 }),
                 tx_status: tx_status_from_json(response.tx_status),
@@ -66,10 +70,14 @@ impl From<Option<ckb_jsonrpc_types::TransactionWithStatusResponse>> for GetShutd
     fn from(value: Option<ckb_jsonrpc_types::TransactionWithStatusResponse>) -> Self {
         match value {
             Some(response) => Self {
-                transaction: response.transaction.map(|tx| match tx.inner {
-                    ckb_jsonrpc_types::Either::Left(json) => transaction_view_from_json(json),
-                    ckb_jsonrpc_types::Either::Right(_) => {
-                        panic!("bytes response format not used");
+                transaction: response.transaction.and_then(|tx| match tx.inner {
+                    ckb_jsonrpc_types::Either::Left(json) => Some(transaction_view_from_json(json)),
+                    ckb_jsonrpc_types::Either::Right(bytes) => {
+                        tracing::warn!(
+                            "CKB RPC returned unexpected bytes transaction format ({} bytes), ignoring",
+                            bytes.len()
+                        );
+                        None
                     }
                 }),
                 tx_status: tx_status_from_json(response.tx_status),
