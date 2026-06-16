@@ -5276,10 +5276,9 @@ where
             .map(|(channel_id, _)| *channel_id)
             .collect();
         for channel_id in failed_channels {
-            if let Some(mut record) = self.store.get_channel_open_record(&channel_id) {
-                record.fail("Peer disconnected during channel opening".to_string());
-                self.store.insert_channel_open_record(record);
-            }
+            // Delete the persisted record to prevent unbounded accumulation
+            // of stale channel-open entries from repeated connect/disconnect cycles.
+            self.store.delete_channel_open_record(&channel_id);
             self.to_be_accepted_channels.remove(&channel_id);
         }
 
