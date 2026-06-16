@@ -1554,11 +1554,13 @@ where
                 tx_index,
                 timestamp,
             ) => {
+                state.inflight_tracers.remove(&outpoint.tx_hash().into());
                 state
                     .on_funding_transaction_confirmed(outpoint, block_hash, tx_index, timestamp)
                     .await;
             }
             NetworkActorEvent::FundingTransactionFailed(outpoint) => {
+                state.inflight_tracers.remove(&outpoint.tx_hash().into());
                 error!("Funding transaction failed: {:?}", outpoint);
                 state.abort_funding(Either::Right(outpoint)).await;
             }
@@ -1574,6 +1576,7 @@ where
                 force,
                 close_by_us,
             ) => {
+                state.inflight_tracers.remove(&tx_hash.clone().into());
                 state
                     .on_closing_transaction_confirmed(
                         &pubkey,
@@ -1585,6 +1588,7 @@ where
                     .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(pubkey, channel_id, tx_hash) => {
+                state.inflight_tracers.remove(&tx_hash.clone().into());
                 error!(
                     "Closing transaction failed for channel {:?}, tx hash: {:?}, peer pubkey: {:?}",
                     &channel_id, &tx_hash, &pubkey
@@ -3995,6 +3999,8 @@ pub struct NetworkActorState<S, C> {
     // Track the last ChannelReady event timestamp per channel to debounce
     // payment retry scans triggered by reestablish.
     last_channel_ready_scan: HashMap<OutPoint, u64>,
+    // Active in-flight CKB tx tracers by tx_hash to prevent duplicate actor spawns.
+    inflight_tracers: HashSet<Hash256>,
 }
 
 #[derive(Debug, Clone)]
@@ -4660,6 +4666,10 @@ where
         tx_hash: Hash256,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
+        if !self.inflight_tracers.insert(tx_hash) {
+            debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
+            return Ok(());
+        }
         let handler = InFlightCkbTxActor {
             chain_actor: self.chain_actor.clone(),
             chain_client: self.chain_client.clone(),
@@ -4685,7 +4695,11 @@ where
         tx: TransactionView,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
-        let tx_hash = tx.hash().into();
+        let tx_hash: Hash256 = tx.hash().into();
+        if !self.inflight_tracers.insert(tx_hash) {
+            debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
+            return Ok(());
+        }
         debug!(
             "Spawning InFlightCkbTxActor: tx_hash={:?}, tx_kind={:?}, confirmations={}, inputs={}, outputs={}",
             tx_hash,
@@ -6237,6 +6251,7 @@ where
             inflight_payments: Default::default(),
             pending_external_funding_replies: Default::default(),
             last_channel_ready_scan: Default::default(),
+            inflight_tracers: Default::default(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
