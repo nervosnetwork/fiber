@@ -15,7 +15,6 @@ tests/nodes/.ports
 /*.info
 .vscode
 /migrate/target
-/package-lock.json
 *.txt
 /node_modules
 /index.html
