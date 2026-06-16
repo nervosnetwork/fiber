@@ -29,6 +29,7 @@ impl ChannelActorState {
         ChannelActorState {
             core,
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -52,6 +53,7 @@ impl ChannelActorState {
         ChannelActorState {
             core,
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
