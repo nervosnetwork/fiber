@@ -2119,7 +2119,15 @@ where
 {
     let start = tokio::time::Instant::now();
     let interval = Duration::from_millis(200);
-    let max_wait_time = Duration::from_secs(10);
+    let max_wait_time = if let Some(timeout_secs) = env::var(EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+    {
+        Duration::from_secs(timeout_secs)
+    } else {
+        Duration::from_secs(10)
+    };
     loop {
         if f().await {
             return;
@@ -2127,8 +2135,8 @@ where
         tokio::time::sleep(interval).await;
         if start.elapsed() > max_wait_time {
             panic!(
-                "Wait timeout after {:?} (interval {:?})",
-                max_wait_time, interval
+                "Wait timeout after {:?} (interval {:?}). You can adjust it with {}",
+                max_wait_time, interval, EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV
             );
         }
     }
