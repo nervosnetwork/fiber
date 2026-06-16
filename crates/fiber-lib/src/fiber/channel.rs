@@ -132,6 +132,8 @@ pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 #[cfg(any(test, feature = "bench"))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 
+pub const REESTABLISH_TIMEOUT: u64 = 5 * 60 * 1000;
+
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 pub(crate) fn funding_timeout_check_delay(
@@ -3438,6 +3440,18 @@ where
                         state.get_remote_pubkey(),
                     );
                     self.notify_network_actor_shutdown_me(state);
+                } else if state.reestablishing
+                    && !state.is_closed()
+                    && state.reestablish_started_at.is_some_and(|started| {
+                        now_timestamp_as_millis_u64().saturating_sub(started) > REESTABLISH_TIMEOUT
+                    })
+                {
+                    error!(
+                        "Channel {} from peer {:?} has been reestablishing too long, shutting down it forcefully",
+                        state.get_id(),
+                        state.get_remote_pubkey(),
+                    );
+                    self.notify_network_actor_shutdown_me(state);
                 }
             }
             ChannelEvent::MaintainChannelTlcs => {
@@ -4510,6 +4524,9 @@ pub struct ChannelActorState {
     pub waiting_peer_response: Option<u64>,
 
     #[doc = "skip_store"]
+    pub reestablish_started_at: Option<u64>,
+
+    #[doc = "skip_store"]
     pub network: Option<ActorRef<NetworkActorMessage>>,
 
     // The handle for scheduled channel update broadcasting.
@@ -4585,6 +4602,7 @@ impl<'de> Deserialize<'de> for ChannelActorState {
         let mut state = Self {
             core,
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -5281,6 +5299,7 @@ impl ChannelActorState {
     pub(crate) fn mark_reestablishing_offline(&mut self) {
         self.clear_waiting_peer_response();
         self.reestablishing = true;
+        self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
         self.connectivity_state = ChannelConnectivityState::Offline;
         if let Some(handle) = self.scheduled_channel_update_handle.take() {
             handle.abort();
@@ -5290,6 +5309,7 @@ impl ChannelActorState {
     pub(crate) fn mark_watching_chain_offline(&mut self) {
         self.clear_waiting_peer_response();
         self.reestablishing = false;
+        self.reestablish_started_at = None;
         self.connectivity_state = ChannelConnectivityState::Offline;
         if let Some(handle) = self.scheduled_channel_update_handle.take() {
             handle.abort();
@@ -5536,6 +5556,7 @@ impl ChannelActorState {
                 created_at: SystemTime::now(),
             },
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -5630,6 +5651,7 @@ impl ChannelActorState {
                 created_at: SystemTime::now(),
             },
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -7951,6 +7973,7 @@ impl ChannelActorState {
 
         self.pending_reestablish_channel_ready = false;
         self.reestablishing = false;
+        self.reestablish_started_at = None;
         self.connectivity_state = ChannelConnectivityState::Online;
         self.notify_channel_connectivity(ChannelConnectivityState::Online);
 

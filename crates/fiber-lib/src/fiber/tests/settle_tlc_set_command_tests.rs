@@ -313,6 +313,7 @@ fn create_test_channel_state_with_tlc(
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
+        reestablish_started_at: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],

@@ -10868,6 +10868,7 @@ mod udt_funding_cell_capacity_tests {
                 external_funding: None,
             },
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
