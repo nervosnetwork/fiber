@@ -8172,6 +8172,14 @@ impl ChannelActorState {
             next_revocation_nonce,
         } = revoke_and_ack;
 
+        let remote_tlc_base_key = &self.get_remote_channel_public_keys().tlc_base_key;
+        if !is_tlc_key_derivation_safe(remote_tlc_base_key, &next_per_commitment_point) {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "peer tlc_basepoint and next_per_commitment_point in RevokeAndAck derive to invalid key"
+                    .to_string(),
+            ));
+        }
+
         let sign_ctx = match self.get_revoke_sign_context(true) {
             Some(ctx) => ctx,
             None => {

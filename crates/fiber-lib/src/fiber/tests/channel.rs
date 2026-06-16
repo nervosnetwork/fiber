@@ -58,7 +58,7 @@ use fiber_types::{
     AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus,
     ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, InboundTlcStatus,
     NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlc,
-    RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, ShuttingDownFlags,
+    RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck, ShuttingDownFlags,
     SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
     NO_SHARED_SECRET,
 };
@@ -325,6 +325,113 @@ fn test_malicious_keys_would_have_caused_panic() {
     assert!(
         result.is_err(),
         "malicious TLC basepoint and commitment point should cause a panic in derive_tlc_pubkey"
+    );
+}
+
+#[test]
+fn test_revoke_and_ack_bypass_safe_initial_keys_with_malicious_later_key() {
+    use fiber_types::derive_tlc_pubkey;
+    let (malicious_tlc_basepoint, bad_commitment_point) =
+        malicious_tlc_basepoint_and_commitment_point();
+
+    let signer = InMemorySigner::generate_from_seed(b"safe-commitment-for-open-channel");
+    let safe_first_commitment_point = signer.get_commitment_point(1);
+    let safe_second_commitment_point = signer.get_commitment_point(2);
+
+    assert!(
+        is_tlc_key_derivation_safe(&malicious_tlc_basepoint, &safe_first_commitment_point),
+        "first_per_commitment_point should pass validation at OpenChannel"
+    );
+    assert!(
+        is_tlc_key_derivation_safe(&malicious_tlc_basepoint, &safe_second_commitment_point),
+        "second_per_commitment_point should pass validation at OpenChannel"
+    );
+
+    assert!(
+        !is_tlc_key_derivation_safe(&malicious_tlc_basepoint, &bad_commitment_point),
+        "malicious next_per_commitment_point in RevokeAndAck should be rejected by the fix"
+    );
+
+    let result = std::panic::catch_unwind(|| {
+        let _ = derive_tlc_pubkey(&malicious_tlc_basepoint, &bad_commitment_point);
+    });
+    assert!(
+        result.is_err(),
+        "without validation, the malicious next_per_commitment_point would cause a panic"
+    );
+}
+
+#[tokio::test]
+async fn test_revoke_and_ack_rejects_malicious_next_per_commitment_point() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let (malicious_tlc_basepoint, bad_commitment_point) =
+        malicious_tlc_basepoint_and_commitment_point();
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    let initial_commitment_points_len = state.remote_commitment_points.len();
+    state
+        .remote_channel_public_keys
+        .as_mut()
+        .unwrap()
+        .tlc_base_key = malicious_tlc_basepoint;
+    state.tlc_state.set_waiting_ack(true);
+    node_a.update_channel_actor_state(state, None).await;
+
+    while tokio::time::timeout(Duration::from_millis(25), node_a.event_emitter.recv())
+        .await
+        .is_ok()
+    {}
+
+    let dummy_partial_sig =
+        musig2::PartialSignature::from_slice(&[1u8; 32]).expect("valid partial signature bytes");
+    let dummy_nonce = musig2::SecNonceBuilder::new([1u8; 32])
+        .build()
+        .public_nonce();
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::revoke_and_ack(RevokeAndAck {
+                    channel_id,
+                    revocation_partial_signature: dummy_partial_sig,
+                    next_per_commitment_point: bad_commitment_point,
+                    next_revocation_nonce: dummy_nonce,
+                }),
+            )),
+        ))
+        .expect("send malicious RevokeAndAck");
+
+    let mut saw_rejection = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(Some(event)) = tokio::time::timeout(remaining, node_a.event_emitter.recv()).await
+        else {
+            break;
+        };
+        if let NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) = &event {
+            if msg.contains("next_per_commitment_point in RevokeAndAck derive to invalid key") {
+                saw_rejection = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        saw_rejection,
+        "node_a should reject the malicious next_per_commitment_point in RevokeAndAck"
+    );
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state.remote_commitment_points.len(),
+        initial_commitment_points_len,
+        "remote_commitment_points should not include the malicious point"
     );
 }
 
