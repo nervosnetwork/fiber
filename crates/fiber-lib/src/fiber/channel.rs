@@ -3393,13 +3393,9 @@ where
                 if reason == StopReason::Abandon {
                     state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
                 } else if reason.is_abort_funding() {
-                    // Re-verify that abort is still valid in case channel state
-                    // changed after the timeout event was scheduled (e.g. a queued
-                    // TxSignatures already signed and broadcast the funding tx).
-                    // Only skip abort when the funding is actually confirmed on chain;
-                    // if funding failed (FundingTransactionFailed) or hasn't yet
-                    // confirmed, abort remains correct regardless of signature flags.
-                    if state.funding_tx_confirmed_at.is_some() {
+                    // For timeout-based aborts: re-verify that abort is still
+                    // valid. FundingFailed always proceeds unconditionally.
+                    if reason.is_timeout_abort() && state.funding_tx_confirmed_at.is_some() {
                         debug!(
                             "Skip abort funding: channel {} state {:?} no longer abortable",
                             state.get_id(),
@@ -4640,12 +4636,22 @@ pub enum StopReason {
     Abandon,
     AbortFunding,
     AbortFundingWithDetail(String),
+    FundingFailed,
     Closed,
     PeerDisConnected,
 }
 
 impl StopReason {
     pub(crate) fn is_abort_funding(&self) -> bool {
+        matches!(
+            self,
+            StopReason::AbortFunding
+                | StopReason::AbortFundingWithDetail(_)
+                | StopReason::FundingFailed
+        )
+    }
+
+    pub(crate) fn is_timeout_abort(&self) -> bool {
         matches!(
             self,
             StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_)

@@ -1668,6 +1668,7 @@ where
                             StopReason::Abandon => "Channel was abandoned".to_string(),
                             StopReason::AbortFunding => "Funding transaction aborted".to_string(),
                             StopReason::AbortFundingWithDetail(detail) => detail.clone(),
+                            StopReason::FundingFailed => "Funding transaction failed".to_string(),
                             StopReason::PeerDisConnected => {
                                 "Peer disconnected during channel opening".to_string()
                             }
@@ -4757,7 +4758,7 @@ where
         self.send_message_to_channel_actor(
             channel_id,
             None,
-            ChannelActorMessage::Event(ChannelEvent::Stop(StopReason::AbortFunding)),
+            ChannelActorMessage::Event(ChannelEvent::Stop(StopReason::FundingFailed)),
         )
         .await;
     }

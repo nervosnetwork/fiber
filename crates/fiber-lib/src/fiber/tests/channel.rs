@@ -11001,14 +11001,14 @@ mod udt_funding_cell_capacity_tests {
         );
     }
 
-    /// Regression test: when `Stop(AbortFunding)` fires after the channel has
-    /// already signed (OUR_TX_SIGNATURES_SENT is set), `can_abort_funding_on_timeout`
-    /// returns false, BUT the abort handler must keep the actor alive only when
-    /// funding is actually confirmed on chain. If funding hasn't confirmed yet
-    /// (e.g., FundingTransactionFailed fired), abort remains valid.
+    /// Regression test: verify that Stop(AbortFunding) (timeout-based) is
+    /// blocked when funding has already confirmed on chain, but that
+    /// Stop(FundingFailed) always proceeds regardless of state.
     ///
-    /// Without the fix, calling `myself.stop()` would clean up pending_channels
-    /// and outpoint_channel_map, stranding the funding confirmation.
+    /// A stale timeout abort arriving after OUR_TX_SIGNATURES_SENT but before
+    /// confirmation still needs to be blocked — otherwise the channel closes
+    /// and pending_channels routing is cleaned up before FundingTransactionConfirmed
+    /// can be delivered.
     #[test]
     fn test_stale_abort_stop_does_not_close_signed_channel() {
         init_tracing();
@@ -11032,22 +11032,21 @@ mod udt_funding_cell_capacity_tests {
             "should NOT be abortable by timeout after OUR_TX_SIGNATURES_SENT is set"
         );
 
-        // Funding not yet confirmed on chain (funding could have failed).
-        // Abort should still be allowed — the guard only blocks when funding
-        // is actually confirmed.
+        // Funding not yet confirmed on chain. A timeout-based abort arriving
+        // in this window (after signing, before confirmation) must be blocked
+        // to preserve the channel for FundingTransactionConfirmed.
         assert!(
             state.funding_tx_confirmed_at.is_none(),
             "funding should not be confirmed yet"
         );
 
-        // Simulate funding confirmed on chain.
-        state.funding_tx_confirmed_at = Some((H256::default(), 0, 0));
+        // FundingFailed should always abort regardless of state.
+        assert!(StopReason::FundingFailed.is_abort_funding());
+        assert!(!StopReason::FundingFailed.is_timeout_abort());
 
-        // Now abort should be blocked — funding is confirmed, can't abort.
-        assert!(
-            !state.is_closed(),
-            "signed channel with confirmed funding must remain open after stale abort"
-        );
+        // After funding confirms, timeout abort must also be blocked.
+        state.funding_tx_confirmed_at = Some((H256::default(), 0, 0));
+        assert!(!state.is_closed());
     }
 
     #[test]
