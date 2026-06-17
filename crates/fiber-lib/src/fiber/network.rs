@@ -1465,7 +1465,9 @@ where
 
                 // Retry payment attempts whose first hop uses this channel.
                 // Debounce to prevent resource exhaustion from repeated
-                // reestablish events.
+                // reestablish events. Uses trailing-edge: when suppressed,
+                // schedules a deferred scan so the trailing ChannelReady
+                // (e.g. from a real reconnect) is never lost.
                 let now = now_timestamp_as_millis_u64();
                 let should_scan = state
                     .last_channel_ready_scan
@@ -1496,6 +1498,31 @@ where
                                 attempt.payment_hash, err
                             );
                         }
+                    }
+                } else {
+                    // Trailing edge: schedule a deferred scan at cooldown expiry
+                    // so the last ChannelReady in a burst isn't lost.
+                    let elapsed = state
+                        .last_channel_ready_scan
+                        .get(&channel_outpoint)
+                        .map(|last| now.saturating_sub(*last))
+                        .unwrap_or(0);
+                    let remaining = CHANNEL_READY_RETRY_DEBOUNCE_MS.saturating_sub(elapsed);
+                    if remaining > 0 {
+                        let ch_outpoint = channel_outpoint.clone();
+                        let ch_id = channel_id;
+                        let pk = pubkey;
+                        debug!(
+                            "Debounced ChannelReady retry scan for {:?}, scheduling deferred scan in {}ms",
+                            ch_outpoint, remaining
+                        );
+                        myself.send_after(Duration::from_millis(remaining), move || {
+                            NetworkActorMessage::new_event(NetworkActorEvent::ChannelReady(
+                                ch_id,
+                                pk,
+                                ch_outpoint,
+                            ))
+                        });
                     }
                 }
 
@@ -5520,6 +5547,7 @@ where
             .find(|(_, id)| *id == &channel_id)
         {
             self.pending_channels.remove(outpoint);
+            self.last_channel_ready_scan.remove(outpoint);
         }
         self.outpoint_channel_map.retain(|_, id| *id != channel_id);
     }
