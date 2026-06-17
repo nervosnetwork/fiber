@@ -3402,7 +3402,6 @@ where
                             state.get_id(),
                             state.state
                         );
-                        myself.stop(Some(format!("ChannelStopped: {:?}", reason)));
                         return Ok(());
                     }
                     if let Some(detail) = reason.funding_abort_detail() {
