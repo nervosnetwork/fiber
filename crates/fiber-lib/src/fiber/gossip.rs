@@ -3831,13 +3831,52 @@ where
             }
             GossipActorMessage::TryBroadcastMessages(messages) => {
                 trace!("Trying to broadcast message: {:?}", &messages);
-                state
-                    .store
-                    .actor
-                    .send_message(ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessages(
-                        messages,
-                    ))
-                    .expect("store actor alive");
+                let validated_messages: Vec<BroadcastMessageWithTimestamp> = messages
+                    .into_iter()
+                    .filter(|msg| match msg {
+                        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
+                            // Verify signature when the announcement exists.
+                            // When the announcement hasn't arrived yet, still allow
+                            // the update through — the update originates from a
+                            // payment onion error and dropping it would break routing
+                            // (the update will reach us through normal gossip when
+                            // the announcement is received for proper verification).
+                            let store = state.store.get_store();
+                            if store
+                                .get_latest_channel_announcement(
+                                    &channel_update.channel_outpoint,
+                                )
+                                .is_none()
+                            {
+                                debug!(
+                                    "Allowing ChannelUpdate from TryBroadcastMessages without announcement (deferred verification): {:?}",
+                                    channel_update.channel_outpoint
+                                );
+                                return true;
+                            }
+                            match verify_channel_update(channel_update, store) {
+                                Ok(_) => true,
+                                Err(e) => {
+                                    debug!(
+                                        "Rejected unverified ChannelUpdate from TryBroadcastMessages: {:?}",
+                                        e
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                        _ => true,
+                    })
+                    .collect();
+                if !validated_messages.is_empty() {
+                    state
+                        .store
+                        .actor
+                        .send_message(ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessages(
+                            validated_messages,
+                        ))
+                        .expect("store actor alive");
+                }
             }
             GossipActorMessage::UpdatePeerFilter(pubkey, cursor) => {
                 self.update_peer_filter(state, &pubkey, &cursor, myself)
