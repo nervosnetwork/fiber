@@ -24,7 +24,7 @@ use ckb_types::{
 };
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use secp256k1::{Message, SecretKey, SECP256K1};
+use secp256k1::{Message, SECP256K1};
 use strum::AsRefStr;
 use tracing::{debug, error, info, warn};
 
@@ -980,7 +980,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
         .build();
 
     let mut two_parties_all_settled = false;
-    let (unlock, mut unlock_amount, unlock_key, new_settlement_witness) = match settlement_witness {
+    let (unlocks, mut unlock_amount, unlock_keys, new_settlement_witness) = match settlement_witness
+    {
         Some(mut sw) => {
             if sw.update() {
                 debug!("channel_data local_settlement_key pubkey hash: {:?}，sw settlement_remote_pubkey_hash: {:?}, sw settlement_local_pubkey_hash: {:?}, for_remote: {}",
@@ -992,19 +993,20 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         two_parties_all_settled = sw.settlement_remote_pubkey_hash == [0u8; 20];
                         if two_parties_all_settled {
                             (
-                                Unlock {
+                                vec![Unlock {
                                     unlock_type: 0xFF,
                                     with_preimage: false,
                                     signature: [0u8; 65],
                                     preimage: None,
-                                },
+                                }],
                                 sw.settlement_local_amount,
-                                channel_data.local_settlement_key.clone(),
+                                vec![channel_data.local_settlement_key.clone()],
                                 sw.to_witness(),
                             )
                         } else {
                             let mut pending_tlcs_count = sw.pending_htlcs.len();
-                            let mut unlock_option = None;
+                            let mut unlocks_with_keys = Vec::new();
+                            let mut timeout_unlock_option = None;
                             for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
                                 let expiry = match tlc.absolute_expiry() {
                                     Some(expiry) => expiry,
@@ -1016,7 +1018,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                         tlc.find_matched_private_key(&settlement_data, false)
                                     {
                                         if current_time > expiry {
-                                            unlock_option = Some((
+                                            timeout_unlock_option = Some((
                                                 Unlock {
                                                     unlock_type: i as u8,
                                                     with_preimage: false,
@@ -1037,7 +1039,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     if let Some(preimage) =
                                         store.search_preimage(self_node_id, &tlc.payment_hash)
                                     {
-                                        unlock_option = Some((
+                                        unlocks_with_keys.push((
                                             Unlock {
                                                 unlock_type: i as u8,
                                                 with_preimage: true,
@@ -1047,7 +1049,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                             tlc.payment_amount,
                                             private_key.clone(),
                                         ));
-                                        break;
                                     } else if current_time > expiry {
                                         pending_tlcs_count = checked_sub_usize(
                                             pending_tlcs_count,
@@ -1060,22 +1061,41 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 }
                             }
 
-                            if pending_tlcs_count == 0 {
-                                unlock_option = Some((
-                                    Unlock {
+                            let unlock_option = if !unlocks_with_keys.is_empty() {
+                                let unlock_amount = unlocks_with_keys
+                                    .iter()
+                                    .map(|(unlock, amount, _)| {
+                                        debug!("unlock: {:?}, unlock_amount: {:?}", unlock, amount);
+                                        amount
+                                    })
+                                    .sum();
+                                let (unlocks, unlock_keys): (Vec<_>, Vec<_>) = unlocks_with_keys
+                                    .into_iter()
+                                    .map(|(unlock, _, key)| (unlock, key))
+                                    .unzip();
+                                Some((unlocks, unlock_amount, unlock_keys))
+                            } else if let Some((unlock, unlock_amount, private_key)) =
+                                timeout_unlock_option
+                            {
+                                debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
+                                Some((vec![unlock], unlock_amount, vec![private_key]))
+                            } else if pending_tlcs_count == 0 {
+                                Some((
+                                    vec![Unlock {
                                         unlock_type: 0xFF,
                                         with_preimage: false,
                                         signature: [0u8; 65],
                                         preimage: None,
-                                    },
+                                    }],
                                     sw.settlement_local_amount,
-                                    channel_data.local_settlement_key.clone(),
-                                ));
-                            }
+                                    vec![channel_data.local_settlement_key.clone()],
+                                ))
+                            } else {
+                                None
+                            };
 
-                            if let Some((unlock, unlock_amount, private_key)) = unlock_option {
-                                debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
-                                (unlock, unlock_amount, private_key, sw.to_witness())
+                            if let Some((unlocks, unlock_amount, private_keys)) = unlock_option {
+                                (unlocks, unlock_amount, private_keys, sw.to_witness())
                             } else {
                                 return Ok(None);
                             }
@@ -1089,19 +1109,20 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     two_parties_all_settled = sw.settlement_local_pubkey_hash == [0u8; 20];
                     if two_parties_all_settled {
                         (
-                            Unlock {
+                            vec![Unlock {
                                 unlock_type: 0xFE,
                                 with_preimage: false,
                                 signature: [0u8; 65],
                                 preimage: None,
-                            },
+                            }],
                             sw.settlement_remote_amount,
-                            channel_data.local_settlement_key.clone(),
+                            vec![channel_data.local_settlement_key.clone()],
                             sw.to_witness(),
                         )
                     } else {
                         let mut pending_tlcs_count = sw.pending_htlcs.len();
-                        let mut unlock_option = None;
+                        let mut unlocks_with_keys = Vec::new();
+                        let mut timeout_unlock_option = None;
                         for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
                             let expiry = match tlc.absolute_expiry() {
                                 Some(expiry) => expiry,
@@ -1113,7 +1134,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     tlc.find_matched_private_key(&settlement_data, false)
                                 {
                                     if current_time > expiry {
-                                        unlock_option = Some((
+                                        timeout_unlock_option = Some((
                                             Unlock {
                                                 unlock_type: i as u8,
                                                 with_preimage: false,
@@ -1134,7 +1155,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 if let Some(preimage) =
                                     store.search_preimage(self_node_id, &tlc.payment_hash)
                                 {
-                                    unlock_option = Some((
+                                    unlocks_with_keys.push((
                                         Unlock {
                                             unlock_type: i as u8,
                                             with_preimage: true,
@@ -1144,7 +1165,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                         tlc.payment_amount,
                                         private_key.clone(),
                                     ));
-                                    break;
                                 } else if current_time > expiry {
                                     pending_tlcs_count = checked_sub_usize(
                                         pending_tlcs_count,
@@ -1161,22 +1181,41 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             }
                         }
 
-                        if pending_tlcs_count == 0 {
-                            unlock_option = Some((
-                                Unlock {
+                        let unlock_option = if !unlocks_with_keys.is_empty() {
+                            let unlock_amount = unlocks_with_keys
+                                .iter()
+                                .map(|(unlock, amount, _)| {
+                                    debug!("unlock: {:?}, unlock_amount: {:?}", unlock, amount);
+                                    amount
+                                })
+                                .sum();
+                            let (unlocks, unlock_keys): (Vec<_>, Vec<_>) = unlocks_with_keys
+                                .into_iter()
+                                .map(|(unlock, _, key)| (unlock, key))
+                                .unzip();
+                            Some((unlocks, unlock_amount, unlock_keys))
+                        } else if let Some((unlock, unlock_amount, private_key)) =
+                            timeout_unlock_option
+                        {
+                            debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
+                            Some((vec![unlock], unlock_amount, vec![private_key]))
+                        } else if pending_tlcs_count == 0 {
+                            Some((
+                                vec![Unlock {
                                     unlock_type: 0xFE,
                                     with_preimage: false,
                                     signature: [0u8; 65],
                                     preimage: None,
-                                },
+                                }],
                                 sw.settlement_remote_amount,
-                                channel_data.local_settlement_key.clone(),
-                            ));
-                        }
+                                vec![channel_data.local_settlement_key.clone()],
+                            ))
+                        } else {
+                            None
+                        };
 
-                        if let Some((unlock, unlock_amount, private_key)) = unlock_option {
-                            debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
-                            (unlock, unlock_amount, private_key, sw.to_witness())
+                        if let Some((unlocks, unlock_amount, private_keys)) = unlock_option {
+                            (unlocks, unlock_amount, private_keys, sw.to_witness())
                         } else {
                             return Ok(None);
                         }
@@ -1193,7 +1232,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
         }
         None => {
             let mut pending_tlcs_count = settlement_data.tlcs.len();
-            let mut unlock_option = None;
+            let mut unlocks_with_keys = Vec::new();
+            let mut timeout_unlock_option = None;
             for (i, tlc) in settlement_data.tlcs.iter().enumerate() {
                 match (tlc.tlc_id.is_offered(), for_remote) {
                     (true, true) | (false, false) => {
@@ -1204,7 +1244,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             <= current_epoch.to_rational()
                             && current_time > tlc.expiry
                         {
-                            unlock_option = Some((
+                            timeout_unlock_option = Some((
                                 Unlock {
                                     unlock_type: i as u8,
                                     with_preimage: false,
@@ -1213,8 +1253,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 },
                                 tlc.payment_amount,
                                 tlc.local_key.clone(),
+                                delay,
                             ));
-                            delay_epoch = delay;
                             break;
                         }
                     }
@@ -1228,7 +1268,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             if let Some(preimage) =
                                 store.get_watch_preimage(self_node_id, &tlc.payment_hash)
                             {
-                                unlock_option = Some((
+                                unlocks_with_keys.push((
                                     Unlock {
                                         unlock_type: i as u8,
                                         with_preimage: true,
@@ -1237,9 +1277,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     },
                                     tlc.payment_amount,
                                     tlc.local_key.clone(),
+                                    delay,
                                 ));
-                                delay_epoch = delay;
-                                break;
                             } else if cell_header_epoch.to_rational() + delay_epoch.to_rational()
                                 <= current_epoch.to_rational()
                                 && current_time > tlc.expiry
@@ -1252,7 +1291,30 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 }
             }
 
-            if pending_tlcs_count == 0 {
+            let unlock_option = if !unlocks_with_keys.is_empty() {
+                let unlock_amount = unlocks_with_keys
+                    .iter()
+                    .map(|(unlock, amount, _, _)| {
+                        debug!("unlock: {:?}, unlock_amount: {:?}", unlock, amount);
+                        amount
+                    })
+                    .sum();
+                let selected_delay = unlocks_with_keys
+                    .first()
+                    .map(|(_, _, _, delay)| *delay)
+                    .expect("non-empty unlocks");
+                delay_epoch = selected_delay;
+                let (unlocks, unlock_keys): (Vec<_>, Vec<_>) = unlocks_with_keys
+                    .into_iter()
+                    .map(|(unlock, _, key, _)| (unlock, key))
+                    .unzip();
+                Some((unlocks, unlock_amount, unlock_keys))
+            } else if let Some((unlock, unlock_amount, private_key, delay)) = timeout_unlock_option
+            {
+                delay_epoch = delay;
+                debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
+                Some((vec![unlock], unlock_amount, vec![private_key]))
+            } else if pending_tlcs_count == 0 {
                 if cell_header_epoch.to_rational() + delay_epoch.to_rational()
                     > current_epoch.to_rational()
                 {
@@ -1262,24 +1324,25 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     );
                     return Ok(None);
                 }
-                unlock_option = Some((
-                    Unlock {
+                Some((
+                    vec![Unlock {
                         unlock_type: if for_remote { 0xFF } else { 0xFE },
                         with_preimage: false,
                         signature: [0u8; 65],
                         preimage: None,
-                    },
+                    }],
                     settlement_data.local_amount,
-                    channel_data.local_settlement_key.clone(),
-                ));
-            }
+                    vec![channel_data.local_settlement_key.clone()],
+                ))
+            } else {
+                None
+            };
 
-            if let Some((unlock, unlock_amount, private_key)) = unlock_option {
-                debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
+            if let Some((unlocks, unlock_amount, private_keys)) = unlock_option {
                 (
-                    unlock,
+                    unlocks,
                     unlock_amount,
-                    private_key,
+                    private_keys,
                     settlement_data_to_witness(
                         &settlement_data,
                         for_remote,
@@ -1294,12 +1357,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
     };
 
     let mut new_commitment_lock_script_args = lock_script_args[0..36].to_vec();
+    let unlock_count = unlocks.len() as u8;
     let new_script_hash = {
         let mut sw = SettlementWitness::build_from_witness(
-            &[&[0x01], new_settlement_witness.as_slice()].concat(),
+            &[&[unlock_count], new_settlement_witness.as_slice()].concat(),
         )
         .expect("valid data");
-        sw.unlocks.push(unlock.clone());
+        sw.unlocks.extend(unlocks.iter().cloned());
         sw.update();
         blake160(&sw.to_witness()).0
     };
@@ -1335,9 +1399,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
         let witness_for_commitment_cell: Vec<u8> = [
             XUDT_COMPATIBLE_WITNESS.as_slice(),
-            &[0x01],
+            &[unlock_count],
             new_settlement_witness.as_slice(),
-            unlock.to_witness().as_slice(),
+            unlocks
+                .iter()
+                .flat_map(|unlock| unlock.to_witness())
+                .collect::<Vec<_>>()
+                .as_slice(),
         ]
         .concat();
 
@@ -1413,7 +1481,10 @@ fn build_settlement_tx<S: WatchtowerStore>(
         }
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
         let mut inputs_capacity = capacity;
-        let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
+        let since = if unlocks
+            .iter()
+            .any(|unlock| unlock.unlock_type < 0xFE && !unlock.with_preimage)
+        {
             Since::new(SinceType::Timestamp, current_time / 1000, false).value()
         } else {
             0
@@ -1463,7 +1534,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     vec![new_commitment_output, adjusted_settlement_output]
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
-                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
+                let tx = sign_tx_with_settlement(tx, signer, &unlock_keys, &unlocks)?;
                 return Ok(Some(tx));
             }
         }
@@ -1512,9 +1583,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
         let witness_for_commitment_cell: Vec<u8> = [
             XUDT_COMPATIBLE_WITNESS.as_slice(),
-            &[0x01],
+            &[unlock_count],
             new_settlement_witness.as_slice(),
-            unlock.to_witness().as_slice(),
+            unlocks
+                .iter()
+                .flat_map(|unlock| unlock.to_witness())
+                .collect::<Vec<_>>()
+                .as_slice(),
         ]
         .concat();
 
@@ -1543,7 +1618,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             )?)
             .input(input);
 
-        let outputs_capacity: u64 = if unlock.unlock_type >= 0xFE {
+        let outputs_capacity: u64 = if unlocks.iter().any(|unlock| unlock.unlock_type >= 0xFE) {
             if two_parties_all_settled {
                 settlement_output = settlement_output
                     .as_builder()
@@ -1638,7 +1713,10 @@ fn build_settlement_tx<S: WatchtowerStore>(
         query.min_total_capacity = min_total_capacity;
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
         let mut inputs_capacity = commitment_cell.output.capacity.value();
-        let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
+        let since = if unlocks
+            .iter()
+            .any(|unlock| unlock.unlock_type < 0xFE && !unlock.with_preimage)
+        {
             Since::new(SinceType::Timestamp, current_time / 1000, false).value()
         } else {
             0
@@ -1694,7 +1772,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .set_outputs(outputs)
                     .set_outputs_data(outputs_data)
                     .build();
-                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
+                let tx = sign_tx_with_settlement(tx, signer, &unlock_keys, &unlocks)?;
                 return Ok(Some(tx));
             }
         }
@@ -1732,31 +1810,31 @@ fn sign_tx(
 fn sign_tx_with_settlement(
     tx: TransactionView,
     change_signer: &LocalSigner,
-    settlement_secret_key: SecretKey,
-    with_preimage: bool,
+    settlement_keys: &[Privkey],
+    unlocks: &[Unlock],
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
+    assert_eq!(settlement_keys.len(), unlocks.len());
     let tx = tx.data().into_view();
 
     let message = compute_tx_message(&tx);
     let secp256k1_message = Message::from_digest_slice(&message)?;
-    let signature = SECP256K1.sign_ecdsa_recoverable(&secp256k1_message, &settlement_secret_key);
-    let (recov_id, data) = signature.serialize_compact();
-    let mut signature_bytes = [0u8; 65];
-    signature_bytes[0..64].copy_from_slice(&data[0..64]);
-    signature_bytes[64] = i32::from(recov_id) as u8;
     let mut settlement_witness = tx
         .witnesses()
         .get(0)
         .expect("get witness at index 0")
         .raw_data()
         .to_vec();
-    if with_preimage {
-        let start = checked_sub_usize(settlement_witness.len(), 97, "settlement witness length")?;
-        let end = checked_sub_usize(settlement_witness.len(), 32, "settlement witness length")?;
-        settlement_witness.splice(start..end, signature_bytes);
-    } else {
-        let start = checked_sub_usize(settlement_witness.len(), 65, "settlement witness length")?;
-        settlement_witness.splice(start.., signature_bytes);
+    let mut offset = settlement_witness.len();
+    for (unlock, settlement_key) in unlocks.iter().zip(settlement_keys).rev() {
+        let signature = SECP256K1.sign_ecdsa_recoverable(&secp256k1_message, &settlement_key.0);
+        let (recov_id, data) = signature.serialize_compact();
+        let mut signature_bytes = [0u8; 65];
+        signature_bytes[0..64].copy_from_slice(&data[0..64]);
+        signature_bytes[64] = i32::from(recov_id) as u8;
+
+        let unlock_len = if unlock.with_preimage { 99 } else { 67 };
+        offset -= unlock_len;
+        settlement_witness.splice(offset + 2..offset + 67, signature_bytes);
     }
 
     let witness = tx.witnesses().get(1).expect("get witness at index 1");
@@ -2513,5 +2591,89 @@ mod tests {
                 (channel_id, child_payment_hash)
             ]
         );
+    }
+
+    #[test]
+    fn settlement_witness_with_two_preimage_unlocks_uses_correct_unlock_count() {
+        let sw = SettlementWitness {
+            pending_htlc_count: 2,
+            pending_htlcs: vec![
+                Htlc {
+                    htlc_type: 0,
+                    payment_amount: 1_000,
+                    payment_hash: [1u8; 20],
+                    remote_htlc_pubkey_hash: [10u8; 20],
+                    local_htlc_pubkey_hash: [11u8; 20],
+                    htlc_expiry: 0,
+                },
+                Htlc {
+                    htlc_type: 0,
+                    payment_amount: 2_000,
+                    payment_hash: [2u8; 20],
+                    remote_htlc_pubkey_hash: [12u8; 20],
+                    local_htlc_pubkey_hash: [13u8; 20],
+                    htlc_expiry: 0,
+                },
+            ],
+            settlement_remote_pubkey_hash: [20u8; 20],
+            settlement_remote_amount: 5_000,
+            settlement_local_pubkey_hash: [21u8; 20],
+            settlement_local_amount: 6_000,
+            unlocks: vec![],
+        };
+
+        let unlock_count: u8 = 2;
+        let unlocks = [
+            Unlock {
+                unlock_type: 0,
+                with_preimage: true,
+                signature: [0u8; 65],
+                preimage: Some(Hash256::from([3u8; 32])),
+            },
+            Unlock {
+                unlock_type: 1,
+                with_preimage: true,
+                signature: [0u8; 65],
+                preimage: Some(Hash256::from([4u8; 32])),
+            },
+        ];
+
+        let expected_body = sw.to_witness();
+        let full_witness: Vec<u8> = [
+            XUDT_COMPATIBLE_WITNESS.as_slice(),
+            &[unlock_count],
+            expected_body.as_slice(),
+            unlocks
+                .iter()
+                .flat_map(|u| u.to_witness())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        ]
+        .concat();
+
+        assert_eq!(
+            full_witness[16], 0x02,
+            "unlock_count byte must be 2 (0x02), not 0x01"
+        );
+
+        let mut parsed = SettlementWitness::build_from_witness(&full_witness[16..])
+            .expect("build_from_witness must parse two-unlock witness");
+
+        assert_eq!(
+            parsed.to_witness(),
+            expected_body,
+            "settlement body must round-trip unchanged"
+        );
+
+        assert!(
+            parsed.update(),
+            "update must succeed for two preimage unlocks"
+        );
+        let after_update = parsed.to_witness();
+        assert_eq!(
+            after_update[0], 0,
+            "pending_htlc_count must drop to 0 after both preimages applied"
+        );
+        assert_eq!(after_update.len(), 73);
     }
 }
