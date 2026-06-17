@@ -3396,7 +3396,10 @@ where
                     // Re-verify that abort is still valid in case channel state
                     // changed after the timeout event was scheduled (e.g. a queued
                     // TxSignatures already signed and broadcast the funding tx).
-                    if !state.can_abort_funding_on_timeout() {
+                    // Only skip abort when the funding is actually confirmed on chain;
+                    // if funding failed (FundingTransactionFailed) or hasn't yet
+                    // confirmed, abort remains correct regardless of signature flags.
+                    if state.funding_tx_confirmed_at.is_some() {
                         debug!(
                             "Skip abort funding: channel {} state {:?} no longer abortable",
                             state.get_id(),

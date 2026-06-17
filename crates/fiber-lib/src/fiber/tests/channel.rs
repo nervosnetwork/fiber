@@ -52,6 +52,7 @@ use ckb_types::{
     core::{tx_pool::TxStatus, Capacity, FeeRate},
     packed::{Bytes, CellDep, CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
+    H256,
 };
 use fiber_types::{
     derive_private_key, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand, AppliedFlags,
@@ -11002,8 +11003,9 @@ mod udt_funding_cell_capacity_tests {
 
     /// Regression test: when `Stop(AbortFunding)` fires after the channel has
     /// already signed (OUR_TX_SIGNATURES_SENT is set), `can_abort_funding_on_timeout`
-    /// returns false, and the abort handler must keep the actor alive so that
-    /// `FundingTransactionConfirmed` can still be routed.
+    /// returns false, BUT the abort handler must keep the actor alive only when
+    /// funding is actually confirmed on chain. If funding hasn't confirmed yet
+    /// (e.g., FundingTransactionFailed fired), abort remains valid.
     ///
     /// Without the fix, calling `myself.stop()` would clean up pending_channels
     /// and outpoint_channel_map, stranding the funding confirmation.
@@ -11027,15 +11029,24 @@ mod udt_funding_cell_capacity_tests {
         );
         assert!(
             !state.can_abort_funding_on_timeout(),
-            "should NOT be abortable after OUR_TX_SIGNATURES_SENT is set"
+            "should NOT be abortable by timeout after OUR_TX_SIGNATURES_SENT is set"
         );
 
-        // A stale Stop(AbortFunding) should not close the channel.
-        // The fix ensures we return Ok(()) without calling myself.stop(),
-        // preserving the channel for the upcoming FundingTransactionConfirmed.
+        // Funding not yet confirmed on chain (funding could have failed).
+        // Abort should still be allowed — the guard only blocks when funding
+        // is actually confirmed.
+        assert!(
+            state.funding_tx_confirmed_at.is_none(),
+            "funding should not be confirmed yet"
+        );
+
+        // Simulate funding confirmed on chain.
+        state.funding_tx_confirmed_at = Some((H256::default(), 0, 0));
+
+        // Now abort should be blocked — funding is confirmed, can't abort.
         assert!(
             !state.is_closed(),
-            "signed channel must remain open after stale abort"
+            "signed channel with confirmed funding must remain open after stale abort"
         );
     }
 
