@@ -3835,9 +3835,12 @@ where
                     .into_iter()
                     .filter(|msg| match msg {
                         BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
-                            // Only verify when the announcement exists; if it hasn't
-                            // arrived yet, allow the update through (the gossip protocol
-                            // handles deferred verification).
+                            // Drop updates whose channel announcement hasn't
+                            // arrived yet — we can't verify the signature and
+                            // routing them through SaveAndBroadcastMessages
+                            // bypasses the dependency-aware gossip path. The
+                            // update will reach us through normal gossip when
+                            // the announcement is received.
                             let store = state.store.get_store();
                             if store
                                 .get_latest_channel_announcement(
@@ -3845,7 +3848,11 @@ where
                                 )
                                 .is_none()
                             {
-                                return true;
+                                debug!(
+                                    "Dropping ChannelUpdate from TryBroadcastMessages (announcement not found): {:?}",
+                                    channel_update.channel_outpoint
+                                );
+                                return false;
                             }
                             match verify_channel_update(channel_update, store) {
                                 Ok(_) => true,
