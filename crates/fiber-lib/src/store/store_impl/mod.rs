@@ -43,6 +43,7 @@ use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
+#[cfg(not(target_arch = "wasm32"))]
 use tracing::warn;
 
 /// Wrapper around `fiber_store::Store` that embeds an optional watcher callback.
