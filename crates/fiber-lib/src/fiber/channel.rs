@@ -3393,9 +3393,10 @@ where
                 if reason == StopReason::Abandon {
                     state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
                 } else if reason.is_abort_funding() {
-                    // For timeout-based aborts: re-verify that abort is still
-                    // valid. FundingFailed always proceeds unconditionally.
-                    if reason.is_timeout_abort() && state.funding_tx_confirmed_at.is_some() {
+                    // For timeout-based aborts: re-verify that the channel
+                    // hasn't advanced past the abortable state. FundingFailed
+                    // always proceeds unconditionally.
+                    if reason.is_timeout_abort() && !state.can_abort_funding_on_timeout() {
                         debug!(
                             "Skip abort funding: channel {} state {:?} no longer abortable",
                             state.get_id(),

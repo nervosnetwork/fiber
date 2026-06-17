@@ -52,7 +52,6 @@ use ckb_types::{
     core::{tx_pool::TxStatus, Capacity, FeeRate},
     packed::{Bytes, CellDep, CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
-    H256,
 };
 use fiber_types::{
     derive_private_key, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand, AppliedFlags,
@@ -11001,21 +11000,16 @@ mod udt_funding_cell_capacity_tests {
         );
     }
 
-    /// Regression test: verify that Stop(AbortFunding) (timeout-based) is
-    /// blocked when funding has already confirmed on chain, but that
-    /// Stop(FundingFailed) always proceeds regardless of state.
-    ///
-    /// A stale timeout abort arriving after OUR_TX_SIGNATURES_SENT but before
-    /// confirmation still needs to be blocked — otherwise the channel closes
-    /// and pending_channels routing is cleaned up before FundingTransactionConfirmed
-    /// can be delivered.
+    /// Regression test: timeout-based Stop(AbortFunding) is blocked when
+    /// OUR_TX_SIGNATURES_SENT is set (channel can no longer be aborted on timeout).
+    /// Stop(FundingFailed) always proceeds unconditionally.
     #[test]
     fn test_stale_abort_stop_does_not_close_signed_channel() {
         init_tracing();
 
         let mut state = minimal_udt_channel_state();
 
-        // Channel is in pre-signing state — abort IS allowed.
+        // Channel is in pre-signing state — timeout abort IS allowed.
         state.core.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
         assert!(
             state.can_abort_funding_on_timeout(),
@@ -11023,30 +11017,22 @@ mod udt_funding_cell_capacity_tests {
         );
 
         // Simulate peer TxSignatures arriving — our signature is now committed.
+        // Timeout abort should be blocked even before on-chain confirmation.
         state.core.state = ChannelState::AwaitingTxSignatures(
             AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT
                 | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT,
         );
         assert!(
             !state.can_abort_funding_on_timeout(),
-            "should NOT be abortable by timeout after OUR_TX_SIGNATURES_SENT is set"
+            "should NOT be abortable by timeout after OUR_TX_SIGNATURES_SENT"
         );
 
-        // Funding not yet confirmed on chain. A timeout-based abort arriving
-        // in this window (after signing, before confirmation) must be blocked
-        // to preserve the channel for FundingTransactionConfirmed.
-        assert!(
-            state.funding_tx_confirmed_at.is_none(),
-            "funding should not be confirmed yet"
-        );
+        // Ensure the channel is not closed after stale timeout abort is skipped.
+        assert!(!state.is_closed());
 
-        // FundingFailed should always abort regardless of state.
+        // FundingFailed should always be treated as an abort regardless of state.
         assert!(StopReason::FundingFailed.is_abort_funding());
         assert!(!StopReason::FundingFailed.is_timeout_abort());
-
-        // After funding confirms, timeout abort must also be blocked.
-        state.funding_tx_confirmed_at = Some((H256::default(), 0, 0));
-        assert!(!state.is_closed());
     }
 
     #[test]
