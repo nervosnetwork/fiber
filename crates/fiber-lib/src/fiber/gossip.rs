@@ -3835,12 +3835,12 @@ where
                     .into_iter()
                     .filter(|msg| match msg {
                         BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
-                            // Drop updates whose channel announcement hasn't
-                            // arrived yet — we can't verify the signature and
-                            // routing them through SaveAndBroadcastMessages
-                            // bypasses the dependency-aware gossip path. The
-                            // update will reach us through normal gossip when
-                            // the announcement is received.
+                            // Verify signature when the announcement exists.
+                            // When the announcement hasn't arrived yet, still allow
+                            // the update through — the update originates from a
+                            // payment onion error and dropping it would break routing
+                            // (the update will reach us through normal gossip when
+                            // the announcement is received for proper verification).
                             let store = state.store.get_store();
                             if store
                                 .get_latest_channel_announcement(
@@ -3849,10 +3849,10 @@ where
                                 .is_none()
                             {
                                 debug!(
-                                    "Dropping ChannelUpdate from TryBroadcastMessages (announcement not found): {:?}",
+                                    "Allowing ChannelUpdate from TryBroadcastMessages without announcement (deferred verification): {:?}",
                                     channel_update.channel_outpoint
                                 );
-                                return false;
+                                return true;
                             }
                             match verify_channel_update(channel_update, store) {
                                 Ok(_) => true,
