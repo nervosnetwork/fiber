@@ -63,8 +63,8 @@ use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
 };
 use super::{
-    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
-    ASSUME_NETWORK_ACTOR_ALIVE,
+    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
+    InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::client::CkbChainClient;
 use crate::ckb::config::UdtCfgInfosExt;
@@ -3996,11 +3996,10 @@ pub struct NetworkActorState<S, C> {
     pending_external_funding_replies:
         HashMap<Hash256, RpcReplyPort<Result<OpenChannelWithExternalFundingResponse, String>>>,
 
-    // Track the last ChannelReady event timestamp per channel to debounce
-    // payment retry scans triggered by reestablish.
     last_channel_ready_scan: HashMap<OutPoint, u64>,
-    // Active in-flight CKB tx tracers by tx_hash to prevent duplicate actor spawns.
-    inflight_tracers: HashSet<Hash256>,
+    // Active in-flight CKB tx tracers by tx_hash. Stores actor refs so
+    // send_tx can upgrade a trace-only actor with the actual transaction.
+    inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
 }
 
 #[derive(Debug, Clone)]
@@ -4666,7 +4665,7 @@ where
         tx_hash: Hash256,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
-        if !self.inflight_tracers.insert(tx_hash) {
+        if self.inflight_tracers.contains_key(&tx_hash) {
             debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
             return Ok(());
         }
@@ -4679,13 +4678,14 @@ where
             confirmations: CKB_TX_TRACING_CONFIRMATIONS,
         };
 
-        Actor::spawn_linked(
+        let (actor_ref, _) = Actor::spawn_linked(
             None,
             handler,
             InFlightCkbTxActorArguments { transaction: None },
             self.network.get_cell(),
         )
         .await?;
+        self.inflight_tracers.insert(tx_hash, actor_ref);
 
         Ok(())
     }
@@ -4696,8 +4696,14 @@ where
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
         let tx_hash: Hash256 = tx.hash().into();
-        if !self.inflight_tracers.insert(tx_hash) {
-            debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
+        if let Some(existing) = self.inflight_tracers.get(&tx_hash) {
+            // A trace-only actor already exists for this tx_hash.
+            // Upgrade it with the actual transaction for broadcasting.
+            debug!(
+                "Upgrading existing tracer for tx {:?} with transaction payload",
+                tx_hash
+            );
+            existing.send_message(InFlightCkbTxActorMessage::SendTx(tx))?;
             return Ok(());
         }
         debug!(
@@ -4718,7 +4724,7 @@ where
             confirmations: CKB_TX_TRACING_CONFIRMATIONS,
         };
 
-        Actor::spawn_linked(
+        let (actor_ref, _) = Actor::spawn_linked(
             None,
             handler,
             InFlightCkbTxActorArguments {
@@ -4727,6 +4733,7 @@ where
             self.network.get_cell(),
         )
         .await?;
+        self.inflight_tracers.insert(tx_hash, actor_ref);
 
         Ok(())
     }
