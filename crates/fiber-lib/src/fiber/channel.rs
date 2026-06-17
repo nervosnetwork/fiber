@@ -9565,7 +9565,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn can_abort_funding_on_timeout(&self) -> bool {
+    pub(crate) fn can_abort_funding_on_timeout(&self) -> bool {
         // Can abort funding on timeout if the channel is not ready and we have
         // not signed the funding tx yet.
         match self.state {

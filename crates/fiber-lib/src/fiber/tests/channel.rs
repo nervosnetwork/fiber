@@ -11000,6 +11000,45 @@ mod udt_funding_cell_capacity_tests {
         );
     }
 
+    /// Regression test: when `Stop(AbortFunding)` fires after the channel has
+    /// already signed (OUR_TX_SIGNATURES_SENT is set), `can_abort_funding_on_timeout`
+    /// returns false, and the abort handler must keep the actor alive so that
+    /// `FundingTransactionConfirmed` can still be routed.
+    ///
+    /// Without the fix, calling `myself.stop()` would clean up pending_channels
+    /// and outpoint_channel_map, stranding the funding confirmation.
+    #[test]
+    fn test_stale_abort_stop_does_not_close_signed_channel() {
+        init_tracing();
+
+        let mut state = minimal_udt_channel_state();
+
+        // Channel is in pre-signing state — abort IS allowed.
+        state.core.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+        assert!(
+            state.can_abort_funding_on_timeout(),
+            "should be abortable before signing"
+        );
+
+        // Simulate peer TxSignatures arriving — our signature is now committed.
+        state.core.state = ChannelState::AwaitingTxSignatures(
+            AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT
+                | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT,
+        );
+        assert!(
+            !state.can_abort_funding_on_timeout(),
+            "should NOT be abortable after OUR_TX_SIGNATURES_SENT is set"
+        );
+
+        // A stale Stop(AbortFunding) should not close the channel.
+        // The fix ensures we return Ok(()) without calling myself.stop(),
+        // preserving the channel for the upcoming FundingTransactionConfirmed.
+        assert!(
+            !state.is_closed(),
+            "signed channel must remain open after stale abort"
+        );
+    }
+
     #[test]
     fn udt_funding_tx_is_final_when_capacity_matches_total_reserved() {
         let state = minimal_udt_channel_state();
