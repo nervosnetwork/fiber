@@ -43,8 +43,6 @@ use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_json_types::RouterHop as JsonRouterHop;
 use fiber_sphinx::OnionSharedSecretIter;
-use fiber_types::Attempt;
-use fiber_types::AttemptStatus;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::Hash256 as InternalHash256;
 use fiber_types::HashAlgorithm;
@@ -52,7 +50,6 @@ use fiber_types::HopHint;
 use fiber_types::RemoveTlcFulfill;
 use fiber_types::RouterHop;
 use fiber_types::SessionRoute;
-use fiber_types::SessionRouteNode;
 use fiber_types::TlcErrPacket;
 use fiber_types::SIGNATURE_U5_SIZE;
 use ractor::call;
@@ -64,9 +61,11 @@ use tracing::{debug, error, info};
 
 struct RemoveTlcFailEventFixture {
     node: NetworkNode,
+    _peers: Vec<NetworkNode>,
     payment_hash: Hash256,
     attempt_id: u64,
     shared_secrets: Vec<[u8; 32]>,
+    node_b: Pubkey,
     node_c: Pubkey,
     channel_ab: OutPoint,
     channel_bc: OutPoint,
@@ -74,86 +73,85 @@ struct RemoveTlcFailEventFixture {
 }
 
 async fn setup_remove_tlc_fail_event_fixture() -> RemoveTlcFailEventFixture {
-    let node = NetworkNode::new().await;
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+    let [node, node_b, node_c, node_d] = nodes.try_into().expect("4 nodes");
     let node_a = node.get_public_key();
-    let node_b = gen_rand_fiber_public_key();
-    let node_c = gen_rand_fiber_public_key();
-    let node_d = gen_rand_fiber_public_key();
-    let channel_ab = gen_rand_channel_outpoint();
-    let channel_bc = gen_rand_channel_outpoint();
-    let channel_cd = gen_rand_channel_outpoint();
-    let payment_hash = gen_rand_sha256_hash();
-    let attempt_id = 1;
-    let session_key = [0x41; 32];
+    let node_b_pubkey = node_b.get_public_key();
+    let node_c_pubkey = node_c.get_public_key();
+    let node_d_pubkey = node_d.get_public_key();
+    let amount = 700;
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_d_pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
+        .expect("build hold invoice");
+    node_d.insert_invoice(hold_invoice.clone(), None);
 
-    let hops_pubkeys: Vec<PublicKey> = [node_b, node_c, node_d]
+    let payment_hash = *hold_invoice.payment_hash();
+    let payment = node
+        .send_payment(SendPaymentCommand {
+            amount: Some(amount),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    assert_eq!(payment.payment_hash, payment_hash);
+    node.wait_until_inflight(payment_hash).await;
+
+    let session = node
+        .get_payment_session(payment_hash)
+        .expect("payment session exists");
+    let attempts = session.attempts().cloned().collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 1);
+    let attempt = attempts.into_iter().next().expect("payment attempt exists");
+    assert!(attempt.is_inflight());
+    let attempt_id = attempt.id;
+
+    let route_nodes = &attempt.route.nodes;
+    assert_eq!(
+        route_nodes
+            .iter()
+            .map(|node| node.pubkey)
+            .collect::<Vec<_>>(),
+        vec![node_a, node_b_pubkey, node_c_pubkey, node_d_pubkey]
+    );
+    let hops_pubkeys: Vec<PublicKey> = attempt
+        .hops_public_keys()
         .iter()
         .map(|key| PublicKey::from_slice(&key.0).expect("valid pubkey"))
         .collect();
     let shared_secrets = OnionSharedSecretIter::new(
         hops_pubkeys.iter(),
-        SecretKey::from_slice(&session_key).unwrap(),
+        SecretKey::from_slice(&attempt.session_key).unwrap(),
         SECP256K1,
     )
     .collect::<Result<Vec<_>, _>>()
     .expect("valid shared secrets");
 
-    let request = SendPaymentDataBuilder::new(node_d, 700, payment_hash)
-        .max_fee_amount(Some(0))
-        .build()
-        .expect("valid payment request");
-    let mut session = PaymentSession::new_session(&node.store, request, 0);
-    session.set_inflight_status();
-
-    let now = now_timestamp_as_millis_u64();
-    let attempt = Attempt {
-        id: attempt_id,
-        try_limit: 0,
-        tried_times: 1,
-        hash: payment_hash,
-        status: AttemptStatus::Inflight,
-        payment_hash,
-        route: SessionRoute {
-            nodes: vec![
-                SessionRouteNode {
-                    pubkey: node_a,
-                    amount: 1000,
-                    channel_outpoint: channel_ab.clone(),
-                },
-                SessionRouteNode {
-                    pubkey: node_b,
-                    amount: 900,
-                    channel_outpoint: channel_bc.clone(),
-                },
-                SessionRouteNode {
-                    pubkey: node_c,
-                    amount: 800,
-                    channel_outpoint: channel_cd.clone(),
-                },
-                SessionRouteNode {
-                    pubkey: node_d,
-                    amount: 700,
-                    channel_outpoint: OutPoint::default(),
-                },
-            ],
-        },
-        route_hops: vec![],
-        session_key,
-        preimage: None,
-        created_at: now,
-        last_updated_at: now,
-        last_error: None,
-    };
-
-    node.store.insert_payment_session(session);
-    node.store.insert_attempt(attempt);
+    let channel_ab = route_nodes[0].channel_outpoint.clone();
+    let channel_bc = route_nodes[1].channel_outpoint.clone();
+    let channel_cd = route_nodes[2].channel_outpoint.clone();
 
     RemoveTlcFailEventFixture {
         node,
+        _peers: vec![node_b, node_c, node_d],
         payment_hash,
         attempt_id,
         shared_secrets,
-        node_c,
+        node_b: node_b_pubkey,
+        node_c: node_c_pubkey,
         channel_ab,
         channel_bc,
         channel_cd,
@@ -261,6 +259,50 @@ async fn test_remove_tlc_fail_event_records_authenticated_downstream_channel_fai
     assert!(!failed_outpoints.contains(&fixture.channel_ab));
     assert!(!failed_outpoints.contains(&fixture.channel_bc));
     assert!(failed_outpoints.contains(&fixture.channel_cd));
+}
+
+#[tokio::test]
+async fn test_remove_tlc_fail_event_first_hop_incorrect_tlc_expiry_records_reporting_channel() {
+    init_tracing();
+
+    let fixture = setup_remove_tlc_fail_event_fixture().await;
+    let channel_error = TlcErr::new_channel_fail(
+        TlcErrorCode::IncorrectTlcExpiry,
+        fixture.node_b,
+        fixture.channel_ab.clone(),
+        None,
+    );
+    let packet = TlcErrPacket::new(channel_error, &fixture.shared_secrets[0]);
+
+    send_remove_tlc_fail_event(&fixture, packet).await;
+
+    let failed_outpoints = failed_history_outpoints(&fixture);
+    assert!(failed_outpoints.contains(&fixture.channel_ab));
+    assert!(!failed_outpoints.contains(&fixture.channel_bc));
+    assert!(!failed_outpoints.contains(&fixture.channel_cd));
+}
+
+#[tokio::test]
+async fn test_remove_tlc_fail_event_incorrect_tlc_expiry_records_reporting_channel() {
+    init_tracing();
+
+    let fixture = setup_remove_tlc_fail_event_fixture().await;
+    let channel_error = TlcErr::new_channel_fail(
+        TlcErrorCode::IncorrectTlcExpiry,
+        fixture.node_c,
+        fixture.channel_bc.clone(),
+        None,
+    );
+    let packet = TlcErrPacket::new(channel_error, &fixture.shared_secrets[1])
+        .backward(&fixture.shared_secrets[0])
+        .expect("backward encrypted error");
+
+    send_remove_tlc_fail_event(&fixture, packet).await;
+
+    let failed_outpoints = failed_history_outpoints(&fixture);
+    assert!(!failed_outpoints.contains(&fixture.channel_ab));
+    assert!(failed_outpoints.contains(&fixture.channel_bc));
+    assert!(!failed_outpoints.contains(&fixture.channel_cd));
 }
 
 #[tokio::test]

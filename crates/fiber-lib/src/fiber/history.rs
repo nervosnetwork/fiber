@@ -370,13 +370,9 @@ impl InternalResult {
                 }
                 TlcErrorCode::IncorrectTlcExpiry => {
                     need_retry = false;
-                    if index == 1 {
-                        self.fail_node(nodes, 1);
-                    } else {
-                        self.fail_pair(nodes, index - 1);
-                        if index > 1 {
-                            self.succeed_range_pairs(nodes, 0, index - 2);
-                        }
+                    self.fail_pair(nodes, index);
+                    if index > 1 {
+                        self.succeed_range_pairs(nodes, 0, index - 1);
                     }
                 }
                 TlcErrorCode::TemporaryChannelFailure
