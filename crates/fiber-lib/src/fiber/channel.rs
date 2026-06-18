@@ -5843,8 +5843,7 @@ impl ChannelActorState {
 
     pub fn get_offered_tlc_balance(&self) -> Result<u128, ProcessingChannelError> {
         Ok(self
-            .get_all_offer_tlcs()
-            .filter(|tlc| !tlc.is_fail_remove_confirmed())
+            .get_inflight_offered_tlcs()
             .try_fold(0_u128, |sum, tlc| {
                 checked_add_u128(sum, tlc.amount, "Offered TLC balance")
             })?)
@@ -5852,8 +5851,7 @@ impl ChannelActorState {
 
     pub fn get_received_tlc_balance(&self) -> Result<u128, ProcessingChannelError> {
         Ok(self
-            .get_all_received_tlcs()
-            .filter(|tlc| !tlc.is_fail_remove_confirmed())
+            .get_inflight_received_tlcs()
             .try_fold(0_u128, |sum, tlc| {
                 checked_add_u128(sum, tlc.amount, "Received TLC balance")
             })?)
@@ -6725,6 +6723,16 @@ impl ChannelActorState {
         self.tlc_state.all_tlcs().filter(|tlc| tlc.is_offered())
     }
 
+    fn get_inflight_received_tlcs(&self) -> impl Iterator<Item = &TlcInfo> {
+        self.get_all_received_tlcs()
+            .filter(|tlc| !tlc.is_fail_remove_confirmed())
+    }
+
+    fn get_inflight_offered_tlcs(&self) -> impl Iterator<Item = &TlcInfo> {
+        self.get_all_offer_tlcs()
+            .filter(|tlc| !tlc.is_fail_remove_confirmed())
+    }
+
     // Get the pubkeys for the tlc. Tlc pubkeys are the pubkeys held by each party
     // while this tlc was created (pubkeys are derived from the commitment number
     // when this tlc was created). The pubkeys returned here are sorted.
@@ -7084,7 +7092,7 @@ impl ChannelActorState {
 
             // The remote peer's constraints are its advertised incoming TLC
             // limits, so they constrain TLCs we offer to it.
-            let active_offered_tls_number = self.get_all_offer_tlcs().count() as u64 + 1;
+            let active_offered_tls_number = self.get_inflight_offered_tlcs().count() as u64 + 1;
             let max_offered_tlcs = self
                 .remote_constraints
                 .max_tlc_number_in_flight
@@ -7094,7 +7102,7 @@ impl ChannelActorState {
             }
 
             let active_offered_amount = self
-                .get_all_offer_tlcs()
+                .get_inflight_offered_tlcs()
                 .try_fold(0_u128, |sum, tlc| {
                     checked_add_u128(sum, tlc.amount, "Offered TLC")
                 })
@@ -7114,7 +7122,7 @@ impl ChannelActorState {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
-            let active_received_tls_number = (self.get_all_received_tlcs().count() as u64)
+            let active_received_tls_number = (self.get_inflight_received_tlcs().count() as u64)
                 .checked_add(1)
                 .ok_or(ProcessingChannelError::TlcNumberExceedLimit)?;
             // Our local constraints are our advertised incoming TLC limits,
@@ -7128,7 +7136,7 @@ impl ChannelActorState {
             }
 
             let active_received_amount = self
-                .get_all_received_tlcs()
+                .get_inflight_received_tlcs()
                 .try_fold(0_u128, |sum, tlc| {
                     checked_add_u128(sum, tlc.amount, "Received TLC")
                 })
@@ -9887,5 +9895,254 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
             tlc_base_key: value.tlc_basepoint,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use fiber_types::{HashAlgorithm, TlcState};
+
+    fn channel_state_with_limits(
+        local_constraints: ChannelConstraints,
+        remote_constraints: ChannelConstraints,
+    ) -> ChannelActorState {
+        let signer = InMemorySigner::generate_from_seed(b"tlc-limit-local");
+        let remote_signer = InMemorySigner::generate_from_seed(b"tlc-limit-remote");
+
+        ChannelActorState {
+            core: ChannelActorData {
+                state: ChannelState::ChannelReady,
+                public_channel_info: None,
+                local_tlc_info: ChannelTlcInfo {
+                    enabled: true,
+                    ..Default::default()
+                },
+                remote_tlc_info: None,
+                local_pubkey: signer.funding_key.pubkey(),
+                remote_pubkey: remote_signer.funding_key.pubkey(),
+                id: Hash256::from([42; 32]),
+                funding_tx: None,
+                funding_tx_confirmed_at: None,
+                funding_udt_type_script: None,
+                is_acceptor: false,
+                is_one_way: false,
+                to_local_amount: 1_000_000,
+                to_remote_amount: 1_000_000,
+                local_reserved_ckb_amount: 0,
+                remote_reserved_ckb_amount: 0,
+                commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
+                commitment_delay_epoch: DEFAULT_COMMITMENT_DELAY_EPOCHS,
+                funding_fee_rate: DEFAULT_FEE_RATE,
+                local_channel_public_keys: signer.get_base_public_keys(),
+                signer,
+                commitment_numbers: CommitmentNumbers::default(),
+                local_constraints,
+                remote_constraints,
+                tlc_state: TlcState::default(),
+                retryable_tlc_operations: VecDeque::new(),
+                waiting_forward_tlc_tasks: HashMap::new(),
+                remote_shutdown_script: None,
+                local_shutdown_script: Script::default(),
+                last_committed_remote_nonce: None,
+                remote_revocation_nonce_for_verify: None,
+                remote_revocation_nonce_for_send: None,
+                remote_revocation_nonce_for_next: None,
+                latest_commitment_transaction: None,
+                remote_commitment_points: Vec::new(),
+                remote_channel_public_keys: Some(remote_signer.get_base_public_keys()),
+                local_shutdown_info: None,
+                remote_shutdown_info: None,
+                shutdown_transaction_hash: None,
+                reestablishing: false,
+                last_revoke_ack_msg: None,
+                created_at: SystemTime::now(),
+                pending_replay_updates: vec![],
+                last_was_revoke: false,
+                connectivity_state: ChannelConnectivityState::Online,
+                external_funding: None,
+            },
+            pending_reestablish_channel_ready: false,
+            defer_peer_tlc_updates: false,
+            deferred_peer_tlc_updates: VecDeque::new(),
+            waiting_peer_response: None,
+            reestablish_started_at: None,
+            network: None,
+            scheduled_channel_update_handle: None,
+            pending_notify_settle_tlcs: vec![],
+            ephemeral_config: ChannelEphemeralConfig::default(),
+            funding_abort_detail: None,
+            private_key: None,
+        }
+    }
+
+    fn failed_remove_ack_confirmed_tlc(tlc_id: TLCId, amount: u128) -> TlcInfo {
+        let status = if tlc_id.is_offered() {
+            TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+        } else {
+            TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+        };
+
+        TlcInfo {
+            status,
+            tlc_id,
+            amount,
+            payment_hash: Hash256::from([u64::from(tlc_id) as u8; 32]),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            created_at: CommitmentNumbers {
+                local: 1,
+                remote: 1,
+            },
+            removed_reason: Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+                &NO_SHARED_SECRET,
+            ))),
+            forwarding_tlc: None,
+            removed_confirmed_at: Some(1),
+            applied_flags: AppliedFlags::REMOVE,
+        }
+    }
+
+    fn committed_tlc(tlc_id: TLCId, amount: u128) -> TlcInfo {
+        let status = if tlc_id.is_offered() {
+            TlcStatus::Outbound(OutboundTlcStatus::Committed)
+        } else {
+            TlcStatus::Inbound(InboundTlcStatus::Committed)
+        };
+
+        TlcInfo {
+            status,
+            tlc_id,
+            amount,
+            payment_hash: Hash256::from([u64::from(tlc_id) as u8 + 1; 32]),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            created_at: CommitmentNumbers {
+                local: 1,
+                remote: 1,
+            },
+            removed_reason: None,
+            forwarding_tlc: None,
+            removed_confirmed_at: None,
+            applied_flags: AppliedFlags::ADD,
+        }
+    }
+
+    #[test]
+    fn failed_remove_ack_confirmed_tlcs_do_not_consume_number_limits() {
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(1_000_000, 1),
+            ChannelConstraints::new(1_000_000, 1),
+        );
+        state
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Offered(0), 10));
+        assert!(
+            state.check_tlc_limits(10, true).is_ok(),
+            "settled failed offered TLC should not consume remote incoming number limit"
+        );
+
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(1_000_000, 1),
+            ChannelConstraints::new(1_000_000, 1),
+        );
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Received(0), 10));
+        assert!(
+            state.check_tlc_limits(10, false).is_ok(),
+            "settled failed received TLC should not consume local incoming number limit"
+        );
+    }
+
+    #[test]
+    fn failed_remove_ack_confirmed_tlcs_do_not_consume_value_limits() {
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(100, 10),
+            ChannelConstraints::new(100, 10),
+        );
+        state
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Offered(0), 90));
+        assert!(
+            state.check_tlc_limits(20, true).is_ok(),
+            "settled failed offered TLC should not consume remote incoming value limit"
+        );
+
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(100, 10),
+            ChannelConstraints::new(100, 10),
+        );
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Received(0), 90));
+        assert!(
+            state.check_tlc_limits(20, false).is_ok(),
+            "settled failed received TLC should not consume local incoming value limit"
+        );
+    }
+
+    #[test]
+    fn active_received_tlcs_still_limit_peer_adds_with_settled_failed_tlcs_present() {
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(100, 1),
+            ChannelConstraints::new(100, 1),
+        );
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Received(0), 90));
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(committed_tlc(TLCId::Received(1), 90));
+
+        assert!(matches!(
+            state.check_tlc_limits(1, false),
+            Err(ProcessingChannelError::TlcNumberExceedLimit)
+        ));
+
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(100, 10),
+            ChannelConstraints::new(100, 10),
+        );
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Received(0), 90));
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(committed_tlc(TLCId::Received(1), 90));
+        assert!(matches!(
+            state.check_tlc_limits(20, false),
+            Err(ProcessingChannelError::TlcValueInflightExceedLimit)
+        ));
     }
 }
