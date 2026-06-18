@@ -3393,6 +3393,17 @@ where
                 if reason == StopReason::Abandon {
                     state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
                 } else if reason.is_abort_funding() {
+                    // For timeout-based aborts: re-verify that the channel
+                    // hasn't advanced past the abortable state. FundingFailed
+                    // always proceeds unconditionally.
+                    if reason.is_timeout_abort() && !state.can_abort_funding_on_timeout() {
+                        debug!(
+                            "Skip abort funding: channel {} state {:?} no longer abortable",
+                            state.get_id(),
+                            state.state
+                        );
+                        return Ok(());
+                    }
                     if let Some(detail) = reason.funding_abort_detail() {
                         state.funding_abort_detail = Some(detail.to_string());
                     }
@@ -4626,12 +4637,22 @@ pub enum StopReason {
     Abandon,
     AbortFunding,
     AbortFundingWithDetail(String),
+    FundingFailed,
     Closed,
     PeerDisConnected,
 }
 
 impl StopReason {
     pub(crate) fn is_abort_funding(&self) -> bool {
+        matches!(
+            self,
+            StopReason::AbortFunding
+                | StopReason::AbortFundingWithDetail(_)
+                | StopReason::FundingFailed
+        )
+    }
+
+    pub(crate) fn is_timeout_abort(&self) -> bool {
         matches!(
             self,
             StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_)
@@ -9554,7 +9575,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn can_abort_funding_on_timeout(&self) -> bool {
+    pub(crate) fn can_abort_funding_on_timeout(&self) -> bool {
         // Can abort funding on timeout if the channel is not ready and we have
         // not signed the funding tx yet.
         match self.state {

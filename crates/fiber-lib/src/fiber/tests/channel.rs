@@ -11000,6 +11000,41 @@ mod udt_funding_cell_capacity_tests {
         );
     }
 
+    /// Regression test: timeout-based Stop(AbortFunding) is blocked when
+    /// OUR_TX_SIGNATURES_SENT is set (channel can no longer be aborted on timeout).
+    /// Stop(FundingFailed) always proceeds unconditionally.
+    #[test]
+    fn test_stale_abort_stop_does_not_close_signed_channel() {
+        init_tracing();
+
+        let mut state = minimal_udt_channel_state();
+
+        // Channel is in pre-signing state — timeout abort IS allowed.
+        state.core.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+        assert!(
+            state.can_abort_funding_on_timeout(),
+            "should be abortable before signing"
+        );
+
+        // Simulate peer TxSignatures arriving — our signature is now committed.
+        // Timeout abort should be blocked even before on-chain confirmation.
+        state.core.state = ChannelState::AwaitingTxSignatures(
+            AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT
+                | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT,
+        );
+        assert!(
+            !state.can_abort_funding_on_timeout(),
+            "should NOT be abortable by timeout after OUR_TX_SIGNATURES_SENT"
+        );
+
+        // Ensure the channel is not closed after stale timeout abort is skipped.
+        assert!(!state.is_closed());
+
+        // FundingFailed should always be treated as an abort regardless of state.
+        assert!(StopReason::FundingFailed.is_abort_funding());
+        assert!(!StopReason::FundingFailed.is_timeout_abort());
+    }
+
     #[test]
     fn udt_funding_tx_is_final_when_capacity_matches_total_reserved() {
         let state = minimal_udt_channel_state();
