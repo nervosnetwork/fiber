@@ -63,8 +63,8 @@ use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
 };
 use super::{
-    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxKind,
-    ASSUME_NETWORK_ACTOR_ALIVE,
+    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
+    InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::ckb::client::CkbChainClient;
 use crate::ckb::config::UdtCfgInfosExt;
@@ -1554,11 +1554,13 @@ where
                 tx_index,
                 timestamp,
             ) => {
+                state.inflight_tracers.remove(&outpoint.tx_hash().into());
                 state
                     .on_funding_transaction_confirmed(outpoint, block_hash, tx_index, timestamp)
                     .await;
             }
             NetworkActorEvent::FundingTransactionFailed(outpoint) => {
+                state.inflight_tracers.remove(&outpoint.tx_hash().into());
                 error!("Funding transaction failed: {:?}", outpoint);
                 state.abort_funding(Either::Right(outpoint)).await;
             }
@@ -1574,6 +1576,7 @@ where
                 force,
                 close_by_us,
             ) => {
+                state.inflight_tracers.remove(&tx_hash.clone().into());
                 state
                     .on_closing_transaction_confirmed(
                         &pubkey,
@@ -1585,6 +1588,7 @@ where
                     .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(pubkey, channel_id, tx_hash) => {
+                state.inflight_tracers.remove(&tx_hash.clone().into());
                 error!(
                     "Closing transaction failed for channel {:?}, tx hash: {:?}, peer pubkey: {:?}",
                     &channel_id, &tx_hash, &pubkey
@@ -3992,9 +3996,10 @@ pub struct NetworkActorState<S, C> {
     pending_external_funding_replies:
         HashMap<Hash256, RpcReplyPort<Result<OpenChannelWithExternalFundingResponse, String>>>,
 
-    // Track the last ChannelReady event timestamp per channel to debounce
-    // payment retry scans triggered by reestablish.
     last_channel_ready_scan: HashMap<OutPoint, u64>,
+    // Active in-flight CKB tx tracers by tx_hash. Stores actor refs so
+    // send_tx can upgrade a trace-only actor with the actual transaction.
+    inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
 }
 
 #[derive(Debug, Clone)]
@@ -4660,6 +4665,10 @@ where
         tx_hash: Hash256,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
+        if self.inflight_tracers.contains_key(&tx_hash) {
+            debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
+            return Ok(());
+        }
         let handler = InFlightCkbTxActor {
             chain_actor: self.chain_actor.clone(),
             chain_client: self.chain_client.clone(),
@@ -4669,13 +4678,14 @@ where
             confirmations: CKB_TX_TRACING_CONFIRMATIONS,
         };
 
-        Actor::spawn_linked(
+        let (actor_ref, _) = Actor::spawn_linked(
             None,
             handler,
             InFlightCkbTxActorArguments { transaction: None },
             self.network.get_cell(),
         )
         .await?;
+        self.inflight_tracers.insert(tx_hash, actor_ref);
 
         Ok(())
     }
@@ -4685,7 +4695,17 @@ where
         tx: TransactionView,
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
-        let tx_hash = tx.hash().into();
+        let tx_hash: Hash256 = tx.hash().into();
+        if let Some(existing) = self.inflight_tracers.get(&tx_hash) {
+            // A trace-only actor already exists for this tx_hash.
+            // Upgrade it with the actual transaction for broadcasting.
+            debug!(
+                "Upgrading existing tracer for tx {:?} with transaction payload",
+                tx_hash
+            );
+            existing.send_message(InFlightCkbTxActorMessage::SendTx(tx))?;
+            return Ok(());
+        }
         debug!(
             "Spawning InFlightCkbTxActor: tx_hash={:?}, tx_kind={:?}, confirmations={}, inputs={}, outputs={}",
             tx_hash,
@@ -4704,7 +4724,7 @@ where
             confirmations: CKB_TX_TRACING_CONFIRMATIONS,
         };
 
-        Actor::spawn_linked(
+        let (actor_ref, _) = Actor::spawn_linked(
             None,
             handler,
             InFlightCkbTxActorArguments {
@@ -4713,6 +4733,7 @@ where
             self.network.get_cell(),
         )
         .await?;
+        self.inflight_tracers.insert(tx_hash, actor_ref);
 
         Ok(())
     }
@@ -6237,6 +6258,7 @@ where
             inflight_payments: Default::default(),
             pending_external_funding_replies: Default::default(),
             last_channel_ready_scan: Default::default(),
+            inflight_tracers: Default::default(),
         };
 
         let node_announcement = state.get_or_create_new_node_announcement_message();
